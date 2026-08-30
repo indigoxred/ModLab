@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
+from .adapters.mo2.scanner import inspect_skyrim_mo2
+from .adapters.mo2.serialization import Mo2EvidenceFormatError, report_to_dict
 from .adapters.skyrim.scanner import discover_skyrim_steam
 from .adapters.skyrim.serialization import (
     SkyrimDiscoveryFormatError,
@@ -70,6 +72,25 @@ def _parser() -> argparse.ArgumentParser:
     game_discover.add_argument("--steam-root", required=True, type=Path)
     game_discover.add_argument("--mo2", type=Path, default=None)
     game_discover.add_argument("--format", choices=("text", "json"), default="text")
+
+    manager = commands.add_parser(
+        "manager",
+        help="inspect an explicitly selected mod-manager installation",
+    )
+    manager_commands = manager.add_subparsers(
+        dest="manager_command", required=True
+    )
+    manager_discover = manager_commands.add_parser(
+        "discover",
+        help="collect read-only manager and profile evidence",
+    )
+    manager_discover.add_argument("manager_key", choices=("mo2",))
+    manager_discover.add_argument("--root", required=True, type=Path)
+    manager_discover.add_argument("--game-root", required=True, type=Path)
+    manager_discover.add_argument("--workspace", type=Path, default=None)
+    manager_discover.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
 
     artifact = commands.add_parser(
         "artifact",
@@ -365,6 +386,79 @@ def main(
                 else 0
             )
 
+        if args.command == "manager" and args.manager_command == "discover":
+            workspace_root = (
+                args.workspace
+                if args.workspace is not None
+                else default_workspace_root()
+            )
+            report = inspect_skyrim_mo2(
+                args.root,
+                args.game_root,
+                workspace_root=workspace_root,
+            )
+            if args.format == "json":
+                _write_json(
+                    output,
+                    {
+                        "schemaVersion": 1,
+                        "managerEvidence": report_to_dict(report),
+                        "actionsPerformed": [],
+                        "downloadsPerformed": [],
+                        "installationActionsPerformed": [],
+                        "programsLaunched": [],
+                    },
+                )
+            else:
+                version = (
+                    report.executable.file_version
+                    if report.executable is not None
+                    and report.executable.file_version is not None
+                    else "unknown"
+                )
+                profile_names = {item.name for item in report.profiles}
+                profiles_ready = {
+                    "ModLab - Lab",
+                    "ModLab - Play",
+                }.issubset(profile_names)
+                print("Portable Skyrim MO2 discovery", file=output)
+                print(f"MO2 root: {report.resolved_root}", file=output)
+                print(f"MO2 version: {version}", file=output)
+                print(f"Skyrim root: {report.game_root}", file=output)
+                print(
+                    f"Active profile: {report.active_profile or '(not observed)'}",
+                    file=output,
+                )
+                print(
+                    f"Lab / Play profiles: {'ready' if profiles_ready else 'incomplete'}",
+                    file=output,
+                )
+                print(f"Installed mod folders: {len(report.top_level_mods)}", file=output)
+                print(f"Overwrite entries: {len(report.overwrite_entries)}", file=output)
+                print("Findings:", file=output)
+                for finding in report.findings:
+                    print(
+                        f"  - {finding.state.value}  {finding.code}: {finding.message}",
+                        file=output,
+                    )
+                print(
+                    "Nothing was launched, changed, installed, repaired, or downloaded.",
+                    file=output,
+                )
+            setup_unknown = {
+                "mo2-root-not-configured",
+                "portable-config-not-configured",
+            }
+            return (
+                3
+                if any(
+                    finding.state is CheckState.BLOCKED
+                    or finding.code in setup_unknown
+                    for finding in report.findings
+                )
+                else 0
+            )
+
         if args.command == "artifact":
             workspace_root = (
                 args.workspace if args.workspace is not None else default_workspace_root()
@@ -639,6 +733,9 @@ def main(
         return 2
     except SkyrimDiscoveryFormatError as error:
         print(f"Game discovery error: {error}", file=errors)
+        return 2
+    except Mo2EvidenceFormatError as error:
+        print(f"Manager discovery error: {error}", file=errors)
         return 2
     except (RecipeFormatError, ValueError) as error:
         print(f"Recipe error: {error}", file=errors)

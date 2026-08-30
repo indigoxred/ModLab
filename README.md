@@ -4,7 +4,7 @@ ModLab is a Windows companion for building a hand-picked Bethesda mod setup with
 
 ## Current build
 
-The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, stores immutable checkpoint lockfiles supplied by future game adapters, contains a tested internal Lab-to-Play file transaction engine, and can inspect one explicitly selected Skyrim Steam library read-only. Transactions retain prior and desired bytes, refuse drift, structurally exclude saves/co-saves, and can roll back after failure or process interruption. Their immutable file plan and roots have a SHA-256 identity. It does **not** connect to MO2, launch a game, download mods, extract archives, install files, expose a promotion command, or change a real game yet.
+The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, stores immutable checkpoint lockfiles supplied by future game adapters, contains a tested internal Lab-to-Play file transaction engine, and can inspect one explicitly selected Skyrim Steam library plus one contained portable MO2 instance read-only. Transactions retain prior and desired bytes, refuse drift, structurally exclude saves/co-saves, and can roll back after failure or process interruption. Their immutable file plan and roots have a SHA-256 identity. It does **not** launch MO2 or a game, download mods, extract archives, install files, expose a promotion command, or change a real game yet.
 
 The bundled Skyrim and OpenMW recipes are **Drafts**. Draft means researched, not assembled and smoke-tested as an exact combination.
 
@@ -29,6 +29,7 @@ python -m modlab artifact list --workspace ./workspace
 python -m modlab checkpoint list --workspace ./workspace --game skyrim-se-ae
 python -m modlab transaction list --workspace ./workspace
 python -m modlab game discover skyrim --steam-root 'C:\Path\To\Steam'
+python -m modlab manager discover mo2 --root '.\workspace\tools\mo2\skyrim-se-ae\app' --game-root 'C:\Path\To\Skyrim Special Edition'
 python -m unittest discover -s tests -v
 ```
 
@@ -55,7 +56,7 @@ workspace/
   inbox/          add downloaded or local mod archives here
   library/        retained archives, metadata, and quarantine
   games/          per-game environments, checkpoints, generated output, logs
-  tools/          portable external utilities
+  tools/          portable external utilities, separated by game
   exports/        reports and portable manifests
   runtime/        cache, jobs, and transaction recovery
 ```
@@ -67,6 +68,19 @@ python -m modlab workspace init
 ```
 
 The initializer never removes an unknown file. MO2-backed installed artifacts will remain inside the configured Skyrim environment rather than being copied into a second installed-mod tree.
+
+The Skyrim portable MO2 layout is deliberately predictable:
+
+```text
+workspace/tools/mo2/skyrim-se-ae/
+  app/          ModOrganizer.exe and portable ModOrganizer.ini
+  downloads/    MO2-selected downloads
+  mods/         installed mod directories shared by MO2 profiles
+  profiles/     exact ModLab - Lab and ModLab - Play profiles
+  overwrite/    generated output awaiting review and routing
+```
+
+Lab and Play isolate selections, plug-in order, and profile INIs; MO2's installed mod directories are shared. A later promotion build must therefore detect shared-content drift and cannot pretend that profile separation makes an in-place mod update safe.
 
 ## Archive vault workflow
 
@@ -120,6 +134,17 @@ Discovery parses only Skyrim's app `489830` manifest, records the exact `SkyrimS
 
 Executable runtime and Anniversary content are separate facts. A runtime such as `1.7.104.0` does not prove that the complete Anniversary Creation Club bundle is installed. `cc`-prefixed file counts are reported as observations only. MO2 is also a separate optional observation (`--mo2 PATH`); a missing manager remains Unknown and ModLab never substitutes Vortex.
 
+## Portable MO2 discovery
+
+The manager adapter inspects the exact portable Skyrim instance you name:
+
+```powershell
+python -m modlab manager discover mo2 --root '.\workspace\tools\mo2\skyrim-se-ae\app' --game-root 'C:\Users\red\Desktop\Steam\steamapps\common\Skyrim Special Edition'
+python -m modlab manager discover mo2 --root '.\workspace\tools\mo2\skyrim-se-ae\app' --game-root 'C:\Users\red\Desktop\Steam\steamapps\common\Skyrim Special Edition' --format json
+```
+
+It hashes and versions `ModOrganizer.exe`, strictly reads the portable INI and fixed Lab/Play profile state, checks that every writable manager path remains under ModLab, compares the configured game path, lists installed mod directory names, and reports top-level Overwrite entries. It does not recurse into installed mods or Overwrite, read any save/co-save, launch MO2, change a profile, authenticate, download, install, repair, or promote.
+
 ## Build sequence
 
-The next independent builds are the portable Skyrim/MO2 Lab/Play adapter and contained generator runner. Real MO2 integration testing will require computer-control access; ModLab will request it when that adapter exists. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.
+The next independent builds are verified MO2 bootstrap/configuration, MO2 checkpoint projection and Lab-to-Play comparison, and the contained generator runner. Real MO2 integration testing requires computer-control access after this read-only adapter is fixture-verified. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.
