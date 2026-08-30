@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from modlab.adapters.mo2.scanner import inspect_skyrim_mo2
+from modlab.adapters.mo2.serialization import report_to_dict
 from modlab.recipes.model import CheckState
 from modlab.workspace import initialize_workspace
 
@@ -20,6 +21,13 @@ class Mo2ScannerTests(unittest.TestCase):
             "Skyrim Special Edition",
         )
         game_root.mkdir(parents=True)
+        (game_root / "Skyrim.ccc").write_text(
+            "ccBGSSSE001-Fish.esm\n_ResourcePack.esl\n", encoding="utf-8"
+        )
+        primary = (
+            "Skyrim.esm\nUpdate.esm\nDawnguard.esm\nHearthFires.esm\n"
+            "Dragonborn.esm\nccBGSSSE001-Fish.esm\n_ResourcePack.esl\n"
+        )
         app = layout.skyrim_mo2_app
         executable = app / "ModOrganizer.exe"
         executable.write_bytes(b"fake mo2 executable")
@@ -31,13 +39,13 @@ class Mo2ScannerTests(unittest.TestCase):
                 "# generated\n+SkyUI\n", encoding="utf-8"
             )
             (profile / "plugins.txt").write_text(
-                "# generated\n*Skyrim.esm\n*SkyUI_SE.esp\n", encoding="utf-8"
+                "# generated\n*SkyUI_SE.esp\n", encoding="utf-8"
             )
             (profile / "loadorder.txt").write_text(
-                "Skyrim.esm\nSkyUI_SE.esp\n", encoding="utf-8"
+                primary + "SkyUI_SE.esp\n", encoding="utf-8"
             )
             (profile / "settings.ini").write_text(
-                "[General]\nLocalSaves=false\n", encoding="utf-8"
+                "[General]\nLocalSaves=false\nLocalSettings=true\n", encoding="utf-8"
             )
 
         (layout.skyrim_mo2_mods / "SkyUI").mkdir()
@@ -114,6 +122,90 @@ class Mo2ScannerTests(unittest.TestCase):
             self.assertEqual(CheckState.PASSED, findings["lab-play-ready"].state)
             self.assertEqual(CheckState.PASSED, findings["overwrite-empty"].state)
             self.assertEqual(before, self.file_bytes(layout.root))
+
+    def test_attaches_stable_internal_comparison_evidence_without_changing_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            layout, game_root, _ = self.make_instance(directory)
+            report = inspect_skyrim_mo2(
+                layout.skyrim_mo2_app,
+                game_root,
+                workspace_root=layout.root,
+                version_reader=lambda _: "2.5.2.0",
+            )
+
+            evidence = report.comparison_evidence
+            self.assertIsNotNone(evidence)
+            self.assertTrue(evidence.read_set_stable)
+            self.assertEqual(64, len(evidence.read_set_sha256))
+            self.assertEqual("Skyrim.esm", evidence.primary_plugins[0])
+            self.assertEqual("_ResourcePack.esl", evidence.primary_plugins[-1])
+            self.assertEqual(
+                (True, True),
+                tuple(
+                    item.profile_local_settings for item in evidence.profile_settings
+                ),
+            )
+            serialized = report_to_dict(report)
+            self.assertNotIn("comparisonEvidence", serialized)
+            self.assertEqual(
+                {
+                    "schemaVersion",
+                    "adapterId",
+                    "requestedRoot",
+                    "resolvedRoot",
+                    "gameRoot",
+                    "executable",
+                    "portableConfigPresent",
+                    "configuredGamePath",
+                    "paths",
+                    "activeProfile",
+                    "profiles",
+                    "topLevelMods",
+                    "modMetadataFiles",
+                    "overwriteEntries",
+                    "findings",
+                    "actions",
+                    "downloads",
+                    "installations",
+                    "programLaunches",
+                },
+                set(serialized),
+            )
+
+    def test_blocks_if_authoritative_state_changes_during_inspection(self):
+        cases = ("profile", "metadata", "overwrite")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                layout, game_root, _ = self.make_instance(directory)
+                if case == "profile":
+                    target = (
+                        layout.skyrim_mo2_profiles
+                        / "ModLab - Lab"
+                        / "plugins.txt"
+                    )
+                    mutate = lambda: target.write_bytes(b"*Changed.esp\n")
+                elif case == "metadata":
+                    target = layout.skyrim_mo2_mods / "SkyUI" / "meta.ini"
+                    target.unlink()
+                    mutate = lambda: target.write_bytes(b"[General]\nversion=changed\n")
+                else:
+                    target = layout.skyrim_mo2_overwrite / "new-output"
+                    mutate = target.mkdir
+
+                report = inspect_skyrim_mo2(
+                    layout.skyrim_mo2_app,
+                    game_root,
+                    workspace_root=layout.root,
+                    version_reader=lambda _: "2.5.2.0",
+                    _before_stability_check=mutate,
+                )
+
+                findings = {item.code: item for item in report.findings}
+                self.assertEqual(
+                    CheckState.BLOCKED,
+                    findings["mo2-state-changed-during-inspection"].state,
+                )
+                self.assertFalse(report.comparison_evidence.read_set_stable)
 
     def test_derives_standard_paths_when_only_base_directory_is_configured(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -304,6 +396,7 @@ class Mo2ScannerTests(unittest.TestCase):
     def test_missing_game_root_is_blocked_even_when_ini_text_matches(self):
         with tempfile.TemporaryDirectory() as directory:
             layout, game_root, _ = self.make_instance(directory)
+            (game_root / "Skyrim.ccc").unlink()
             game_root.rmdir()
 
             report = inspect_skyrim_mo2(

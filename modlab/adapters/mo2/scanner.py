@@ -3,6 +3,7 @@
 import hashlib
 import os
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path, PureWindowsPath
 
 from modlab.adapters.skyrim.windows_version import read_windows_file_version
@@ -10,18 +11,20 @@ from modlab.recipes.model import CheckState
 
 from .ini import Mo2IniError, decode_qsettings_path, parse_ini_bytes
 from .model import (
+    Mo2ComparisonInspectionEvidence,
     Mo2ExecutableEvidence,
     Mo2Finding,
     Mo2InspectionReport,
     Mo2PathEvidence,
+    Mo2ProfileComparisonEvidence,
     Mo2ProfileEvidence,
     Mo2StateFileEvidence,
 )
-from .profile import Mo2ProfileError, inspect_profile
+from .profile import Mo2ProfileError, inspect_profile, parse_load_order_bytes
+from .readset import Mo2ReadSet
 from .serialization import report_from_dict, report_to_dict
 
 
-_CHUNK_SIZE = 1024 * 1024
 _PATH_KEYS = {
     "downloads": "download_directory",
     "mods": "mod_directory",
@@ -30,6 +33,13 @@ _PATH_KEYS = {
 }
 _LAB_PROFILE = "ModLab - Lab"
 _PLAY_PROFILE = "ModLab - Play"
+_CORE_PRIMARY_PLUGINS = (
+    "Skyrim.esm",
+    "Update.esm",
+    "Dawnguard.esm",
+    "HearthFires.esm",
+    "Dragonborn.esm",
+)
 
 
 def inspect_skyrim_mo2(
@@ -38,6 +48,7 @@ def inspect_skyrim_mo2(
     *,
     workspace_root: Path,
     version_reader: Callable[[Path], str | None] = read_windows_file_version,
+    _before_stability_check: Callable[[], None] | None = None,
 ) -> Mo2InspectionReport:
     requested_root = Path(mo2_root).expanduser().resolve(strict=False)
     game_candidate = Path(game_root).expanduser().absolute()
@@ -106,6 +117,7 @@ def inspect_skyrim_mo2(
     findings.append(
         _finding(CheckState.PASSED, "mo2-root-contained", "MO2 root is contained by ModLab.")
     )
+    read_set = Mo2ReadSet()
 
     if game_candidate.is_symlink() or not requested_game.is_dir():
         findings.append(
@@ -120,9 +132,28 @@ def inspect_skyrim_mo2(
             _finding(CheckState.PASSED, "game-root-observed", "The selected Skyrim root is a regular directory.")
         )
 
-    executable = _observe_executable(resolved_root, version_reader, findings)
+    executable = _observe_executable(
+        resolved_root, version_reader, findings, read_set
+    )
     config_path = resolved_root / "ModOrganizer.ini"
-    if config_path.is_symlink() or not config_path.is_file():
+    try:
+        config_data = read_set.optional_bytes(config_path)
+    except OSError as error:
+        findings.append(
+            _finding(
+                CheckState.BLOCKED,
+                "portable-config-invalid",
+                f"ModOrganizer.ini cannot be trusted: {error}",
+            )
+        )
+        return _report(
+            requested_root,
+            resolved_root,
+            requested_game,
+            executable=executable,
+            findings=findings,
+        )
+    if config_data is None:
         findings.append(
             _finding(
                 CheckState.UNKNOWN,
@@ -139,7 +170,7 @@ def inspect_skyrim_mo2(
         )
 
     try:
-        config = parse_ini_bytes(config_path.read_bytes())
+        config = parse_ini_bytes(config_data)
     except (OSError, Mo2IniError) as error:
         findings.append(
             _finding(
@@ -159,6 +190,21 @@ def inspect_skyrim_mo2(
     findings.append(
         _finding(CheckState.PASSED, "portable-config-observed", "Portable ModOrganizer.ini parsed without ambiguity.")
     )
+
+    try:
+        primary_plugins, skyrim_ccc = _observe_primary_plugins(
+            requested_game, read_set, findings
+        )
+    except (OSError, Mo2ProfileError) as error:
+        primary_plugins = _CORE_PRIMARY_PLUGINS
+        skyrim_ccc = None
+        findings.append(
+            _finding(
+                CheckState.BLOCKED,
+                "skyrim-primary-plugin-policy-invalid",
+                f"Skyrim primary plug-in policy could not be observed: {error}",
+            )
+        )
 
     configured_game = _configured_absolute_path(
         config.get("General", "gamePath"), "gamePath", findings
@@ -190,7 +236,7 @@ def inspect_skyrim_mo2(
 
     profiles_path = _usable_path(path_by_kind.get("profiles"))
     if profiles_path is not None:
-        profiles = _observe_profiles(profiles_path, findings)
+        profiles = _observe_profiles(profiles_path, findings, read_set)
     else:
         findings.append(
             _finding(CheckState.BLOCKED, "lab-play-incomplete", "The contained profiles directory is unavailable.")
@@ -199,13 +245,13 @@ def inspect_skyrim_mo2(
     mods_path = _usable_path(path_by_kind.get("mods"))
     if mods_path is not None:
         top_level_mods, mod_metadata_files = _observe_mods(
-            mods_path, findings
+            mods_path, findings, read_set
         )
 
     overwrite_path = _usable_path(path_by_kind.get("overwrite"))
     if overwrite_path is not None:
         overwrite_entries = _observe_safe_children(
-            overwrite_path, "overwrite", findings
+            overwrite_path, "overwrite", findings, read_set
         )
         if any(item.code == "overwrite-entries-skipped" for item in findings):
             findings.append(
@@ -248,6 +294,29 @@ def inspect_skyrim_mo2(
             _finding(CheckState.WARNING, "active-profile-unmanaged", "The active profile is missing or is not a ModLab Lab/Play profile.")
         )
 
+    if _before_stability_check is not None:
+        _before_stability_check()
+    verification = read_set.verify()
+    if not verification.stable:
+        findings.append(
+            _finding(
+                CheckState.BLOCKED,
+                "mo2-state-changed-during-inspection",
+                "Authoritative MO2 state changed during inspection; no comparison is safe.",
+            )
+        )
+    comparison_evidence = Mo2ComparisonInspectionEvidence(
+        primary_plugins=primary_plugins,
+        skyrim_ccc=skyrim_ccc,
+        profile_settings=tuple(
+            Mo2ProfileComparisonEvidence(item.name, item.profile_local_settings)
+            for item in profiles
+        ),
+        read_set_sha256=verification.sha256,
+        read_set_stable=verification.stable,
+        changed_paths=verification.changed_paths,
+    )
+
     return _report(
         requested_root,
         resolved_root,
@@ -262,6 +331,7 @@ def inspect_skyrim_mo2(
         mod_metadata_files=mod_metadata_files,
         overwrite_entries=overwrite_entries,
         findings=findings,
+        comparison_evidence=comparison_evidence,
     )
 
 
@@ -269,15 +339,26 @@ def _observe_executable(
     root: Path,
     version_reader: Callable[[Path], str | None],
     findings: list[Mo2Finding],
+    read_set: Mo2ReadSet,
 ) -> Mo2ExecutableEvidence | None:
     path = root / "ModOrganizer.exe"
-    if path.is_symlink() or not path.is_file():
+    try:
+        data = read_set.optional_bytes(path)
+    except OSError as error:
+        findings.append(
+            _finding(
+                CheckState.BLOCKED,
+                "mo2-executable-unreadable",
+                f"ModOrganizer.exe could not be identified: {error}",
+            )
+        )
+        return None
+    if data is None:
         findings.append(
             _finding(CheckState.UNKNOWN, "mo2-executable-not-observed", "ModOrganizer.exe is missing or redirected.")
         )
         return None
     try:
-        sha256, size = _hash_file(path)
         version = version_reader(path)
     except OSError as error:
         findings.append(
@@ -294,7 +375,39 @@ def _observe_executable(
             f"ModOrganizer.exe reports {version}." if version is not None else "ModOrganizer.exe did not expose a readable file version.",
         )
     )
-    return Mo2ExecutableEvidence("ModOrganizer.exe", version, sha256, size)
+    return Mo2ExecutableEvidence(
+        "ModOrganizer.exe",
+        version,
+        hashlib.sha256(data).hexdigest(),
+        len(data),
+    )
+
+
+def _observe_primary_plugins(
+    game_root: Path,
+    read_set: Mo2ReadSet,
+    findings: list[Mo2Finding],
+) -> tuple[tuple[str, ...], Mo2StateFileEvidence | None]:
+    ccc_path = game_root / "Skyrim.ccc"
+    data = read_set.optional_bytes(ccc_path)
+    if data is None:
+        return _CORE_PRIMARY_PLUGINS, None
+    creation_plugins = parse_load_order_bytes(data)
+    combined = _CORE_PRIMARY_PLUGINS + creation_plugins
+    if len({item.casefold() for item in combined}) != len(combined):
+        findings.append(
+            _finding(
+                CheckState.BLOCKED,
+                "skyrim-primary-plugin-policy-invalid",
+                "Skyrim.ccc duplicates a primary plug-in identity.",
+            )
+        )
+    state_file = Mo2StateFileEvidence(
+        relative_path="Skyrim.ccc",
+        sha256=hashlib.sha256(data).hexdigest(),
+        size=len(data),
+    )
+    return combined, state_file
 
 
 def _observe_paths(config, instance_root: Path, workspace: Path, findings: list[Mo2Finding]) -> tuple[Mo2PathEvidence, ...]:
@@ -360,12 +473,34 @@ def _observe_paths(config, instance_root: Path, workspace: Path, findings: list[
     return tuple(observed)
 
 
-def _observe_profiles(root: Path, findings: list[Mo2Finding]) -> tuple[Mo2ProfileEvidence, ...]:
+def _observe_profiles(
+    root: Path,
+    findings: list[Mo2Finding],
+    read_set: Mo2ReadSet,
+) -> tuple[Mo2ProfileEvidence, ...]:
     profiles: list[Mo2ProfileEvidence] = []
     errors: list[str] = []
+    try:
+        entries = {item.name: item for item in read_set.list_directory(root)}
+    except OSError as error:
+        findings.append(
+            _finding(
+                CheckState.BLOCKED,
+                "lab-play-incomplete",
+                f"Profiles directory could not be observed: {error}",
+            )
+        )
+        return ()
     for name in (_LAB_PROFILE, _PLAY_PROFILE):
+        entry = entries.get(name)
+        if entry is None:
+            errors.append(f"{name}: exact profile directory is missing")
+            continue
+        if entry.redirected or entry.kind != "directory":
+            errors.append(f"{name}: profile directory is redirected or invalid")
+            continue
         try:
-            profiles.append(inspect_profile(root / name, root))
+            profiles.append(inspect_profile(root / name, root, read_set))
         except Mo2ProfileError as error:
             errors.append(f"{name}: {error}")
     if errors:
@@ -395,28 +530,24 @@ def _observe_safe_children(
     root: Path,
     label: str,
     findings: list[Mo2Finding],
+    read_set: Mo2ReadSet,
     *,
     directories_only: bool = False,
 ) -> tuple[str, ...]:
     names: list[str] = []
     skipped = 0
     try:
-        children = tuple(root.iterdir())
+        children = read_set.list_directory(root)
     except OSError as error:
         findings.append(
             _finding(CheckState.BLOCKED, f"{label}-unreadable", f"{label} could not be listed: {error}")
         )
         return ()
     for child in children:
-        if directories_only and not child.is_dir():
-            continue
-        if child.is_symlink() or not _safe_entry_name(child.name):
+        if child.redirected or not _safe_entry_name(child.name):
             skipped += 1
             continue
-        try:
-            child.resolve(strict=True).relative_to(root.resolve(strict=True))
-        except (FileNotFoundError, OSError, ValueError):
-            skipped += 1
+        if directories_only and child.kind != "directory":
             continue
         names.append(child.name)
     if skipped:
@@ -427,32 +558,29 @@ def _observe_safe_children(
 
 
 def _observe_mods(
-    root: Path, findings: list[Mo2Finding]
+    root: Path,
+    findings: list[Mo2Finding],
+    read_set: Mo2ReadSet,
 ) -> tuple[tuple[str, ...], tuple[Mo2StateFileEvidence, ...]]:
     names = _observe_safe_children(
-        root, "mods", findings, directories_only=True
+        root, "mods", findings, read_set, directories_only=True
     )
     metadata: list[Mo2StateFileEvidence] = []
     skipped = 0
-    resolved_root = root.resolve(strict=True)
     for name in names:
         candidate = root / name / "meta.ini"
-        if not candidate.exists():
-            continue
         try:
-            resolved = candidate.resolve(strict=True)
-            resolved.relative_to(resolved_root / name)
-            if candidate.is_symlink() or not resolved.is_file():
-                raise ValueError("redirected metadata")
-            sha256, size = _hash_file(resolved)
-        except (OSError, ValueError):
+            data = read_set.optional_bytes(candidate)
+        except OSError:
             skipped += 1
+            continue
+        if data is None:
             continue
         metadata.append(
             Mo2StateFileEvidence(
                 f"mods/{name}/meta.ini",
-                sha256,
-                size,
+                hashlib.sha256(data).hexdigest(),
+                len(data),
             )
         )
     if skipped:
@@ -477,6 +605,7 @@ def _report(
     mod_metadata_files: tuple[Mo2StateFileEvidence, ...] = (),
     overwrite_entries: tuple[str, ...] = (),
     findings: list[Mo2Finding],
+    comparison_evidence: Mo2ComparisonInspectionEvidence | None = None,
 ) -> Mo2InspectionReport:
     report = Mo2InspectionReport(
         schema_version=1,
@@ -501,7 +630,8 @@ def _report(
         installations=(),
         program_launches=(),
     )
-    return report_from_dict(report_to_dict(report))
+    validated = report_from_dict(report_to_dict(report))
+    return replace(validated, comparison_evidence=comparison_evidence)
 
 
 def _configured_absolute_path(value: str | None, label: str, findings: list[Mo2Finding]) -> Path | None:
@@ -572,16 +702,6 @@ def _safe_entry_name(name: str) -> bool:
         and name.casefold() != "saves"
         and PureWindowsPath(name).suffix.casefold() not in {".ess", ".skse"}
     )
-
-
-def _hash_file(path: Path) -> tuple[str, int]:
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as stream:
-        while chunk := stream.read(_CHUNK_SIZE):
-            digest.update(chunk)
-            size += len(chunk)
-    return digest.hexdigest(), size
 
 
 def _finding(state: CheckState, code: str, message: str) -> Mo2Finding:

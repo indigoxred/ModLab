@@ -1,6 +1,6 @@
 """Immutable evidence returned by portable MO2 inspection."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from modlab.recipes.model import CheckState
 
@@ -54,6 +54,22 @@ class Mo2ProfileEvidence:
 
 
 @dataclass(frozen=True)
+class Mo2ProfileComparisonEvidence:
+    name: str
+    profile_local_settings: bool | None
+
+
+@dataclass(frozen=True)
+class Mo2ComparisonInspectionEvidence:
+    primary_plugins: tuple[str, ...]
+    skyrim_ccc: Mo2StateFileEvidence | None
+    profile_settings: tuple[Mo2ProfileComparisonEvidence, ...]
+    read_set_sha256: str
+    read_set_stable: bool
+    changed_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Mo2Finding:
     state: CheckState
     code: str
@@ -81,3 +97,6 @@ class Mo2InspectionReport:
     downloads: tuple[str, ...]
     installations: tuple[str, ...]
     program_launches: tuple[str, ...]
+    comparison_evidence: Mo2ComparisonInspectionEvidence | None = field(
+        default=None, compare=False, repr=False
+    )

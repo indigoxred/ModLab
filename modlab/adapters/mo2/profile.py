@@ -12,6 +12,7 @@ from .model import (
     Mo2ProfileEvidence,
     Mo2StateFileEvidence,
 )
+from .readset import Mo2ReadSet
 
 
 class Mo2ProfileError(ValueError):
@@ -91,7 +92,11 @@ def parse_profile_settings_bytes(data: bytes) -> tuple[bool | None, bool | None]
         raise Mo2ProfileError(f"invalid profile settings.ini: {error}") from error
 
 
-def inspect_profile(profile_root: Path, profiles_root: Path) -> Mo2ProfileEvidence:
+def inspect_profile(
+    profile_root: Path,
+    profiles_root: Path,
+    read_set: Mo2ReadSet | None = None,
+) -> Mo2ProfileEvidence:
     requested_profile = Path(profile_root)
     requested_profiles = Path(profiles_root)
     try:
@@ -104,21 +109,30 @@ def inspect_profile(profile_root: Path, profiles_root: Path) -> Mo2ProfileEviden
         raise Mo2ProfileError("profile must be one directory under the profiles root")
 
     name = _safe_name(resolved_profile.name, "profile name")
+    observer = read_set or Mo2ReadSet()
+    try:
+        entries = {
+            entry.name.casefold(): entry
+            for entry in observer.list_directory(requested_profile)
+        }
+    except OSError as error:
+        raise Mo2ProfileError(f"profile directory cannot be observed: {error}") from error
     observed: dict[str, bytes] = {}
     for filename in _FIXED_STATE_FILES:
-        candidate = resolved_profile / filename
-        if not candidate.exists():
+        entry = entries.get(filename.casefold())
+        if entry is None:
             continue
-        try:
-            resolved_file = candidate.resolve(strict=True)
-            resolved_file.relative_to(resolved_profile)
-        except (FileNotFoundError, OSError, ValueError) as error:
+        if entry.redirected or entry.kind != "file":
             raise Mo2ProfileError(
-                f"profile state file escapes its profile: {filename}"
+                f"profile state path is not a direct file: {filename}"
+            )
+        candidate = requested_profile / entry.name
+        try:
+            observed[filename] = observer.read_bytes(candidate)
+        except OSError as error:
+            raise Mo2ProfileError(
+                f"profile state file cannot be observed: {filename}"
             ) from error
-        if not resolved_file.is_file():
-            raise Mo2ProfileError(f"profile state path is not a file: {filename}")
-        observed[filename] = resolved_file.read_bytes()
 
     if "modlist.txt" not in observed:
         raise Mo2ProfileError("required profile modlist.txt is missing")
