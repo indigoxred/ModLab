@@ -20,6 +20,12 @@ class ChangeOperation(StrEnum):
 
 
 @dataclass(frozen=True)
+class RequestedChange:
+    relative_path: str
+    operation: ChangeOperation
+
+
+@dataclass(frozen=True)
 class FileSnapshot:
     present: bool
     sha256: str | None
