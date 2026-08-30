@@ -5,7 +5,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from modlab.checkpoints.serialization import CheckpointFormatError, draft_from_dict
+from modlab.checkpoints.model import CheckpointHealth
+from modlab.checkpoints.serialization import (
+    CheckpointFormatError,
+    checkpoint_id_for_draft,
+    draft_from_dict,
+)
 from modlab.checkpoints.store import CheckpointStore, CheckpointStoreError
 from tests.test_checkpoint_serialization import VALID_DRAFT
 
@@ -110,6 +115,81 @@ class CheckpointStoreTests(unittest.TestCase):
 
             with self.assertRaises(CheckpointFormatError):
                 store.list()
+
+
+class CheckpointVerificationTests(unittest.TestCase):
+    def test_exact_canonical_content_is_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CheckpointStore(Path(directory, "workspace"), "skyrim-se-ae")
+            record = store.create(draft_from_dict(VALID_DRAFT))
+
+            finding = store.verify(record.checkpoint_id)
+
+            self.assertEqual(CheckpointHealth.AVAILABLE, finding.health)
+            self.assertEqual(record.checkpoint_id, finding.actual_checkpoint_id)
+
+    def test_deleted_lockfile_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CheckpointStore(Path(directory, "workspace"), "skyrim-se-ae")
+            record = store.create(draft_from_dict(VALID_DRAFT))
+            store.path_for(record.checkpoint_id).unlink()
+
+            finding = store.verify(record.checkpoint_id)
+
+            self.assertEqual(CheckpointHealth.MISSING, finding.health)
+            self.assertIsNone(finding.actual_checkpoint_id)
+            self.assertFalse(finding.path.exists())
+
+    def test_semantic_mutation_is_modified_with_recomputed_actual_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CheckpointStore(Path(directory, "workspace"), "skyrim-se-ae")
+            record = store.create(draft_from_dict(VALID_DRAFT))
+            lockfile = store.path_for(record.checkpoint_id)
+            mutated = json.loads(lockfile.read_text(encoding="utf-8"))
+            mutated["adapterState"]["profile"] = "Play"
+            lockfile.write_text(json.dumps(mutated), encoding="utf-8")
+
+            finding = store.verify(record.checkpoint_id)
+
+            expected_actual = checkpoint_id_for_draft(
+                draft_from_dict(
+                    {
+                        key: value
+                        for key, value in mutated.items()
+                        if key != "checkpointId"
+                    }
+                )
+            )
+            self.assertEqual(CheckpointHealth.MODIFIED, finding.health)
+            self.assertEqual(expected_actual, finding.actual_checkpoint_id)
+            self.assertNotEqual(record.checkpoint_id, finding.actual_checkpoint_id)
+            self.assertEqual("Play", json.loads(lockfile.read_text(encoding="utf-8"))["adapterState"]["profile"])
+
+    def test_malformed_json_is_modified_without_inventing_an_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CheckpointStore(Path(directory, "workspace"), "skyrim-se-ae")
+            record = store.create(draft_from_dict(VALID_DRAFT))
+            lockfile = store.path_for(record.checkpoint_id)
+            lockfile.write_text("not json", encoding="utf-8")
+
+            finding = store.verify(record.checkpoint_id)
+
+            self.assertEqual(CheckpointHealth.MODIFIED, finding.health)
+            self.assertIsNone(finding.actual_checkpoint_id)
+            self.assertEqual("not json", lockfile.read_text(encoding="utf-8"))
+
+    def test_formatting_only_change_remains_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CheckpointStore(Path(directory, "workspace"), "skyrim-se-ae")
+            record = store.create(draft_from_dict(VALID_DRAFT))
+            lockfile = store.path_for(record.checkpoint_id)
+            parsed = json.loads(lockfile.read_text(encoding="utf-8"))
+            lockfile.write_text(json.dumps(parsed, separators=(",", ":")), encoding="utf-8")
+
+            finding = store.verify(record.checkpoint_id)
+
+            self.assertEqual(CheckpointHealth.AVAILABLE, finding.health)
+            self.assertEqual(record.checkpoint_id, finding.actual_checkpoint_id)
 
 
 if __name__ == "__main__":

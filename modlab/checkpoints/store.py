@@ -5,15 +5,23 @@ import os
 import re
 import uuid
 from pathlib import Path
+from typing import Mapping
 
 from modlab.workspace import initialize_workspace
 
-from .model import CheckpointDraft, CheckpointRecord
+from .model import (
+    CheckpointDraft,
+    CheckpointFinding,
+    CheckpointHealth,
+    CheckpointRecord,
+)
 from .serialization import (
     CheckpointFormatError,
     checkpoint_from_dict,
+    checkpoint_id_for_draft,
     checkpoint_record_from_draft,
     checkpoint_to_dict,
+    draft_from_dict,
 )
 
 
@@ -114,6 +122,59 @@ class CheckpointStore:
         if record.game != self.game_key:
             raise CheckpointFormatError("checkpoint game does not match its game store")
         return record
+
+    def verify(self, checkpoint_id: str) -> CheckpointFinding:
+        path = self.path_for(checkpoint_id)
+        if not path.is_file():
+            return CheckpointFinding(
+                health=CheckpointHealth.MISSING,
+                checkpoint_id=checkpoint_id,
+                actual_checkpoint_id=None,
+                path=path,
+                message="Checkpoint lockfile is missing.",
+            )
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            return CheckpointFinding(
+                health=CheckpointHealth.MODIFIED,
+                checkpoint_id=checkpoint_id,
+                actual_checkpoint_id=None,
+                path=path,
+                message=f"Checkpoint lockfile cannot be parsed: {error}",
+            )
+
+        actual_checkpoint_id: str | None = None
+        try:
+            if not isinstance(data, Mapping):
+                raise CheckpointFormatError("checkpoint must be an object")
+            body = {key: value for key, value in data.items() if key != "checkpointId"}
+            draft = draft_from_dict(body)
+            actual_checkpoint_id = checkpoint_id_for_draft(draft)
+            stored_checkpoint_id = data.get("checkpointId")
+            if (
+                actual_checkpoint_id == checkpoint_id
+                and stored_checkpoint_id == checkpoint_id
+                and draft.game == self.game_key
+            ):
+                return CheckpointFinding(
+                    health=CheckpointHealth.AVAILABLE,
+                    checkpoint_id=checkpoint_id,
+                    actual_checkpoint_id=actual_checkpoint_id,
+                    path=path,
+                    message="Checkpoint canonical content matches its identity.",
+                )
+        except CheckpointFormatError:
+            pass
+
+        return CheckpointFinding(
+            health=CheckpointHealth.MODIFIED,
+            checkpoint_id=checkpoint_id,
+            actual_checkpoint_id=actual_checkpoint_id,
+            path=path,
+            message="Checkpoint content differs from its recorded identity.",
+        )
 
     def path_for(self, checkpoint_id: str) -> Path:
         if not isinstance(checkpoint_id, str):
