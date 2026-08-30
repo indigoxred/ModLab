@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from modlab.adapters.mo2.scanner import inspect_skyrim_mo2
+from modlab.adapters.mo2.projection import Mo2Readiness, project_mo2_state
 from modlab.adapters.mo2.serialization import report_to_dict
 from modlab.recipes.model import CheckState
 from modlab.workspace import initialize_workspace
@@ -170,6 +171,10 @@ class Mo2ScannerTests(unittest.TestCase):
                     "programLaunches",
                 },
                 set(serialized),
+            )
+            self.assertEqual(
+                Mo2Readiness.READY,
+                project_mo2_state(report).readiness,
             )
 
     def test_blocks_if_authoritative_state_changes_during_inspection(self):
