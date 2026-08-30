@@ -87,3 +87,12 @@ class EnvironmentEvidence:
     environment_id: str
     dimensions: Mapping[str, str]
 
+
+@dataclass(frozen=True)
+class CompatibilityFinding:
+    state: CheckState
+    component_id: str
+    dimension: str
+    allowed_values: tuple[str, ...]
+    actual_value: str | None
+    reason: str

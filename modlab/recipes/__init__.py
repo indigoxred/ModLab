@@ -7,9 +7,11 @@ from .loading import (
     parse_environment,
     parse_recipe,
 )
+from .checking import check_component
 from .model import (
     CheckState,
     CompatibilityConstraint,
+    CompatibilityFinding,
     ComponentImportance,
     EnvironmentEvidence,
     FoundationRecipe,
@@ -22,6 +24,7 @@ from .model import (
 __all__ = [
     "CheckState",
     "CompatibilityConstraint",
+    "CompatibilityFinding",
     "ComponentImportance",
     "EnvironmentEvidence",
     "FoundationRecipe",
@@ -34,4 +37,5 @@ __all__ = [
     "load_recipe",
     "parse_environment",
     "parse_recipe",
+    "check_component",
 ]
