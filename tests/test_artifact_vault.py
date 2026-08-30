@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -95,6 +96,43 @@ class ArchiveVaultImportTests(unittest.TestCase):
 
             self.assertEqual([], list((vault.workspace_root / "library" / "archives").rglob("payload.*")))
             self.assertEqual([], list((vault.workspace_root / "library" / "metadata" / "artifacts").glob("*.json")))
+
+    def test_source_inspection_failure_is_reported_as_an_import_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "mod.zip"
+            source.write_bytes(b"mod archive")
+            vault = ArchiveVault(base / "workspace")
+
+            with (
+                patch.object(Path, "is_file", return_value=True),
+                patch.object(Path, "stat", side_effect=OSError("access changed")),
+                self.assertRaisesRegex(ArchiveImportError, "Could not inspect"),
+            ):
+                vault.import_archive(source, "local", imported_at=IMPORTED_AT)
+
+    def test_metadata_promotion_failure_rolls_back_new_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "mod.zip"
+            source.write_bytes(b"mod archive")
+            vault = ArchiveVault(base / "workspace")
+            real_replace = os.replace
+
+            def fail_metadata_replace(source_path, destination_path):
+                if Path(destination_path).suffix == ".json":
+                    raise OSError("metadata promotion failed")
+                return real_replace(source_path, destination_path)
+
+            with patch("modlab.artifacts.vault.os.replace", side_effect=fail_metadata_replace):
+                with self.assertRaisesRegex(ArchiveImportError, "metadata promotion failed"):
+                    vault.import_archive(source, "local", imported_at=IMPORTED_AT)
+
+            self.assertEqual(b"mod archive", source.read_bytes())
+            self.assertEqual([], list((vault.workspace_root / "library" / "archives").rglob("payload.*")))
+            self.assertEqual([], list(vault.metadata_path.glob("*.json")))
+            self.assertEqual([], list(vault.metadata_path.glob("*.part")))
+            self.assertEqual([], list(vault.jobs_path.glob("import-*.part")))
 
 
 class ArchiveVaultVerificationTests(unittest.TestCase):

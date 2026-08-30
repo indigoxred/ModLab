@@ -99,8 +99,16 @@ class ArchiveVault:
         source_url: str | None = None,
         imported_at: str | None = None,
     ) -> ArchiveArtifact:
-        source_path = Path(source).expanduser().resolve()
-        self._validate_source(source_path)
+        requested_source = Path(source).expanduser()
+        try:
+            source_path = requested_source.resolve()
+            self._validate_source(source_path)
+        except ArchiveImportError:
+            raise
+        except OSError as error:
+            raise ArchiveImportError(
+                f"Could not inspect archive source {requested_source}: {error}"
+            ) from error
 
         operation_id = uuid.uuid4().hex
         staging_path = self.jobs_path / f"import-{operation_id}.part"
