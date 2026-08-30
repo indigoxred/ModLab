@@ -12,6 +12,7 @@ from .recipes.loading import RecipeFormatError, load_environment, load_recipe
 from .recipes.model import RecipeReview
 from .recipes.reviewing import review_recipe
 from .recipes.serialization import review_to_dict
+from .workspace import default_workspace_root, initialize_workspace
 
 
 NO_ACTIONS = "No downloads or installation actions were performed."
@@ -23,6 +24,21 @@ def _parser() -> argparse.ArgumentParser:
         description="Inspect ModLab recipes without changing a mod setup.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+
+    workspace = commands.add_parser(
+        "workspace",
+        help="create or inspect the organized user-data folders",
+    )
+    workspace_commands = workspace.add_subparsers(
+        dest="workspace_command",
+        required=True,
+    )
+    workspace_init = workspace_commands.add_parser(
+        "init",
+        help="create missing folders without deleting existing content",
+    )
+    workspace_init.add_argument("--root", type=Path, default=None)
+
     recipe = commands.add_parser("recipe", help="check or review a recipe")
     recipe_commands = recipe.add_subparsers(dest="recipe_command", required=True)
 
@@ -92,6 +108,19 @@ def main(
     errors = stderr if stderr is not None else sys.stderr
     args = _parser().parse_args(argv)
     try:
+        if args.command == "workspace" and args.workspace_command == "init":
+            root = args.root if args.root is not None else default_workspace_root()
+            layout = initialize_workspace(root)
+            print(f"Workspace: {layout.root}", file=output)
+            print(f"Inbox: {layout.inbox}", file=output)
+            print(f"Library: {layout.archives.parent}", file=output)
+            print(f"Games: {layout.games}", file=output)
+            print(f"Tools: {layout.tools}", file=output)
+            print(f"Exports: {layout.exports}", file=output)
+            print(f"Runtime: {layout.cache.parent}", file=output)
+            print("Existing files were preserved.", file=output)
+            return 0
+
         if args.command == "recipe" and args.recipe_command == "check":
             recipe = load_recipe(args.recipe)
             print(
