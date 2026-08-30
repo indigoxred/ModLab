@@ -39,6 +39,7 @@ _EXECUTABLE_FIELDS = {"relativePath", "fileVersion", "sha256", "size"}
 _DATA_FILE_FIELDS = {"relativePath", "extension", "size"}
 _FINDING_FIELDS = {"state", "code", "message"}
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_APP_ID = re.compile(r"^[0-9]{1,20}$")
 _CODE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _DATA_EXTENSIONS = {".esm", ".esl", ".esp", ".bsa"}
 
@@ -61,8 +62,10 @@ def discovery_from_dict(data: object) -> SkyrimDiscoveryReport:
         )
 
     app_id = mapping["appId"]
-    if app_id is not None and app_id != "489830":
-        raise SkyrimDiscoveryFormatError("appId must be null or 489830")
+    if app_id is not None and (
+        not isinstance(app_id, str) or _APP_ID.fullmatch(app_id) is None
+    ):
+        raise SkyrimDiscoveryFormatError("appId must be null or numeric text")
     app_name = _optional_text(mapping["appName"], "appName")
     install_directory = _optional_install_directory(mapping["installDirectory"])
     state_flags = mapping["installStateFlags"]
