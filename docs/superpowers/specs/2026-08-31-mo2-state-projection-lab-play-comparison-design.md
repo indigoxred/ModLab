@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-31
 
-**Status:** Revised after verified external review; awaiting written-spec approval
+**Status:** Approved for implementation
 
 **Scope:** Skyrim SE/AE portable MO2 adapter only
 
