@@ -9,13 +9,17 @@ from .serialization import (
     checkpoint_to_dict,
     draft_from_dict,
 )
+from .store import CheckpointNotFoundError, CheckpointStore, CheckpointStoreError
 
 __all__ = [
     "CheckpointDraft",
     "CheckpointFinding",
     "CheckpointFormatError",
     "CheckpointHealth",
+    "CheckpointNotFoundError",
     "CheckpointRecord",
+    "CheckpointStore",
+    "CheckpointStoreError",
     "checkpoint_from_dict",
     "checkpoint_id_for_draft",
     "checkpoint_record_from_draft",
