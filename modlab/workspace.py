@@ -14,7 +14,11 @@ _DIRECTORIES = (
     "games/skyrim-se-ae/checkpoints",
     "games/skyrim-se-ae/generated",
     "games/skyrim-se-ae/logs",
-    "tools",
+    "tools/mo2/skyrim-se-ae/app",
+    "tools/mo2/skyrim-se-ae/downloads",
+    "tools/mo2/skyrim-se-ae/mods",
+    "tools/mo2/skyrim-se-ae/profiles",
+    "tools/mo2/skyrim-se-ae/overwrite",
     "exports",
     "runtime/cache",
     "runtime/jobs",
@@ -37,6 +41,12 @@ class WorkspaceLayout:
     generated: Path
     logs: Path
     tools: Path
+    skyrim_mo2: Path
+    skyrim_mo2_app: Path
+    skyrim_mo2_downloads: Path
+    skyrim_mo2_mods: Path
+    skyrim_mo2_profiles: Path
+    skyrim_mo2_overwrite: Path
     exports: Path
     cache: Path
     jobs: Path
@@ -53,6 +63,7 @@ def initialize_workspace(root: Path) -> WorkspaceLayout:
         (resolved / relative).mkdir(parents=True, exist_ok=True)
 
     skyrim = resolved / "games" / "skyrim-se-ae"
+    skyrim_mo2 = resolved / "tools" / "mo2" / "skyrim-se-ae"
     return WorkspaceLayout(
         root=resolved,
         inbox=resolved / "inbox",
@@ -67,6 +78,12 @@ def initialize_workspace(root: Path) -> WorkspaceLayout:
         generated=skyrim / "generated",
         logs=skyrim / "logs",
         tools=resolved / "tools",
+        skyrim_mo2=skyrim_mo2,
+        skyrim_mo2_app=skyrim_mo2 / "app",
+        skyrim_mo2_downloads=skyrim_mo2 / "downloads",
+        skyrim_mo2_mods=skyrim_mo2 / "mods",
+        skyrim_mo2_profiles=skyrim_mo2 / "profiles",
+        skyrim_mo2_overwrite=skyrim_mo2 / "overwrite",
         exports=resolved / "exports",
         cache=resolved / "runtime" / "cache",
         jobs=resolved / "runtime" / "jobs",

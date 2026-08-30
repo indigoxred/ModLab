@@ -22,6 +22,13 @@ EXPECTED_RELATIVE_DIRECTORIES = {
     "games/skyrim-se-ae/generated",
     "games/skyrim-se-ae/logs",
     "tools",
+    "tools/mo2",
+    "tools/mo2/skyrim-se-ae",
+    "tools/mo2/skyrim-se-ae/app",
+    "tools/mo2/skyrim-se-ae/downloads",
+    "tools/mo2/skyrim-se-ae/mods",
+    "tools/mo2/skyrim-se-ae/overwrite",
+    "tools/mo2/skyrim-se-ae/profiles",
     "exports",
     "runtime",
     "runtime/cache",
@@ -44,6 +51,10 @@ class WorkspaceTests(unittest.TestCase):
             }
             self.assertEqual(EXPECTED_RELATIVE_DIRECTORIES, actual)
             self.assertEqual(root.resolve() / "inbox", layout.inbox)
+            self.assertEqual(
+                root.resolve() / "tools" / "mo2" / "skyrim-se-ae" / "app",
+                layout.skyrim_mo2_app,
+            )
 
     def test_reinitializing_never_removes_an_unknown_user_file(self):
         with tempfile.TemporaryDirectory() as directory:
