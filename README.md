@@ -4,7 +4,7 @@ ModLab is a Windows companion for building a hand-picked Bethesda mod setup with
 
 ## Current build
 
-The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, stores immutable checkpoint lockfiles supplied by future game adapters, contains a tested internal Lab-to-Play file transaction engine, and can inspect one explicitly selected Skyrim Steam library plus one contained portable MO2 instance read-only. Transactions retain prior and desired bytes, refuse drift, structurally exclude saves/co-saves, and can roll back after failure or process interruption. Their immutable file plan and roots have a SHA-256 identity. It does **not** launch MO2 or a game, download mods, extract archives, install files, expose a promotion command, or change a real game yet.
+The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, stores immutable checkpoint lockfiles supplied by future game adapters, contains a tested internal Lab-to-Play file transaction engine, and can inspect one explicitly selected Skyrim Steam library plus one contained portable MO2 instance read-only. It can also compare the exact `ModLab - Lab` and `ModLab - Play` MO2 profile state without writing a report or changing either profile. Transactions retain prior and desired bytes, refuse drift, structurally exclude saves/co-saves, and can roll back after failure or process interruption. Their immutable file plan and roots have a SHA-256 identity. It does **not** launch MO2 or a game, download mods, extract archives, install files, expose a promotion command, or change a real game yet.
 
 The bundled Skyrim and OpenMW recipes are **Drafts**. Draft means researched, not assembled and smoke-tested as an exact combination.
 
@@ -30,6 +30,8 @@ python -m modlab checkpoint list --workspace ./workspace --game skyrim-se-ae
 python -m modlab transaction list --workspace ./workspace
 python -m modlab game discover skyrim --steam-root 'C:\Path\To\Steam'
 python -m modlab manager discover mo2 --root '.\workspace\tools\mo2\skyrim-se-ae\app' --game-root 'C:\Path\To\Skyrim Special Edition'
+python -B -m modlab manager compare mo2 --root '.\workspace\tools\mo2\skyrim-se-ae\app' --game-root 'C:\Path\To\Skyrim Special Edition' --workspace '.\workspace'
+python -B -m modlab manager compare mo2 --root '.\workspace\tools\mo2\skyrim-se-ae\app' --game-root 'C:\Path\To\Skyrim Special Edition' --workspace '.\workspace' --format json
 python -m unittest discover -s tests -v
 ```
 
@@ -41,7 +43,7 @@ python -m modlab recipe review RECIPE.json --environment ENVIRONMENT.json --sele
 
 Exit codes are stable:
 
-- `0` — valid recipe or review ready to be considered for approval.
+- `0` — valid input, a review ready to be considered, or a complete manager comparison.
 - `2` — invalid file, schema, or component request.
 - `3` — incomplete selection, proven compatibility block, or missing/modified retained state.
 
@@ -145,6 +147,19 @@ python -m modlab manager discover mo2 --root '.\workspace\tools\mo2\skyrim-se-ae
 
 It hashes and versions `ModOrganizer.exe`, strictly reads the portable INI and fixed Lab/Play list/configuration files, checks that every writable manager path matches the organized ModLab layout, compares the configured game path, lists installed mod directory names, hashes each available top-level `meta.ini`, and reports top-level Overwrite entries. It does not recurse through installed mod content or Overwrite, read any save/co-save, launch MO2, change a profile, authenticate, download, install, repair, or promote.
 
+## MO2 Lab and Play comparison
+
+The comparison command projects one stable snapshot of both exact profiles and explains Play-to-Lab differences:
+
+```powershell
+python -B -m modlab manager compare mo2 --root '.\workspace\tools\mo2\skyrim-se-ae\app' --game-root 'C:\Path\To\Skyrim Special Edition' --workspace '.\workspace'
+python -B -m modlab manager compare mo2 --root '.\workspace\tools\mo2\skyrim-se-ae\app' --game-root 'C:\Path\To\Skyrim Special Edition' --workspace '.\workspace' --format json
+```
+
+It compares MO2 priority, enablement, plug-in order, and profile configuration. Additions, removals, and enablement changes include their nearest shared placement anchors. Contradictory evidence or state that changes during inspection blocks the comparison instead of producing a partial answer.
+
+The command reads no save or co-save and writes no cache, report, profile, mod, game, checkpoint, temporary, or workspace file. Its scope does not inspect installed mod payload contents, asset conflicts, plug-in records, or runtime stability, so it does not claim that conflicts are solved or that Skyrim will run correctly.
+
 ## Build sequence
 
-The next independent builds are verified MO2 bootstrap/configuration, MO2 checkpoint projection and Lab-to-Play comparison, and the contained generator runner. Real MO2 integration testing requires computer-control access after this read-only adapter is fixture-verified. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.
+The next independent builds are verified MO2 bootstrap/configuration, checkpoint persistence using the now-proven MO2 projection, and the contained generator runner. Changes to the real MO2 interface will use computer-control testing when that work begins. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.
