@@ -4,7 +4,7 @@ ModLab is a Windows companion for building a hand-picked Bethesda mod setup with
 
 ## Current build
 
-The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, stores immutable checkpoint lockfiles supplied by future game adapters, and contains a tested internal Lab-to-Play file transaction engine. Transactions retain prior and desired bytes, refuse drift, structurally exclude saves/co-saves, and can roll back after failure or process interruption. Their immutable file plan and roots have a SHA-256 identity. It does **not** connect to MO2, inspect an installed game, download mods, extract archives, install files, expose a promotion command, or change a real game yet.
+The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, stores immutable checkpoint lockfiles supplied by future game adapters, contains a tested internal Lab-to-Play file transaction engine, and can inspect one explicitly selected Skyrim Steam library read-only. Transactions retain prior and desired bytes, refuse drift, structurally exclude saves/co-saves, and can roll back after failure or process interruption. Their immutable file plan and roots have a SHA-256 identity. It does **not** connect to MO2, launch a game, download mods, extract archives, install files, expose a promotion command, or change a real game yet.
 
 The bundled Skyrim and OpenMW recipes are **Drafts**. Draft means researched, not assembled and smoke-tested as an exact combination.
 
@@ -28,6 +28,7 @@ python -m modlab recipe review catalogue/recipes/skyrim-se-ae-current-draft.json
 python -m modlab artifact list --workspace ./workspace
 python -m modlab checkpoint list --workspace ./workspace --game skyrim-se-ae
 python -m modlab transaction list --workspace ./workspace
+python -m modlab game discover skyrim --steam-root 'C:\Path\To\Steam'
 python -m unittest discover -s tests -v
 ```
 
@@ -106,6 +107,19 @@ python -m modlab transaction verify 'transaction:<id>' --workspace '.\workspace'
 
 Prepare, apply, commit, and recover remain internal adapter methods. No current command can promote a Lab, restore files, or point this engine at Steam/MO2. Recovery snapshots remain retained after commit or rollback; any later cleanup feature must be explicit.
 
+## Skyrim Steam discovery
+
+The first game adapter can inspect one Steam library you name explicitly:
+
+```powershell
+python -m modlab game discover skyrim --steam-root 'C:\Users\red\Desktop\Steam'
+python -m modlab game discover skyrim --steam-root 'C:\Users\red\Desktop\Steam' --format json
+```
+
+Discovery parses only Skyrim's app `489830` manifest, records the exact `SkyrimSE.exe` file version/size/SHA-256, derives the community-style compatibility runtime (for example `1.7.104.0` → `1.7.104`), and lists top-level `.esm`, `.esl`, `.esp`, and `.bsa` files in `Data`. It never recurses into saves, reads `.ess`/`.skse`, launches Steam/Skyrim, or persists a report unless a later explicit export feature is used.
+
+Executable runtime and Anniversary content are separate facts. A runtime such as `1.7.104.0` does not prove that the complete Anniversary Creation Club bundle is installed. `cc`-prefixed file counts are reported as observations only. MO2 is also a separate optional observation (`--mo2 PATH`); a missing manager remains Unknown and ModLab never substitutes Vortex.
+
 ## Build sequence
 
-The next independent builds are the Skyrim/MO2 adapter and contained generator runner. Real MO2 integration testing will require computer-control access; ModLab will request it when that adapter exists. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.
+The next independent builds are the portable Skyrim/MO2 Lab/Play adapter and contained generator runner. Real MO2 integration testing will require computer-control access; ModLab will request it when that adapter exists. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.

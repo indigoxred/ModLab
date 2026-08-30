@@ -28,6 +28,7 @@ VALID_REPORT = {
     "executable": {
         "relativePath": "SkyrimSE.exe",
         "fileVersion": "1.7.104.0",
+        "compatibilityRuntime": "1.7.104",
         "sha256": "a" * 64,
         "size": 37910440,
     },
@@ -70,6 +71,7 @@ class SkyrimDiscoverySerializationTests(unittest.TestCase):
         self.assertEqual(report, restored)
         self.assertIsInstance(report, SkyrimDiscoveryReport)
         self.assertIsInstance(report.executable, ExecutableEvidence)
+        self.assertEqual("1.7.104", report.executable.compatibility_runtime)
         self.assertIsInstance(report.data_files[0], DataFileEvidence)
         self.assertIsInstance(report.findings[0], DiscoveryFinding)
         self.assertEqual(CheckState.UNKNOWN, report.findings[1].state)
@@ -93,6 +95,10 @@ class SkyrimDiscoverySerializationTests(unittest.TestCase):
         wrong_count = copy.deepcopy(VALID_REPORT)
         wrong_count["creationClubPluginCount"] = 99
         cases.append(wrong_count)
+
+        reserved_install_directory = copy.deepcopy(VALID_REPORT)
+        reserved_install_directory["installDirectory"] = "CON"
+        cases.append(reserved_install_directory)
 
         for index, data in enumerate(cases):
             with self.subTest(case=index):

@@ -8,6 +8,11 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
+from .adapters.skyrim.scanner import discover_skyrim_steam
+from .adapters.skyrim.serialization import (
+    SkyrimDiscoveryFormatError,
+    discovery_to_dict,
+)
 from .artifacts.model import ArchiveArtifact, ArtifactFinding, ArtifactHealth
 from .artifacts.serialization import ArtifactFormatError, artifact_to_dict
 from .artifacts.vault import ArtifactNotFoundError, ArchiveImportError, ArchiveVault
@@ -19,7 +24,7 @@ from .checkpoints.store import (
     CheckpointStoreError,
 )
 from .recipes.loading import RecipeFormatError, load_environment, load_recipe
-from .recipes.model import RecipeReview
+from .recipes.model import CheckState, RecipeReview
 from .recipes.reviewing import review_recipe
 from .recipes.serialization import review_to_dict
 from .transactions.manager import TransactionManager, TransactionManagerError
@@ -51,6 +56,20 @@ def _parser() -> argparse.ArgumentParser:
         help="create missing folders without deleting existing content",
     )
     workspace_init.add_argument("--root", type=Path, default=None)
+
+    game = commands.add_parser(
+        "game",
+        help="inspect an explicitly selected game installation",
+    )
+    game_commands = game.add_subparsers(dest="game_command", required=True)
+    game_discover = game_commands.add_parser(
+        "discover",
+        help="collect read-only installation evidence",
+    )
+    game_discover.add_argument("game_key", choices=("skyrim",))
+    game_discover.add_argument("--steam-root", required=True, type=Path)
+    game_discover.add_argument("--mo2", type=Path, default=None)
+    game_discover.add_argument("--format", choices=("text", "json"), default="text")
 
     artifact = commands.add_parser(
         "artifact",
@@ -278,6 +297,73 @@ def main(
             print(f"Runtime: {layout.cache.parent}", file=output)
             print("Existing files were preserved.", file=output)
             return 0
+
+        if args.command == "game" and args.game_command == "discover":
+            report = discover_skyrim_steam(
+                args.steam_root,
+                mo2_path=args.mo2,
+            )
+            if args.format == "json":
+                _write_json(
+                    output,
+                    {
+                        "schemaVersion": 1,
+                        "discovery": discovery_to_dict(report),
+                        "actionsPerformed": [],
+                        "installationActionsPerformed": [],
+                        "programsLaunched": [],
+                    },
+                )
+            else:
+                runtime = (
+                    report.executable.file_version
+                    if report.executable is not None
+                    and report.executable.file_version is not None
+                    else "unknown"
+                )
+                compatibility_runtime = (
+                    report.executable.compatibility_runtime
+                    if report.executable is not None
+                    and report.executable.compatibility_runtime is not None
+                    else "unknown"
+                )
+                print("Skyrim Steam discovery", file=output)
+                print(f"Steam root: {report.steam_root}", file=output)
+                print(f"Game root: {report.game_root or '(not observed)'}", file=output)
+                print(f"Executable runtime: {runtime}", file=output)
+                print(
+                    f"Compatibility runtime: {compatibility_runtime}",
+                    file=output,
+                )
+                print(
+                    "Anniversary bundle: not proven "
+                    f"({report.creation_club_plugin_count} cc plugins, "
+                    f"{report.creation_club_archive_count} cc archives observed)",
+                    file=output,
+                )
+                print(
+                    f"MO2: {report.mo2_path if report.mo2_path is not None else 'not configured'}",
+                    file=output,
+                )
+                print("Findings:", file=output)
+                for finding in report.findings:
+                    print(
+                        f"  - {finding.state.value}  {finding.code}: "
+                        f"{finding.message}",
+                        file=output,
+                    )
+                print(
+                    "Nothing was launched, changed, installed, repaired, or downloaded.",
+                    file=output,
+                )
+            return (
+                3
+                if any(
+                    finding.state is CheckState.BLOCKED
+                    for finding in report.findings
+                )
+                else 0
+            )
 
         if args.command == "artifact":
             workspace_root = (
@@ -550,6 +636,9 @@ def main(
         return 2
     except (TransactionFormatError, TransactionManagerError) as error:
         print(f"Transaction error: {error}", file=errors)
+        return 2
+    except SkyrimDiscoveryFormatError as error:
+        print(f"Game discovery error: {error}", file=errors)
         return 2
     except (RecipeFormatError, ValueError) as error:
         print(f"Recipe error: {error}", file=errors)

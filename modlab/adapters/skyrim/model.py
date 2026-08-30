@@ -9,6 +9,7 @@ from modlab.recipes.model import CheckState
 class ExecutableEvidence:
     relative_path: str
     file_version: str | None
+    compatibility_runtime: str | None
     sha256: str
     size: int
 

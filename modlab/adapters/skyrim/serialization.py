@@ -35,13 +35,28 @@ _REPORT_FIELDS = {
     "mo2Path",
     "findings",
 }
-_EXECUTABLE_FIELDS = {"relativePath", "fileVersion", "sha256", "size"}
+_EXECUTABLE_FIELDS = {
+    "relativePath",
+    "fileVersion",
+    "compatibilityRuntime",
+    "sha256",
+    "size",
+}
 _DATA_FILE_FIELDS = {"relativePath", "extension", "size"}
 _FINDING_FIELDS = {"state", "code", "message"}
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _APP_ID = re.compile(r"^[0-9]{1,20}$")
+_VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+){2,3}$")
 _CODE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _DATA_EXTENSIONS = {".esm", ".esl", ".esp", ".bsa"}
+_WINDOWS_RESERVED_NAMES = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{number}" for number in range(1, 10)),
+    *(f"lpt{number}" for number in range(1, 10)),
+}
 
 
 def discovery_from_dict(data: object) -> SkyrimDiscoveryReport:
@@ -89,7 +104,7 @@ def discovery_from_dict(data: object) -> SkyrimDiscoveryReport:
         expected_game_root = PureWindowsPath(
             steam_root, "steamapps", "common", install_directory
         )
-        if game_root is None or PureWindowsPath(game_root) != expected_game_root:
+        if game_root is not None and PureWindowsPath(game_root) != expected_game_root:
             raise SkyrimDiscoveryFormatError(
                 "gameRoot must match steamRoot/steamapps/common/installDirectory"
             )
@@ -174,6 +189,7 @@ def discovery_to_dict(report: SkyrimDiscoveryReport) -> dict[str, object]:
             else {
                 "relativePath": report.executable.relative_path,
                 "fileVersion": report.executable.file_version,
+                "compatibilityRuntime": report.executable.compatibility_runtime,
                 "sha256": report.executable.sha256,
                 "size": report.executable.size,
             }
@@ -209,13 +225,41 @@ def _executable_from_dict(value: object) -> ExecutableEvidence | None:
             "executable.relativePath must be SkyrimSE.exe"
         )
     file_version = _optional_text(mapping["fileVersion"], "executable.fileVersion")
+    if file_version is not None and _VERSION.fullmatch(file_version) is None:
+        raise SkyrimDiscoveryFormatError(
+            "executable.fileVersion must be a dotted numeric version"
+        )
+    compatibility_runtime = _optional_text(
+        mapping["compatibilityRuntime"],
+        "executable.compatibilityRuntime",
+    )
+    expected_runtime = normalize_compatibility_runtime(file_version)
+    if compatibility_runtime != expected_runtime:
+        raise SkyrimDiscoveryFormatError(
+            "executable.compatibilityRuntime must match the normalized fileVersion"
+        )
     sha256 = mapping["sha256"]
     if not isinstance(sha256, str) or _SHA256.fullmatch(sha256) is None:
         raise SkyrimDiscoveryFormatError(
             "executable.sha256 must be a lowercase SHA-256"
         )
     size = _non_negative_int(mapping["size"], "executable.size")
-    return ExecutableEvidence("SkyrimSE.exe", file_version, sha256, size)
+    return ExecutableEvidence(
+        "SkyrimSE.exe",
+        file_version,
+        compatibility_runtime,
+        sha256,
+        size,
+    )
+
+
+def normalize_compatibility_runtime(file_version: str | None) -> str | None:
+    if file_version is None:
+        return None
+    parts = file_version.split(".")
+    if len(parts) == 4 and parts[-1] == "0":
+        return ".".join(parts[:-1])
+    return file_version
 
 
 def _data_file_from_dict(value: object) -> DataFileEvidence:
@@ -301,11 +345,19 @@ def _optional_text(value: object, field_name: str) -> str | None:
 def _optional_install_directory(value: object) -> str | None:
     if value is None:
         return None
+    return validate_install_directory(value)
+
+
+def validate_install_directory(value: object) -> str:
     if (
         not isinstance(value, str)
         or not value.strip()
+        or value != value.strip()
         or value in {".", ".."}
-        or any(character in value for character in "\\/:")
+        or value.endswith(".")
+        or any(character in value for character in '<>:"/\\|?*')
+        or any(ord(character) < 32 for character in value)
+        or value.split(".", 1)[0].casefold() in _WINDOWS_RESERVED_NAMES
     ):
         raise SkyrimDiscoveryFormatError(
             "installDirectory must be null or one safe directory name"

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
   "recipeId": "skyrim-se-ae.current-steam",
-  "revision": "2026.08.30-draft.1",
+  "revision": "2026.08.30-draft.2",
   "displayName": "Skyrim SE/AE Current Steam Foundation",
   "maturity": "Draft",
   "target": {
     "game": "Skyrim SE/AE",
-    "edition": "Anniversary Edition",
+    "edition": "SE/AE runtime lane; content conditional",
     "distribution": "Steam",
     "engineLane": "Creation Engine",
     "adapter": "MO2"

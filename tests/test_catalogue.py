@@ -28,6 +28,7 @@ class BundledCatalogueTests(unittest.TestCase):
 
         self.assertEqual("1.7.104", environment.dimensions["executableRuntime"])
         self.assertEqual("2.3.1", environment.dimensions["scriptExtender"])
+        self.assertIn("content conditional", recipe.target.edition.casefold())
         self.assertEqual(ComponentImportance.REQUIRED, components["skse64"].importance)
         self.assertEqual("2.3.1", components["skse64"].version)
         runtime_constraint = next(

@@ -13,7 +13,13 @@ from .model import (
     ExecutableEvidence,
     SkyrimDiscoveryReport,
 )
-from .serialization import discovery_from_dict, discovery_to_dict
+from .serialization import (
+    SkyrimDiscoveryFormatError,
+    discovery_from_dict,
+    discovery_to_dict,
+    normalize_compatibility_runtime,
+    validate_install_directory,
+)
 from .steam_manifest import SteamManifestError, parse_keyvalues
 from .windows_version import read_windows_file_version
 
@@ -268,7 +274,13 @@ def _observe_executable(
             message,
         )
     )
-    return ExecutableEvidence("SkyrimSE.exe", version, sha256, size)
+    return ExecutableEvidence(
+        "SkyrimSE.exe",
+        version,
+        normalize_compatibility_runtime(version),
+        sha256,
+        size,
+    )
 
 
 def _observe_data(
@@ -372,11 +384,10 @@ def _normalized_mo2_path(path: Path | None) -> Path | None:
 
 
 def _safe_install_directory(value: object) -> str | None:
-    if not isinstance(value, str) or not value.strip():
+    try:
+        return validate_install_directory(value)
+    except SkyrimDiscoveryFormatError:
         return None
-    if value in {".", ".."} or any(character in value for character in "\\/:"):
-        return None
-    return value
 
 
 def _optional_manifest_text(value: object) -> str | None:

@@ -55,6 +55,7 @@ class SkyrimSteamScannerTests(unittest.TestCase):
             self.assertEqual(4, report.install_state_flags)
             self.assertEqual(str(game_root.resolve()), report.game_root)
             self.assertEqual("1.7.104.0", report.executable.file_version)
+            self.assertEqual("1.7.104", report.executable.compatibility_runtime)
             self.assertEqual(
                 hashlib.sha256(b"fake skyrim executable").hexdigest(),
                 report.executable.sha256,
@@ -97,12 +98,38 @@ class SkyrimSteamScannerTests(unittest.TestCase):
             self.assertEqual(CheckState.BLOCKED, findings["steam-root-missing"].state)
             self.assertEqual(CheckState.UNKNOWN, findings["runtime-not-observed"].state)
 
+    def test_valid_manifest_with_missing_game_root_returns_blocked_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            steam_root = Path(directory, "Steam")
+            steamapps = steam_root / "steamapps"
+            steamapps.mkdir(parents=True)
+            (steamapps / "appmanifest_489830.acf").write_text(
+                VALID_MANIFEST,
+                encoding="utf-8",
+            )
+
+            report = discover_skyrim_steam(
+                steam_root,
+                version_reader=lambda _: self.fail("version reader must not run"),
+            )
+
+            self.assertEqual("Skyrim Special Edition", report.install_directory)
+            self.assertIsNone(report.game_root)
+            self.assertIsNone(report.executable)
+            findings = {finding.code: finding for finding in report.findings}
+            self.assertEqual(CheckState.BLOCKED, findings["game-root-invalid"].state)
+
     def test_wrong_app_id_and_unsafe_install_directory_are_never_followed(self):
         cases = (
             VALID_MANIFEST.replace('"489830"', '"123"', 1),
             VALID_MANIFEST.replace(
                 '"Skyrim Special Edition"',
                 '"..\\Outside"',
+                1,
+            ),
+            VALID_MANIFEST.replace(
+                '"Skyrim Special Edition"',
+                '"CON"',
                 1,
             ),
         )
