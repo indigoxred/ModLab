@@ -4,7 +4,7 @@ ModLab is a Windows companion for building a hand-picked Bethesda mod setup with
 
 ## Current build
 
-This first working slice validates transparent Foundation Recipe files, checks their declared compatibility against explicit environment evidence, and previews selections, omissions, dependencies, and incompatibilities. It does **not** connect to MO2, download mods, install files, or change a game yet.
+The current build validates transparent Foundation Recipe files and includes a local archive vault for user-selected ZIP, 7z, and RAR files. The vault gives each exact archive a stable SHA-256 identity, retains it in organized storage, and detects missing or changed bytes. It does **not** connect to MO2, download mods, extract archives, install files, or change a game yet.
 
 The bundled Skyrim and OpenMW recipes are **Drafts**. Draft means researched, not assembled and smoke-tested as an exact combination.
 
@@ -25,6 +25,7 @@ Run these from the ModLab folder with Python 3.12:
 python -m modlab recipe check catalogue/recipes/skyrim-se-ae-current-draft.json
 python -m modlab recipe review catalogue/recipes/skyrim-se-ae-current-draft.json --environment catalogue/environments/skyrim-steam-1.7.104.json
 python -m modlab recipe review catalogue/recipes/skyrim-se-ae-current-draft.json --environment catalogue/environments/skyrim-steam-1.7.104.json --format json
+python -m modlab artifact list --workspace ./workspace
 python -m unittest discover -s tests -v
 ```
 
@@ -39,6 +40,7 @@ Exit codes are stable:
 - `0` — valid recipe or review ready to be considered for approval.
 - `2` — invalid file, schema, or component request.
 - `3` — incomplete selection or proven compatibility block.
+- `3` — also reports a retained archive that is missing or modified.
 
 Every review result includes an explicit empty action list or the message `No downloads or installation actions were performed.`
 
@@ -64,6 +66,19 @@ python -m modlab workspace init
 
 The initializer never removes an unknown file. MO2-backed installed artifacts will remain inside the configured Skyrim environment rather than being copied into a second installed-mod tree.
 
+## Archive vault workflow
+
+Put a downloaded or older trusted archive in the inbox, then retain and verify it:
+
+```powershell
+Copy-Item 'D:\Downloads\My Mod.7z' '.\workspace\inbox\'
+python -m modlab artifact import '.\workspace\inbox\My Mod.7z' --workspace '.\workspace' --source-note 'Personal archive from verified source'
+python -m modlab artifact list --workspace '.\workspace'
+python -m modlab artifact verify 'archive-sha256:<hash>' --workspace '.\workspace'
+```
+
+Import means retention and byte identity only. It copies the source, never moves it, and performs no extraction, safety claim, compatibility decision, download, MO2 action, FOMOD selection, enablement, or installation. Guided MO2/FOMOD installation belongs to the later Skyrim adapter, where ModLab can show you conflicts and choices before anything is promoted to Play.
+
 ## Build sequence
 
-The next independent builds are the artifact/checkpoint core, Lab-to-Play transaction core, Skyrim/MO2 adapter, and contained generator runner. Real MO2 integration testing will require computer-control access; ModLab will request it when that adapter exists.
+The next independent builds are the checkpoint core, Lab-to-Play transaction core, Skyrim/MO2 adapter, and contained generator runner. Real MO2 integration testing will require computer-control access; ModLab will request it when that adapter exists.
