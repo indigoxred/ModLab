@@ -22,6 +22,9 @@ from .recipes.loading import RecipeFormatError, load_environment, load_recipe
 from .recipes.model import RecipeReview
 from .recipes.reviewing import review_recipe
 from .recipes.serialization import review_to_dict
+from .transactions.manager import TransactionManager, TransactionManagerError
+from .transactions.model import TransactionFinding, TransactionHealth
+from .transactions.serialization import TransactionFormatError, journal_to_dict
 from .workspace import default_workspace_root, initialize_workspace
 
 
@@ -114,6 +117,37 @@ def _parser() -> argparse.ArgumentParser:
     checkpoint_verify.add_argument("--game", required=True)
     checkpoint_verify.add_argument("--format", choices=("text", "json"), default="text")
 
+    transaction = commands.add_parser(
+        "transaction",
+        help="inspect retained Lab-to-Play recovery journals",
+    )
+    transaction_commands = transaction.add_subparsers(
+        dest="transaction_command", required=True
+    )
+
+    transaction_list = transaction_commands.add_parser(
+        "list",
+        help="list transaction journals without changing them",
+    )
+    transaction_list.add_argument("--workspace", type=Path, default=None)
+    transaction_list.add_argument("--format", choices=("text", "json"), default="text")
+
+    transaction_show = transaction_commands.add_parser(
+        "show",
+        help="show an exact transaction journal",
+    )
+    transaction_show.add_argument("transaction_id")
+    transaction_show.add_argument("--workspace", type=Path, default=None)
+    transaction_show.add_argument("--format", choices=("text", "json"), default="text")
+
+    transaction_verify = transaction_commands.add_parser(
+        "verify",
+        help="detect missing or modified journals and snapshots without repairing them",
+    )
+    transaction_verify.add_argument("transaction_id")
+    transaction_verify.add_argument("--workspace", type=Path, default=None)
+    transaction_verify.add_argument("--format", choices=("text", "json"), default="text")
+
     recipe = commands.add_parser("recipe", help="check or review a recipe")
     recipe_commands = recipe.add_subparsers(dest="recipe_command", required=True)
 
@@ -201,6 +235,19 @@ def _checkpoint_finding_to_dict(finding: CheckpointFinding) -> dict[str, object]
         "checkpointId": finding.checkpoint_id,
         "actualCheckpointId": finding.actual_checkpoint_id,
         "path": str(finding.path),
+        "message": finding.message,
+    }
+
+
+def _transaction_finding_to_dict(
+    finding: TransactionFinding,
+) -> dict[str, object]:
+    return {
+        "health": finding.health.value,
+        "transactionId": finding.transaction_id,
+        "state": finding.state.value if finding.state is not None else None,
+        "journalPath": str(finding.journal_path),
+        "issues": list(finding.issues),
         "message": finding.message,
     }
 
@@ -386,6 +433,86 @@ def main(
                 print("Nothing was repaired, restored, promoted, or installed.", file=output)
             return 0 if finding.health is CheckpointHealth.AVAILABLE else 3
 
+        if args.command == "transaction":
+            workspace_root = (
+                args.workspace if args.workspace is not None else default_workspace_root()
+            )
+            manager = TransactionManager(workspace_root)
+            if args.transaction_command == "list":
+                journals = manager.list()
+                if args.format == "json":
+                    _write_json(
+                        output,
+                        {
+                            "schemaVersion": 1,
+                            "transactions": [
+                                journal_to_dict(journal) for journal in journals
+                            ],
+                            "actionsPerformed": [],
+                            "installationActionsPerformed": [],
+                        },
+                    )
+                elif journals:
+                    for journal in journals:
+                        print(
+                            f"{journal.transaction_id}  {journal.state.value}  "
+                            f"{journal.created_at}",
+                            file=output,
+                        )
+                    print("No transaction or game state was changed.", file=output)
+                else:
+                    print("No retained transaction journals.", file=output)
+                return 0
+
+            if args.transaction_command == "show":
+                journal = manager.load(args.transaction_id)
+                if args.format == "json":
+                    _write_json(
+                        output,
+                        {
+                            "schemaVersion": 1,
+                            "transaction": journal_to_dict(journal),
+                            "actionsPerformed": [],
+                            "installationActionsPerformed": [],
+                        },
+                    )
+                else:
+                    print(f"Transaction: {journal.transaction_id}", file=output)
+                    print(f"State: {journal.state.value}", file=output)
+                    print(f"Plan SHA-256: {journal.plan_sha256}", file=output)
+                    print(f"Created / updated: {journal.created_at} / {journal.updated_at}", file=output)
+                    print(f"Allowlisted files: {len(journal.entries)}", file=output)
+                    print(
+                        "Journal inspection only; nothing was applied, recovered, "
+                        "committed, restored, or installed.",
+                        file=output,
+                    )
+                return 0
+
+            finding = manager.verify(args.transaction_id)
+            if args.format == "json":
+                _write_json(
+                    output,
+                    {
+                        "schemaVersion": 1,
+                        "finding": _transaction_finding_to_dict(finding),
+                        "actionsPerformed": [],
+                        "installationActionsPerformed": [],
+                    },
+                )
+            else:
+                print(f"{finding.health.value}: {finding.transaction_id}", file=output)
+                print(
+                    f"State: {finding.state.value if finding.state is not None else '(unknown)'}",
+                    file=output,
+                )
+                print(f"Journal: {finding.journal_path}", file=output)
+                if finding.issues:
+                    print("Issues: " + ", ".join(finding.issues), file=output)
+                print(finding.message, file=output)
+                print("Nothing was repaired, recovered, promoted, or installed.", file=output)
+            return 0 if finding.health is TransactionHealth.AVAILABLE else 3
+
         if args.command == "recipe" and args.recipe_command == "check":
             recipe = load_recipe(args.recipe)
             print(
@@ -420,6 +547,9 @@ def main(
         CheckpointStoreError,
     ) as error:
         print(f"Checkpoint error: {error}", file=errors)
+        return 2
+    except (TransactionFormatError, TransactionManagerError) as error:
+        print(f"Transaction error: {error}", file=errors)
         return 2
     except (RecipeFormatError, ValueError) as error:
         print(f"Recipe error: {error}", file=errors)

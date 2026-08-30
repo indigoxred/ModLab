@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
 
 class TransactionState(StrEnum):
@@ -17,6 +18,12 @@ class TransactionState(StrEnum):
 class ChangeOperation(StrEnum):
     REPLACE = "Replace"
     DELETE = "Delete"
+
+
+class TransactionHealth(StrEnum):
+    AVAILABLE = "Available"
+    MISSING = "Missing"
+    MODIFIED = "Modified"
 
 
 @dataclass(frozen=True)
@@ -45,6 +52,7 @@ class TransactionEntry:
 class TransactionJournal:
     schema_version: int
     transaction_id: str
+    plan_sha256: str
     state: TransactionState
     play_root: str
     staged_root: str
@@ -54,3 +62,13 @@ class TransactionJournal:
     updated_at: str
     entries: tuple[TransactionEntry, ...]
     error: str | None
+
+
+@dataclass(frozen=True)
+class TransactionFinding:
+    health: TransactionHealth
+    transaction_id: str
+    state: TransactionState | None
+    journal_path: Path
+    issues: tuple[str, ...]
+    message: str

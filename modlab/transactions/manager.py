@@ -10,18 +10,19 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from modlab.workspace import initialize_workspace
-
 from .model import (
     ChangeOperation,
     FileSnapshot,
     RequestedChange,
     TransactionEntry,
+    TransactionFinding,
+    TransactionHealth,
     TransactionJournal,
     TransactionState,
 )
 from .serialization import (
     TransactionFormatError,
+    calculate_plan_sha256,
     journal_from_dict,
     journal_to_dict,
     validate_target_relative_path,
@@ -69,8 +70,9 @@ class TransactionManager:
             )
         timestamp = created_at or _utc_now()
 
-        layout = initialize_workspace(self.workspace_root)
-        self.transactions_path = layout.transactions
+        self.transactions_path.mkdir(parents=True, exist_ok=True)
+        self._validated_storage_root()
+        tx_dir = self.transaction_directory(selected_id)
         created_directory = False
         try:
             tx_dir.mkdir(parents=False, exist_ok=False)
@@ -108,6 +110,7 @@ class TransactionManager:
             journal = TransactionJournal(
                 schema_version=1,
                 transaction_id=selected_id,
+                plan_sha256="0" * 64,
                 state=TransactionState.PREPARED,
                 play_root=str(play),
                 staged_root=str(staged),
@@ -117,6 +120,10 @@ class TransactionManager:
                 updated_at=timestamp,
                 entries=tuple(entries),
                 error=None,
+            )
+            journal = replace(
+                journal,
+                plan_sha256=calculate_plan_sha256(journal),
             )
             normalized_journal = journal_from_dict(journal_to_dict(journal))
             self._write_journal(normalized_journal)
@@ -136,7 +143,7 @@ class TransactionManager:
             raise TransactionManagerError(
                 f"preflight requires Prepared, found {journal.state.value}"
             )
-        play = Path(journal.play_root)
+        play = self._trusted_play_root(journal)
         drifted = []
         for entry in journal.entries:
             target = _confined_path(play, entry.relative_path)
@@ -170,9 +177,10 @@ class TransactionManager:
         )
         self._write_journal(applying)
         try:
-            play = Path(applying.play_root)
+            play = self._trusted_play_root(applying)
             tx_dir = self.transaction_directory(applying.transaction_id)
             for entry in applying.entries:
+                play = self._trusted_play_root(applying)
                 target = _confined_path(play, entry.relative_path)
                 if entry.desired.present:
                     desired_source = _confined_path(
@@ -264,16 +272,36 @@ class TransactionManager:
         )
 
     def list(self) -> tuple[TransactionJournal, ...]:
-        journals = tuple(
-            self._load_path(path)
-            for path in self.transactions_path.glob("*/journal.json")
-        )
+        self._validated_storage_root()
+        journals: list[TransactionJournal] = []
+        if not self.transactions_path.exists():
+            return ()
+        for directory in self.transactions_path.iterdir():
+            if directory.is_symlink():
+                raise TransactionManagerError(
+                    f"transaction directory must not be a symlink: {directory}"
+                )
+            if not directory.is_dir():
+                continue
+            path = directory / "journal.json"
+            if not path.is_file():
+                continue
+            directory_name = directory.name
+            if re.fullmatch(r"[0-9a-f]{32}", directory_name) is None:
+                raise TransactionFormatError(
+                    f"transaction journal has an invalid directory: {directory}"
+                )
+            journals.append(self.load(f"transaction:{directory_name}"))
         return tuple(
             sorted(journals, key=lambda item: (item.created_at, item.transaction_id))
         )
 
     def load(self, transaction_id: str) -> TransactionJournal:
         path = self.path_for(transaction_id)
+        if path.is_symlink():
+            raise TransactionManagerError(
+                f"transaction journal must not be a symlink: {path}"
+            )
         if not path.is_file():
             raise TransactionManagerError(f"unknown transaction: {transaction_id}")
         journal = self._load_path(path)
@@ -282,6 +310,58 @@ class TransactionManager:
                 "transactionId does not match its transaction directory"
             )
         return journal
+
+    def verify(self, transaction_id: str) -> TransactionFinding:
+        path = self.path_for(transaction_id)
+        if not path.is_file():
+            return TransactionFinding(
+                TransactionHealth.MISSING,
+                transaction_id,
+                None,
+                path,
+                ("journal:missing",),
+                "The transaction journal is missing.",
+            )
+        try:
+            journal = self.load(transaction_id)
+        except (TransactionFormatError, TransactionManagerError) as error:
+            return TransactionFinding(
+                TransactionHealth.MODIFIED,
+                transaction_id,
+                None,
+                path,
+                ("journal:invalid",),
+                f"The transaction journal cannot be trusted: {error}",
+            )
+
+        try:
+            issues = self._snapshot_drift(journal, include_desired=True)
+        except (OSError, TransactionFormatError, TransactionManagerError) as error:
+            return TransactionFinding(
+                TransactionHealth.MODIFIED,
+                transaction_id,
+                journal.state,
+                path,
+                ("snapshot:invalid",),
+                f"Retained transaction snapshots cannot be trusted: {error}",
+            )
+        if issues:
+            return TransactionFinding(
+                TransactionHealth.MODIFIED,
+                transaction_id,
+                journal.state,
+                path,
+                issues,
+                "One or more retained transaction snapshots are missing or modified.",
+            )
+        return TransactionFinding(
+            TransactionHealth.AVAILABLE,
+            transaction_id,
+            journal.state,
+            path,
+            (),
+            "The journal plan and all retained snapshots match their recorded identities.",
+        )
 
     def transaction_directory(self, transaction_id: str) -> Path:
         if not isinstance(transaction_id, str):
@@ -293,7 +373,41 @@ class TransactionManager:
             raise TransactionFormatError(
                 "transaction ID must be transaction:<32 lowercase hex>"
             )
-        return self.transactions_path / match.group(1)
+        transaction_directory = self.transactions_path / match.group(1)
+        if transaction_directory.is_symlink():
+            raise TransactionManagerError(
+                "transaction directory must not be a symlink: "
+                f"{transaction_directory}"
+            )
+        resolved_storage = self._validated_storage_root()
+        resolved_transaction = transaction_directory.resolve(strict=False)
+        try:
+            resolved_transaction.relative_to(resolved_storage)
+        except ValueError as error:
+            raise TransactionManagerError(
+                "transaction storage escapes the workspace"
+            ) from error
+        return transaction_directory
+
+    def _validated_storage_root(self) -> Path:
+        runtime_path = self.workspace_root / "runtime"
+        for storage_path in (runtime_path, self.transactions_path):
+            if storage_path.is_symlink():
+                raise TransactionManagerError(
+                    f"transaction storage must not be a symlink: {storage_path}"
+                )
+            if storage_path.exists() and not storage_path.is_dir():
+                raise TransactionManagerError(
+                    f"transaction storage is not a directory: {storage_path}"
+                )
+        resolved_storage = self.transactions_path.resolve(strict=False)
+        try:
+            resolved_storage.relative_to(self.workspace_root)
+        except ValueError as error:
+            raise TransactionManagerError(
+                "transaction storage escapes the workspace"
+            ) from error
+        return resolved_storage
 
     def path_for(self, transaction_id: str) -> Path:
         return self.transaction_directory(transaction_id) / "journal.json"
@@ -352,7 +466,7 @@ class TransactionManager:
     def _target_drift(
         self, journal: TransactionJournal, *, desired: bool
     ) -> tuple[str, ...]:
-        play = Path(journal.play_root)
+        play = self._trusted_play_root(journal)
         drifted: list[str] = []
         for entry in journal.entries:
             target = _confined_path(play, entry.relative_path)
@@ -405,9 +519,10 @@ class TransactionManager:
         )
         self._write_journal(rolling_back)
         try:
-            play = Path(rolling_back.play_root)
+            play = self._trusted_play_root(rolling_back)
             tx_dir = self.transaction_directory(rolling_back.transaction_id)
             for entry in rolling_back.entries:
+                play = self._trusted_play_root(rolling_back)
                 target = _confined_path(play, entry.relative_path)
                 if entry.prior.present:
                     prior_source = _confined_path(
@@ -463,6 +578,25 @@ class TransactionManager:
         return journal_from_dict(journal_to_dict(candidate))
 
     @staticmethod
+    def _trusted_play_root(journal: TransactionJournal) -> Path:
+        declared = Path(journal.play_root)
+        if declared.is_symlink() or not declared.is_dir():
+            raise TransactionManagerError(
+                f"Play root is missing or redirected: {declared}"
+            )
+        try:
+            resolved = declared.resolve(strict=True)
+        except OSError as error:
+            raise TransactionManagerError(
+                f"Play root cannot be resolved safely: {declared}"
+            ) from error
+        if os.path.normcase(str(resolved)) != os.path.normcase(str(declared)):
+            raise TransactionManagerError(
+                f"Play root is redirected: {declared} -> {resolved}"
+            )
+        return declared
+
+    @staticmethod
     def _validate_checkpoint_id(value: str, label: str) -> None:
         if not isinstance(value, str) or _CHECKPOINT_ID.fullmatch(value) is None:
             raise TransactionManagerError(
@@ -515,7 +649,8 @@ def _relative_path(relative_path: str) -> Path:
 
 
 def _confined_path(root: Path, relative_path: str) -> Path:
-    candidate = root.joinpath(*PurePosixPath(relative_path).parts)
+    relative_parts = PurePosixPath(relative_path).parts
+    candidate = root.joinpath(*relative_parts)
     resolved_root = root.resolve()
     resolved_candidate = candidate.resolve(strict=False)
     try:
@@ -524,6 +659,18 @@ def _confined_path(root: Path, relative_path: str) -> Path:
         raise TransactionManagerError(
             f"path escapes its declared root: {relative_path}"
         ) from error
+    parent = root
+    for part in relative_parts[:-1]:
+        parent = parent / part
+        if parent.is_symlink():
+            raise TransactionManagerError(
+                f"path parent is redirected: {relative_path}"
+            )
+        resolved_parent = parent.resolve(strict=False)
+        if os.path.normcase(str(resolved_parent)) != os.path.normcase(str(parent)):
+            raise TransactionManagerError(
+                f"path parent is redirected: {relative_path}"
+            )
     return candidate
 
 

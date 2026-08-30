@@ -5,10 +5,17 @@ from .model import (
     FileSnapshot,
     RequestedChange,
     TransactionEntry,
+    TransactionFinding,
+    TransactionHealth,
     TransactionJournal,
     TransactionState,
 )
-from .serialization import TransactionFormatError, journal_from_dict, journal_to_dict
+from .serialization import (
+    TransactionFormatError,
+    calculate_plan_sha256,
+    journal_from_dict,
+    journal_to_dict,
+)
 from .manager import TransactionManager, TransactionManagerError
 
 __all__ = [
@@ -17,10 +24,13 @@ __all__ = [
     "RequestedChange",
     "TransactionEntry",
     "TransactionFormatError",
+    "TransactionFinding",
+    "TransactionHealth",
     "TransactionJournal",
     "TransactionManager",
     "TransactionManagerError",
     "TransactionState",
+    "calculate_plan_sha256",
     "journal_from_dict",
     "journal_to_dict",
 ]

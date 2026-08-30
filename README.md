@@ -4,7 +4,7 @@ ModLab is a Windows companion for building a hand-picked Bethesda mod setup with
 
 ## Current build
 
-The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, and stores immutable checkpoint lockfiles supplied by future game adapters. Archives and checkpoints have stable SHA-256 identities and read-only drift checks. It does **not** connect to MO2, inspect an installed game, download mods, extract archives, install files, promote a setup, or change a game yet.
+The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, stores immutable checkpoint lockfiles supplied by future game adapters, and contains a tested internal Lab-to-Play file transaction engine. Transactions retain prior and desired bytes, refuse drift, structurally exclude saves/co-saves, and can roll back after failure or process interruption. Their immutable file plan and roots have a SHA-256 identity. It does **not** connect to MO2, inspect an installed game, download mods, extract archives, install files, expose a promotion command, or change a real game yet.
 
 The bundled Skyrim and OpenMW recipes are **Drafts**. Draft means researched, not assembled and smoke-tested as an exact combination.
 
@@ -27,6 +27,7 @@ python -m modlab recipe review catalogue/recipes/skyrim-se-ae-current-draft.json
 python -m modlab recipe review catalogue/recipes/skyrim-se-ae-current-draft.json --environment catalogue/environments/skyrim-steam-1.7.104.json --format json
 python -m modlab artifact list --workspace ./workspace
 python -m modlab checkpoint list --workspace ./workspace --game skyrim-se-ae
+python -m modlab transaction list --workspace ./workspace
 python -m unittest discover -s tests -v
 ```
 
@@ -40,8 +41,7 @@ Exit codes are stable:
 
 - `0` — valid recipe or review ready to be considered for approval.
 - `2` — invalid file, schema, or component request.
-- `3` — incomplete selection or proven compatibility block.
-- `3` — also reports a retained archive that is missing or modified.
+- `3` — incomplete selection, proven compatibility block, or missing/modified retained state.
 
 Every review result includes an explicit empty action list or the message `No downloads or installation actions were performed.`
 
@@ -92,6 +92,20 @@ python -m modlab checkpoint verify 'checkpoint-sha256:<hash>' --workspace '.\wor
 
 Checkpoint creation is adapter-facing in this build. A lockfile does not prove that Skyrim or MO2 was inspected merely because it contains a field named `adapterState`; the Skyrim adapter must collect and independently verify authoritative profile, mod, plug-in, INI, root, and evidence state before ModLab can call a checkpoint Candidate or promotion-ready. These commands never promote, restore, repair, install, or touch saves and co-saves.
 
+## Transaction recovery
+
+The transaction core is the safety boundary a future game adapter will use for an approved Lab-to-Play change. It snapshots the exact allowlisted files first, records `Applying` before the first target write, atomically replaces files, and preserves enough prior state to roll back after a caught failure or interrupted process. It rejects traversal, directories, nested roots, duplicate paths, every `saves` path segment, and `.ess`/`.skse` targets.
+
+Only read-only inspection is exposed at the command line:
+
+```powershell
+python -m modlab transaction list --workspace '.\workspace'
+python -m modlab transaction show 'transaction:<id>' --workspace '.\workspace'
+python -m modlab transaction verify 'transaction:<id>' --workspace '.\workspace'
+```
+
+Prepare, apply, commit, and recover remain internal adapter methods. No current command can promote a Lab, restore files, or point this engine at Steam/MO2. Recovery snapshots remain retained after commit or rollback; any later cleanup feature must be explicit.
+
 ## Build sequence
 
-The next independent builds are the Lab-to-Play transaction core, Skyrim/MO2 adapter, and contained generator runner. Real MO2 integration testing will require computer-control access; ModLab will request it when that adapter exists. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.
+The next independent builds are the Skyrim/MO2 adapter and contained generator runner. Real MO2 integration testing will require computer-control access; ModLab will request it when that adapter exists. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.

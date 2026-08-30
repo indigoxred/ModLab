@@ -4,7 +4,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from modlab.transactions.manager import TransactionManager, TransactionManagerError
-from modlab.transactions.model import ChangeOperation, RequestedChange, TransactionState
+from modlab.transactions.model import (
+    ChangeOperation,
+    RequestedChange,
+    TransactionHealth,
+    TransactionState,
+)
 
 
 FROM_CHECKPOINT = "checkpoint-sha256:" + "a" * 64
@@ -181,6 +186,64 @@ class TransactionPreparationTests(unittest.TestCase):
             self.assertEqual(journal_before, manager.path_for(TRANSACTION_ID).read_bytes())
             self.assertEqual(TransactionState.PREPARED, manager.load(TRANSACTION_ID).state)
 
+    def test_transaction_directory_symlink_is_rejected_before_journal_access(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, play, staged = self.make_roots(directory)
+            target = play / "profiles" / "Play" / "modlist.txt"
+            desired = staged / "profiles" / "Play" / "modlist.txt"
+            target.write_bytes(b"old")
+            desired.write_bytes(b"new")
+            manager = TransactionManager(workspace)
+            manager.prepare(
+                play,
+                staged,
+                (RequestedChange("profiles/Play/modlist.txt", ChangeOperation.REPLACE),),
+                FROM_CHECKPOINT,
+                TO_CHECKPOINT,
+                transaction_id=TRANSACTION_ID,
+                created_at=CREATED_AT,
+            )
+            transaction_directory = manager.transaction_directory(TRANSACTION_ID)
+            real_is_symlink = Path.is_symlink
+
+            def report_redirect(path):
+                return path == transaction_directory or real_is_symlink(path)
+
+            with patch.object(Path, "is_symlink", autospec=True, side_effect=report_redirect):
+                with self.assertRaisesRegex(TransactionManagerError, "symlink"):
+                    manager.load(TRANSACTION_ID)
+
+    def test_verify_reports_redirected_snapshot_storage_as_modified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, play, staged = self.make_roots(directory)
+            target = play / "profiles" / "Play" / "modlist.txt"
+            desired = staged / "profiles" / "Play" / "modlist.txt"
+            target.write_bytes(b"old")
+            desired.write_bytes(b"new")
+            manager = TransactionManager(workspace)
+            manager.prepare(
+                play,
+                staged,
+                (RequestedChange("profiles/Play/modlist.txt", ChangeOperation.REPLACE),),
+                FROM_CHECKPOINT,
+                TO_CHECKPOINT,
+                transaction_id=TRANSACTION_ID,
+                created_at=CREATED_AT,
+            )
+            redirected_parent = (
+                manager.transaction_directory(TRANSACTION_ID) / "desired"
+            )
+            real_is_symlink = Path.is_symlink
+
+            def report_redirect(path):
+                return path == redirected_parent or real_is_symlink(path)
+
+            with patch.object(Path, "is_symlink", autospec=True, side_effect=report_redirect):
+                finding = manager.verify(TRANSACTION_ID)
+
+            self.assertEqual(TransactionHealth.MODIFIED, finding.health)
+            self.assertIn("snapshot", finding.issues[0])
+
 
 class TransactionApplyAndRecoveryTests(unittest.TestCase):
     def prepare_three_changes(self, directory: str):
@@ -267,6 +330,48 @@ class TransactionApplyAndRecoveryTests(unittest.TestCase):
 
             self.assertEqual(b"old mod list", (play_profile / "modlist.txt").read_bytes())
             self.assertEqual(b"manual edit", (play_profile / "plugins.txt").read_bytes())
+            self.assertEqual(b"old obsolete", (play_profile / "obsolete.ini").read_bytes())
+            self.assertEqual(TransactionState.PREPARED, manager.load(TRANSACTION_ID).state)
+            self.assert_protected_files_unchanged(play_profile)
+
+    def test_redirected_play_root_blocks_apply_before_any_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager, journal, play_profile = self.prepare_three_changes(directory)
+            play_root = Path(journal.play_root)
+            real_is_symlink = Path.is_symlink
+
+            def report_redirect(path):
+                return path == play_root or real_is_symlink(path)
+
+            with patch.object(Path, "is_symlink", autospec=True, side_effect=report_redirect):
+                with self.assertRaisesRegex(TransactionManagerError, "Play root"):
+                    manager.apply(
+                        TRANSACTION_ID, updated_at="2026-08-30T10:01:00Z"
+                    )
+
+            self.assertEqual(b"old mod list", (play_profile / "modlist.txt").read_bytes())
+            self.assertEqual(b"old plugins", (play_profile / "plugins.txt").read_bytes())
+            self.assertEqual(b"old obsolete", (play_profile / "obsolete.ini").read_bytes())
+            self.assertEqual(TransactionState.PREPARED, manager.load(TRANSACTION_ID).state)
+            self.assert_protected_files_unchanged(play_profile)
+
+    def test_redirected_target_parent_blocks_apply_before_any_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager, journal, play_profile = self.prepare_three_changes(directory)
+            redirected_parent = Path(journal.play_root) / "profiles"
+            real_is_symlink = Path.is_symlink
+
+            def report_redirect(path):
+                return path == redirected_parent or real_is_symlink(path)
+
+            with patch.object(Path, "is_symlink", autospec=True, side_effect=report_redirect):
+                with self.assertRaisesRegex(TransactionManagerError, "redirected"):
+                    manager.apply(
+                        TRANSACTION_ID, updated_at="2026-08-30T10:01:00Z"
+                    )
+
+            self.assertEqual(b"old mod list", (play_profile / "modlist.txt").read_bytes())
+            self.assertEqual(b"old plugins", (play_profile / "plugins.txt").read_bytes())
             self.assertEqual(b"old obsolete", (play_profile / "obsolete.ini").read_bytes())
             self.assertEqual(TransactionState.PREPARED, manager.load(TRANSACTION_ID).state)
             self.assert_protected_files_unchanged(play_profile)

@@ -1,4 +1,6 @@
 import copy
+import hashlib
+import json
 import unittest
 
 from modlab.transactions.model import ChangeOperation, TransactionState
@@ -60,6 +62,30 @@ VALID_JOURNAL = {
 }
 
 
+def _plan_sha256(data):
+    immutable_fields = (
+        "schemaVersion",
+        "transactionId",
+        "playRoot",
+        "stagedRoot",
+        "fromCheckpointId",
+        "toCheckpointId",
+        "createdAt",
+        "entries",
+    )
+    payload = {field: data[field] for field in immutable_fields}
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+VALID_JOURNAL["planSha256"] = _plan_sha256(VALID_JOURNAL)
+
+
 class TransactionSerializationTests(unittest.TestCase):
     def test_round_trip_preserves_allowlisted_file_states(self):
         journal = journal_from_dict(VALID_JOURNAL)
@@ -70,6 +96,13 @@ class TransactionSerializationTests(unittest.TestCase):
         self.assertEqual(TransactionState.PREPARED, journal.state)
         self.assertEqual(ChangeOperation.REPLACE, journal.entries[0].operation)
         self.assertEqual(ChangeOperation.DELETE, journal.entries[1].operation)
+
+    def test_immutable_plan_tampering_is_rejected(self):
+        data = copy.deepcopy(VALID_JOURNAL)
+        data["playRoot"] = "D:\\Redirected\\Play"
+
+        with self.assertRaisesRegex(TransactionFormatError, "planSha256"):
+            journal_from_dict(data)
 
     def test_rejects_traversal_absolute_backslash_and_duplicate_paths(self):
         unsafe_paths = (

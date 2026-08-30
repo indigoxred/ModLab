@@ -1,5 +1,7 @@
 """Strict serialization for crash-recovery transaction journals."""
 
+import hashlib
+import json
 import re
 from datetime import datetime
 from pathlib import PurePosixPath, PureWindowsPath
@@ -21,6 +23,7 @@ class TransactionFormatError(ValueError):
 _JOURNAL_FIELDS = {
     "schemaVersion",
     "transactionId",
+    "planSha256",
     "state",
     "playRoot",
     "stagedRoot",
@@ -88,9 +91,14 @@ def journal_from_dict(data: object) -> TransactionJournal:
     } and error_value is not None:
         raise TransactionFormatError(f"{state.value} journals cannot record an error")
 
-    return TransactionJournal(
+    plan_sha256 = mapping["planSha256"]
+    if not isinstance(plan_sha256, str) or _SHA256.fullmatch(plan_sha256) is None:
+        raise TransactionFormatError("planSha256 must be a lowercase SHA-256")
+
+    journal = TransactionJournal(
         schema_version=schema_version,
         transaction_id=transaction_id,
+        plan_sha256=plan_sha256,
         state=state,
         play_root=play_root,
         staged_root=staged_root,
@@ -101,12 +109,18 @@ def journal_from_dict(data: object) -> TransactionJournal:
         entries=tuple(sorted(entries, key=lambda entry: entry.relative_path)),
         error=error_value,
     )
+    if calculate_plan_sha256(journal) != plan_sha256:
+        raise TransactionFormatError(
+            "planSha256 does not match the immutable transaction plan"
+        )
+    return journal
 
 
 def journal_to_dict(journal: TransactionJournal) -> dict[str, object]:
     return {
         "schemaVersion": journal.schema_version,
         "transactionId": journal.transaction_id,
+        "planSha256": journal.plan_sha256,
         "state": journal.state.value,
         "playRoot": journal.play_root,
         "stagedRoot": journal.staged_root,
@@ -117,6 +131,26 @@ def journal_to_dict(journal: TransactionJournal) -> dict[str, object]:
         "entries": [_entry_to_dict(entry) for entry in journal.entries],
         "error": journal.error,
     }
+
+
+def calculate_plan_sha256(journal: TransactionJournal) -> str:
+    payload = {
+        "schemaVersion": journal.schema_version,
+        "transactionId": journal.transaction_id,
+        "playRoot": journal.play_root,
+        "stagedRoot": journal.staged_root,
+        "fromCheckpointId": journal.from_checkpoint_id,
+        "toCheckpointId": journal.to_checkpoint_id,
+        "createdAt": journal.created_at,
+        "entries": [_entry_to_dict(entry) for entry in journal.entries],
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def validate_target_relative_path(value: object) -> str:
