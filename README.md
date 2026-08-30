@@ -4,7 +4,7 @@ ModLab is a Windows companion for building a hand-picked Bethesda mod setup with
 
 ## Current build
 
-The current build validates transparent Foundation Recipe files and includes a local archive vault for user-selected ZIP, 7z, and RAR files. The vault gives each exact archive a stable SHA-256 identity, retains it in organized storage, and detects missing or changed bytes. It does **not** connect to MO2, download mods, extract archives, install files, or change a game yet.
+The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, and stores immutable checkpoint lockfiles supplied by future game adapters. Archives and checkpoints have stable SHA-256 identities and read-only drift checks. It does **not** connect to MO2, inspect an installed game, download mods, extract archives, install files, promote a setup, or change a game yet.
 
 The bundled Skyrim and OpenMW recipes are **Drafts**. Draft means researched, not assembled and smoke-tested as an exact combination.
 
@@ -26,6 +26,7 @@ python -m modlab recipe check catalogue/recipes/skyrim-se-ae-current-draft.json
 python -m modlab recipe review catalogue/recipes/skyrim-se-ae-current-draft.json --environment catalogue/environments/skyrim-steam-1.7.104.json
 python -m modlab recipe review catalogue/recipes/skyrim-se-ae-current-draft.json --environment catalogue/environments/skyrim-steam-1.7.104.json --format json
 python -m modlab artifact list --workspace ./workspace
+python -m modlab checkpoint list --workspace ./workspace --game skyrim-se-ae
 python -m unittest discover -s tests -v
 ```
 
@@ -79,6 +80,18 @@ python -m modlab artifact verify 'archive-sha256:<hash>' --workspace '.\workspac
 
 Import means retention and byte identity only. It copies the source, never moves it, and performs no extraction, safety claim, compatibility decision, download, MO2 action, FOMOD selection, enablement, or installation. Guided MO2/FOMOD installation belongs to the later Skyrim adapter, where ModLab can show you conflicts and choices before anything is promoted to Play.
 
+## Checkpoint records
+
+Checkpoint lockfiles preserve exact adapter-supplied state and evidence under the relevant game folder. The current commands are deliberately read-only:
+
+```powershell
+python -m modlab checkpoint list --workspace '.\workspace' --game skyrim-se-ae
+python -m modlab checkpoint show 'checkpoint-sha256:<hash>' --workspace '.\workspace' --game skyrim-se-ae
+python -m modlab checkpoint verify 'checkpoint-sha256:<hash>' --workspace '.\workspace' --game skyrim-se-ae
+```
+
+Checkpoint creation is adapter-facing in this build. A lockfile does not prove that Skyrim or MO2 was inspected merely because it contains a field named `adapterState`; the Skyrim adapter must collect and independently verify authoritative profile, mod, plug-in, INI, root, and evidence state before ModLab can call a checkpoint Candidate or promotion-ready. These commands never promote, restore, repair, install, or touch saves and co-saves.
+
 ## Build sequence
 
-The next independent builds are the checkpoint core, Lab-to-Play transaction core, Skyrim/MO2 adapter, and contained generator runner. Real MO2 integration testing will require computer-control access; ModLab will request it when that adapter exists.
+The next independent builds are the Lab-to-Play transaction core, Skyrim/MO2 adapter, and contained generator runner. Real MO2 integration testing will require computer-control access; ModLab will request it when that adapter exists. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.

@@ -43,12 +43,10 @@ class CheckpointStore:
             raise CheckpointFormatError(
                 "game key must use lowercase letters, digits, dots, underscores, or hyphens"
             )
-        layout = initialize_workspace(workspace_root)
-        self.workspace_root = layout.root
+        self.workspace_root = Path(workspace_root).expanduser().resolve()
         self.game_key = game_key
-        self.checkpoints_path = layout.games / game_key / "checkpoints"
-        self.jobs_path = layout.jobs
-        self.checkpoints_path.mkdir(parents=True, exist_ok=True)
+        self.checkpoints_path = self.workspace_root / "games" / game_key / "checkpoints"
+        self.jobs_path = self.workspace_root / "runtime" / "jobs"
 
     def create(self, draft: CheckpointDraft) -> CheckpointRecord:
         record = checkpoint_record_from_draft(draft)
@@ -63,6 +61,10 @@ class CheckpointStore:
                 raise CheckpointStoreError(
                     f"parent checkpoint is not present: {record.parent_checkpoint_id}"
                 ) from error
+
+        layout = initialize_workspace(self.workspace_root)
+        self.checkpoints_path.mkdir(parents=True, exist_ok=True)
+        self.jobs_path = layout.jobs
 
         target = self.path_for(record.checkpoint_id)
         if target.exists():

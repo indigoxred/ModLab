@@ -11,6 +11,13 @@ from typing import TextIO
 from .artifacts.model import ArchiveArtifact, ArtifactFinding, ArtifactHealth
 from .artifacts.serialization import ArtifactFormatError, artifact_to_dict
 from .artifacts.vault import ArtifactNotFoundError, ArchiveImportError, ArchiveVault
+from .checkpoints.model import CheckpointFinding, CheckpointHealth
+from .checkpoints.serialization import CheckpointFormatError, checkpoint_to_dict
+from .checkpoints.store import (
+    CheckpointNotFoundError,
+    CheckpointStore,
+    CheckpointStoreError,
+)
 from .recipes.loading import RecipeFormatError, load_environment, load_recipe
 from .recipes.model import RecipeReview
 from .recipes.reviewing import review_recipe
@@ -24,7 +31,7 @@ NO_ACTIONS = "No downloads or installation actions were performed."
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="modlab",
-        description="Inspect ModLab recipes without changing a mod setup.",
+        description="Use ModLab's local safety core without changing a game setup.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -72,6 +79,40 @@ def _parser() -> argparse.ArgumentParser:
     artifact_verify.add_argument("artifact_id")
     artifact_verify.add_argument("--workspace", type=Path, default=None)
     artifact_verify.add_argument("--format", choices=("text", "json"), default="text")
+
+    checkpoint = commands.add_parser(
+        "checkpoint",
+        help="inspect and verify immutable state snapshots",
+    )
+    checkpoint_commands = checkpoint.add_subparsers(
+        dest="checkpoint_command", required=True
+    )
+
+    checkpoint_list = checkpoint_commands.add_parser(
+        "list",
+        help="list stored checkpoints without changing them",
+    )
+    checkpoint_list.add_argument("--workspace", type=Path, default=None)
+    checkpoint_list.add_argument("--game", required=True)
+    checkpoint_list.add_argument("--format", choices=("text", "json"), default="text")
+
+    checkpoint_show = checkpoint_commands.add_parser(
+        "show",
+        help="show an exact recorded checkpoint",
+    )
+    checkpoint_show.add_argument("checkpoint_id")
+    checkpoint_show.add_argument("--workspace", type=Path, default=None)
+    checkpoint_show.add_argument("--game", required=True)
+    checkpoint_show.add_argument("--format", choices=("text", "json"), default="text")
+
+    checkpoint_verify = checkpoint_commands.add_parser(
+        "verify",
+        help="detect missing or modified lockfiles without repairing them",
+    )
+    checkpoint_verify.add_argument("checkpoint_id")
+    checkpoint_verify.add_argument("--workspace", type=Path, default=None)
+    checkpoint_verify.add_argument("--game", required=True)
+    checkpoint_verify.add_argument("--format", choices=("text", "json"), default="text")
 
     recipe = commands.add_parser("recipe", help="check or review a recipe")
     recipe_commands = recipe.add_subparsers(dest="recipe_command", required=True)
@@ -149,6 +190,16 @@ def _finding_to_dict(finding: ArtifactFinding) -> dict[str, object]:
         "artifactId": finding.artifact_id,
         "expectedSha256": finding.expected_sha256,
         "actualSha256": finding.actual_sha256,
+        "path": str(finding.path),
+        "message": finding.message,
+    }
+
+
+def _checkpoint_finding_to_dict(finding: CheckpointFinding) -> dict[str, object]:
+    return {
+        "health": finding.health.value,
+        "checkpointId": finding.checkpoint_id,
+        "actualCheckpointId": finding.actual_checkpoint_id,
         "path": str(finding.path),
         "message": finding.message,
     }
@@ -253,6 +304,88 @@ def main(
                 print("Nothing was repaired, replaced, extracted, or installed.", file=output)
             return 0 if finding.health is ArtifactHealth.AVAILABLE else 3
 
+        if args.command == "checkpoint":
+            workspace_root = (
+                args.workspace if args.workspace is not None else default_workspace_root()
+            )
+            store = CheckpointStore(workspace_root, args.game)
+            if args.checkpoint_command == "list":
+                records = store.list()
+                if args.format == "json":
+                    _write_json(
+                        output,
+                        {
+                            "schemaVersion": 1,
+                            "game": args.game,
+                            "checkpoints": [
+                                checkpoint_to_dict(record) for record in records
+                            ],
+                            "actionsPerformed": [],
+                            "installationActionsPerformed": [],
+                        },
+                    )
+                elif records:
+                    for record in records:
+                        print(
+                            f"{record.checkpoint_id}  {record.created_at}  "
+                            f"{record.recipe_id} @ {record.recipe_revision}",
+                            file=output,
+                        )
+                    print("No checkpoint or game state was changed.", file=output)
+                else:
+                    print(f"No checkpoints for {args.game}.", file=output)
+                return 0
+
+            if args.checkpoint_command == "show":
+                record = store.get(args.checkpoint_id)
+                if args.format == "json":
+                    _write_json(
+                        output,
+                        {
+                            "schemaVersion": 1,
+                            "checkpoint": checkpoint_to_dict(record),
+                            "actionsPerformed": [],
+                            "installationActionsPerformed": [],
+                        },
+                    )
+                else:
+                    print(f"Checkpoint: {record.checkpoint_id}", file=output)
+                    print(f"Created: {record.created_at}", file=output)
+                    print(f"Game / environment: {record.game} / {record.environment_id}", file=output)
+                    print(f"Adapter: {record.adapter_id}", file=output)
+                    print(
+                        f"Recipe: {record.recipe_id} @ {record.recipe_revision} "
+                        f"({record.recipe_maturity.value}, {record.recipe_identity.value})",
+                        file=output,
+                    )
+                    print(f"Lineage: {record.lineage_id}", file=output)
+                    print(f"Artifacts: {len(record.artifact_ids)}", file=output)
+                    print(
+                        "Recorded adapter state only; no live adapter was inspected and "
+                        "nothing was promoted or changed.",
+                        file=output,
+                    )
+                return 0
+
+            finding = store.verify(args.checkpoint_id)
+            if args.format == "json":
+                _write_json(
+                    output,
+                    {
+                        "schemaVersion": 1,
+                        "finding": _checkpoint_finding_to_dict(finding),
+                        "actionsPerformed": [],
+                        "installationActionsPerformed": [],
+                    },
+                )
+            else:
+                print(f"{finding.health.value}: {finding.checkpoint_id}", file=output)
+                print(f"Actual checkpoint ID: {finding.actual_checkpoint_id or '(none)'}", file=output)
+                print(f"Lockfile: {finding.path}", file=output)
+                print(finding.message, file=output)
+                print("Nothing was repaired, restored, promoted, or installed.", file=output)
+            return 0 if finding.health is CheckpointHealth.AVAILABLE else 3
+
         if args.command == "recipe" and args.recipe_command == "check":
             recipe = load_recipe(args.recipe)
             print(
@@ -280,6 +413,13 @@ def main(
         return 0 if review.ready_for_approval else 3
     except (ArchiveImportError, ArtifactFormatError, ArtifactNotFoundError) as error:
         print(f"Artifact error: {error}", file=errors)
+        return 2
+    except (
+        CheckpointFormatError,
+        CheckpointNotFoundError,
+        CheckpointStoreError,
+    ) as error:
+        print(f"Checkpoint error: {error}", file=errors)
         return 2
     except (RecipeFormatError, ValueError) as error:
         print(f"Recipe error: {error}", file=errors)
