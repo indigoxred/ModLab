@@ -96,3 +96,17 @@ class CompatibilityFinding:
     allowed_values: tuple[str, ...]
     actual_value: str | None
     reason: str
+
+
+@dataclass(frozen=True)
+class RecipeReview:
+    recipe_id: str
+    revision: str
+    maturity: RecipeMaturity
+    identity: RecipeIdentity
+    selected: tuple[str, ...]
+    omitted: tuple[str, ...]
+    dependency_proposals: tuple[str, ...]
+    incompatibilities: tuple[tuple[str, str], ...]
+    findings: tuple[CompatibilityFinding, ...]
+    ready_for_approval: bool
