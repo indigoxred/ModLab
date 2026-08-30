@@ -1,0 +1,221 @@
+{
+  "schemaVersion": 1,
+  "recipeId": "skyrim-se-ae.current-steam",
+  "revision": "2026.08.30-draft.1",
+  "displayName": "Skyrim SE/AE Current Steam Foundation",
+  "maturity": "Draft",
+  "target": {
+    "game": "Skyrim SE/AE",
+    "edition": "Anniversary Edition",
+    "distribution": "Steam",
+    "engineLane": "Creation Engine",
+    "adapter": "MO2"
+  },
+  "researchedAt": "2026-08-30",
+  "components": [
+    {
+      "componentId": "skse64",
+      "displayName": "Skyrim Script Extender 64",
+      "importance": "Required",
+      "defaultSelected": true,
+      "role": "Permanent Core",
+      "deployment": "Game root",
+      "requires": [],
+      "incompatibleWith": [],
+      "constraints": [
+        {
+          "dimension": "executableRuntime",
+          "allowedValues": ["1.7.104"],
+          "reason": "This Draft targets the current Steam executable runtime recorded during research."
+        },
+        {
+          "dimension": "scriptExtender",
+          "allowedValues": ["2.3.1"],
+          "reason": "SKSE 2.3.1 is the build matched to the target executable in this Draft."
+        }
+      ],
+      "rationale": "Provides the script-extender runtime required by the technical foundation.",
+      "sources": ["https://skse.silverlock.org/"],
+      "version": "2.3.1"
+    },
+    {
+      "componentId": "address-library",
+      "displayName": "Address Library for SKSE Plugins",
+      "importance": "Required",
+      "defaultSelected": true,
+      "role": "Framework Dependency",
+      "deployment": "Data/VFS",
+      "requires": ["skse64"],
+      "incompatibleWith": [],
+      "constraints": [
+        {
+          "dimension": "executableRuntime",
+          "allowedValues": ["1.7.104"],
+          "reason": "The selected address database must explicitly contain the target runtime."
+        }
+      ],
+      "rationale": "Supplies shared runtime addresses but does not by itself prove dependent DLL compatibility.",
+      "sources": ["https://www.nexusmods.com/skyrimspecialedition/mods/32444"]
+    },
+    {
+      "componentId": "sse-engine-fixes",
+      "displayName": "SSE Engine Fixes",
+      "importance": "Required",
+      "defaultSelected": true,
+      "role": "Permanent Core",
+      "deployment": "Game root + Data/VFS",
+      "requires": ["skse64", "address-library"],
+      "incompatibleWith": [],
+      "constraints": [
+        {
+          "dimension": "executableRuntime",
+          "allowedValues": ["1.7.104"],
+          "reason": "Native DLL and root components must be assembled for the exact target runtime."
+        }
+      ],
+      "rationale": "Provides a pinned set of engine-level fixes with explicit root/Data ownership.",
+      "sources": ["https://www.nexusmods.com/skyrimspecialedition/mods/17230"]
+    },
+    {
+      "componentId": "sse-display-tweaks",
+      "displayName": "SSE Display Tweaks",
+      "importance": "Required",
+      "defaultSelected": true,
+      "role": "Permanent Core",
+      "deployment": "Data/VFS",
+      "requires": ["skse64", "address-library"],
+      "incompatibleWith": [],
+      "constraints": [
+        {
+          "dimension": "executableRuntime",
+          "allowedValues": ["1.7.104"],
+          "reason": "The native display plug-in must explicitly support the target runtime."
+        }
+      ],
+      "rationale": "Controls frame pacing, high-refresh behavior, display mode, and physics-related settings.",
+      "sources": ["https://www.nexusmods.com/skyrimspecialedition/mods/34705"]
+    },
+    {
+      "componentId": "crash-logger",
+      "displayName": "Crash Logger SSE AE VR",
+      "importance": "Required",
+      "defaultSelected": true,
+      "role": "Permanent Core",
+      "deployment": "Data/VFS",
+      "requires": ["skse64", "address-library"],
+      "incompatibleWith": [],
+      "constraints": [
+        {
+          "dimension": "executableRuntime",
+          "allowedValues": ["1.7.104"],
+          "reason": "The selected logger build must support the target runtime."
+        }
+      ],
+      "rationale": "Provides one primary crash-evidence lane; competing logger lanes are excluded.",
+      "sources": ["https://www.nexusmods.com/skyrimspecialedition/mods/59818"]
+    },
+    {
+      "componentId": "skyui",
+      "displayName": "SkyUI",
+      "importance": "Required",
+      "defaultSelected": true,
+      "role": "Permanent Core",
+      "deployment": "Data/VFS",
+      "requires": ["skse64"],
+      "incompatibleWith": [],
+      "constraints": [],
+      "rationale": "Provides the standard PC interface and MCM base for the standard recipe.",
+      "sources": ["https://www.nexusmods.com/skyrimspecialedition/mods/12604"]
+    },
+    {
+      "componentId": "ussep",
+      "displayName": "Unofficial Skyrim Special Edition Patch",
+      "importance": "Recommended Default",
+      "defaultSelected": true,
+      "role": "Permanent Core",
+      "deployment": "Data/VFS",
+      "requires": [],
+      "incompatibleWith": [],
+      "constraints": [
+        {
+          "dimension": "executableRuntime",
+          "allowedValues": ["1.7.104"],
+          "reason": "USSEP 4.3.9 requires game version 1.7.99 or later and is not the fallback-runtime choice."
+        }
+      ],
+      "rationale": "Provides the recommended community bug-fix baseline for the supported current runtime.",
+      "sources": ["https://www.afkmods.com/Unofficial%20Skyrim%20Special%20Edition%20Patch%20Readme%20%2B%20Credits.html"],
+      "version": "4.3.9"
+    },
+    {
+      "componentId": "ucccp",
+      "displayName": "Unofficial Creation Club Content Patch",
+      "importance": "Conditional",
+      "defaultSelected": false,
+      "role": "Framework Dependency",
+      "deployment": "Data/VFS",
+      "requires": ["ussep"],
+      "incompatibleWith": [],
+      "constraints": [],
+      "rationale": "Is proposed only when the approved Anniversary content baseline requires its fixes.",
+      "sources": ["https://www.nexusmods.com/skyrimspecialedition/mods/18975"]
+    },
+    {
+      "componentId": "po3-tweaks",
+      "displayName": "powerofthree's Tweaks",
+      "importance": "Recommended Default",
+      "defaultSelected": true,
+      "role": "Permanent Core",
+      "deployment": "Data/VFS",
+      "requires": ["skse64", "address-library"],
+      "incompatibleWith": [],
+      "constraints": [
+        {
+          "dimension": "executableRuntime",
+          "allowedValues": ["1.7.104"],
+          "reason": "The exact native build and enabled configuration must be proven for the target runtime."
+        }
+      ],
+      "rationale": "Provides a curated set of engine and gameplay fixes after exact configuration review.",
+      "sources": ["https://www.nexusmods.com/skyrimspecialedition/mods/51073"]
+    },
+    {
+      "componentId": "bug-fixes-sse",
+      "displayName": "Bug Fixes SSE",
+      "importance": "Recommended Default",
+      "defaultSelected": true,
+      "role": "Permanent Core",
+      "deployment": "Data/VFS",
+      "requires": ["skse64", "address-library"],
+      "incompatibleWith": [],
+      "constraints": [
+        {
+          "dimension": "executableRuntime",
+          "allowedValues": ["1.7.104"],
+          "reason": "The exact native build must explicitly support the target runtime."
+        }
+      ],
+      "rationale": "Adds a version-pinned set of technical fixes after runtime verification.",
+      "sources": ["https://www.nexusmods.com/skyrimspecialedition/mods/33261"]
+    },
+    {
+      "componentId": "scrambled-bugs",
+      "displayName": "Scrambled Bugs",
+      "importance": "Recommended Default",
+      "defaultSelected": true,
+      "role": "Permanent Core",
+      "deployment": "Data/VFS",
+      "requires": ["skse64", "address-library"],
+      "incompatibleWith": [],
+      "constraints": [
+        {
+          "dimension": "executableRuntime",
+          "allowedValues": ["1.7.104"],
+          "reason": "The exact native build and overlap ownership must be proven for the target runtime."
+        }
+      ],
+      "rationale": "Adds explicitly enabled fixes with known overlap ownership rather than enabling every option.",
+      "sources": ["https://www.nexusmods.com/skyrimspecialedition/mods/43532"]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "environmentId": "skyrim-se-ae.steam-1.7.104",
+  "dimensions": {
+    "executableRuntime": "1.7.104",
+    "scriptExtender": "2.3.1",
+    "adapterVersion": "2.5.2"
+  }
+}

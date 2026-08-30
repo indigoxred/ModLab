@@ -79,6 +79,18 @@ class RecipeLoadingTests(unittest.TestCase):
         self.assertEqual(ComponentImportance.REQUIRED, recipe.components[0].importance)
         self.assertEqual(ComponentImportance.OPTIONAL, recipe.components[1].importance)
 
+    def test_parse_recipe_retains_optional_version_and_content_hash_pins(self):
+        pinned = copy.deepcopy(VALID_RECIPE)
+        pinned["components"][0]["version"] = "2.3.1"
+        pinned["components"][0]["archiveSha256"] = "a" * 64
+        pinned["components"][0]["installedTreeSha256"] = "b" * 64
+
+        component = parse_recipe(pinned).components[0]
+
+        self.assertEqual("2.3.1", component.version)
+        self.assertEqual("a" * 64, component.archive_sha256)
+        self.assertEqual("b" * 64, component.installed_tree_sha256)
+
     def test_parse_recipe_rejects_unknown_maturity(self):
         malformed = {**VALID_RECIPE, "maturity": "Popular"}
 

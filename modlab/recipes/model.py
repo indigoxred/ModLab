@@ -64,6 +64,9 @@ class RecipeComponent:
     constraints: tuple[CompatibilityConstraint, ...]
     rationale: str
     sources: tuple[str, ...]
+    version: str | None = None
+    archive_sha256: str | None = None
+    installed_tree_sha256: str | None = None
 
 
 @dataclass(frozen=True)

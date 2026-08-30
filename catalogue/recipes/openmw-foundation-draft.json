@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "recipeId": "morrowind.openmw-foundation",
+  "revision": "2026.08.30-draft.1",
+  "displayName": "Morrowind OpenMW Foundation",
+  "maturity": "Draft",
+  "target": {
+    "game": "Morrowind",
+    "edition": "Game of the Year",
+    "distribution": "Any legal PC distribution",
+    "engineLane": "OpenMW",
+    "adapter": "OpenMW"
+  },
+  "researchedAt": "2026-08-30",
+  "components": [
+    {
+      "componentId": "openmw",
+      "displayName": "OpenMW",
+      "importance": "Required",
+      "defaultSelected": true,
+      "role": "Environment Tool",
+      "deployment": "OpenMW engine",
+      "requires": [],
+      "incompatibleWith": [],
+      "constraints": [
+        {
+          "dimension": "replacementEngine",
+          "allowedValues": ["0.51.0"],
+          "reason": "This Draft is researched against the OpenMW 0.51.0 engine lane."
+        }
+      ],
+      "rationale": "Provides the modern replacement-engine environment and authoritative data-directory model.",
+      "sources": ["https://openmw.org/downloads/"],
+      "version": "0.51.0"
+    },
+    {
+      "componentId": "patch-for-purists",
+      "displayName": "Patch for Purists",
+      "importance": "Recommended Default",
+      "defaultSelected": true,
+      "role": "Permanent Core",
+      "deployment": "OpenMW content list",
+      "requires": ["openmw"],
+      "incompatibleWith": [],
+      "constraints": [],
+      "rationale": "Provides the vanilla-friendly community bug-fix baseline.",
+      "sources": ["https://www.nexusmods.com/morrowind/mods/45096"]
+    },
+    {
+      "componentId": "morrowind-optimization-patch",
+      "displayName": "Morrowind Optimization Patch",
+      "importance": "Recommended Default",
+      "defaultSelected": true,
+      "role": "Permanent Core",
+      "deployment": "OpenMW data directory",
+      "requires": ["openmw"],
+      "incompatibleWith": [],
+      "constraints": [],
+      "rationale": "Provides an optimization and mesh baseline whose exact order must be pinned during assembly.",
+      "sources": ["https://www.nexusmods.com/morrowind/mods/45384"]
+    },
+    {
+      "componentId": "project-atlas",
+      "displayName": "Project Atlas",
+      "importance": "Recommended Default",
+      "defaultSelected": true,
+      "role": "Permanent Core",
+      "deployment": "OpenMW data directory",
+      "requires": ["openmw"],
+      "incompatibleWith": [],
+      "constraints": [],
+      "rationale": "Provides an atlas-based optimization candidate with order and compatibility pinned during assembly.",
+      "sources": ["https://www.nexusmods.com/morrowind/mods/45399"]
+    },
+    {
+      "componentId": "morrowind-enhanced-textures",
+      "displayName": "Morrowind Enhanced Textures",
+      "importance": "Opinionated",
+      "defaultSelected": false,
+      "role": "Lane Component",
+      "deployment": "OpenMW data directory",
+      "requires": ["openmw"],
+      "incompatibleWith": [],
+      "constraints": [],
+      "rationale": "Offers a restrained visual baseline but remains an explicit aesthetic choice.",
+      "sources": ["https://www.nexusmods.com/morrowind/mods/46221"]
+    }
+  ]
+}

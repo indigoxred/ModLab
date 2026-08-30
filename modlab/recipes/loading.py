@@ -56,6 +56,22 @@ def _boolean(data: Mapping[str, Any], key: str, path: str) -> bool:
     return value
 
 
+def _optional_text(data: Mapping[str, Any], key: str, path: str) -> str | None:
+    if key not in data:
+        return None
+    return _text(data, key, path)
+
+
+def _optional_sha256(data: Mapping[str, Any], key: str, path: str) -> str | None:
+    value = _optional_text(data, key, path)
+    if value is None:
+        return None
+    normalized = value.lower()
+    if len(normalized) != 64 or any(character not in "0123456789abcdef" for character in normalized):
+        raise RecipeFormatError(f"{path}.{key} must be a 64-character SHA-256 value")
+    return normalized
+
+
 def _array(data: Mapping[str, Any], key: str, path: str) -> Sequence[object]:
     value = data.get(key)
     if not isinstance(value, list):
@@ -132,6 +148,11 @@ def _parse_component(value: object, index: int) -> RecipeComponent:
         constraints=constraints,
         rationale=_text(data, "rationale", path),
         sources=_text_array(data, "sources", path),
+        version=_optional_text(data, "version", path),
+        archive_sha256=_optional_sha256(data, "archiveSha256", path),
+        installed_tree_sha256=_optional_sha256(
+            data, "installedTreeSha256", path
+        ),
     )
 
 
@@ -230,4 +251,3 @@ def load_recipe(path: Path) -> FoundationRecipe:
 
 def load_environment(path: Path) -> EnvironmentEvidence:
     return parse_environment(_load_json(path))
-

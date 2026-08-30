@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "environmentId": "morrowind.openmw-0.51.0",
+  "dimensions": {
+    "replacementEngine": "0.51.0",
+    "adapterVersion": "0.51.0"
+  }
+}
