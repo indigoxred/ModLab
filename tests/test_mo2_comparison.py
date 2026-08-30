@@ -1,7 +1,11 @@
 import unittest
 
 from modlab.adapters.mo2.comparison import compare_mo2_profiles
-from modlab.adapters.mo2.model import Mo2Finding, Mo2StateFileEvidence
+from modlab.adapters.mo2.model import (
+    Mo2ExecutableEvidence,
+    Mo2Finding,
+    Mo2StateFileEvidence,
+)
 from modlab.adapters.mo2.projection import (
     Mo2AdapterState,
     Mo2Capability,
@@ -96,7 +100,9 @@ def make_projection(
         mo2_root=r"C:\ModLab\workspace\tools\mo2\skyrim-se-ae\app",
         game_root=r"C:\Steam\Skyrim Special Edition",
         active_profile="ModLab - Lab",
-        executable=None,
+        executable=Mo2ExecutableEvidence(
+            "ModOrganizer.exe", "2.5.2.0", "b" * 64, 100
+        ),
         configured_paths=(),
         read_set_sha256="a" * 64,
         read_set_stable=not blocked,

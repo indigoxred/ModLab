@@ -144,8 +144,8 @@ _CAPABILITY_DETAILS = {
         "Scanner evidence is blocked.",
     ),
     "configuration": (
-        "Portable MO2 configuration was parsed.",
-        "Portable MO2 configuration is incomplete.",
+        "Portable MO2 configuration and executable identity were observed.",
+        "Portable MO2 configuration or executable identity is incomplete.",
     ),
     "game-match": (
         "The requested Skyrim installation was observed and matched.",
@@ -318,6 +318,7 @@ def project_mo2_state(report: Mo2InspectionReport) -> Mo2Projection:
         "configuration": (
             report.portable_config_present
             and report.configured_game_path is not None
+            and report.executable is not None
             and _passed(finding_by_code, "portable-config-observed")
         ),
         "game-match": (

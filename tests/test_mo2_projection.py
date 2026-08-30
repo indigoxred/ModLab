@@ -304,6 +304,12 @@ class Mo2ProjectionTests(unittest.TestCase):
         unknown_version = project_mo2_state(make_report(file_version=None))
         self.assertEqual(Mo2Readiness.READY, unknown_version.readiness)
 
+        missing_executable = project_mo2_state(
+            replace(make_report(), executable=None)
+        )
+        self.assertEqual(Mo2Readiness.BLOCKED, missing_executable.readiness)
+        self.assertIsNone(missing_executable.adapter_state)
+
         unstable = project_mo2_state(make_report(read_set_stable=False))
         self.assertEqual(Mo2Readiness.BLOCKED, unstable.readiness)
         self.assertIsNone(unstable.adapter_state)

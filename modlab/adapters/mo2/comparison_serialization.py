@@ -234,6 +234,14 @@ def comparison_result_from_dict(data: object) -> Mo2ComparisonReport:
             )
         if any(item.status != "complete" for item in capabilities):
             raise Mo2ComparisonFormatError("Ready comparison requires complete capabilities")
+        if context.executable is None:
+            raise Mo2ComparisonFormatError(
+                "Ready comparison requires an observed executable identity"
+            )
+        if not context.read_set_stable or context.read_set_sha256 is None:
+            raise Mo2ComparisonFormatError(
+                "Ready comparison requires stable read-set evidence"
+            )
         if adapter_state_sha256(adapter_state) != adapter_hash:
             raise Mo2ComparisonFormatError(
                 "adapterStateSha256 does not match adapterState"

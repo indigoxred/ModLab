@@ -183,7 +183,7 @@ MO2's installed `mods` and `overwrite` directories are shared by both profiles:
 
 Comparison readiness is not derived from “no Unknown findings.” It is derived from explicit capabilities needed for this projection. Every capability must be proven `complete`:
 
-- MO2 configuration was parsed completely;
+- MO2 configuration was parsed completely and the executable byte identity was observed; its version string may remain Unknown;
 - the requested Skyrim installation was matched;
 - configured paths and all observed entries are contained and unambiguous;
 - the exact Lab and Play profiles exist once each;

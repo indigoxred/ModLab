@@ -24,7 +24,7 @@
 - `plugins.txt` uses the Windows system encoding; `*` is active, unmarked is inactive, and primary plug-ins are absent.
 - Skyrim primary plug-ins are the five mandatory core masters followed by the ordered installed subset of unique policy entries from `Skyrim.ccc`; the file can also name uninstalled Creations.
 - Ready means complete only for MO2 profile-state evidence. Installed payloads, asset conflicts, plug-in record conflicts, and runtime validation remain uninspected.
-- A Ready comparison may retain contextual `Unknown` findings such as an unavailable executable version. Any `Blocked` scanner finding or incomplete required capability blocks.
+- A Ready comparison may retain contextual `Unknown` findings such as an unavailable executable version when the executable byte identity is still observed. A missing executable identity, any `Blocked` scanner finding, or any incomplete required capability blocks.
 - A blocked result exposes observation context, capabilities, coverage, and findings, but `adapterState`, `adapterStateSha256`, and `differences` are `null`.
 - The command performs no writes anywhere and returns explicit empty `actionsPerformed`, `downloadsPerformed`, `installationActionsPerformed`, and `programsLaunched` arrays.
 - Do not add installation, promotion, checkpoint persistence, conflict solving, LOOT, xEdit, program launch, or support for another game.

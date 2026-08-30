@@ -210,6 +210,18 @@ class Mo2ComparisonSerializationTests(unittest.TestCase):
         wrong_hash["managerComparison"]["adapterStateSha256"] = "0" * 64
         cases.append(wrong_hash)
 
+        missing_executable = copy.deepcopy(ready)
+        missing_executable["managerComparison"]["observationContext"][
+            "executable"
+        ] = None
+        cases.append(missing_executable)
+
+        unstable_context = copy.deepcopy(ready)
+        unstable_context["managerComparison"]["observationContext"][
+            "readSetStable"
+        ] = False
+        cases.append(unstable_context)
+
         wrong_position = copy.deepcopy(ready)
         wrong_position["managerComparison"]["differences"]["modChanges"][0][
             "labPosition"
