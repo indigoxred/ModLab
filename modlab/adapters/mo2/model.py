@@ -50,6 +50,7 @@ class Mo2ProfileEvidence:
     mods: tuple[Mo2ModEntry, ...]
     plugins: tuple[Mo2PluginEntry, ...]
     load_order: tuple[str, ...]
+    profile_local_settings: bool | None = None
 
 
 @dataclass(frozen=True)

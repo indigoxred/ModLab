@@ -1,6 +1,7 @@
 """Read-only parsing of the fixed state files in one MO2 profile."""
 
 import hashlib
+import locale
 from pathlib import Path
 from pathlib import PurePosixPath, PureWindowsPath
 
@@ -34,7 +35,9 @@ _PLUGIN_EXTENSIONS = {".esm", ".esl", ".esp"}
 
 def parse_modlist_bytes(data: bytes) -> tuple[Mo2ModEntry, ...]:
     entries: list[Mo2ModEntry] = []
-    for number, line in _content_lines(data):
+    for number, line in _content_lines(
+        data, label="modlist.txt", encoding="utf-8-sig"
+    ):
         marker = line[0]
         if marker not in {"+", "-", "*"}:
             raise Mo2ProfileError(f"invalid mod marker on line {number}")
@@ -44,15 +47,24 @@ def parse_modlist_bytes(data: bytes) -> tuple[Mo2ModEntry, ...]:
     return tuple(entries)
 
 
-def parse_plugins_bytes(data: bytes) -> tuple[Mo2PluginEntry, ...]:
+def parse_plugins_bytes(
+    data: bytes, *, encoding: str | None = None
+) -> tuple[Mo2PluginEntry, ...]:
+    selected_encoding = encoding or locale.getencoding()
     entries: list[Mo2PluginEntry] = []
-    for number, line in _content_lines(data):
+    for number, line in _content_lines(
+        data, label="plugins.txt", encoding=selected_encoding
+    ):
         if line[0] in {"+", "-"}:
             raise Mo2ProfileError(f"invalid plugin marker on line {number}")
         enabled = line.startswith("*")
         name = line[1:].strip() if enabled else line
-        name = _safe_plugin_name(name, f"plugin on line {number}")
-        entries.append(Mo2PluginEntry(name, enabled))
+        entries.append(
+            Mo2PluginEntry(
+                _safe_plugin_name(name, f"plugin on line {number}"),
+                enabled,
+            )
+        )
     _reject_duplicates((item.name for item in entries), "plugins")
     return tuple(entries)
 
@@ -60,10 +72,23 @@ def parse_plugins_bytes(data: bytes) -> tuple[Mo2PluginEntry, ...]:
 def parse_load_order_bytes(data: bytes) -> tuple[str, ...]:
     entries = tuple(
         _safe_plugin_name(line, f"load order entry on line {number}")
-        for number, line in _content_lines(data)
+        for number, line in _content_lines(
+            data, label="loadorder.txt", encoding="utf-8-sig"
+        )
     )
     _reject_duplicates(entries, "load order")
     return entries
+
+
+def parse_profile_settings_bytes(data: bytes) -> tuple[bool | None, bool | None]:
+    try:
+        settings = parse_ini_bytes(data)
+        return (
+            parse_qsettings_bool(settings.get("General", "LocalSaves")),
+            parse_qsettings_bool(settings.get("General", "LocalSettings")),
+        )
+    except Mo2IniError as error:
+        raise Mo2ProfileError(f"invalid profile settings.ini: {error}") from error
 
 
 def inspect_profile(profile_root: Path, profiles_root: Path) -> Mo2ProfileEvidence:
@@ -110,12 +135,11 @@ def inspect_profile(profile_root: Path, profiles_root: Path) -> Mo2ProfileEviden
         else parse_load_order_bytes(observed["loadorder.txt"])
     )
     local_saves = None
+    local_settings = None
     if "settings.ini" in observed:
-        try:
-            settings = parse_ini_bytes(observed["settings.ini"])
-            local_saves = parse_qsettings_bool(settings.get("General", "LocalSaves"))
-        except Mo2IniError as error:
-            raise Mo2ProfileError(f"invalid profile settings.ini: {error}") from error
+        local_saves, local_settings = parse_profile_settings_bytes(
+            observed["settings.ini"]
+        )
 
     state_files = tuple(
         Mo2StateFileEvidence(
@@ -133,20 +157,22 @@ def inspect_profile(profile_root: Path, profiles_root: Path) -> Mo2ProfileEviden
         mods=mods,
         plugins=plugins,
         load_order=load_order,
+        profile_local_settings=local_settings,
     )
 
 
-def _content_lines(data: bytes) -> tuple[tuple[int, str], ...]:
+def _content_lines(
+    data: bytes, *, label: str, encoding: str
+) -> tuple[tuple[int, str], ...]:
     try:
-        text = data.decode("utf-8-sig")
-    except UnicodeDecodeError as error:
-        raise Mo2ProfileError("MO2 profile list must be UTF-8") from error
+        text = data.decode(encoding)
+    except (LookupError, UnicodeDecodeError) as error:
+        raise Mo2ProfileError(f"{label} cannot be decoded as {encoding}") from error
     lines: list[tuple[int, str]] = []
     for number, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        lines.append((number, line))
+        if line and not line.startswith("#"):
+            lines.append((number, line))
     return tuple(lines)
 
 

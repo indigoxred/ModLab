@@ -8,6 +8,7 @@ from modlab.adapters.mo2.profile import (
     inspect_profile,
     parse_load_order_bytes,
     parse_modlist_bytes,
+    parse_profile_settings_bytes,
     parse_plugins_bytes,
 )
 
@@ -28,6 +29,26 @@ class Mo2ProfileTests(unittest.TestCase):
         self.assertEqual((True, True, False), tuple(item.enabled for item in mods))
         self.assertEqual((True, True, False), tuple(item.enabled for item in plugins))
         self.assertEqual(("Skyrim.esm", "SkyUI_SE.esp"), load_order)
+
+    def test_plugins_use_explicit_windows_system_encoding(self):
+        plugins = parse_plugins_bytes(
+            "# generated\r\n*Café.esp\r\nAncien.esp\r\n".encode("cp1252"),
+            encoding="cp1252",
+        )
+
+        self.assertEqual(
+            ("Café.esp", "Ancien.esp"), tuple(item.name for item in plugins)
+        )
+        self.assertEqual((True, False), tuple(item.enabled for item in plugins))
+        with self.assertRaisesRegex(Mo2ProfileError, "plugins.txt"):
+            parse_plugins_bytes(b"*Caf\xe9.esp\r\n", encoding="ascii")
+
+    def test_parses_both_profile_isolation_settings(self):
+        values = parse_profile_settings_bytes(
+            b"[General]\nLocalSaves=false\nLocalSettings=true\n"
+        )
+
+        self.assertEqual((False, True), values)
 
     def test_rejects_malformed_markers_duplicates_and_save_names(self):
         cases = (
@@ -52,7 +73,7 @@ class Mo2ProfileTests(unittest.TestCase):
             (profile / "modlist.txt").write_bytes(modlist)
             (profile / "plugins.txt").write_bytes(b"*Skyrim.esm\r\n")
             (profile / "settings.ini").write_text(
-                "[General]\nLocalSaves=false\n", encoding="utf-8"
+                "[General]\nLocalSaves=false\nLocalSettings=true\n", encoding="utf-8"
             )
             (profile / "SkyrimPrefs.ini").write_text(
                 "[Display]\nbBorderless=1\n", encoding="utf-8"
@@ -65,6 +86,7 @@ class Mo2ProfileTests(unittest.TestCase):
             evidence = inspect_profile(profile, Path(temp))
 
             self.assertFalse(evidence.profile_local_saves)
+            self.assertTrue(evidence.profile_local_settings)
             self.assertEqual(("SkyUI",), tuple(item.name for item in evidence.mods))
             self.assertEqual([], list(evidence.load_order))
             self.assertEqual(
