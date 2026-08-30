@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -143,6 +144,125 @@ class TransactionManager:
                 drifted.append(entry.relative_path)
         return tuple(drifted)
 
+    def apply(
+        self, transaction_id: str, *, updated_at: str | None = None
+    ) -> TransactionJournal:
+        journal = self.load(transaction_id)
+        if journal.state is not TransactionState.PREPARED:
+            raise TransactionManagerError(
+                f"apply requires Prepared, found {journal.state.value}"
+            )
+        target_drift = self._target_drift(journal, desired=False)
+        if target_drift:
+            raise TransactionManagerError(
+                "Play target drift blocks apply: " + ", ".join(target_drift)
+            )
+        snapshot_drift = self._snapshot_drift(journal, include_desired=True)
+        if snapshot_drift:
+            raise TransactionManagerError(
+                "transaction snapshot drift blocks apply: "
+                + ", ".join(snapshot_drift)
+            )
+
+        timestamp = updated_at or _utc_now()
+        applying = self._transition(
+            journal, TransactionState.APPLYING, timestamp, error=None
+        )
+        self._write_journal(applying)
+        try:
+            play = Path(applying.play_root)
+            tx_dir = self.transaction_directory(applying.transaction_id)
+            for entry in applying.entries:
+                target = _confined_path(play, entry.relative_path)
+                if entry.desired.present:
+                    desired_source = _confined_path(
+                        tx_dir, entry.desired.snapshot_relative_path
+                    )
+                    _promote_file(
+                        desired_source, target, applying.transaction_id
+                    )
+                else:
+                    _remove_target(target)
+
+            desired_drift = self._target_drift(applying, desired=True)
+            if desired_drift:
+                raise TransactionManagerError(
+                    "applied files do not match desired state: "
+                    + ", ".join(desired_drift)
+                )
+            applied = self._transition(
+                applying, TransactionState.APPLIED, timestamp, error=None
+            )
+            self._write_journal(applied)
+            return applied
+        except Exception as apply_error:
+            try:
+                self._restore_prior(
+                    applying,
+                    error_message=str(apply_error),
+                    updated_at=timestamp,
+                )
+            except TransactionManagerError as recovery_error:
+                raise TransactionManagerError(
+                    f"transaction apply failed and recovery is required: {recovery_error}"
+                ) from apply_error
+            raise TransactionManagerError(
+                f"transaction apply failed; prior state restored: {apply_error}"
+            ) from apply_error
+
+    def commit(
+        self, transaction_id: str, *, updated_at: str | None = None
+    ) -> TransactionJournal:
+        journal = self.load(transaction_id)
+        if journal.state is not TransactionState.APPLIED:
+            raise TransactionManagerError(
+                f"commit requires Applied, found {journal.state.value}"
+            )
+        desired_drift = self._target_drift(journal, desired=True)
+        if desired_drift:
+            raise TransactionManagerError(
+                "Play no longer matches desired state: "
+                + ", ".join(desired_drift)
+            )
+        snapshot_drift = self._snapshot_drift(journal, include_desired=True)
+        if snapshot_drift:
+            raise TransactionManagerError(
+                "transaction snapshots changed before commit: "
+                + ", ".join(snapshot_drift)
+            )
+        committed = self._transition(
+            journal,
+            TransactionState.COMMITTED,
+            updated_at or _utc_now(),
+            error=None,
+        )
+        self._write_journal(committed)
+        return committed
+
+    def recover(
+        self, transaction_id: str, *, updated_at: str | None = None
+    ) -> TransactionJournal:
+        journal = self.load(transaction_id)
+        if journal.state is TransactionState.ROLLED_BACK:
+            return journal
+        if journal.state not in {
+            TransactionState.APPLYING,
+            TransactionState.APPLIED,
+            TransactionState.ROLLING_BACK,
+            TransactionState.RECOVERY_REQUIRED,
+        }:
+            raise TransactionManagerError(
+                f"{journal.state.value} transaction does not require recovery"
+            )
+        return self._restore_prior(
+            journal,
+            error_message=(
+                journal.error
+                or f"Recovered interrupted transaction from {journal.state.value}"
+            ),
+            updated_at=updated_at or _utc_now(),
+        )
+
     def list(self) -> tuple[TransactionJournal, ...]:
         journals = tuple(
             self._load_path(path)
@@ -209,6 +329,10 @@ class TransactionManager:
                     f"unsupported operation for {relative_path}"
                 )
             target = _confined_path(play, relative_path)
+            if not target.parent.is_dir():
+                raise TransactionManagerError(
+                    f"Play target parent does not exist: {relative_path}"
+                )
             if target.is_symlink() or (target.exists() and not target.is_file()):
                 raise TransactionManagerError(
                     f"Play target is not a regular file or absent: {relative_path}"
@@ -224,6 +348,119 @@ class TransactionManager:
         if len(paths) != len(set(paths)):
             raise TransactionManagerError("changes contain a duplicate relative path")
         return tuple(sorted(normalized, key=lambda item: item.relative_path))
+
+    def _target_drift(
+        self, journal: TransactionJournal, *, desired: bool
+    ) -> tuple[str, ...]:
+        play = Path(journal.play_root)
+        drifted: list[str] = []
+        for entry in journal.entries:
+            target = _confined_path(play, entry.relative_path)
+            expected = entry.desired if desired else entry.prior
+            if not _matches_snapshot(target, expected):
+                drifted.append(entry.relative_path)
+        return tuple(drifted)
+
+    def _snapshot_drift(
+        self, journal: TransactionJournal, *, include_desired: bool
+    ) -> tuple[str, ...]:
+        tx_dir = self.transaction_directory(journal.transaction_id)
+        drifted: list[str] = []
+        for entry in journal.entries:
+            snapshots = [("prior", entry.prior)]
+            if include_desired:
+                snapshots.append(("desired", entry.desired))
+            for label, snapshot in snapshots:
+                if not snapshot.present:
+                    continue
+                path = _confined_path(tx_dir, snapshot.snapshot_relative_path)
+                if not _matches_snapshot(path, snapshot):
+                    drifted.append(f"{label}:{entry.relative_path}")
+        return tuple(drifted)
+
+    def _restore_prior(
+        self,
+        journal: TransactionJournal,
+        *,
+        error_message: str,
+        updated_at: str,
+    ) -> TransactionJournal:
+        prior_drift = self._snapshot_drift(journal, include_desired=False)
+        if prior_drift:
+            recovery_error = (
+                "prior recovery snapshots are unavailable: "
+                + ", ".join(prior_drift)
+            )
+            required = self._transition(
+                journal,
+                TransactionState.RECOVERY_REQUIRED,
+                updated_at,
+                error=recovery_error,
+            )
+            self._write_journal(required)
+            raise TransactionManagerError(recovery_error)
+
+        rolling_back = self._transition(
+            journal, TransactionState.ROLLING_BACK, updated_at, error=None
+        )
+        self._write_journal(rolling_back)
+        try:
+            play = Path(rolling_back.play_root)
+            tx_dir = self.transaction_directory(rolling_back.transaction_id)
+            for entry in rolling_back.entries:
+                target = _confined_path(play, entry.relative_path)
+                if entry.prior.present:
+                    prior_source = _confined_path(
+                        tx_dir, entry.prior.snapshot_relative_path
+                    )
+                    _promote_file(
+                        prior_source, target, rolling_back.transaction_id
+                    )
+                else:
+                    _remove_target(target)
+
+            restored_drift = self._target_drift(
+                rolling_back, desired=False
+            )
+            if restored_drift:
+                raise TransactionManagerError(
+                    "restored files do not match prior state: "
+                    + ", ".join(restored_drift)
+                )
+            rolled_back = self._transition(
+                rolling_back,
+                TransactionState.ROLLED_BACK,
+                updated_at,
+                error=error_message,
+            )
+            self._write_journal(rolled_back)
+            return rolled_back
+        except Exception as restore_error:
+            recovery_error = f"rollback could not restore prior state: {restore_error}"
+            required = self._transition(
+                rolling_back,
+                TransactionState.RECOVERY_REQUIRED,
+                updated_at,
+                error=recovery_error,
+            )
+            self._write_journal(required)
+            raise TransactionManagerError(recovery_error) from restore_error
+
+    @staticmethod
+    def _transition(
+        journal: TransactionJournal,
+        state: TransactionState,
+        updated_at: str,
+        *,
+        error: str | None,
+    ) -> TransactionJournal:
+        candidate = replace(
+            journal,
+            state=state,
+            updated_at=updated_at,
+            error=error,
+        )
+        return journal_from_dict(journal_to_dict(candidate))
 
     @staticmethod
     def _validate_checkpoint_id(value: str, label: str) -> None:
@@ -299,6 +536,32 @@ def _copy_snapshot(source: Path, destination: Path) -> tuple[str, int]:
             digest.update(chunk)
             size += len(chunk)
     return digest.hexdigest(), size
+
+
+def _promote_file(source: Path, target: Path, transaction_id: str) -> None:
+    if not target.parent.is_dir():
+        raise TransactionManagerError(
+            f"target parent disappeared during transaction: {target.parent}"
+        )
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise TransactionManagerError(
+            f"target is no longer a regular file or absent: {target}"
+        )
+    tx_suffix = transaction_id.removeprefix("transaction:")
+    temporary = target.parent / f".modlab-{tx_suffix}-{uuid.uuid4().hex}.part"
+    try:
+        _copy_snapshot(source, temporary)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _remove_target(target: Path) -> None:
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise TransactionManagerError(
+            f"target is no longer a regular file or absent: {target}"
+        )
+    target.unlink(missing_ok=True)
 
 
 def _hash_file(path: Path) -> tuple[str, int]:
