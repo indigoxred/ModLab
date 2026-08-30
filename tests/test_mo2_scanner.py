@@ -115,6 +115,52 @@ class Mo2ScannerTests(unittest.TestCase):
             self.assertEqual(CheckState.PASSED, findings["overwrite-empty"].state)
             self.assertEqual(before, self.file_bytes(layout.root))
 
+    def test_derives_standard_paths_when_only_base_directory_is_configured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            layout, game_root, _ = self.make_instance(directory)
+            ini = layout.skyrim_mo2_app / "ModOrganizer.ini"
+            explicit_paths = {
+                "download_directory=%BASE_DIR%/downloads\n",
+                "mod_directory=%BASE_DIR%/mods\n",
+                "profiles_directory=%BASE_DIR%/profiles\n",
+                "overwrite_directory=%BASE_DIR%/overwrite\n",
+            }
+            ini.write_text(
+                "".join(
+                    line
+                    for line in ini.read_text(encoding="utf-8").splitlines(keepends=True)
+                    if line not in explicit_paths
+                ),
+                encoding="utf-8",
+            )
+
+            report = inspect_skyrim_mo2(
+                layout.skyrim_mo2_app,
+                game_root,
+                workspace_root=layout.root,
+                version_reader=lambda _: "2.5.2.0",
+            )
+
+            paths = {item.kind: item for item in report.paths}
+            self.assertEqual(
+                {
+                    "base": layout.skyrim_mo2,
+                    "downloads": layout.skyrim_mo2_downloads,
+                    "mods": layout.skyrim_mo2_mods,
+                    "profiles": layout.skyrim_mo2_profiles,
+                    "overwrite": layout.skyrim_mo2_overwrite,
+                },
+                {
+                    kind: Path(item.resolved_path)
+                    for kind, item in paths.items()
+                },
+            )
+            self.assertEqual("%BASE_DIR%/downloads", paths["downloads"].configured_path)
+            self.assertEqual("ModLab - Lab", report.active_profile)
+            findings = {item.code: item for item in report.findings}
+            self.assertEqual(CheckState.PASSED, findings["paths-contained"].state)
+            self.assertEqual(CheckState.PASSED, findings["lab-play-ready"].state)
+
     def test_escaped_writable_path_is_blocked_and_never_followed(self):
         with tempfile.TemporaryDirectory() as directory:
             layout, game_root, _ = self.make_instance(directory)

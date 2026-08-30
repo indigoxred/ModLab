@@ -311,7 +311,12 @@ def _observe_paths(config, instance_root: Path, workspace: Path, findings: list[
     observed.append(Mo2PathEvidence("base", base_value, str(base_path), base_contained))
     missing: list[str] = []
     for kind, key in _PATH_KEYS.items():
-        configured = _decode_observed_path(config.get("Settings", key))
+        raw_value = config.get("Settings", key)
+        configured = (
+            f"%BASE_DIR%/{kind}"
+            if raw_value is None
+            else _decode_observed_path(raw_value)
+        )
         resolved = _resolve_configured_path(configured, base_path)
         if configured is None or resolved is None:
             missing.append(kind)
