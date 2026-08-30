@@ -15,6 +15,7 @@ from .model import (
     Mo2InspectionReport,
     Mo2PathEvidence,
     Mo2ProfileEvidence,
+    Mo2StateFileEvidence,
 )
 from .profile import Mo2ProfileError, inspect_profile
 from .serialization import report_from_dict, report_to_dict
@@ -39,7 +40,8 @@ def inspect_skyrim_mo2(
     version_reader: Callable[[Path], str | None] = read_windows_file_version,
 ) -> Mo2InspectionReport:
     requested_root = Path(mo2_root).expanduser().resolve(strict=False)
-    requested_game = Path(game_root).expanduser().resolve(strict=False)
+    game_candidate = Path(game_root).expanduser().absolute()
+    requested_game = game_candidate.resolve(strict=False)
     workspace = Path(workspace_root).expanduser().resolve(strict=False)
     findings: list[Mo2Finding] = []
 
@@ -59,8 +61,9 @@ def inspect_skyrim_mo2(
         )
 
     try:
+        resolved_workspace = workspace.resolve(strict=True)
         resolved_root = requested_root.resolve(strict=True)
-        resolved_root.relative_to(workspace.resolve(strict=True))
+        resolved_root.relative_to(resolved_workspace)
     except (FileNotFoundError, OSError, ValueError) as error:
         findings.append(
             _finding(
@@ -72,6 +75,21 @@ def inspect_skyrim_mo2(
         return _report(
             requested_root,
             requested_root,
+            requested_game,
+            findings=findings,
+        )
+    expected_root = resolved_workspace / "tools" / "mo2" / "skyrim-se-ae" / "app"
+    if not _same_path(resolved_root, expected_root):
+        findings.append(
+            _finding(
+                CheckState.BLOCKED,
+                "mo2-root-layout-mismatch",
+                f"Skyrim MO2 must use the organized app folder: {expected_root}",
+            )
+        )
+        return _report(
+            requested_root,
+            resolved_root,
             requested_game,
             findings=findings,
         )
@@ -88,6 +106,19 @@ def inspect_skyrim_mo2(
     findings.append(
         _finding(CheckState.PASSED, "mo2-root-contained", "MO2 root is contained by ModLab.")
     )
+
+    if game_candidate.is_symlink() or not requested_game.is_dir():
+        findings.append(
+            _finding(
+                CheckState.BLOCKED,
+                "game-root-invalid",
+                f"The selected Skyrim root is missing or redirected: {game_candidate}",
+            )
+        )
+    else:
+        findings.append(
+            _finding(CheckState.PASSED, "game-root-observed", "The selected Skyrim root is a regular directory.")
+        )
 
     executable = _observe_executable(resolved_root, version_reader, findings)
     config_path = resolved_root / "ModOrganizer.ini"
@@ -154,6 +185,7 @@ def inspect_skyrim_mo2(
     path_by_kind = {item.kind: item for item in paths}
     profiles: tuple[Mo2ProfileEvidence, ...] = ()
     top_level_mods: tuple[str, ...] = ()
+    mod_metadata_files: tuple[Mo2StateFileEvidence, ...] = ()
     overwrite_entries: tuple[str, ...] = ()
 
     profiles_path = _usable_path(path_by_kind.get("profiles"))
@@ -166,8 +198,8 @@ def inspect_skyrim_mo2(
 
     mods_path = _usable_path(path_by_kind.get("mods"))
     if mods_path is not None:
-        top_level_mods = _observe_safe_children(
-            mods_path, "mods", findings, directories_only=True
+        top_level_mods, mod_metadata_files = _observe_mods(
+            mods_path, findings
         )
 
     overwrite_path = _usable_path(path_by_kind.get("overwrite"))
@@ -175,19 +207,30 @@ def inspect_skyrim_mo2(
         overwrite_entries = _observe_safe_children(
             overwrite_path, "overwrite", findings
         )
-        findings.append(
-            _finding(
-                CheckState.PASSED if not overwrite_entries else CheckState.WARNING,
-                "overwrite-empty" if not overwrite_entries else "overwrite-not-empty",
-                (
-                    "MO2 overwrite is empty."
-                    if not overwrite_entries
-                    else f"MO2 overwrite has {len(overwrite_entries)} top-level entries that require review."
-                ),
+        if any(item.code == "overwrite-entries-skipped" for item in findings):
+            findings.append(
+                _finding(
+                    CheckState.UNKNOWN,
+                    "overwrite-status-unknown",
+                    "MO2 overwrite was not fully observed; it is not claimed empty.",
+                )
             )
-        )
+        else:
+            findings.append(
+                _finding(
+                    CheckState.PASSED if not overwrite_entries else CheckState.WARNING,
+                    "overwrite-empty" if not overwrite_entries else "overwrite-not-empty",
+                    (
+                        "MO2 overwrite is empty."
+                        if not overwrite_entries
+                        else f"MO2 overwrite has {len(overwrite_entries)} top-level entries that require review."
+                    ),
+                )
+            )
 
-    selected_profile = config.get("General", "selected_profile")
+    selected_profile = _decode_observed_path(
+        config.get("General", "selected_profile")
+    )
     active_profile = None
     if selected_profile is not None and any(
         item.name.casefold() == selected_profile.casefold() for item in profiles
@@ -216,6 +259,7 @@ def inspect_skyrim_mo2(
         active_profile=active_profile,
         profiles=profiles,
         top_level_mods=top_level_mods,
+        mod_metadata_files=mod_metadata_files,
         overwrite_entries=overwrite_entries,
         findings=findings,
     )
@@ -285,9 +329,24 @@ def _observe_paths(config, instance_root: Path, workspace: Path, findings: list[
         findings.append(
             _finding(CheckState.BLOCKED, "paths-incomplete", f"MO2 paths are missing or unsafe: {', '.join(missing)}.")
         )
+    expected_paths = {
+        "base": instance_root,
+        "downloads": instance_root / "downloads",
+        "mods": instance_root / "mods",
+        "profiles": instance_root / "profiles",
+        "overwrite": instance_root / "overwrite",
+    }
+    layout_mismatch = any(
+        not _same_path(Path(item.resolved_path), expected_paths[item.kind])
+        for item in observed
+    )
     if any(not item.contained for item in observed):
         findings.append(
             _finding(CheckState.BLOCKED, "paths-escaped", "One or more writable MO2 paths escape the ModLab Skyrim instance.")
+        )
+    elif layout_mismatch:
+        findings.append(
+            _finding(CheckState.BLOCKED, "paths-layout-mismatch", "Writable MO2 paths do not match the organized Skyrim layout.")
         )
     elif not missing:
         findings.append(
@@ -362,6 +421,42 @@ def _observe_safe_children(
     return tuple(sorted(names, key=str.casefold))
 
 
+def _observe_mods(
+    root: Path, findings: list[Mo2Finding]
+) -> tuple[tuple[str, ...], tuple[Mo2StateFileEvidence, ...]]:
+    names = _observe_safe_children(
+        root, "mods", findings, directories_only=True
+    )
+    metadata: list[Mo2StateFileEvidence] = []
+    skipped = 0
+    resolved_root = root.resolve(strict=True)
+    for name in names:
+        candidate = root / name / "meta.ini"
+        if not candidate.exists():
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(resolved_root / name)
+            if candidate.is_symlink() or not resolved.is_file():
+                raise ValueError("redirected metadata")
+            sha256, size = _hash_file(resolved)
+        except (OSError, ValueError):
+            skipped += 1
+            continue
+        metadata.append(
+            Mo2StateFileEvidence(
+                f"mods/{name}/meta.ini",
+                sha256,
+                size,
+            )
+        )
+    if skipped:
+        findings.append(
+            _finding(CheckState.BLOCKED, "mod-metadata-skipped", f"Skipped {skipped} redirected or unreadable mod metadata files.")
+        )
+    return names, tuple(metadata)
+
+
 def _report(
     requested_root: Path,
     resolved_root: Path,
@@ -374,6 +469,7 @@ def _report(
     active_profile: str | None = None,
     profiles: tuple[Mo2ProfileEvidence, ...] = (),
     top_level_mods: tuple[str, ...] = (),
+    mod_metadata_files: tuple[Mo2StateFileEvidence, ...] = (),
     overwrite_entries: tuple[str, ...] = (),
     findings: list[Mo2Finding],
 ) -> Mo2InspectionReport:
@@ -392,6 +488,7 @@ def _report(
         active_profile=active_profile,
         profiles=profiles,
         top_level_mods=top_level_mods,
+        mod_metadata_files=mod_metadata_files,
         overwrite_entries=overwrite_entries,
         findings=tuple(findings),
         actions=(),

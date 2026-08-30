@@ -54,6 +54,9 @@ class Mo2ProfileTests(unittest.TestCase):
             (profile / "settings.ini").write_text(
                 "[General]\nLocalSaves=false\n", encoding="utf-8"
             )
+            (profile / "SkyrimPrefs.ini").write_text(
+                "[Display]\nbBorderless=1\n", encoding="utf-8"
+            )
             saves = profile / "saves"
             saves.mkdir()
             unreadable_save = saves / "do-not-read.ess"
@@ -74,6 +77,12 @@ class Mo2ProfileTests(unittest.TestCase):
             )
             self.assertTrue(
                 all("saves" not in item.relative_path.casefold() for item in evidence.state_files)
+            )
+            self.assertTrue(
+                any(
+                    item.relative_path.endswith("SkyrimPrefs.ini")
+                    for item in evidence.state_files
+                )
             )
 
     def test_missing_required_modlist_and_escaped_profile_are_rejected(self):

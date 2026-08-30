@@ -18,10 +18,16 @@ class Mo2ProfileError(ValueError):
 
 
 _FIXED_STATE_FILES = (
+    "archives.txt",
+    "initweaks.ini",
     "loadorder.txt",
+    "lockedorder.txt",
     "modlist.txt",
     "plugins.txt",
     "settings.ini",
+    "Skyrim.ini",
+    "SkyrimCustom.ini",
+    "SkyrimPrefs.ini",
 )
 _PLUGIN_EXTENSIONS = {".esm", ".esl", ".esp"}
 

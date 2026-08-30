@@ -143,7 +143,7 @@ python -m modlab manager discover mo2 --root '.\workspace\tools\mo2\skyrim-se-ae
 python -m modlab manager discover mo2 --root '.\workspace\tools\mo2\skyrim-se-ae\app' --game-root 'C:\Users\red\Desktop\Steam\steamapps\common\Skyrim Special Edition' --format json
 ```
 
-It hashes and versions `ModOrganizer.exe`, strictly reads the portable INI and fixed Lab/Play profile state, checks that every writable manager path remains under ModLab, compares the configured game path, lists installed mod directory names, and reports top-level Overwrite entries. It does not recurse into installed mods or Overwrite, read any save/co-save, launch MO2, change a profile, authenticate, download, install, repair, or promote.
+It hashes and versions `ModOrganizer.exe`, strictly reads the portable INI and fixed Lab/Play list/configuration files, checks that every writable manager path matches the organized ModLab layout, compares the configured game path, lists installed mod directory names, hashes each available top-level `meta.ini`, and reports top-level Overwrite entries. It does not recurse through installed mod content or Overwrite, read any save/co-save, launch MO2, change a profile, authenticate, download, install, repair, or promote.
 
 ## Build sequence
 

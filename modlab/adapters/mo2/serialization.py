@@ -36,6 +36,7 @@ _REPORT_FIELDS = {
     "activeProfile",
     "profiles",
     "topLevelMods",
+    "modMetadataFiles",
     "overwriteEntries",
     "findings",
     "actions",
@@ -116,6 +117,25 @@ def report_from_dict(data: object) -> Mo2InspectionReport:
         raise Mo2EvidenceFormatError("activeProfile must name an observed profile")
 
     top_level_mods = _name_array(mapping["topLevelMods"], "topLevelMods")
+    mod_metadata_files = _array(
+        mapping["modMetadataFiles"], _state_file, "modMetadataFiles"
+    )
+    _unique(
+        (item.relative_path.casefold() for item in mod_metadata_files),
+        "modMetadataFiles contain a duplicate relativePath",
+    )
+    mod_names = {item.casefold() for item in top_level_mods}
+    for item in mod_metadata_files:
+        parts = PurePosixPath(item.relative_path).parts
+        if (
+            len(parts) != 3
+            or parts[0].casefold() != "mods"
+            or parts[1].casefold() not in mod_names
+            or parts[2].casefold() != "meta.ini"
+        ):
+            raise Mo2EvidenceFormatError(
+                "modMetadataFiles must be mods/<observed mod>/meta.ini"
+            )
     overwrite_entries = _name_array(
         mapping["overwriteEntries"], "overwriteEntries"
     )
@@ -139,6 +159,9 @@ def report_from_dict(data: object) -> Mo2InspectionReport:
         active_profile=active_profile,
         profiles=tuple(sorted(profiles, key=lambda item: item.name.casefold())),
         top_level_mods=tuple(sorted(top_level_mods, key=str.casefold)),
+        mod_metadata_files=tuple(
+            sorted(mod_metadata_files, key=lambda item: item.relative_path.casefold())
+        ),
         overwrite_entries=tuple(sorted(overwrite_entries, key=str.casefold)),
         findings=findings,
         actions=(),
@@ -149,6 +172,16 @@ def report_from_dict(data: object) -> Mo2InspectionReport:
 
 
 def report_to_dict(report: Mo2InspectionReport) -> dict[str, object]:
+    for field, values in (
+        ("actions", report.actions),
+        ("downloads", report.downloads),
+        ("installations", report.installations),
+        ("programLaunches", report.program_launches),
+    ):
+        if values:
+            raise Mo2EvidenceFormatError(
+                f"{field} must remain empty in read-only MO2 evidence"
+            )
     return {
         "schemaVersion": report.schema_version,
         "adapterId": report.adapter_id,
@@ -207,6 +240,14 @@ def report_to_dict(report: Mo2InspectionReport) -> dict[str, object]:
             for profile in report.profiles
         ],
         "topLevelMods": list(report.top_level_mods),
+        "modMetadataFiles": [
+            {
+                "relativePath": item.relative_path,
+                "sha256": item.sha256,
+                "size": item.size,
+            }
+            for item in report.mod_metadata_files
+        ],
         "overwriteEntries": list(report.overwrite_entries),
         "findings": [
             {

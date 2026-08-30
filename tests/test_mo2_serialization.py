@@ -1,6 +1,7 @@
 import copy
 import json
 import unittest
+from dataclasses import replace
 
 from modlab.adapters.mo2.model import Mo2InspectionReport
 from modlab.adapters.mo2.serialization import (
@@ -75,6 +76,13 @@ VALID_REPORT = {
         },
     ],
     "topLevelMods": ["DLC: HearthFires", "SkyUI"],
+    "modMetadataFiles": [
+        {
+            "relativePath": "mods/SkyUI/meta.ini",
+            "sha256": "c" * 64,
+            "size": 42,
+        }
+    ],
     "overwriteEntries": [],
     "findings": [
         {
@@ -144,13 +152,12 @@ class Mo2SerializationTests(unittest.TestCase):
         with self.assertRaisesRegex(Mo2EvidenceFormatError, "duplicate JSON key"):
             report_from_json(duplicate)
 
-    def test_to_dict_does_not_accept_unvalidated_action_data(self):
+    def test_to_dict_rejects_unvalidated_action_data(self):
         report = report_from_dict(VALID_REPORT)
-        value = report_to_dict(report)
+        altered = replace(report, actions=("launch",))
 
-        self.assertEqual([], value["downloads"])
-        self.assertEqual([], value["installations"])
-        self.assertEqual([], value["programLaunches"])
+        with self.assertRaisesRegex(Mo2EvidenceFormatError, "actions"):
+            report_to_dict(altered)
 
 
 if __name__ == "__main__":

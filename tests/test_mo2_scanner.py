@@ -41,6 +41,9 @@ class Mo2ScannerTests(unittest.TestCase):
             )
 
         (layout.skyrim_mo2_mods / "SkyUI").mkdir()
+        (layout.skyrim_mo2_mods / "SkyUI" / "meta.ini").write_text(
+            "[General]\nversion=5.2SE\n", encoding="utf-8"
+        )
         (layout.skyrim_mo2_mods / "not-an-installed-mod.txt").write_text(
             "ignored", encoding="utf-8"
         )
@@ -49,7 +52,7 @@ class Mo2ScannerTests(unittest.TestCase):
                 "[General]\n"
                 "gameName=Skyrim Special Edition\n"
                 f"gamePath={game_root.as_posix()}\n"
-                "selected_profile=ModLab - Lab\n"
+                "selected_profile=@ByteArray(ModLab - Lab)\n"
                 "[Settings]\n"
                 f"base_directory={layout.skyrim_mo2.as_posix()}\n"
                 "download_directory=%BASE_DIR%/downloads\n"
@@ -99,6 +102,11 @@ class Mo2ScannerTests(unittest.TestCase):
                 tuple(profile.name for profile in report.profiles),
             )
             self.assertEqual(("SkyUI",), report.top_level_mods)
+            self.assertEqual(1, len(report.mod_metadata_files))
+            self.assertEqual(
+                "mods/SkyUI/meta.ini",
+                report.mod_metadata_files[0].relative_path,
+            )
             self.assertEqual((), report.overwrite_entries)
             self.assertTrue(all(item.contained for item in report.paths))
             findings = {item.code: item for item in report.findings}
@@ -207,6 +215,60 @@ class Mo2ScannerTests(unittest.TestCase):
 
             findings = {item.code: item for item in report.findings}
             self.assertEqual(CheckState.BLOCKED, findings["paths-incomplete"].state)
+
+    def test_save_like_overwrite_entry_is_not_claimed_as_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            layout, game_root, _ = self.make_instance(directory)
+            (layout.skyrim_mo2_overwrite / "accidental.ess").write_bytes(b"save")
+
+            report = inspect_skyrim_mo2(
+                layout.skyrim_mo2_app,
+                game_root,
+                workspace_root=layout.root,
+                version_reader=lambda _: "2.5.2.0",
+            )
+
+            findings = {item.code: item for item in report.findings}
+            self.assertNotIn("overwrite-empty", findings)
+            self.assertEqual(
+                CheckState.UNKNOWN, findings["overwrite-status-unknown"].state
+            )
+
+    def test_nonstandard_app_folder_inside_workspace_is_blocked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory, "ModLab", "workspace")
+            wrong_root = workspace / "misc" / "app"
+            wrong_root.mkdir(parents=True)
+            (wrong_root / "ModOrganizer.exe").write_bytes(b"do not inspect")
+            game_root = Path(directory, "Skyrim Special Edition")
+            game_root.mkdir()
+
+            report = inspect_skyrim_mo2(
+                wrong_root,
+                game_root,
+                workspace_root=workspace,
+                version_reader=lambda _: self.fail("wrong layout was followed"),
+            )
+
+            findings = {item.code: item for item in report.findings}
+            self.assertEqual(
+                CheckState.BLOCKED, findings["mo2-root-layout-mismatch"].state
+            )
+
+    def test_missing_game_root_is_blocked_even_when_ini_text_matches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            layout, game_root, _ = self.make_instance(directory)
+            game_root.rmdir()
+
+            report = inspect_skyrim_mo2(
+                layout.skyrim_mo2_app,
+                game_root,
+                workspace_root=layout.root,
+                version_reader=lambda _: "2.5.2.0",
+            )
+
+            findings = {item.code: item for item in report.findings}
+            self.assertEqual(CheckState.BLOCKED, findings["game-root-invalid"].state)
 
 
 if __name__ == "__main__":

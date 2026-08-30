@@ -73,10 +73,10 @@ class Mo2InspectionReport:
     active_profile: str | None
     profiles: tuple[Mo2ProfileEvidence, ...]
     top_level_mods: tuple[str, ...]
+    mod_metadata_files: tuple[Mo2StateFileEvidence, ...]
     overwrite_entries: tuple[str, ...]
     findings: tuple[Mo2Finding, ...]
-    actions: tuple[()]
-    downloads: tuple[()]
-    installations: tuple[()]
-    program_launches: tuple[()]
-
+    actions: tuple[str, ...]
+    downloads: tuple[str, ...]
+    installations: tuple[str, ...]
+    program_launches: tuple[str, ...]

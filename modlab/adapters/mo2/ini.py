@@ -99,4 +99,3 @@ def _decode_text(data: bytes) -> str:
         return data.decode("utf-8-sig")
     except UnicodeDecodeError as error:
         raise Mo2IniError("MO2 text must be UTF-8 or BOM-marked UTF-16") from error
-

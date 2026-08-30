@@ -29,7 +29,7 @@ class Mo2CliTests(unittest.TestCase):
             (
                 "[General]\n"
                 f"gamePath={game_root.as_posix()}\n"
-                "selected_profile=ModLab - Lab\n"
+                "selected_profile=@ByteArray(ModLab - Lab)\n"
                 "[Settings]\n"
                 f"base_directory={layout.skyrim_mo2.as_posix()}\n"
                 "download_directory=%BASE_DIR%/downloads\n"
