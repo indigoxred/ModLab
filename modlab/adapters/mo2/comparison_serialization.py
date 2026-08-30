@@ -339,9 +339,13 @@ def comparison_result_to_text(report: Mo2ComparisonReport) -> str:
         lines.append(f"Mod changes: {len(differences.mod_changes)}")
         for item in differences.mod_changes:
             lines.append(f"  {item.change}: {item.name}")
+            _append_position_text(lines, "Play", item.play_position)
+            _append_position_text(lines, "Lab", item.lab_position)
         lines.append(f"Plug-in changes: {len(differences.plugin_changes)}")
         for item in differences.plugin_changes:
             lines.append(f"  {item.change}: {item.name}")
+            _append_position_text(lines, "Play", item.play_position)
+            _append_position_text(lines, "Lab", item.lab_position)
         _append_order_text(lines, "Mod", differences.mod_order)
         _append_order_text(lines, "Plug-in", differences.plugin_order)
         configuration_count = (
@@ -827,6 +831,24 @@ def _append_order_text(
         lines.append(f"Play[{index}]: {order.play_sequence[index]}")
         lines.append(f"Lab[{index}]: {order.lab_sequence[index]}")
     lines.append("Use --format json for complete sequences.")
+
+
+def _append_position_text(
+    lines: list[str], label: str, position: Mo2EntryPosition | None
+) -> None:
+    if position is None:
+        return
+    previous = position.previous_shared_anchor or "(start)"
+    following = position.next_shared_anchor or "(end)"
+    runtime = (
+        ""
+        if position.runtime_priority is None
+        else f"; runtime priority {position.runtime_priority}"
+    )
+    lines.append(
+        f"  {label} placement: index {position.sequence_index}; "
+        f"previous {previous}; next {following}{runtime}"
+    )
 
 
 def _no_in_scope_difference(value: Mo2Differences) -> bool:

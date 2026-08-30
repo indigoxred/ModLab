@@ -8,6 +8,13 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
+from .adapters.mo2.comparison import compare_mo2_profiles
+from .adapters.mo2.comparison_serialization import (
+    Mo2ComparisonFormatError,
+    comparison_result_to_dict,
+    comparison_result_to_text,
+)
+from .adapters.mo2.projection import Mo2Readiness, project_mo2_state
 from .adapters.mo2.scanner import inspect_skyrim_mo2
 from .adapters.mo2.serialization import Mo2EvidenceFormatError, report_to_dict
 from .adapters.skyrim.scanner import discover_skyrim_steam
@@ -89,6 +96,17 @@ def _parser() -> argparse.ArgumentParser:
     manager_discover.add_argument("--game-root", required=True, type=Path)
     manager_discover.add_argument("--workspace", type=Path, default=None)
     manager_discover.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
+    manager_compare = manager_commands.add_parser(
+        "compare",
+        help="compare exact MO2 Lab and Play profile state read-only",
+    )
+    manager_compare.add_argument("manager_key", choices=("mo2",))
+    manager_compare.add_argument("--root", required=True, type=Path)
+    manager_compare.add_argument("--game-root", required=True, type=Path)
+    manager_compare.add_argument("--workspace", type=Path, default=None)
+    manager_compare.add_argument(
         "--format", choices=("text", "json"), default="text"
     )
 
@@ -385,6 +403,29 @@ def main(
                 )
                 else 0
             )
+
+        if args.command == "manager" and args.manager_command == "compare":
+            workspace_root = (
+                args.workspace
+                if args.workspace is not None
+                else default_workspace_root()
+            )
+            inspection = inspect_skyrim_mo2(
+                args.root,
+                args.game_root,
+                workspace_root=workspace_root,
+            )
+            projection = project_mo2_state(inspection)
+            comparison = compare_mo2_profiles(projection)
+            if args.format == "json":
+                _write_json(output, comparison_result_to_dict(comparison))
+            else:
+                print(
+                    comparison_result_to_text(comparison),
+                    end="",
+                    file=output,
+                )
+            return 0 if comparison.readiness is Mo2Readiness.READY else 3
 
         if args.command == "manager" and args.manager_command == "discover":
             workspace_root = (
@@ -736,6 +777,9 @@ def main(
         return 2
     except Mo2EvidenceFormatError as error:
         print(f"Manager discovery error: {error}", file=errors)
+        return 2
+    except Mo2ComparisonFormatError as error:
+        print(f"Manager comparison error: {error}", file=errors)
         return 2
     except (RecipeFormatError, ValueError) as error:
         print(f"Recipe error: {error}", file=errors)
