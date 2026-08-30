@@ -22,7 +22,7 @@
 - Required profile files are `modlist.txt`, `plugins.txt`, `loadorder.txt`, and `settings.ini`.
 - `modlist.txt` disk rows are reverse priority. Reverse the full parsed row sequence before assigning UI positions.
 - `plugins.txt` uses the Windows system encoding; `*` is active, unmarked is inactive, and primary plug-ins are absent.
-- Skyrim primary plug-ins are the five core masters followed by unique entries from `Skyrim.ccc`.
+- Skyrim primary plug-ins are the five mandatory core masters followed by the ordered installed subset of unique policy entries from `Skyrim.ccc`; the file can also name uninstalled Creations.
 - Ready means complete only for MO2 profile-state evidence. Installed payloads, asset conflicts, plug-in record conflicts, and runtime validation remain uninspected.
 - A Ready comparison may retain contextual `Unknown` findings such as an unavailable executable version. Any `Blocked` scanner finding or incomplete required capability blocks.
 - A blocked result exposes observation context, capabilities, coverage, and findings, but `adapterState`, `adapterStateSha256`, and `differences` are `null`.
@@ -844,16 +844,29 @@ def _project_plugins(
     load_keys = tuple(item.casefold() for item in profile.load_order)
     primary_keys = tuple(item.casefold() for item in primary_plugins)
     state_keys = tuple(item.name.casefold() for item in profile.plugins)
-    if load_keys[:len(primary_keys)] != primary_keys:
-        raise Mo2ProjectionError("expected primary plug-ins are not the load-order prefix")
-    if state_keys != load_keys[len(primary_keys):]:
+    core_count = 5
+    if load_keys[:core_count] != primary_keys[:core_count]:
+        raise Mo2ProjectionError("expected core primary plug-ins are not the load-order prefix")
+    if any(key in set(primary_keys) for key in state_keys):
+        raise Mo2ProjectionError("plugins.txt contains a primary plug-in state row")
+    primary_count = len(load_keys) - len(state_keys)
+    observed_creation_keys = load_keys[core_count:primary_count]
+    policy_positions = {
+        key: index for index, key in enumerate(primary_keys[core_count:])
+    }
+    if any(key not in policy_positions for key in observed_creation_keys):
+        raise Mo2ProjectionError("loadorder.txt has an unexplained load-order-only plug-in")
+    positions = tuple(policy_positions[key] for key in observed_creation_keys)
+    if positions != tuple(sorted(positions)):
+        raise Mo2ProjectionError("installed Creation plug-ins do not follow Skyrim.ccc order")
+    if state_keys != load_keys[primary_count:]:
         raise Mo2ProjectionError("plugins.txt does not match non-primary load order")
     states = {item.name.casefold(): item.enabled for item in profile.plugins}
     return tuple(
         Mo2ProjectedPlugin(
             name=name,
-            primary=index < len(primary_plugins),
-            enabled=True if index < len(primary_plugins) else states[name.casefold()],
+            primary=index < primary_count,
+            enabled=True if index < primary_count else states[name.casefold()],
             load_order_index=index,
         )
         for index, name in enumerate(profile.load_order)

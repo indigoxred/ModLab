@@ -418,11 +418,32 @@ def _project_plugins(
         raise Mo2ProjectionError("loadorder.txt contains duplicate plug-ins")
     if len(state_keys) != len(set(state_keys)):
         raise Mo2ProjectionError("plugins.txt contains duplicate plug-ins")
-    if load_keys[: len(primary_keys)] != primary_keys:
+    core_count = len(_CORE_PRIMARY_PLUGINS)
+    if load_keys[:core_count] != primary_keys[:core_count]:
         raise Mo2ProjectionError(
-            "expected primary plug-ins are not the load-order prefix"
+            "expected core primary plug-ins are not the load-order prefix"
         )
-    if state_keys != load_keys[len(primary_keys) :]:
+    if any(key in set(primary_keys) for key in state_keys):
+        raise Mo2ProjectionError("plugins.txt contains a primary plug-in state row")
+    primary_count = len(load_keys) - len(state_keys)
+    if primary_count < core_count:
+        raise Mo2ProjectionError("loadorder.txt is missing a core primary plug-in")
+    observed_creation_keys = load_keys[core_count:primary_count]
+    creation_policy_positions = {
+        key: index for index, key in enumerate(primary_keys[core_count:])
+    }
+    if any(key not in creation_policy_positions for key in observed_creation_keys):
+        raise Mo2ProjectionError(
+            "loadorder.txt has an unexplained load-order-only plug-in"
+        )
+    observed_positions = tuple(
+        creation_policy_positions[key] for key in observed_creation_keys
+    )
+    if observed_positions != tuple(sorted(observed_positions)):
+        raise Mo2ProjectionError(
+            "installed Creation plug-ins do not follow Skyrim.ccc order"
+        )
+    if state_keys != load_keys[primary_count:]:
         raise Mo2ProjectionError(
             "plugins.txt does not match non-primary load order"
         )
@@ -430,10 +451,10 @@ def _project_plugins(
     return tuple(
         Mo2ProjectedPlugin(
             name=name,
-            primary=index < len(primary_plugins),
+            primary=index < primary_count,
             enabled=(
                 True
-                if index < len(primary_plugins)
+                if index < primary_count
                 else states[name.casefold()]
             ),
             load_order_index=index,

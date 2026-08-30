@@ -20,10 +20,10 @@ The design is based on the current MO2 implementation and the live portable MO2 
 - Managed mods, foreign Creation/DLC rows, and separator rows are classified separately. Managed and foreign rows can affect the runtime; names ending in MO2's `_separator` suffix are organisational only.
 - For Skyrim SE/AE, `loadorder.txt` is the ordered visible plug-in inventory.
 - `plugins.txt` records every non-primary plug-in's enabled state in load order: `*` means enabled and an unmarked entry means disabled. Skyrim's primary plug-ins are omitted.
-- The primary plug-in set is the five core masters followed by the entries observed in `Skyrim.ccc`. Its observed spelling is retained and identities are matched case-insensitively.
+- The primary plug-in policy is the five mandatory core masters followed by the ordered entries observed in `Skyrim.ccc`. `Skyrim.ccc` can name Creation plug-ins that are not installed. A profile's actual primary prefix is therefore the five core masters plus the ordered subset of `Skyrim.ccc` entries present load-order-only in that profile; absent policy entries are not manufactured or required.
 - Current MO2 writes `plugins.txt` with the Windows system encoding. ModLab will use the same decoding policy and will block instead of silently substituting text on a decoding failure.
 
-The two fresh live profiles, `ModLab - Lab` and `ModLab - Play`, both contain readable `modlist.txt`, `plugins.txt`, `loadorder.txt`, and `settings.ini`. Their primary-only state is valid: the ten primary plug-ins appear in `loadorder.txt`, while `plugins.txt` contains only its header. This observed case is a required regression fixture. A missing required file will not be inferred to mean an empty default.
+The two fresh live profiles, `ModLab - Lab` and `ModLab - Play`, both contain readable `modlist.txt`, `plugins.txt`, `loadorder.txt`, and `settings.ini`. Their primary-only state is valid: the five core masters and five installed Creation plug-ins appear in `loadorder.txt`, while `plugins.txt` contains only its header. The live `Skyrim.ccc` also names uninstalled Creations, confirming that it is a policy list rather than a mandatory inventory. This observed case is a required regression fixture. A missing required file will not be inferred to mean an empty default.
 
 ## User Experience
 
@@ -124,8 +124,8 @@ Before projection is Ready, each profile's plug-in evidence must obey the verifi
 1. `loadorder.txt` contains a case-insensitively unique ordered inventory.
 2. `plugins.txt` contains a case-insensitively unique state row for every non-primary entry in `loadorder.txt`, in that same relative order.
 3. Every `plugins.txt` entry exists in `loadorder.txt` and is non-primary.
-4. Every expected primary entry appears exactly once in `loadorder.txt` and does not appear in `plugins.txt`; that load-order-only presence is expected, not inconsistent.
-5. The expected primary sequence is the prefix of `loadorder.txt`, in official relative order, before all non-primary entries.
+4. All five core masters appear exactly once at the start of `loadorder.txt` and do not appear in `plugins.txt`.
+5. Any installed Creation primaries form an ordered subset of `Skyrim.ccc` immediately after the core masters. They are load-order-only, absent `Skyrim.ccc` policy entries are allowed, and all primary entries precede non-primary entries.
 6. A primary entry is effectively enabled by its presence. A non-primary entry is effectively enabled only when its `plugins.txt` row is starred.
 
 An unexplained non-primary load-order-only entry, a plug-in-state-only entry, a duplicate case-insensitive identity, an unexpected primary state row, or contradictory relative order blocks with `mo2-plugin-order-evidence-inconsistent`. ModLab retains the raw scanner evidence for diagnosis but does not manufacture an effective order.

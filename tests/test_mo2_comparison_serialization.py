@@ -274,6 +274,11 @@ class Mo2ComparisonSerializationTests(unittest.TestCase):
             text,
         )
 
+    def test_text_names_profile_configuration_differences(self):
+        text = comparison_result_to_text(make_comparison_report())
+
+        self.assertIn("Content-changed profile files: settings.ini", text)
+
 
 if __name__ == "__main__":
     unittest.main()

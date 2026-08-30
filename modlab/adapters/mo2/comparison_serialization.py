@@ -354,6 +354,21 @@ def comparison_result_to_text(report: Mo2ComparisonReport) -> str:
             + len(differences.configuration.content_changed)
         )
         lines.append(f"Profile configuration changes: {configuration_count}")
+        if differences.configuration.lab_only:
+            lines.append(
+                "Lab-only profile files: "
+                + ", ".join(differences.configuration.lab_only)
+            )
+        if differences.configuration.play_only:
+            lines.append(
+                "Play-only profile files: "
+                + ", ".join(differences.configuration.play_only)
+            )
+        if differences.configuration.content_changed:
+            lines.append(
+                "Content-changed profile files: "
+                + ", ".join(differences.configuration.content_changed)
+            )
         no_difference = _no_in_scope_difference(differences)
         if no_difference:
             lines.append("No in-scope profile-state differences were found.")

@@ -204,6 +204,62 @@ class Mo2ProjectionTests(unittest.TestCase):
             tuple(item.name for item in projection.adapter_state.lab.plugins[5:]),
         )
 
+    def test_skyrim_ccc_policy_allows_an_ordered_installed_subset(self):
+        report = make_report()
+        policy = CORE + (
+            "Creation-A.esl",
+            "Creation-B.esl",
+            "Creation-C.esl",
+        )
+        installed_load_order = CORE + (
+            "Creation-A.esl",
+            "Creation-C.esl",
+            "SkyUI_SE.esp",
+        )
+        report = replace(
+            report,
+            profiles=tuple(
+                replace(profile, load_order=installed_load_order)
+                for profile in report.profiles
+            ),
+            comparison_evidence=replace(
+                report.comparison_evidence,
+                primary_plugins=policy,
+            ),
+        )
+
+        projection = project_mo2_state(report)
+
+        self.assertEqual(Mo2Readiness.READY, projection.readiness)
+        self.assertEqual(
+            (True, True, True, True, True, True, True, False),
+            tuple(item.primary for item in projection.adapter_state.lab.plugins),
+        )
+
+    def test_skyrim_ccc_installed_subset_must_retain_policy_order(self):
+        report = make_report()
+        report = replace(
+            report,
+            profiles=tuple(
+                replace(
+                    profile,
+                    load_order=CORE
+                    + ("Creation-C.esl", "Creation-A.esl", "SkyUI_SE.esp"),
+                )
+                for profile in report.profiles
+            ),
+            comparison_evidence=replace(
+                report.comparison_evidence,
+                primary_plugins=CORE
+                + ("Creation-A.esl", "Creation-B.esl", "Creation-C.esl"),
+            ),
+        )
+
+        projection = project_mo2_state(report)
+
+        self.assertEqual(Mo2Readiness.BLOCKED, projection.readiness)
+        self.assertIsNone(projection.adapter_state)
+
     def test_nonprimary_membership_or_order_mismatch_blocks_without_state(self):
         for report in (
             make_report(lab_plugins=(Mo2PluginEntry("OnlyState.esp", True),)),
