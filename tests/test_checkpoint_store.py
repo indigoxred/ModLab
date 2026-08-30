@@ -191,6 +191,25 @@ class CheckpointVerificationTests(unittest.TestCase):
             self.assertEqual(CheckpointHealth.AVAILABLE, finding.health)
             self.assertEqual(record.checkpoint_id, finding.actual_checkpoint_id)
 
+    def test_duplicate_json_key_is_modified_even_when_last_value_is_valid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CheckpointStore(Path(directory, "workspace"), "skyrim-se-ae")
+            record = store.create(draft_from_dict(VALID_DRAFT))
+            lockfile = store.path_for(record.checkpoint_id)
+            original = lockfile.read_text(encoding="utf-8")
+            duplicate = original.replace(
+                '"checkpointId":',
+                '"checkpointId": "checkpoint-sha256:' + "f" * 64 + '",\n  "checkpointId":',
+                1,
+            )
+            lockfile.write_text(duplicate, encoding="utf-8")
+
+            finding = store.verify(record.checkpoint_id)
+
+            self.assertEqual(CheckpointHealth.MODIFIED, finding.health)
+            self.assertIsNone(finding.actual_checkpoint_id)
+            self.assertEqual(duplicate, lockfile.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
