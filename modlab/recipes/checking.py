@@ -13,14 +13,24 @@ def check_component(
     environment: EnvironmentEvidence,
 ) -> tuple[CompatibilityFinding, ...]:
     findings: list[CompatibilityFinding] = []
+    exact_artifact_pinned = bool(
+        component.archive_sha256 or component.installed_tree_sha256
+    )
     for constraint in component.constraints:
         actual = environment.dimensions.get(constraint.dimension)
+        reason = constraint.reason
         if actual is None:
             state = CheckState.UNKNOWN
-        elif actual in constraint.allowed_values:
-            state = CheckState.PASSED
-        else:
+        elif actual not in constraint.allowed_values:
             state = CheckState.BLOCKED
+        elif not exact_artifact_pinned:
+            state = CheckState.UNKNOWN
+            reason = (
+                f"{constraint.reason} The target matches, but no exact "
+                "component artifact hash is pinned."
+            )
+        else:
+            state = CheckState.PASSED
         findings.append(
             CompatibilityFinding(
                 state=state,
@@ -28,7 +38,7 @@ def check_component(
                 dimension=constraint.dimension,
                 allowed_values=constraint.allowed_values,
                 actual_value=actual,
-                reason=constraint.reason,
+                reason=reason,
             )
         )
     return tuple(findings)

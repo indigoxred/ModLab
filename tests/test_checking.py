@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from types import MappingProxyType
 
 from modlab.recipes.checking import check_component
@@ -30,6 +31,8 @@ def native_component() -> RecipeComponent:
         ),
         rationale="Provides a native fix.",
         sources=(),
+        version="1.0.0",
+        archive_sha256="a" * 64,
     )
 
 
@@ -65,6 +68,24 @@ class CompatibilityCheckingTests(unittest.TestCase):
 
         self.assertEqual(CheckState.UNKNOWN, findings[0].state)
         self.assertIsNone(findings[0].actual_value)
+
+    def test_matching_target_without_exact_artifact_pin_is_unknown(self):
+        unpinned = replace(
+            native_component(),
+            version=None,
+            archive_sha256=None,
+            installed_tree_sha256=None,
+        )
+        environment = EnvironmentEvidence(
+            1,
+            "current",
+            MappingProxyType({"executableRuntime": "1.7.104"}),
+        )
+
+        findings = check_component(unpinned, environment)
+
+        self.assertEqual(CheckState.UNKNOWN, findings[0].state)
+        self.assertIn("exact component artifact", findings[0].reason)
 
     def test_component_without_constraints_has_no_findings(self):
         component = native_component()
