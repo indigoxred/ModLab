@@ -4,12 +4,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from modlab.artifacts.vault import ArchiveImportError, ArchiveVault
+from modlab.artifacts.model import ArtifactHealth
+from modlab.artifacts.serialization import ArtifactFormatError
+from modlab.artifacts.vault import (
+    ArtifactNotFoundError,
+    ArchiveImportError,
+    ArchiveVault,
+)
 
 
 IMPORTED_AT = "2026-08-30T08:00:00Z"
 MOD_ARCHIVE_SHA256 = "e8675c0b9bdb62561503c50a19d0b948c353e0b5016a1a3299f73aded414e0a8"
 CHANGED_ARCHIVE_SHA256 = "b21e837baffc37f61d453c447a3958e04df7959ef028ed7fdb6d5bf779ff99a8"
+SECOND_ARCHIVE_SHA256 = "cb7469f44122ba751d137a8fef6a36b8e56c6b524a35d7abfa7677955a252a4d"
 
 
 class ArchiveVaultImportTests(unittest.TestCase):
@@ -88,6 +95,97 @@ class ArchiveVaultImportTests(unittest.TestCase):
 
             self.assertEqual([], list((vault.workspace_root / "library" / "archives").rglob("payload.*")))
             self.assertEqual([], list((vault.workspace_root / "library" / "metadata" / "artifacts").glob("*.json")))
+
+
+class ArchiveVaultVerificationTests(unittest.TestCase):
+    def test_list_sorts_by_imported_time_then_artifact_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            late = base / "late.zip"
+            early_b = base / "early-b.7z"
+            early_c = base / "early-c.rar"
+            late.write_bytes(b"mod archive")
+            early_b.write_bytes(b"changed archive")
+            early_c.write_bytes(b"second archive")
+            vault = ArchiveVault(base / "workspace")
+            vault.import_archive(late, "late", imported_at="2026-08-30T09:00:00Z")
+            vault.import_archive(early_c, "early c", imported_at=IMPORTED_AT)
+            vault.import_archive(early_b, "early b", imported_at=IMPORTED_AT)
+
+            records = vault.list()
+
+            self.assertEqual(
+                [CHANGED_ARCHIVE_SHA256, SECOND_ARCHIVE_SHA256, MOD_ARCHIVE_SHA256],
+                [record.sha256 for record in records],
+            )
+
+    def test_get_rejects_malformed_and_reports_unknown_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vault = ArchiveVault(Path(directory, "workspace"))
+
+            with self.assertRaisesRegex(ArtifactFormatError, "artifact ID"):
+                vault.get("../../outside.json")
+            unknown_id = "archive-sha256:" + "f" * 64
+            with self.assertRaisesRegex(ArtifactNotFoundError, unknown_id):
+                vault.get(unknown_id)
+
+    def test_exact_stored_bytes_are_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "mod.zip"
+            source.write_bytes(b"mod archive")
+            vault = ArchiveVault(base / "workspace")
+            record = vault.import_archive(source, "local", imported_at=IMPORTED_AT)
+
+            finding = vault.verify(record.artifact_id)
+
+            self.assertEqual(ArtifactHealth.AVAILABLE, finding.health)
+            self.assertEqual(MOD_ARCHIVE_SHA256, finding.expected_sha256)
+            self.assertEqual(MOD_ARCHIVE_SHA256, finding.actual_sha256)
+
+    def test_deleted_payload_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "mod.zip"
+            source.write_bytes(b"mod archive")
+            vault = ArchiveVault(base / "workspace")
+            record = vault.import_archive(source, "local", imported_at=IMPORTED_AT)
+            record.stored_path(vault.workspace_root).unlink()
+
+            finding = vault.verify(record.artifact_id)
+
+            self.assertEqual(ArtifactHealth.MISSING, finding.health)
+            self.assertIsNone(finding.actual_sha256)
+            self.assertFalse(record.stored_path(vault.workspace_root).exists())
+
+    def test_changed_payload_is_modified_but_never_repaired(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "mod.zip"
+            source.write_bytes(b"mod archive")
+            vault = ArchiveVault(base / "workspace")
+            record = vault.import_archive(source, "local", imported_at=IMPORTED_AT)
+            stored = record.stored_path(vault.workspace_root)
+            stored.write_bytes(b"changed archive")
+
+            finding = vault.verify(record.artifact_id)
+
+            self.assertEqual(ArtifactHealth.MODIFIED, finding.health)
+            self.assertEqual(CHANGED_ARCHIVE_SHA256, finding.actual_sha256)
+            self.assertEqual(b"changed archive", stored.read_bytes())
+
+    def test_malformed_metadata_is_not_hidden_from_listing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "mod.zip"
+            source.write_bytes(b"mod archive")
+            vault = ArchiveVault(base / "workspace")
+            vault.import_archive(source, "local", imported_at=IMPORTED_AT)
+            metadata = vault.metadata_path / f"{MOD_ARCHIVE_SHA256}.json"
+            metadata.write_text("{}", encoding="utf-8")
+
+            with self.assertRaises(ArtifactFormatError):
+                vault.list()
 
     def test_copy_failure_removes_only_its_staging_file(self):
         with tempfile.TemporaryDirectory() as directory:

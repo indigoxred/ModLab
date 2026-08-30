@@ -25,3 +25,13 @@ class ArchiveArtifact:
 
     def stored_path(self, workspace_root: Path) -> Path:
         return workspace_root.joinpath(*PurePosixPath(self.stored_relative_path).parts)
+
+
+@dataclass(frozen=True)
+class ArtifactFinding:
+    health: ArtifactHealth
+    artifact_id: str
+    expected_sha256: str
+    actual_sha256: str | None
+    path: Path
+    message: str
