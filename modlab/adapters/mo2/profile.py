@@ -1,0 +1,171 @@
+"""Read-only parsing of the fixed state files in one MO2 profile."""
+
+import hashlib
+from pathlib import Path
+from pathlib import PurePosixPath, PureWindowsPath
+
+from .ini import Mo2IniError, parse_ini_bytes, parse_qsettings_bool
+from .model import (
+    Mo2ModEntry,
+    Mo2PluginEntry,
+    Mo2ProfileEvidence,
+    Mo2StateFileEvidence,
+)
+
+
+class Mo2ProfileError(ValueError):
+    """Raised when a profile state file is missing, unsafe, or ambiguous."""
+
+
+_FIXED_STATE_FILES = (
+    "loadorder.txt",
+    "modlist.txt",
+    "plugins.txt",
+    "settings.ini",
+)
+_PLUGIN_EXTENSIONS = {".esm", ".esl", ".esp"}
+
+
+def parse_modlist_bytes(data: bytes) -> tuple[Mo2ModEntry, ...]:
+    entries: list[Mo2ModEntry] = []
+    for number, line in _content_lines(data):
+        marker = line[0]
+        if marker not in {"+", "-", "*"}:
+            raise Mo2ProfileError(f"invalid mod marker on line {number}")
+        name = _safe_name(line[1:].strip(), f"mod on line {number}")
+        entries.append(Mo2ModEntry(name, marker, marker in {"+", "*"}))
+    _reject_duplicates((item.name for item in entries), "modlist")
+    return tuple(entries)
+
+
+def parse_plugins_bytes(data: bytes) -> tuple[Mo2PluginEntry, ...]:
+    entries: list[Mo2PluginEntry] = []
+    for number, line in _content_lines(data):
+        if line[0] in {"+", "-"}:
+            raise Mo2ProfileError(f"invalid plugin marker on line {number}")
+        enabled = line.startswith("*")
+        name = line[1:].strip() if enabled else line
+        name = _safe_plugin_name(name, f"plugin on line {number}")
+        entries.append(Mo2PluginEntry(name, enabled))
+    _reject_duplicates((item.name for item in entries), "plugins")
+    return tuple(entries)
+
+
+def parse_load_order_bytes(data: bytes) -> tuple[str, ...]:
+    entries = tuple(
+        _safe_plugin_name(line, f"load order entry on line {number}")
+        for number, line in _content_lines(data)
+    )
+    _reject_duplicates(entries, "load order")
+    return entries
+
+
+def inspect_profile(profile_root: Path, profiles_root: Path) -> Mo2ProfileEvidence:
+    requested_profile = Path(profile_root)
+    requested_profiles = Path(profiles_root)
+    try:
+        resolved_profiles = requested_profiles.resolve(strict=True)
+        resolved_profile = requested_profile.resolve(strict=True)
+        resolved_profile.relative_to(resolved_profiles)
+    except (FileNotFoundError, OSError, ValueError) as error:
+        raise Mo2ProfileError("profile must resolve beneath the profiles root") from error
+    if not resolved_profile.is_dir() or resolved_profile.parent != resolved_profiles:
+        raise Mo2ProfileError("profile must be one directory under the profiles root")
+
+    name = _safe_name(resolved_profile.name, "profile name")
+    observed: dict[str, bytes] = {}
+    for filename in _FIXED_STATE_FILES:
+        candidate = resolved_profile / filename
+        if not candidate.exists():
+            continue
+        try:
+            resolved_file = candidate.resolve(strict=True)
+            resolved_file.relative_to(resolved_profile)
+        except (FileNotFoundError, OSError, ValueError) as error:
+            raise Mo2ProfileError(
+                f"profile state file escapes its profile: {filename}"
+            ) from error
+        if not resolved_file.is_file():
+            raise Mo2ProfileError(f"profile state path is not a file: {filename}")
+        observed[filename] = resolved_file.read_bytes()
+
+    if "modlist.txt" not in observed:
+        raise Mo2ProfileError("required profile modlist.txt is missing")
+
+    mods = parse_modlist_bytes(observed["modlist.txt"])
+    plugins = (
+        ()
+        if "plugins.txt" not in observed
+        else parse_plugins_bytes(observed["plugins.txt"])
+    )
+    load_order = (
+        ()
+        if "loadorder.txt" not in observed
+        else parse_load_order_bytes(observed["loadorder.txt"])
+    )
+    local_saves = None
+    if "settings.ini" in observed:
+        try:
+            settings = parse_ini_bytes(observed["settings.ini"])
+            local_saves = parse_qsettings_bool(settings.get("General", "LocalSaves"))
+        except Mo2IniError as error:
+            raise Mo2ProfileError(f"invalid profile settings.ini: {error}") from error
+
+    state_files = tuple(
+        Mo2StateFileEvidence(
+            relative_path=PurePosixPath("profiles", name, filename).as_posix(),
+            sha256=hashlib.sha256(data).hexdigest(),
+            size=len(data),
+        )
+        for filename, data in sorted(observed.items())
+    )
+    return Mo2ProfileEvidence(
+        name=name,
+        relative_path=PurePosixPath("profiles", name).as_posix(),
+        profile_local_saves=local_saves,
+        state_files=state_files,
+        mods=mods,
+        plugins=plugins,
+        load_order=load_order,
+    )
+
+
+def _content_lines(data: bytes) -> tuple[tuple[int, str], ...]:
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise Mo2ProfileError("MO2 profile list must be UTF-8") from error
+    lines: list[tuple[int, str]] = []
+    for number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        lines.append((number, line))
+    return tuple(lines)
+
+
+def _safe_plugin_name(value: str, label: str) -> str:
+    result = _safe_name(value, label)
+    if PureWindowsPath(result).suffix.casefold() not in _PLUGIN_EXTENSIONS:
+        raise Mo2ProfileError(f"{label} must name an ESM, ESL, or ESP")
+    return result
+
+
+def _safe_name(value: str, label: str) -> str:
+    if (
+        not value
+        or value != value.strip()
+        or value in {".", ".."}
+        or any(character in value for character in "/\\")
+        or any(ord(character) < 32 for character in value)
+        or value.casefold() == "saves"
+        or PureWindowsPath(value).suffix.casefold() in {".ess", ".skse"}
+    ):
+        raise Mo2ProfileError(f"{label} must be one safe non-save name")
+    return value
+
+
+def _reject_duplicates(values, label: str) -> None:
+    normalized = [value.casefold() for value in values]
+    if len(normalized) != len(set(normalized)):
+        raise Mo2ProfileError(f"{label} contains a duplicate name")
