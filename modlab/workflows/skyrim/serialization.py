@@ -757,8 +757,10 @@ def _drift_scalar(value: object, label: str) -> None:
             _text(value, label)
         return
     if isinstance(value, list):
-        if len(value) > 7:
-            raise SkyrimWorkflowFormatError("drift sequence windows are limited to seven items")
+        if len(value) > 9:
+            raise SkyrimWorkflowFormatError(
+                "drift sequence evidence is limited to metadata plus a seven-item window"
+            )
         _string_list(value, label)
         return
     raise SkyrimWorkflowFormatError(f"{label} has an unsupported drift value")

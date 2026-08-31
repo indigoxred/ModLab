@@ -129,13 +129,39 @@ class SkyrimWorkflowSerializationTests(unittest.TestCase):
             used, workspace_root=self.fixture.workspace
         ))
 
-    def test_status_json_and_text_are_bounded_and_explicitly_read_only(self):
-        captured = self.capture()
-        profile = (
+    def test_status_json_and_text_bound_metadata_plus_seven_entry_windows(self):
+        instance_root = (
             self.fixture.workspace / "tools" / "mo2" / "skyrim-se-ae"
-            / "profiles" / "ModLab - Lab" / "archives.txt"
         )
+        profile_root = (
+            instance_root / "profiles" / "ModLab - Lab"
+        )
+        mod_names = tuple(f"Mod-{index:02d}" for index in range(10))
+        for mod_name in mod_names:
+            (instance_root / "mods" / mod_name).mkdir()
+        modlist = "".join(f"+{mod_name}\n" for mod_name in mod_names)
+        for profile_name in ("ModLab - Lab", "ModLab - Play"):
+            (
+                instance_root / "profiles" / profile_name / "modlist.txt"
+            ).write_text(modlist, encoding="utf-8")
+        for filename in (
+            "lockedorder.txt",
+            "Skyrim.ini",
+            "SkyrimCustom.ini",
+            "SkyrimPrefs.ini",
+        ):
+            (profile_root / filename).write_text("", encoding="utf-8")
+        captured = self.capture()
+        profile = profile_root / "archives.txt"
         profile.write_text("changed archive\n", encoding="utf-8")
+        (profile_root / "initweaks.ini").write_text(
+            "[Archive]\n", encoding="utf-8"
+        )
+        reordered = (*mod_names[:-2], mod_names[-1], mod_names[-2])
+        (profile_root / "modlist.txt").write_text(
+            "".join(f"+{mod_name}\n" for mod_name in reordered),
+            encoding="utf-8",
+        )
         report = self.status()
         value = status_result_to_dict(report)
         text = status_result_to_text(report)
@@ -155,7 +181,38 @@ class SkyrimWorkflowSerializationTests(unittest.TestCase):
             for key in ("checkpointValue", "currentValue")
             if isinstance(change[key], list)
         ]
-        self.assertTrue(all(len(window) <= 7 for window in windows))
+        self.assertTrue(all(len(window) <= 9 for window in windows))
+        self.assertTrue(
+            any(
+                window[0].startswith("count=") and len(window) == 8
+                for window in windows
+            )
+        )
+        order_change = next(
+            change
+            for domain in value["status"]["domains"]
+            for change in domain["changes"]
+            if change["field"] == "mods.order"
+        )
+        for window in (
+            order_change["checkpointValue"], order_change["currentValue"]
+        ):
+            self.assertEqual(9, len(window))
+            self.assertTrue(window[0].startswith("count="))
+            self.assertTrue(window[1].startswith("firstDifference="))
+
+        too_large = copy.deepcopy(value)
+        too_large_change = next(
+            change
+            for domain in too_large["status"]["domains"]
+            for change in domain["changes"]
+            if change["field"] == "mods.order"
+        )
+        too_large_change["currentValue"] = [
+            f"evidence-{index}" for index in range(10)
+        ]
+        with self.assertRaises(SkyrimWorkflowFormatError):
+            status_result_from_dict(too_large)
         self.assertIn("Drifted", text.splitlines()[0])
         self.assertIn(
             "Nothing was written, launched, installed, repaired, restored, or promoted.",
