@@ -5,6 +5,11 @@ import locale
 from pathlib import Path
 from pathlib import PurePosixPath, PureWindowsPath
 
+from modlab.adapters.skyrim.primary_plugins import (
+    SkyrimPrimaryPluginError,
+    validate_skyrim_plugin_name,
+)
+
 from .ini import Mo2IniError, parse_ini_bytes, parse_qsettings_bool
 from .model import (
     Mo2ModEntry,
@@ -31,7 +36,6 @@ _FIXED_STATE_FILES = (
     "SkyrimCustom.ini",
     "SkyrimPrefs.ini",
 )
-_PLUGIN_EXTENSIONS = {".esm", ".esl", ".esp"}
 
 
 def parse_modlist_bytes(data: bytes) -> tuple[Mo2ModEntry, ...]:
@@ -191,10 +195,10 @@ def _content_lines(
 
 
 def _safe_plugin_name(value: str, label: str) -> str:
-    result = _safe_name(value, label)
-    if PureWindowsPath(result).suffix.casefold() not in _PLUGIN_EXTENSIONS:
-        raise Mo2ProfileError(f"{label} must name an ESM, ESL, or ESP")
-    return result
+    try:
+        return validate_skyrim_plugin_name(value, label=label)
+    except SkyrimPrimaryPluginError as error:
+        raise Mo2ProfileError(str(error)) from error
 
 
 def _safe_name(value: str, label: str) -> str:

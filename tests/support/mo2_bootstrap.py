@@ -363,19 +363,19 @@ def make_plan_fixture(**overrides: object) -> BootstrapPlan:
                 ),
                 OptionalFileIdentity(
                     path=(
-                        r"C:\Users\red\Documents\My Games\Skyrim Special Edition\SkyrimCustom.ini"
-                    ),
-                    present=False,
-                    sha256=None,
-                    size=None,
-                ),
-                OptionalFileIdentity(
-                    path=(
                         r"C:\Users\red\Documents\My Games\Skyrim Special Edition\SkyrimPrefs.ini"
                     ),
                     present=True,
                     sha256="b" * 64,
                     size=91,
+                ),
+                OptionalFileIdentity(
+                    path=(
+                        r"C:\Users\red\Documents\My Games\Skyrim Special Edition\SkyrimCustom.ini"
+                    ),
+                    present=False,
+                    sha256=None,
+                    size=None,
                 ),
             ),
         ),

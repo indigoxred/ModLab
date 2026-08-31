@@ -12,6 +12,10 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 from modlab.recipes.model import CheckState
+from modlab.adapters.skyrim.primary_plugins import (
+    SkyrimPrimaryPluginError,
+    validate_skyrim_plugin_name,
+)
 
 from .bootstrap_model import (
     ArchiveEvidence,
@@ -156,8 +160,8 @@ _JOB_ID = re.compile(r"^bootstrap-job:([0-9a-f]{32})$")
 _ARTIFACT_ID = re.compile(r"^archive-sha256:([0-9a-f]{64})$")
 _CHECKPOINT_ID = re.compile(r"^checkpoint-sha256:[0-9a-f]{64}$")
 _SAFE_CODE = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
-_PLUGIN_NAME = re.compile(r"^[^\\/:*?\"<>|\x00-\x1f]+\.(?:esm|esl|esp)$", re.IGNORECASE)
 _TEMPLATE_TOKEN = re.compile(r"\{([^{}]+)\}")
+_PROFILE_INI_NAMES = ("Skyrim.ini", "SkyrimPrefs.ini", "SkyrimCustom.ini")
 _ALLOWED_TEMPLATE_TOKENS = {"planId", "jobId", "receiptId"}
 _BASELINE_STATUSES = {"Matched", "NoBaseline", "Drifted", "Blocked"}
 _TARGET_KINDS = {"Empty", "Existing", "Blocked"}
@@ -779,6 +783,9 @@ def _profile_seed_to_dict(value: ProfileSeedEvidence) -> dict[str, object]:
 
 def _profile_seed_from_dict(value: object) -> ProfileSeedEvidence:
     data = _exact_mapping(value, _PROFILE_SEED_FIELDS, "profileSeed")
+    documents_root = _absolute_path(
+        data["documentsRoot"], "profileSeed.documentsRoot"
+    )
     plugins_value = data["primaryPlugins"]
     if not isinstance(plugins_value, list) or not plugins_value:
         raise BootstrapFormatError("profileSeed.primaryPlugins must be a non-empty array")
@@ -796,11 +803,24 @@ def _profile_seed_from_dict(value: object) -> ProfileSeedEvidence:
         _optional_file_from_dict(item, f"profileSeed.iniSources[{index}]")
         for index, item in enumerate(ini_value)
     )
-    _require_sorted_unique(
-        tuple(item.path for item in ini_sources), "profileSeed.iniSources"
+    expected_ini_paths = tuple(
+        str(
+            PureWindowsPath(
+                documents_root,
+                "My Games",
+                "Skyrim Special Edition",
+                name,
+            )
+        )
+        for name in _PROFILE_INI_NAMES
     )
+    if tuple(item.path for item in ini_sources) != expected_ini_paths:
+        raise BootstrapFormatError(
+            "profileSeed.iniSources must contain the exact Skyrim INI paths "
+            "in semantic order"
+        )
     return ProfileSeedEvidence(
-        documents_root=_absolute_path(data["documentsRoot"], "profileSeed.documentsRoot"),
+        documents_root=documents_root,
         primary_plugins=plugins,
         skyrim_ccc=_optional_file_from_dict(data["skyrimCcc"], "profileSeed.skyrimCcc"),
         ini_sources=ini_sources,
@@ -1063,9 +1083,10 @@ def _reject_save_parts(parts: tuple[str, ...], suffix: str, label: str) -> None:
 
 def _plugin_name(value: object, label: str) -> str:
     text = _text(value, label)
-    if _PLUGIN_NAME.fullmatch(text) is None or text in {".", ".."}:
-        raise BootstrapFormatError(f"{label} must name one safe ESM, ESL, or ESP")
-    return text
+    try:
+        return validate_skyrim_plugin_name(text, label=label)
+    except SkyrimPrimaryPluginError as error:
+        raise BootstrapFormatError(str(error)) from error
 
 
 def _text_array(value: object, label: str) -> tuple[str, ...]:

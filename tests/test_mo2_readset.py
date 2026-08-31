@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 
 from modlab.adapters.mo2.readset import Mo2ReadSet
@@ -43,6 +44,43 @@ class Mo2ReadSetTests(unittest.TestCase):
             self.assertIn(str(state), result.changed_paths)
             self.assertIn(str(root / "optional.txt"), result.changed_paths)
             self.assertIn(str(root), result.changed_paths)
+
+    def test_regular_file_metadata_observation_tracks_presence_without_payload_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            required = root / "required.esm"
+            required.write_bytes(b"payload")
+            read_set = Mo2ReadSet()
+
+            observed = read_set.required_regular_file(required)
+            optional = read_set.optional_regular_file(root / "optional.esl")
+
+            self.assertTrue(observed.present)
+            self.assertEqual(7, observed.size)
+            self.assertFalse(optional.present)
+            self.assertTrue(read_set.verify().stable)
+
+    def test_regular_file_metadata_verification_detects_change_and_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            required = root / "required.esm"
+            optional = root / "optional.esl"
+            required.write_bytes(b"payload")
+            read_set = Mo2ReadSet()
+            first = read_set.required_regular_file(required)
+            read_set.optional_regular_file(optional)
+
+            required.write_bytes(b"changed")
+            os.utime(
+                required,
+                ns=(first.modified_ns + 2_000_000_000,) * 2,
+            )
+            optional.write_bytes(b"new")
+            result = read_set.verify()
+
+            self.assertFalse(result.stable)
+            self.assertIn(str(required), result.changed_paths)
+            self.assertIn(str(optional), result.changed_paths)
 
 
 if __name__ == "__main__":

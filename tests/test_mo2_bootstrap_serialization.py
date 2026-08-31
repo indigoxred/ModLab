@@ -75,6 +75,26 @@ class BootstrapSerializationTests(unittest.TestCase):
                 self.assertEqual(data, data.decode("utf-8").encode("utf-8"))
                 self.assert_canonical_key_order(json.loads(data))
 
+    def test_plan_rejects_unsafe_plugin_name_and_nonsemantic_ini_order(self):
+        plan = make_plan_fixture()
+        unsafe_seed = replace(
+            plan.profile_seed,
+            primary_plugins=plan.profile_seed.primary_plugins + ("CON.esm",),
+        )
+        wrong_order_seed = replace(
+            plan.profile_seed,
+            ini_sources=(
+                plan.profile_seed.ini_sources[0],
+                plan.profile_seed.ini_sources[2],
+                plan.profile_seed.ini_sources[1],
+            ),
+        )
+
+        for seed in (unsafe_seed, wrong_order_seed):
+            with self.subTest(seed=seed):
+                with self.assertRaises(BootstrapFormatError):
+                    plan_id_for(replace(plan, profile_seed=seed))
+
 
 if __name__ == "__main__":
     unittest.main()

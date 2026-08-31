@@ -23,6 +23,14 @@ CORE_PRIMARY_PLUGINS = (
 )
 
 _PLUGIN_EXTENSIONS = {".esm", ".esl", ".esp"}
+_RESERVED_WINDOWS_NAMES = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{number}" for number in range(1, 10)),
+    *(f"lpt{number}" for number in range(1, 10)),
+}
 
 
 @dataclass(frozen=True)
@@ -90,25 +98,34 @@ def _parse_ccc(data: bytes) -> tuple[str, ...]:
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        plugins.append(_safe_plugin_name(line, number))
+        plugins.append(
+            validate_skyrim_plugin_name(
+                line, label=f"Skyrim.ccc line {number}"
+            )
+        )
     normalized = tuple(item.casefold() for item in plugins)
     if len(normalized) != len(set(normalized)):
         raise SkyrimPrimaryPluginError("Skyrim.ccc contains a duplicate plug-in")
     return tuple(plugins)
 
 
-def _safe_plugin_name(value: str, line_number: int) -> str:
+def validate_skyrim_plugin_name(value: str, *, label: str = "plug-in") -> str:
     if (
-        not value
+        type(value) is not str
+        or not value
         or value != value.strip()
         or value in {".", ".."}
-        or any(character in value for character in "/\\")
-        or any(ord(character) < 32 for character in value)
+        or value.endswith((" ", "."))
+        or any(
+            ord(character) < 32 or character in '<>:"/\\|?*'
+            for character in value
+        )
         or value.casefold() == "saves"
         or PureWindowsPath(value).suffix.casefold() not in _PLUGIN_EXTENSIONS
+        or value.split(".", 1)[0].casefold() in _RESERVED_WINDOWS_NAMES
     ):
         raise SkyrimPrimaryPluginError(
-            f"Skyrim.ccc line {line_number} must name one safe ESM, ESL, or ESP"
+            f"{label} must name one safe ESM, ESL, or ESP"
         )
     return value
 
@@ -117,7 +134,7 @@ def _require_plugin_file(
     data_root: Path, name: str, observer: Mo2ReadSet
 ) -> None:
     try:
-        observer.read_bytes(data_root / name)
+        observer.required_regular_file(data_root / name)
     except OSError as error:
         raise SkyrimPrimaryPluginError(
             f"required primary plug-in is missing or unsafe: {name}"
@@ -128,7 +145,7 @@ def _observe_optional_plugin_file(
     data_root: Path, name: str, observer: Mo2ReadSet
 ) -> bool:
     try:
-        return observer.optional_bytes(data_root / name) is not None
+        return observer.optional_regular_file(data_root / name).present
     except OSError as error:
         raise SkyrimPrimaryPluginError(
             f"listed primary plug-in is present but unsafe: {name}"

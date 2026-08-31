@@ -2,6 +2,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from modlab.adapters.mo2.readset import Mo2ReadSet
 from modlab.adapters.skyrim.primary_plugins import (
@@ -74,6 +75,50 @@ class SkyrimPrimaryPluginTests(unittest.TestCase):
             self.assertEqual(
                 CORE_PRIMARY_PLUGINS
                 + ("ccBGSSSE001-Fish.esm", "_ResourcePack.esl"),
+                evidence.plugins,
+            )
+
+    def test_unsafe_windows_catalogue_names_block_even_when_absent(self):
+        unsafe = (
+            "base.esm:stream.esl",
+            "bad?.esl",
+            "CON.esm",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index, name in enumerate(unsafe):
+                with self.subTest(name=name):
+                    fixture = make_primary_policy_fixture(
+                        Path(directory, str(index), "Skyrim Special Edition"),
+                        ccc_plugins=(name,),
+                        missing_data_files=(name,),
+                    )
+                    with self.assertRaisesRegex(
+                        SkyrimPrimaryPluginError, "safe ESM, ESL, or ESP"
+                    ):
+                        observe_skyrim_primary_plugins(
+                            fixture.game_root, read_set=Mo2ReadSet()
+                        )
+
+    def test_primary_observation_never_reads_data_plugin_payload_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = make_primary_policy_fixture(
+                Path(directory, "Skyrim Special Edition"),
+                ccc_plugins=("ccBGSSSE001-Fish.esm",),
+            )
+            original = Path.read_bytes
+
+            def guarded_read(path):
+                if path.parent.name.casefold() == "data":
+                    self.fail(f"Data plug-in payload was read: {path.name}")
+                return original(path)
+
+            with patch.object(Path, "read_bytes", guarded_read):
+                evidence = observe_skyrim_primary_plugins(
+                    fixture.game_root, read_set=Mo2ReadSet()
+                )
+
+            self.assertEqual(
+                CORE_PRIMARY_PLUGINS + ("ccBGSSSE001-Fish.esm",),
                 evidence.plugins,
             )
 

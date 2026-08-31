@@ -14,6 +14,7 @@ from modlab.adapters.mo2.bootstrap_config import (
     render_profile_files,
     write_staged_configuration,
 )
+from modlab.adapters.mo2.bootstrap_serialization import plan_from_bytes, plan_to_bytes
 from modlab.adapters.mo2.ini import decode_qsettings_path, parse_ini_bytes
 from modlab.adapters.mo2.readset import Mo2ReadSet
 from modlab.adapters.mo2.release import bundled_mo2_252_path, load_mo2_release
@@ -22,6 +23,7 @@ from modlab.adapters.mo2.scanner import inspect_skyrim_mo2
 from modlab.workspace import initialize_workspace, workspace_layout
 from tests.support.mo2_bootstrap import (
     files_for_profile,
+    make_plan_fixture,
     make_primary_policy_fixture,
 )
 
@@ -127,6 +129,18 @@ class Mo2BootstrapConfigTests(unittest.TestCase):
             ("Skyrim.ini", "SkyrimPrefs.ini", "SkyrimCustom.ini"),
             tuple(Path(item.path).name for item in seed.ini_sources),
         )
+
+    def test_observed_seed_round_trips_through_strict_bootstrap_plan(self):
+        seed = observe_profile_seed(
+            self.game_root,
+            self.documents_root,
+            read_set=Mo2ReadSet(),
+        )
+
+        plan = make_plan_fixture(profile_seed=seed)
+        restored = plan_from_bytes(plan_to_bytes(plan))
+
+        self.assertEqual(seed, restored.profile_seed)
 
     def test_nonregular_ini_and_source_drift_block(self):
         (self.game_ini_root / "SkyrimCustom.ini").mkdir()

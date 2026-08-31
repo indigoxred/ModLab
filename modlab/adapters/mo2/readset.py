@@ -22,6 +22,16 @@ class Mo2ReadSetVerification:
     changed_paths: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class Mo2RegularFileMetadata:
+    present: bool
+    size: int | None
+    modified_ns: int | None
+    changed_ns: int | None
+    device: int | None
+    inode: int | None
+
+
 _UNREADABLE = object()
 
 
@@ -30,6 +40,7 @@ class Mo2ReadSet:
 
     def __init__(self) -> None:
         self._files: dict[Path, bytes | None] = {}
+        self._regular_files: dict[Path, Mo2RegularFileMetadata] = {}
         self._directories: dict[Path, tuple[Mo2DirectoryEntry, ...]] = {}
 
     def read_bytes(self, path: Path) -> bytes:
@@ -49,6 +60,20 @@ class Mo2ReadSet:
             self._files[observed] = self._capture_optional_file(observed)
         return self._files[observed]
 
+    def required_regular_file(self, path: Path) -> Mo2RegularFileMetadata:
+        observed = self.optional_regular_file(path)
+        if not observed.present:
+            raise FileNotFoundError(path)
+        return observed
+
+    def optional_regular_file(self, path: Path) -> Mo2RegularFileMetadata:
+        observed = Path(path)
+        if observed not in self._regular_files:
+            self._regular_files[observed] = self._capture_optional_regular_file(
+                observed
+            )
+        return self._regular_files[observed]
+
     def list_directory(self, path: Path) -> tuple[Mo2DirectoryEntry, ...]:
         observed = Path(path)
         if observed not in self._directories:
@@ -60,6 +85,13 @@ class Mo2ReadSet:
         for path, first in self._files.items():
             try:
                 second = self._capture_optional_file(path)
+            except OSError:
+                second = _UNREADABLE
+            if second != first:
+                changed.append(str(path))
+        for path, first in self._regular_files.items():
+            try:
+                second = self._capture_optional_regular_file(path)
             except OSError:
                 second = _UNREADABLE
             if second != first:
@@ -94,6 +126,23 @@ class Mo2ReadSet:
         if _is_redirected(path) or not stat.S_ISREG(status.st_mode):
             raise OSError(f"observed file is not a regular, direct file: {path}")
         return path.read_bytes()
+
+    @staticmethod
+    def _capture_optional_regular_file(path: Path) -> Mo2RegularFileMetadata:
+        try:
+            status = path.lstat()
+        except FileNotFoundError:
+            return Mo2RegularFileMetadata(False, None, None, None, None, None)
+        if _is_redirected(path, status) or not stat.S_ISREG(status.st_mode):
+            raise OSError(f"observed file is not a regular, direct file: {path}")
+        return Mo2RegularFileMetadata(
+            present=True,
+            size=status.st_size,
+            modified_ns=status.st_mtime_ns,
+            changed_ns=status.st_ctime_ns,
+            device=status.st_dev,
+            inode=status.st_ino,
+        )
 
     @staticmethod
     def _capture_directory(path: Path) -> tuple[Mo2DirectoryEntry, ...]:
@@ -135,6 +184,20 @@ class Mo2ReadSet:
                     "size": None if data is None else len(data),
                 }
             )
+        regular_files = [
+            {
+                "path": str(path),
+                "present": metadata.present,
+                "size": metadata.size,
+                "modifiedNs": metadata.modified_ns,
+                "changedNs": metadata.changed_ns,
+                "device": metadata.device,
+                "inode": metadata.inode,
+            }
+            for path, metadata in sorted(
+                self._regular_files.items(), key=lambda item: str(item[0]).casefold()
+            )
+        ]
         directories = [
             {
                 "path": str(path),
@@ -147,15 +210,20 @@ class Mo2ReadSet:
             )
         ]
         return json.dumps(
-            {"files": files, "directories": directories},
+            {
+                "files": files,
+                "regularFiles": regular_files,
+                "directories": directories,
+            },
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
 
 
-def _is_redirected(path: Path) -> bool:
-    attributes = getattr(path.lstat(), "st_file_attributes", 0)
+def _is_redirected(path: Path, status=None) -> bool:
+    metadata = path.lstat() if status is None else status
+    attributes = getattr(metadata, "st_file_attributes", 0)
     return path.is_symlink() or bool(
         attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
     )
