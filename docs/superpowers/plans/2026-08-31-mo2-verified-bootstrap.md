@@ -1080,7 +1080,7 @@ git commit -m "feat: adopt verified MO2 package"
 - Consumes: stored Create plan, package stage, seed bytes, fixed target.
 - Produces: Create branch of `apply_mo2_setup` with `Created` receipt and verified Ready projection.
 
-- [ ] **Step 1: Write failing Create success test**
+- [x] **Step 1: Write failing Create success test**
 
 ```python
 def test_create_activates_exact_contained_ready_instance(self):
@@ -1110,7 +1110,7 @@ def test_create_activates_exact_contained_ready_instance(self):
     self.assertEqual(lab_files, play_files)
 ```
 
-- [ ] **Step 2: Implement staged instance assembly**
+- [x] **Step 2: Implement staged instance assembly**
 
 After common revalidation and empty-target proof:
 
@@ -1124,26 +1124,26 @@ After common revalidation and empty-target proof:
 
 Do not call `initialize_workspace` after stage construction because it could create paths in the final target.
 
-- [ ] **Step 3: Implement durable activation**
+- [x] **Step 3: Implement durable activation**
 
 Transition the journal to `Applying` before the first rename. If the target skeleton exists, rename it to the journal's exact prior root beneath its job directory; if absent, record absent and do not invent it. Re-verify stage/target/prior identities, then `os.replace(stage, final_root)` and transition `Activated`.
 
 Run `inspect_skyrim_mo2` and `project_mo2_state` from the final root. Require Ready, exact release executable, contained paths, both profiles, local saves false, identical planned initial profile bytes, empty mods, and empty Overwrite.
 
-- [ ] **Step 4: Write Created receipt and finalize**
+- [x] **Step 4: Write Created receipt and finalize**
 
 Write/reload `BootstrapReceipt(mode=CREATED)`, transition `Verified`, and retain the exact prior absent/empty state until the job proves verified. Clean a preserved empty skeleton only by enumerating and removing known empty directories bottom-up; never use a recursive generic delete.
 
-- [ ] **Step 5: Add creation refusal and interruption tests**
+- [x] **Step 5: Add creation refusal and interruption tests**
 
 Cover target changed after plan, target nonempty, stage collision, insufficient disk, extraction failure, generated config collision, profile source drift, failure preserving prior, failure activating stage, post-activation scanner Blocked, receipt failure, journal failure, and final verification byte drift. Assert Steam/game/Documents bytes never change and every pre-activation failure leaves the target exact prior state.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run: `& 'C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m unittest tests.test_mo2_bootstrap_create -v`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add modlab/workflows/skyrim/mo2_bootstrap.py tests/test_mo2_bootstrap_create.py

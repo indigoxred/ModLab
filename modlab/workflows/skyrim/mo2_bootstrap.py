@@ -30,6 +30,9 @@ from modlab.adapters.mo2.bootstrap_config import (
     Mo2BootstrapConfigError,
     classify_mo2_target,
     observe_profile_seed,
+    render_modorganizer_ini,
+    render_profile_files,
+    write_staged_configuration,
 )
 from modlab.adapters.mo2.bootstrap_model import (
     ArchiveEvidence,
@@ -59,6 +62,7 @@ from modlab.adapters.mo2.processes import (
     inspect_mo2_processes,
     windows_documents_root,
 )
+from modlab.adapters.mo2.ini import Mo2IniError, parse_ini_bytes
 from modlab.adapters.mo2.projection import Mo2Projection, Mo2Readiness, project_mo2_state
 from modlab.adapters.mo2.release import (
     LoadedMo2Release,
@@ -548,11 +552,8 @@ def apply_mo2_setup(
         raise Mo2BootstrapRefusal(
             "plan-invalid", "Blocked bootstrap plans cannot be applied"
         )
-    if plan.disposition is BootstrapDisposition.CREATE:
-        raise Mo2BootstrapRefusal(
-            "plan-invalid", "Create apply is not available until Task 9"
-        )
     if plan.disposition not in {
+        BootstrapDisposition.CREATE,
         BootstrapDisposition.ADOPT,
         BootstrapDisposition.ALREADY_MANAGED,
     }:
@@ -576,6 +577,23 @@ def apply_mo2_setup(
     _require_stopped_processes(collected.plan.processes)
     latest_processes = _observe_processes(process_inspector, layout.skyrim_mo2, {})
     _require_stopped_processes(latest_processes)
+
+    if plan.disposition is BootstrapDisposition.CREATE:
+        if collected.plan.disposition is not BootstrapDisposition.CREATE:
+            raise Mo2BootstrapRefusal(
+                "target-changed",
+                "the current target no longer qualifies for safe creation",
+            )
+        return _apply_create_plan(
+            plan=plan,
+            collected=collected,
+            store=store,
+            process_inspector=process_inspector,
+            command_runner=command_runner,
+            free_space_reader=free_space_reader,
+            clock=clock,
+            version_reader=version_reader,
+        )
 
     if collected.compatible_receipt is not None:
         return SetupApplyResult(
@@ -702,6 +720,758 @@ def _require_stopped_processes(observation: ProcessObservation) -> None:
         )
 
 
+def _require_extraction_inputs_current(collected: _CollectedSetup) -> None:
+    repeated_release = _load_release(collected.release.path)
+    if repeated_release != collected.release:
+        raise Mo2BootstrapRefusal(
+            "release-modified", "release descriptor changed at extraction boundary"
+        )
+    repeated_artifact = _observe_artifact(
+        collected.layout,
+        collected.artifact.record.artifact_id,
+    )
+    if repeated_artifact != collected.artifact:
+        raise Mo2BootstrapRefusal(
+            "artifact-modified", "retained archive changed at extraction boundary"
+        )
+    try:
+        sha256, size = _stable_direct_file_hash(
+            Path(collected.plan.extractor.executable.path),
+            "system bsdtar",
+        )
+    except OSError as error:
+        raise Mo2BootstrapRefusal(
+            "extractor-changed", f"system bsdtar changed at extraction boundary: {error}"
+        ) from error
+    if (
+        sha256 != collected.plan.extractor.executable.sha256
+        or size != collected.plan.extractor.executable.size
+    ):
+        raise Mo2BootstrapRefusal(
+            "extractor-changed", "system bsdtar changed at extraction boundary"
+        )
+
+
+def _apply_create_plan(
+    *,
+    plan: BootstrapPlan,
+    collected: _CollectedSetup,
+    store: Mo2BootstrapStore,
+    process_inspector: Callable[[Path], ProcessObservation],
+    command_runner: CommandRunner | None,
+    free_space_reader: Callable[[Path], int],
+    clock: Callable[[], datetime],
+    version_reader: Callable[[Path], str | None],
+) -> SetupApplyResult:
+    runner = command_runner or SubprocessCommandRunner()
+    try:
+        job = store.create_job(plan)
+    except (Mo2BootstrapStoreError, OSError) as error:
+        raise Mo2BootstrapRefusal(
+            "journal-invalid", f"bootstrap creation job could not be created: {error}"
+        ) from error
+
+    journal_path = job.path.relative_to(collected.layout.root).as_posix()
+    package: PackageInventory | None = None
+    stage_snapshot: _ManagerSnapshot | None = None
+    stage_identity: _EntryIdentity | None = None
+    prior_snapshot: _ManagerSnapshot | None = None
+    prior_identity: _EntryIdentity | None = None
+    prior_present = False
+    prior_moved = False
+    activated = False
+    manager_ancestry: tuple[tuple[Path, _EntryIdentity], ...] | None = None
+    prior_parent_ancestry: tuple[tuple[Path, _EntryIdentity], ...] | None = None
+    try:
+        manager_ancestry = _capture_cleanup_ancestry(
+            collected.layout.skyrim_mo2.parent
+        )
+        prior_parent_ancestry = _capture_cleanup_ancestry(
+            Path(job.journal.prior_root).parent
+        )
+        _require_stopped_processes(
+            _observe_processes(process_inspector, collected.layout.skyrim_mo2, {})
+        )
+        job = _transition_create_job(
+            store,
+            job,
+            BootstrapJobState.PLANNED,
+            BootstrapJobState.STAGING,
+            clock,
+        )
+        _require_extraction_inputs_current(collected)
+        stage_root = Path(job.journal.stage_root)
+        try:
+            stage_root.mkdir()
+        except OSError as error:
+            raise Mo2ArchiveError(
+                f"cannot create exact bootstrap staging root: {error}"
+            ) from error
+        stage_identity = _direct_directory_identity(stage_root, "staging root")
+        package = extract_and_inventory(
+            collected.artifact.payload_path,
+            collected.release.descriptor,
+            Path(collected.plan.extractor.executable.path),
+            stage_root / "app",
+            runner=runner,
+            free_space_reader=free_space_reader,
+        )
+        _require_extraction_inputs_current(collected)
+        _create_staged_empty_directories(stage_root)
+        manager_ini = render_modorganizer_ini(
+            collected.layout,
+            Path(plan.game_root),
+            collected.release.descriptor,
+        )
+        profile_files = render_profile_files(plan.profile_seed)
+        configuration_inventory = write_staged_configuration(
+            stage_root,
+            manager_ini,
+            profile_files,
+        )
+        stage_snapshot = _validate_staged_create(
+            stage_root=stage_root,
+            package=package,
+            configuration=configuration_inventory,
+            manager_ini=manager_ini,
+            profile_files=profile_files,
+            release=collected.release.descriptor,
+            listing=collected.listing,
+        )
+        if _observe_seed(Path(plan.game_root), Path(plan.profile_seed.documents_root)) != plan.profile_seed:
+            raise Mo2BootstrapRefusal(
+                "profile-seed-changed",
+                "profile seed changed after staged configuration was assembled",
+            )
+        if classify_mo2_target(collected.layout) != plan.target:
+            raise Mo2BootstrapRefusal(
+                "target-changed", "MO2 target changed before staged activation"
+            )
+        _require_stopped_processes(
+            _observe_processes(process_inspector, collected.layout.skyrim_mo2, {})
+        )
+        job = _transition_create_job(
+            store,
+            job,
+            BootstrapJobState.STAGING,
+            BootstrapJobState.STAGED,
+            clock,
+            stage_inventory_sha256=stage_snapshot.inventory.sha256,
+            stage_entry_count=stage_snapshot.inventory.file_count,
+        )
+
+        final_root = collected.layout.skyrim_mo2
+        prior_root = Path(job.journal.prior_root)
+        prior_metadata = _lstat_if_exists(final_root)
+        prior_present = prior_metadata is not None
+        if prior_present:
+            prior_identity = _direct_directory_identity(final_root, "empty MO2 target")
+            prior_snapshot = _snapshot_manager_tree(final_root)
+        if _lstat_if_exists(prior_root) is not None:
+            raise Mo2BootstrapRefusal(
+                "target-changed", "bootstrap prior path appeared before activation"
+            )
+        if classify_mo2_target(collected.layout) != plan.target:
+            raise Mo2BootstrapRefusal(
+                "target-changed", "MO2 target changed at the activation boundary"
+            )
+        job = _transition_create_job(
+            store,
+            job,
+            BootstrapJobState.STAGED,
+            BootstrapJobState.APPLYING,
+            clock,
+        )
+        _require_stopped_processes(
+            _observe_processes(process_inspector, collected.layout.skyrim_mo2, {})
+        )
+
+        if prior_present:
+            assert prior_snapshot is not None and prior_identity is not None
+            assert manager_ancestry is not None and prior_parent_ancestry is not None
+            _validate_captured_ancestry(manager_ancestry)
+            _validate_captured_ancestry(prior_parent_ancestry)
+            if _lstat_if_exists(prior_root) is not None:
+                raise Mo2BootstrapRefusal(
+                    "target-changed", "bootstrap prior path appeared before preservation"
+                )
+            _require_tree_identity(final_root, prior_identity, prior_snapshot, "empty target")
+            _validate_captured_ancestry(manager_ancestry)
+            _validate_captured_ancestry(prior_parent_ancestry)
+            if _lstat_if_exists(prior_root) is not None:
+                raise Mo2BootstrapRefusal(
+                    "target-changed",
+                    "bootstrap prior path appeared immediately before preservation",
+                )
+            _replace_path(final_root, prior_root)
+            prior_moved = True
+            _validate_captured_ancestry(manager_ancestry)
+            _validate_captured_ancestry(prior_parent_ancestry)
+            if _lstat_if_exists(final_root) is not None:
+                raise Mo2BootstrapRefusal(
+                    "target-changed", "final target remained after prior preservation"
+                )
+            _require_tree_identity(prior_root, prior_identity, prior_snapshot, "preserved target")
+        elif _lstat_if_exists(final_root) is not None:
+            raise Mo2BootstrapRefusal(
+                "target-changed", "absent MO2 target appeared during activation"
+            )
+
+        assert stage_snapshot is not None and stage_identity is not None
+        assert manager_ancestry is not None
+        _validate_captured_ancestry(manager_ancestry)
+        if prior_moved:
+            assert prior_parent_ancestry is not None
+            _validate_captured_ancestry(prior_parent_ancestry)
+            assert prior_snapshot is not None and prior_identity is not None
+            _require_tree_identity(
+                prior_root,
+                prior_identity,
+                prior_snapshot,
+                "preserved target",
+            )
+        _require_tree_identity(stage_root, stage_identity, stage_snapshot, "staged instance")
+        _validate_captured_ancestry(manager_ancestry)
+        if prior_moved:
+            assert prior_parent_ancestry is not None
+            _validate_captured_ancestry(prior_parent_ancestry)
+        if _lstat_if_exists(final_root) is not None:
+            raise Mo2BootstrapRefusal(
+                "target-changed", "final target appeared immediately before activation"
+            )
+        _replace_path(stage_root, final_root)
+        activated = True
+        _validate_captured_ancestry(manager_ancestry)
+        if prior_moved:
+            assert prior_parent_ancestry is not None
+            _validate_captured_ancestry(prior_parent_ancestry)
+        _require_tree_identity(final_root, stage_identity, stage_snapshot, "activated instance")
+        job = _transition_create_job(
+            store,
+            job,
+            BootstrapJobState.APPLYING,
+            BootstrapJobState.ACTIVATED,
+            clock,
+            activated_inventory_sha256=stage_snapshot.inventory.sha256,
+            activated_entry_count=stage_snapshot.inventory.file_count,
+        )
+
+        existing = _verify_created_instance(
+            collected=collected,
+            plan=plan,
+            package=package,
+            stage_snapshot=stage_snapshot,
+            stage_identity=stage_identity,
+            version_reader=version_reader,
+        )
+        receipt = _created_receipt(
+            plan=plan,
+            job=job.journal,
+            collected=collected,
+            existing=existing,
+            package=package,
+            clock=clock,
+        )
+        stored_receipt = store.write_receipt(receipt)
+        _require_stopped_processes(
+            _observe_processes(process_inspector, collected.layout.skyrim_mo2, {})
+        )
+        _require_tree_identity(
+            final_root,
+            stage_identity,
+            stage_snapshot,
+            "activated instance",
+        )
+        job = _transition_create_job(
+            store,
+            job,
+            BootstrapJobState.ACTIVATED,
+            BootstrapJobState.VERIFIED,
+            clock,
+            receipt_id=stored_receipt.receipt.receipt_id,
+        )
+    except Mo2BootstrapRefusal as error:
+        rollback_error = _restore_create_prior(
+            collected.layout.skyrim_mo2,
+            Path(job.journal.prior_root),
+            prior_present=prior_present,
+            prior_moved=prior_moved,
+            activated=activated,
+            prior_identity=prior_identity,
+            prior_snapshot=prior_snapshot,
+            manager_ancestry=manager_ancestry,
+            prior_parent_ancestry=prior_parent_ancestry,
+        )
+        _mark_create_recovery(store, job, error, clock, rollback_error)
+        if rollback_error is not None:
+            raise Mo2BootstrapRefusal(
+                "recovery-required",
+                f"MO2 creation failed and prior restoration also failed: {rollback_error}",
+            ) from error
+        raise
+    except (
+        BootstrapFormatError,
+        Mo2ArchiveError,
+        Mo2BootstrapConfigError,
+        Mo2BootstrapStoreError,
+        Mo2IniError,
+        OSError,
+    ) as error:
+        rollback_error = _restore_create_prior(
+            collected.layout.skyrim_mo2,
+            Path(job.journal.prior_root),
+            prior_present=prior_present,
+            prior_moved=prior_moved,
+            activated=activated,
+            prior_identity=prior_identity,
+            prior_snapshot=prior_snapshot,
+            manager_ancestry=manager_ancestry,
+            prior_parent_ancestry=prior_parent_ancestry,
+        )
+        _mark_create_recovery(store, job, error, clock, rollback_error)
+        detail = f"MO2 creation requires recovery: {error}"
+        if rollback_error is not None:
+            detail += f"; prior restoration failed: {rollback_error}"
+        raise Mo2BootstrapRefusal("recovery-required", detail) from error
+    except Exception as error:
+        rollback_error = _restore_create_prior(
+            collected.layout.skyrim_mo2,
+            Path(job.journal.prior_root),
+            prior_present=prior_present,
+            prior_moved=prior_moved,
+            activated=activated,
+            prior_identity=prior_identity,
+            prior_snapshot=prior_snapshot,
+            manager_ancestry=manager_ancestry,
+            prior_parent_ancestry=prior_parent_ancestry,
+        )
+        _mark_create_recovery(store, job, error, clock, rollback_error)
+        detail = f"MO2 creation failed safely: {error}"
+        if rollback_error is not None:
+            detail += f"; prior restoration failed: {rollback_error}"
+        raise Mo2BootstrapRefusal("recovery-required", detail) from error
+
+    if prior_moved:
+        assert prior_snapshot is not None and prior_identity is not None
+        try:
+            _remove_preserved_empty_prior(
+                Path(job.journal.prior_root),
+                prior_identity,
+                prior_snapshot,
+            )
+        except (Mo2ArchiveError, OSError) as error:
+            raise Mo2BootstrapRefusal(
+                "recovery-required",
+                f"creation verified but preserved empty target was not cleaned: {error}",
+            ) from error
+
+    programs = (
+        *collected.plan.programs_launched,
+        f"{plan.extractor.executable.path} [extract]",
+    )
+    return SetupApplyResult(
+        outcome=BootstrapReceiptMode.CREATED.value,
+        plan_id=plan.plan_id,
+        journal=job.journal,
+        receipt=stored_receipt.receipt,
+        paths_written=tuple(
+            sorted(
+                (
+                    journal_path,
+                    stored_receipt.path.relative_to(
+                        collected.layout.root
+                    ).as_posix(),
+                ),
+                key=str.casefold,
+            )
+        ),
+        downloads=(),
+        installations=("portable-mo2-create",),
+        manager_changes=tuple(
+            f"{collected.layout.skyrim_mo2.relative_to(collected.layout.root).as_posix()}/"
+            f"{item.relative_path}"
+            for item in stage_snapshot.inventory.files
+        ),
+        game_changes=(),
+        programs_launched=programs,
+    )
+
+
+def _transition_create_job(
+    store: Mo2BootstrapStore,
+    observed: StoredBootstrapJournal,
+    expected: BootstrapJobState,
+    target: BootstrapJobState,
+    clock: Callable[[], datetime],
+    **changes: object,
+) -> StoredBootstrapJournal:
+    replacement = replace(
+        observed.journal,
+        state=target,
+        updated_at=_bootstrap_timestamp(clock()),
+        error=None,
+        **changes,
+    )
+    return store.transition_job(observed, expected, replacement)
+
+
+def _create_staged_empty_directories(stage_root: Path) -> None:
+    for name in ("downloads", "mods", "overwrite", "webcache"):
+        target = stage_root / name
+        try:
+            target.mkdir()
+        except OSError as error:
+            raise Mo2BootstrapConfigError(
+                f"could not create exact staged {name} directory: {error}"
+            ) from error
+        _direct_directory_identity(target, f"staged {name} directory")
+
+
+def _validate_staged_create(
+    *,
+    stage_root: Path,
+    package: PackageInventory,
+    configuration: PackageInventory,
+    manager_ini: bytes,
+    profile_files: dict[PurePosixPath, bytes],
+    release: Mo2ReleaseDescriptor,
+    listing: ArchiveListing,
+) -> _ManagerSnapshot:
+    app_inventory = inventory_tree(stage_root / "app")
+    app_comparison = compare_package_to_existing(package, app_inventory, release)
+    if not app_comparison.compatible or app_comparison.allowed_extras != (
+        "ModOrganizer.ini",
+    ):
+        raise Mo2BootstrapConfigError(
+            "staged app does not contain the exact package plus ModOrganizer.ini"
+        )
+    expected_files = tuple(
+        PackageFile(
+            relative_path=f"app/{item.relative_path}",
+            sha256=item.sha256,
+            size=item.size,
+        )
+        for item in package.files
+    ) + configuration.files
+    expected_inventory = _inventory_from_files(expected_files)
+    snapshot = _snapshot_manager_tree(stage_root)
+    if snapshot.inventory != expected_inventory:
+        raise Mo2BootstrapConfigError(
+            "staged instance inventory differs from its exact package and seed"
+        )
+
+    expected_directories = {"app", "downloads", "mods", "overwrite", "profiles", "webcache"}
+    for item in expected_inventory.files:
+        path = PurePosixPath(item.relative_path)
+        for depth in range(1, len(path.parts)):
+            expected_directories.add(PurePosixPath(*path.parts[:depth]).as_posix())
+    for entry in listing.entries:
+        if entry.kind == "directory":
+            path = PurePosixPath("app") / entry.relative_path
+            for depth in range(1, len(path.parts) + 1):
+                expected_directories.add(PurePosixPath(*path.parts[:depth]).as_posix())
+    observed_directories = {
+        entry.relative_path for entry in snapshot.entries if entry.kind == "directory"
+    }
+    if observed_directories != expected_directories:
+        raise Mo2BootstrapConfigError(
+            "staged instance directory set differs from the exact contained layout"
+        )
+    observed_manager_ini = (stage_root / "app" / "ModOrganizer.ini").read_bytes()
+    if observed_manager_ini != manager_ini:
+        raise Mo2BootstrapConfigError("staged ModOrganizer.ini bytes changed")
+    parse_ini_bytes(observed_manager_ini)
+    for relative, data in profile_files.items():
+        observed = stage_root.joinpath(*relative.parts).read_bytes()
+        if observed != data:
+            raise Mo2BootstrapConfigError(
+                f"staged profile file changed: {relative.as_posix()}"
+            )
+        if relative.name == "settings.ini":
+            parse_ini_bytes(observed)
+    return snapshot
+
+
+def _inventory_from_files(files) -> PackageInventory:
+    ordered = tuple(
+        sorted(files, key=lambda item: (item.relative_path.casefold(), item.relative_path))
+    )
+    if len({item.relative_path.casefold() for item in ordered}) != len(ordered):
+        raise Mo2BootstrapConfigError("staged inventory contains a duplicate path")
+    canonical = json.dumps(
+        [[item.relative_path, item.sha256, item.size] for item in ordered],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return PackageInventory(
+        files=ordered,
+        total_size=sum(item.size for item in ordered),
+        sha256=hashlib.sha256(canonical).hexdigest(),
+    )
+
+
+def _direct_directory_identity(path: Path, label: str) -> _EntryIdentity:
+    metadata = _direct_cleanup_metadata(path, label)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise Mo2ArchiveError(f"{label} is not a direct directory: {path}")
+    return _entry_identity(".", "directory", metadata)
+
+
+def _require_tree_identity(
+    root: Path,
+    expected_root: _EntryIdentity,
+    expected_tree: _ManagerSnapshot,
+    label: str,
+) -> None:
+    if _direct_directory_identity(root, label) != expected_root:
+        raise Mo2ArchiveError(f"{label} root identity changed: {root}")
+    if _snapshot_manager_tree(root) != expected_tree:
+        raise Mo2ArchiveError(f"{label} tree changed: {root}")
+
+
+def _verify_created_instance(
+    *,
+    collected: _CollectedSetup,
+    plan: BootstrapPlan,
+    package: PackageInventory,
+    stage_snapshot: _ManagerSnapshot,
+    stage_identity: _EntryIdentity,
+    version_reader: Callable[[Path], str | None],
+) -> _ExistingObservation:
+    _require_tree_identity(
+        collected.layout.skyrim_mo2,
+        stage_identity,
+        stage_snapshot,
+        "activated instance",
+    )
+    findings: dict[str, BootstrapFinding] = {}
+    existing = _observe_existing_manager(
+        collected.layout,
+        Path(plan.game_root),
+        collected.release.descriptor,
+        collected.listing,
+        version_reader,
+        findings,
+    )
+    blocked = tuple(
+        finding for finding in findings.values() if finding.state is CheckState.BLOCKED
+    )
+    if (
+        existing is None
+        or blocked
+        or existing.projection.readiness is not Mo2Readiness.READY
+        or existing.package_inventory != package
+        or existing.extra_entries != ("ModOrganizer.ini",)
+        or existing.projection.adapter_state_sha256 is None
+    ):
+        raise Mo2BootstrapRefusal(
+            "post-activation-not-ready",
+            "activated MO2 does not have complete, exact Ready package evidence",
+        )
+    state = existing.projection.adapter_state
+    if (
+        state.installed_mods
+        or state.overwrite_entries
+        or state.lab.profile_local_saves
+        or state.play.profile_local_saves
+    ):
+        raise Mo2BootstrapRefusal(
+            "post-activation-not-ready",
+            "activated MO2 is not the exact empty Lab/Play starting state",
+        )
+    return existing
+
+
+def _created_receipt(
+    *,
+    plan: BootstrapPlan,
+    job: BootstrapJournal,
+    collected: _CollectedSetup,
+    existing: _ExistingObservation,
+    package: PackageInventory,
+    clock: Callable[[], datetime],
+) -> BootstrapReceipt:
+    projection_hash = existing.projection.adapter_state_sha256
+    if projection_hash is None or existing.extra_entries is None:
+        raise Mo2BootstrapRefusal(
+            "post-activation-not-ready", "created MO2 has incomplete receipt evidence"
+        )
+    receipt_findings = {item.code: item for item in collected.plan.findings}
+    _put_finding(
+        receipt_findings,
+        CheckState.PASSED,
+        "post-activation-not-ready",
+        "The activated contained MO2 instance projects as Ready.",
+    )
+    layout = collected.layout
+    draft = BootstrapReceipt(
+        schema_version=1,
+        receipt_id="bootstrap-receipt-sha256:" + "0" * 64,
+        qualification="VerifiedBootstrap",
+        mode=BootstrapReceiptMode.CREATED,
+        plan_id=plan.plan_id,
+        job_id=job.job_id,
+        release_id=plan.release_id,
+        release_descriptor_sha256=plan.release_descriptor_sha256,
+        archive_artifact_id=plan.archive.artifact_id,
+        archive_metadata_sha256=plan.archive.metadata_sha256,
+        archive_sha256=plan.archive.sha256,
+        archive_size=plan.archive.size,
+        skyrim_executable=plan.skyrim_executable,
+        mo2_executable=existing.executable,
+        final_root=str(layout.skyrim_mo2),
+        downloads_root=str(layout.skyrim_mo2_downloads),
+        mods_root=str(layout.skyrim_mo2_mods),
+        profiles_root=str(layout.skyrim_mo2_profiles),
+        overwrite_root=str(layout.skyrim_mo2_overwrite),
+        webcache_root=str(layout.skyrim_mo2 / "webcache"),
+        package_inventory_sha256=package.sha256,
+        package_file_count=package.file_count,
+        package_size=package.total_size,
+        mutable_package_paths=collected.release.descriptor.mutable_package_paths,
+        extra_entries=existing.extra_entries,
+        profile_state_sha256=projection_hash,
+        extractor=plan.extractor,
+        verified_at=_bootstrap_timestamp(clock()),
+        findings=_sorted_findings(receipt_findings.values()),
+        coverage=plan.coverage,
+        repairable=False,
+        upgrade_supported=False,
+    )
+    return replace(draft, receipt_id=receipt_id_for(draft))
+
+
+def _restore_create_prior(
+    final_root: Path,
+    prior_root: Path,
+    *,
+    prior_present: bool,
+    prior_moved: bool,
+    activated: bool,
+    prior_identity: _EntryIdentity | None,
+    prior_snapshot: _ManagerSnapshot | None,
+    manager_ancestry: tuple[tuple[Path, _EntryIdentity], ...] | None,
+    prior_parent_ancestry: tuple[tuple[Path, _EntryIdentity], ...] | None,
+) -> str | None:
+    if activated or not prior_moved:
+        return None
+    try:
+        if _lstat_if_exists(final_root) is not None:
+            raise Mo2ArchiveError(
+                "final target appeared before preserved prior could be restored"
+            )
+        if (
+            not prior_present
+            or prior_identity is None
+            or prior_snapshot is None
+            or manager_ancestry is None
+            or prior_parent_ancestry is None
+        ):
+            raise Mo2ArchiveError("preserved prior evidence is incomplete")
+        _validate_captured_ancestry(manager_ancestry)
+        _validate_captured_ancestry(prior_parent_ancestry)
+        if _lstat_if_exists(final_root) is not None:
+            raise Mo2ArchiveError(
+                "final target appeared before preserved prior could be restored"
+            )
+        _require_tree_identity(
+            prior_root,
+            prior_identity,
+            prior_snapshot,
+            "preserved target",
+        )
+        _validate_captured_ancestry(manager_ancestry)
+        _validate_captured_ancestry(prior_parent_ancestry)
+        if _lstat_if_exists(final_root) is not None:
+            raise Mo2ArchiveError(
+                "final target appeared immediately before preserved prior restoration"
+            )
+        _replace_path(prior_root, final_root)
+        _validate_captured_ancestry(manager_ancestry)
+        _validate_captured_ancestry(prior_parent_ancestry)
+        _require_tree_identity(
+            final_root,
+            prior_identity,
+            prior_snapshot,
+            "restored target",
+        )
+        return None
+    except Exception as error:
+        return str(error) or type(error).__name__
+
+
+def _mark_create_recovery(
+    store: Mo2BootstrapStore,
+    observed: StoredBootstrapJournal,
+    error: Exception,
+    clock: Callable[[], datetime],
+    rollback_error: str | None,
+) -> StoredBootstrapJournal:
+    try:
+        current = store.load_job(observed.journal.job_id)
+        if current.journal.state not in {
+            BootstrapJobState.PLANNED,
+            BootstrapJobState.STAGING,
+            BootstrapJobState.STAGED,
+            BootstrapJobState.APPLYING,
+            BootstrapJobState.ACTIVATED,
+        }:
+            return current
+        try:
+            timestamp = _bootstrap_timestamp(clock())
+        except Exception:
+            timestamp = current.journal.updated_at
+        message = str(error) or type(error).__name__
+        if rollback_error is not None:
+            message += f"; prior restoration failed: {rollback_error}"
+        replacement = replace(
+            current.journal,
+            state=BootstrapJobState.RECOVERY_REQUIRED,
+            updated_at=timestamp,
+            error=message,
+        )
+        return store.transition_job(current, current.journal.state, replacement)
+    except Exception:
+        return observed
+
+
+def _replace_path(source: Path, target: Path) -> None:
+    os.replace(source, target)
+
+
+def _remove_preserved_empty_prior(
+    prior_root: Path,
+    expected_root: _EntryIdentity,
+    expected_tree: _ManagerSnapshot,
+) -> None:
+    _require_tree_identity(prior_root, expected_root, expected_tree, "preserved target")
+    if expected_tree.inventory.file_count or any(
+        entry.kind != "directory" for entry in expected_tree.entries
+    ):
+        raise Mo2ArchiveError("preserved prior is not an exact empty directory tree")
+    ancestry = _capture_cleanup_ancestry(prior_root.parent)
+    entries = {entry.relative_path: entry for entry in expected_tree.entries}
+    directories = sorted(
+        expected_tree.entries,
+        key=lambda entry: (
+            -len(PurePosixPath(entry.relative_path).parts),
+            entry.relative_path.casefold(),
+            entry.relative_path,
+        ),
+    )
+    for entry in directories:
+        _validate_cleanup_entry(
+            prior_root,
+            expected_root,
+            ancestry,
+            entries,
+            entry,
+        )
+        prior_root.joinpath(*PurePosixPath(entry.relative_path).parts).rmdir()
+    _validate_cleanup_root(prior_root, expected_root, ancestry)
+    prior_root.rmdir()
+
+
 def _apply_adopt_plan(
     *,
     plan: BootstrapPlan,
@@ -721,7 +1491,7 @@ def _apply_adopt_plan(
             "journal-invalid", f"bootstrap adoption job could not be created: {error}"
         ) from error
 
-    journal_path = str(job.path)
+    journal_path = job.path.relative_to(collected.layout.root).as_posix()
     stage_inventory: PackageInventory | None = None
     try:
         _require_stopped_processes(
@@ -734,6 +1504,7 @@ def _apply_adopt_plan(
             BootstrapJobState.STAGING,
             clock,
         )
+        _require_extraction_inputs_current(collected)
         stage_root = Path(job.journal.stage_root)
         stage_inventory = extract_and_inventory(
             collected.artifact.payload_path,
@@ -743,6 +1514,7 @@ def _apply_adopt_plan(
             runner=runner,
             free_space_reader=free_space_reader,
         )
+        _require_extraction_inputs_current(collected)
         job = _transition_adopt_job(
             store,
             job,
@@ -860,7 +1632,17 @@ def _apply_adopt_plan(
         plan_id=plan.plan_id,
         journal=job.journal,
         receipt=stored_receipt.receipt,
-        paths_written=(journal_path, str(stored_receipt.path)),
+        paths_written=tuple(
+            sorted(
+                (
+                    journal_path,
+                    stored_receipt.path.relative_to(
+                        collected.layout.root
+                    ).as_posix(),
+                ),
+                key=str.casefold,
+            )
+        ),
         downloads=(),
         installations=(),
         manager_changes=(),
@@ -1149,9 +1931,7 @@ def _capture_cleanup_ancestry(
     return tuple(result)
 
 
-def _validate_cleanup_root(
-    stage_root: Path,
-    expected_stage: _EntryIdentity,
+def _validate_captured_ancestry(
     ancestry: tuple[tuple[Path, _EntryIdentity], ...],
 ) -> None:
     for path, expected in ancestry:
@@ -1159,6 +1939,14 @@ def _validate_cleanup_root(
         current = _entry_identity(str(path), "directory", metadata)
         if current != expected:
             raise Mo2ArchiveError(f"staging ancestor identity changed: {path}")
+
+
+def _validate_cleanup_root(
+    stage_root: Path,
+    expected_stage: _EntryIdentity,
+    ancestry: tuple[tuple[Path, _EntryIdentity], ...],
+) -> None:
+    _validate_captured_ancestry(ancestry)
     metadata = _direct_cleanup_metadata(stage_root, "staging root")
     if not stat.S_ISDIR(metadata.st_mode):
         raise Mo2ArchiveError("staging root is no longer a directory")

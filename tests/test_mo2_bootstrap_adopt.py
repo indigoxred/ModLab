@@ -90,12 +90,14 @@ class Mo2BootstrapAdoptTests(unittest.TestCase):
         self.assertEqual((), result.game_changes)
         self.assertEqual(
             {
-                str(Mo2BootstrapStore(self.fixture.workspace).journal_path(
-                    result.journal.job_id
-                )),
-                str(Mo2BootstrapStore(self.fixture.workspace).receipt_path(
-                    result.receipt.receipt_id
-                )),
+                Mo2BootstrapStore(self.fixture.workspace)
+                .journal_path(result.journal.job_id)
+                .relative_to(self.fixture.workspace)
+                .as_posix(),
+                Mo2BootstrapStore(self.fixture.workspace)
+                .receipt_path(result.receipt.receipt_id)
+                .relative_to(self.fixture.workspace)
+                .as_posix(),
             },
             set(result.paths_written),
         )
