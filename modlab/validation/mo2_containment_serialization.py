@@ -20,10 +20,10 @@ def scenario_journal_to_bytes(v: ScenarioJournal)->bytes: return _bytes(scenario
 def scenario_journal_from_bytes(v: bytes)->ScenarioJournal: return scenario_journal_from_dict(_decode(v,"scenario journal"))
 def scenario_result_to_bytes(v: ScenarioResult)->bytes: return _bytes(scenario_result_to_dict(v))
 def scenario_result_from_bytes(v: bytes)->ScenarioResult: return scenario_result_from_dict(_decode(v,"scenario result"))
-def capability_decision_to_bytes(v: CapabilityDecision)->bytes: return _bytes(capability_decision_to_dict(v))
-def capability_decision_from_bytes(v: bytes)->CapabilityDecision: return capability_decision_from_dict(_decode(v,"capability decision"))
+def capability_decision_to_bytes(v: CapabilityDecision, scenario_results: tuple[ScenarioResult, ...] | None = None)->bytes: return _bytes(capability_decision_to_dict(v, scenario_results))
+def capability_decision_from_bytes(v: bytes, scenario_results: tuple[ScenarioResult, ...] | None = None)->CapabilityDecision: return capability_decision_from_dict(_decode(v,"capability decision"), scenario_results)
 def scenario_result_id_for(v: ScenarioResult)->str: return "containment-result-sha256:"+hashlib.sha256(scenario_result_to_bytes(v)).hexdigest()
-def capability_decision_id_for(v: CapabilityDecision)->str: return "containment-decision-sha256:"+hashlib.sha256(capability_decision_to_bytes(v)).hexdigest()
+def capability_decision_id_for(v: CapabilityDecision, scenario_results: tuple[ScenarioResult, ...] | None = None)->str: return "containment-decision-sha256:"+hashlib.sha256(capability_decision_to_bytes(v, scenario_results)).hexdigest()
 
 def scenario_journal_to_dict(v): return _journal_dict(scenario_journal_from_dict(_journal_dict(v)))
 def scenario_journal_from_dict(v):
@@ -38,14 +38,25 @@ def scenario_result_from_dict(v):
  d=_map(v,_RESULT,"scenario result")
  r=ScenarioResult(_schema(d["schemaVersion"]),_run(d["runId"]),_enum(ContainmentScenario,d["scenario"],"scenario"),_enum(ScenarioOutcome,d["outcome"],"outcome"),_protected(d["protectedBefore"],"protectedBefore"),_protected(d["protectedAfter"],"protectedAfter"),None if d["mo2Process"] is None else _process(d["mo2Process"],"mo2Process"),_enum(IntegrityObservation,d["sourceIntegrity"],"sourceIntegrity"),_enum(IntegrityObservation,d["stageIntegrity"],"stageIntegrity"),_bool(d["watcherComplete"],"watcherComplete"),_events(d["watcherEvents"]),_nn(d["projectionCount"],"projectionCount"),_bool(d["projectionTargetsVerified"],"projectionTargetsVerified"),_nn(d["projectionPayloadBytesCopied"],"projectionPayloadBytesCopied"),_sorted_rel(d["productionBackupNames"],"productionBackupNames"),_sorted_rel(d["stagingNewNames"],"stagingNewNames"),_sorted_rel(d["stagingOutputNames"],"stagingOutputNames"),None if d["adoptedName"] is None else _rel(d["adoptedName"],"adoptedName"),None if d["adoptedTree"] is None else _tree(d["adoptedTree"],"adoptedTree"),None if d["adoptedIntegrity"] is None else _enum(IntegrityObservation,d["adoptedIntegrity"],"adoptedIntegrity"),_bool(d["sourceRestoredAfterQuarantine"],"sourceRestoredAfterQuarantine"),_sorted_text(d["reasons"],"reasons"))
  _check_result(r); return r
-def capability_decision_to_dict(v): return _decision_dict(capability_decision_from_dict(_decision_dict(v)))
-def capability_decision_from_dict(v):
+def capability_decision_to_dict(v, scenario_results=None): return _decision_dict(capability_decision_from_dict(_decision_dict(v), scenario_results))
+def capability_decision_from_dict(v, scenario_results=None):
  d=_map(v,_DECISION,"capability decision"); ids=_ids(d["scenarioResultIds"]); result=CapabilityDecision(_schema(d["schemaVersion"]),_run(d["runId"]),_fixed(d["mechanism"],_MECHANISM,"mechanism"),_enum(CapabilityVerdict,d["verdict"],"verdict"),ids,_sorted_text(d["reasons"],"reasons"))
  if result.verdict is CapabilityVerdict.SUPPORTED:
   if len(ids)!=4: raise ContainmentFormatError("Supported decision requires four passing scenarios")
   if result.reasons: raise ContainmentFormatError("Supported decision cannot record reasons")
+  _check_supported_results(result, scenario_results)
  elif not result.reasons: raise ContainmentFormatError(f"{result.verdict.value} decision requires reasons")
  return result
+
+def _check_supported_results(decision, scenario_results):
+ if scenario_results is None:
+  raise ContainmentFormatError("Supported decision requires corresponding scenario results")
+ results=tuple(scenario_results)
+ if len(results)!=len(ContainmentScenario): raise ContainmentFormatError("Supported decision requires four corresponding scenario results")
+ if tuple(result.scenario for result in results)!=tuple(ContainmentScenario): raise ContainmentFormatError("Supported decision scenario results must use enum order")
+ if any(result.run_id!=decision.run_id for result in results): raise ContainmentFormatError("Supported decision scenario results must share runId")
+ if any(result.outcome is not ScenarioOutcome.PASSED for result in results): raise ContainmentFormatError("Supported decision requires Passed scenario results")
+ if tuple(scenario_result_id_for(result) for result in results)!=decision.scenario_result_ids: raise ContainmentFormatError("Supported decision scenario result IDs do not match evidence")
 
 def _check_result(r):
  adopt=(r.adopted_name,r.adopted_tree,r.adopted_integrity)
@@ -69,6 +80,9 @@ def _check_result(r):
    if (r.adopted_name,r.staging_new_names,r.staging_output_names)!=(n,new,out): raise ContainmentFormatError(f"Passed {r.scenario.value} result requires exact adopted staging outputs")
    if r.adopted_tree is None or r.adopted_integrity is not IntegrityObservation.MEDIUM: raise ContainmentFormatError(f"Passed {r.scenario.value} result requires Medium adopted tree evidence")
   elif any(x is not None for x in adopt) or r.staging_new_names or r.staging_output_names: raise ContainmentFormatError(f"Passed {r.scenario.value} result cannot record adopted output")
+ elif r.outcome is ScenarioOutcome.FAILED:
+  if not r.reasons: raise ContainmentFormatError("Failed result requires reasons")
+  if not r.watcher_complete or r.mo2_process is None or IntegrityObservation.UNKNOWN in {r.source_integrity,r.stage_integrity} or (r.mo2_process is not None and r.mo2_process.integrity is IntegrityObservation.UNKNOWN): raise ContainmentFormatError("incomplete or unknown evidence must be Incomplete")
  elif r.outcome is ScenarioOutcome.INCOMPLETE and not r.reasons: raise ContainmentFormatError("Incomplete result requires reasons")
 
 def _journal_dict(v): return {"schemaVersion":v.schema_version,"runId":v.run_id,"scenario":v.scenario.value,"state":v.state.value,"sourceRoot":v.source_root,"stageRoot":v.stage_root,"archivePath":v.archive_path,"protectedModName":v.protected_mod_name,"expectedNewModName":v.expected_new_mod_name,"protectedBefore":_protected_dict(v.protected_before),"monitorPid":v.monitor_pid,"mo2Pid":v.mo2_pid,"error":v.error}

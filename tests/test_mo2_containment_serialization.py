@@ -11,6 +11,8 @@ from modlab.validation.mo2_containment_model import (
     ProcessEvidence,
     ProtectedState,
     ScenarioOutcome,
+    ScenarioJournal,
+    ScenarioState,
     ScenarioResult,
     TreeIdentity,
     WatcherEvent,
@@ -18,7 +20,10 @@ from modlab.validation.mo2_containment_model import (
 from modlab.validation.mo2_containment_serialization import (
     ContainmentFormatError,
     capability_decision_from_bytes,
+    capability_decision_id_for,
     capability_decision_to_bytes,
+    scenario_journal_from_bytes,
+    scenario_journal_to_bytes,
     scenario_result_from_bytes,
     scenario_result_id_for,
     scenario_result_to_bytes,
@@ -146,9 +151,9 @@ def invalid_containment_documents():
         scenario_result_ids=identifiers,
         reasons=(),
     )
-    incomplete_document = json.loads(capability_decision_to_bytes(supported))
+    incomplete_document = json.loads(capability_decision_to_bytes(supported, all_results))
     incomplete_document["scenarioResultIds"] = list(identifiers[:-1])
-    wrong_document = json.loads(capability_decision_to_bytes(supported))
+    wrong_document = json.loads(capability_decision_to_bytes(supported, all_results))
     wrong_document["runId"] = "containment-run:fedcba9876543210fedcba9876543210Z"
     malformed.extend((
         (json.dumps(incomplete_document, sort_keys=True, separators=(",", ":")).encode(), "Supported decision requires four passing scenarios"),
@@ -190,8 +195,66 @@ class Mo2ContainmentSerializationTests(unittest.TestCase):
             reasons=(),
         )
 
-        encoded = capability_decision_to_bytes(decision)
-        self.assertEqual(decision, capability_decision_from_bytes(encoded))
+        encoded = capability_decision_to_bytes(decision, results)
+        self.assertEqual(decision, capability_decision_from_bytes(encoded, results))
+        self.assertEqual(
+            f"containment-decision-sha256:{hashlib.sha256(encoded).hexdigest()}",
+            capability_decision_id_for(decision, results),
+        )
+
+    def test_supported_decision_rejects_cross_record_mismatch(self):
+        results = tuple(valid_scenario_result(scenario) for scenario in ContainmentScenario)
+        decision = CapabilityDecision(
+            schema_version=1,
+            run_id=results[0].run_id,
+            mechanism="isolated-low-integrity-junction-projection-v1",
+            verdict=CapabilityVerdict.SUPPORTED,
+            scenario_result_ids=tuple(scenario_result_id_for(item) for item in results),
+            reasons=(),
+        )
+
+        for invalid in (
+            results[::-1],
+            results[:-1] + (replace(results[-1], outcome=ScenarioOutcome.FAILED, reasons=("failed",)),),
+            (replace(results[0], run_id="containment-run:fedcba9876543210fedcba9876543210"),) + results[1:],
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ContainmentFormatError):
+                    capability_decision_to_bytes(decision, invalid)
+
+    def test_failed_or_unknown_evidence_is_not_allowed_to_be_supported(self):
+        value = valid_scenario_result(ContainmentScenario.MERGE_EXISTING)
+        invalid = (
+            replace(value, outcome=ScenarioOutcome.FAILED, watcher_complete=False, reasons=("failure",)),
+            replace(value, outcome=ScenarioOutcome.FAILED, mo2_process=None, reasons=("failure",)),
+            replace(value, outcome=ScenarioOutcome.FAILED, source_integrity=IntegrityObservation.UNKNOWN, reasons=("failure",)),
+            replace(value, outcome=ScenarioOutcome.FAILED, reasons=()),
+        )
+        for result in invalid:
+            with self.subTest(result=result):
+                with self.assertRaises(ContainmentFormatError):
+                    scenario_result_to_bytes(result)
+
+    def test_journal_round_trips_and_rejects_captured_without_mo2_pid(self):
+        value = ScenarioJournal(
+            schema_version=1,
+            run_id="containment-run:0123456789abcdef0123456789abcdef",
+            scenario=ContainmentScenario.MERGE_EXISTING,
+            state=ScenarioState.CAPTURED,
+            source_root=r"C:\Lab\source",
+            stage_root=r"C:\Lab\stage",
+            archive_path=r"C:\Lab\archive.zip",
+            protected_mod_name="Protected Mod",
+            expected_new_mod_name="Expected Mod",
+            protected_before=protected("a"),
+            monitor_pid=11,
+            mo2_pid=12,
+            error=None,
+        )
+
+        self.assertEqual(value, scenario_journal_from_bytes(scenario_journal_to_bytes(value)))
+        with self.assertRaises(ContainmentFormatError):
+            scenario_journal_to_bytes(replace(value, mo2_pid=None))
 
     def test_passing_special_scenarios_require_exact_adopted_outputs(self):
         for scenario in (
