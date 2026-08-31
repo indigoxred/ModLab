@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import stat
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -27,6 +30,74 @@ class RecipeFormatError(ValueError):
             raise ValueError("RecipeFormatError requires at least one issue")
         self.issues = tuple(issues)
         super().__init__("; ".join(self.issues))
+
+
+@dataclass(frozen=True)
+class LoadedRecipeSource:
+    path: Path
+    data: bytes
+    sha256: str
+    recipe: FoundationRecipe
+
+
+@dataclass(frozen=True)
+class LoadedEnvironmentSource:
+    path: Path
+    data: bytes
+    sha256: str
+    environment: EnvironmentEvidence
+
+
+_RECIPE_FIELDS = {
+    "schemaVersion",
+    "recipeId",
+    "revision",
+    "displayName",
+    "maturity",
+    "target",
+    "researchedAt",
+    "components",
+}
+_TARGET_FIELDS = {"game", "edition", "distribution", "engineLane", "adapter"}
+_COMPONENT_REQUIRED_FIELDS = {
+    "componentId",
+    "displayName",
+    "importance",
+    "defaultSelected",
+    "role",
+    "deployment",
+    "requires",
+    "incompatibleWith",
+    "constraints",
+    "rationale",
+    "sources",
+}
+_COMPONENT_OPTIONAL_FIELDS = {"version", "archiveSha256", "installedTreeSha256"}
+_CONSTRAINT_FIELDS = {"dimension", "allowedValues", "reason"}
+_ENVIRONMENT_FIELDS = {"schemaVersion", "environmentId", "dimensions"}
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _without_duplicate_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise RecipeFormatError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _exact_fields(
+    value: Mapping[str, object], expected: set[str], label: str
+) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise RecipeFormatError(
+            f"{label} fields differ: missing={sorted(expected - actual)}, "
+            f"extra={sorted(actual - expected)}"
+        )
 
 
 def _object(value: object, path: str) -> Mapping[str, Any]:
@@ -111,6 +182,7 @@ def _enum(enum_type: type[Any], value: str, path: str) -> Any:
 
 def _parse_constraint(value: object, path: str) -> CompatibilityConstraint:
     data = _object(value, path)
+    _exact_fields(data, _CONSTRAINT_FIELDS, path)
     return CompatibilityConstraint(
         dimension=_text(data, "dimension", path),
         allowed_values=_text_array(
@@ -123,6 +195,10 @@ def _parse_constraint(value: object, path: str) -> CompatibilityConstraint:
 def _parse_component(value: object, index: int) -> RecipeComponent:
     path = f"recipe.components[{index}]"
     data = _object(value, path)
+    expected_fields = _COMPONENT_REQUIRED_FIELDS | (
+        set(data) & _COMPONENT_OPTIONAL_FIELDS
+    )
+    _exact_fields(data, expected_fields, path)
     importance_text = _text(data, "importance", path)
     importance = _enum(
         ComponentImportance, importance_text, f"{path}.importance"
@@ -158,11 +234,13 @@ def _parse_component(value: object, index: int) -> RecipeComponent:
 
 def parse_recipe(value: object) -> FoundationRecipe:
     data = _object(value, "recipe")
+    _exact_fields(data, _RECIPE_FIELDS, "recipe")
     schema_version = _schema_version(data, "recipe")
     maturity_text = _text(data, "maturity", "recipe")
     maturity = _enum(RecipeMaturity, maturity_text, "recipe.maturity")
 
     target_data = _object(data.get("target"), "recipe.target")
+    _exact_fields(target_data, _TARGET_FIELDS, "recipe.target")
     target = RecipeTarget(
         game=_text(target_data, "game", "recipe.target"),
         edition=_text(target_data, "edition", "recipe.target"),
@@ -213,6 +291,7 @@ def parse_recipe(value: object) -> FoundationRecipe:
 
 def parse_environment(value: object) -> EnvironmentEvidence:
     data = _object(value, "environment")
+    _exact_fields(data, _ENVIRONMENT_FIELDS, "environment")
     schema_version = _schema_version(data, "environment")
     dimensions_data = _object(data.get("dimensions"), "environment.dimensions")
     dimensions: dict[str, str] = {}
@@ -233,21 +312,74 @@ def parse_environment(value: object) -> EnvironmentEvidence:
     )
 
 
-def _load_json(path: Path) -> object:
+def _is_redirected(path: Path) -> bool:
     try:
-        with Path(path).open("r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except json.JSONDecodeError as error:
-        raise RecipeFormatError(
-            f"{path} is not valid JSON: line {error.lineno}, column {error.colno}"
-        ) from error
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return path.is_symlink() or bool(
+        getattr(metadata, "st_file_attributes", 0)
+        & _FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _read_source_bytes(path: Path) -> bytes:
+    source_path = Path(path)
+    absolute_path = source_path.absolute()
+    try:
+        metadata = absolute_path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or any(
+            _is_redirected(candidate)
+            for candidate in (absolute_path, *absolute_path.parents)
+        ):
+            raise RecipeFormatError(
+                f"{path} must be a regular non-redirected file"
+            )
+        return absolute_path.read_bytes()
+    except RecipeFormatError:
+        raise
     except OSError as error:
         raise RecipeFormatError(f"Cannot read {path}: {error}") from error
 
 
+def _parse_source_json(path: Path, data: bytes) -> object:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RecipeFormatError(f"{path} is not valid UTF-8: {error}") from error
+    try:
+        return json.loads(text, object_pairs_hook=_without_duplicate_keys)
+    except json.JSONDecodeError as error:
+        raise RecipeFormatError(
+            f"{path} is not valid JSON: line {error.lineno}, column {error.colno}"
+        ) from error
+
+
+def load_recipe_source(path: Path) -> LoadedRecipeSource:
+    source_path = Path(path)
+    data = _read_source_bytes(source_path)
+    return LoadedRecipeSource(
+        path=source_path,
+        data=data,
+        sha256=hashlib.sha256(data).hexdigest(),
+        recipe=parse_recipe(_parse_source_json(source_path, data)),
+    )
+
+
+def load_environment_source(path: Path) -> LoadedEnvironmentSource:
+    source_path = Path(path)
+    data = _read_source_bytes(source_path)
+    return LoadedEnvironmentSource(
+        path=source_path,
+        data=data,
+        sha256=hashlib.sha256(data).hexdigest(),
+        environment=parse_environment(_parse_source_json(source_path, data)),
+    )
+
+
 def load_recipe(path: Path) -> FoundationRecipe:
-    return parse_recipe(_load_json(path))
+    return load_recipe_source(path).recipe
 
 
 def load_environment(path: Path) -> EnvironmentEvidence:
-    return parse_environment(_load_json(path))
+    return load_environment_source(path).environment
