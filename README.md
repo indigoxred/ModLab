@@ -4,7 +4,7 @@ ModLab is a Windows companion for building a hand-picked Bethesda mod setup with
 
 ## Current build
 
-The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, and can register one explicitly selected Skyrim Steam library plus one contained portable MO2 instance. It captures immutable **Observed** Skyrim baselines and reports bounded drift across the game, manager, Lab/Play profiles, shared manager state, recipe intent, target environment, and inspection coverage. It also contains a tested internal Lab-to-Play file transaction engine. Transactions retain prior and desired bytes, refuse drift, structurally exclude saves/co-saves, and can roll back after failure or process interruption. Their immutable file plan and roots have a SHA-256 identity. The public Skyrim workflow does **not** launch MO2 or a game, download mods, extract archives, install files, expose a promotion command, restore files, or change the real game.
+The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, and can register one explicitly selected Skyrim Steam library. It can preview, create, adopt, verify, and recover a contained portable MO2 2.5.2 setup. Create transactionally builds a new contained instance; Adopt verifies a compatible existing instance without writing beneath it. ModLab also captures immutable **Observed** Skyrim baselines and reports bounded drift across the game, manager, Lab/Play profiles, shared manager state, recipe intent, target environment, and inspection coverage. Its tested internal Lab-to-Play transaction engine retains prior and desired bytes, refuses drift, structurally excludes saves/co-saves, and can roll back after failure or process interruption. The public Skyrim workflow does not launch MO2 or a game, download mods, expose Lab-to-Play promotion, or change the real game.
 
 The bundled Skyrim and OpenMW recipes are **Drafts**. Draft means researched, not assembled and smoke-tested as an exact combination.
 
@@ -35,8 +35,13 @@ python -B -m modlab manager compare mo2 --root '.\workspace\tools\mo2\skyrim-se-
 python -B -m modlab skyrim configure --steam-root 'C:\Path\To\Steam' --recipe '.\catalogue\recipes\skyrim-se-ae-current-draft.json' --environment '.\catalogue\environments\skyrim-steam-1.7.104.json' --workspace '.\workspace'
 python -B -m modlab skyrim baseline create --workspace '.\workspace'
 python -B -m modlab skyrim status --workspace '.\workspace'
+python -B -m modlab skyrim mo2 setup --artifact 'archive-sha256:<hash>' --steam-root 'C:\Path\To\Steam' --workspace '.\workspace'
+python -B -m modlab skyrim mo2 setup --apply 'bootstrap-plan-sha256:<hash>' --workspace '.\workspace'
+python -B -m modlab skyrim mo2 recover 'bootstrap-job:<id>' --workspace '.\workspace'
 python -m unittest discover -s tests -v
 ```
+
+MO2 preview returns the immutable plan ID used by `--apply`; interrupted work reports the exact job ID used by `recover`. `--steam-root` is accepted only with `--artifact` and can be omitted after Skyrim is registered. Add `--format json` for machine-readable evidence.
 
 Recipe review options can be repeated:
 
@@ -46,9 +51,9 @@ python -m modlab recipe review RECIPE.json --environment ENVIRONMENT.json --sele
 
 Exit codes are stable:
 
-- `0` — valid input, a successful Skyrim configure/capture/use, a ready review or manager comparison, or a Matched Skyrim status.
-- `2` — invalid file, schema, or component request.
-- `3` — incomplete selection, safe Skyrim workflow refusal, Drifted/NoBaseline/Blocked status, proven compatibility block, or missing/modified retained state.
+- `0` — valid input, a successful Skyrim configure/capture/use, a ready review or manager comparison, a Matched Skyrim status, or successful MO2 preview/apply/recovery.
+- `2` — invalid file, identifier, schema, component request, or unsupported MO2 release.
+- `3` — incomplete selection, safe refusal, Drifted/NoBaseline/Blocked status, RecoveryRequired, proven compatibility block, or missing/modified retained state.
 
 Every review result includes an explicit empty action list or the message `No downloads or installation actions were performed.`
 
@@ -85,7 +90,30 @@ workspace/tools/mo2/skyrim-se-ae/
   overwrite/    generated output awaiting review and routing
 ```
 
+MO2 setup evidence remains easy to find:
+
+```text
+workspace/runtime/jobs/mo2-bootstrap/plans/       immutable previews
+workspace/runtime/jobs/mo2-bootstrap/<job>/        journal and recovery evidence
+workspace/games/skyrim-se-ae/tool-installations/mo2/ verified receipts
+```
+
+Staging or quarantine directories remain confined to the workspace and may be retained when exact-job recovery is required.
+
 Lab and Play isolate selections, plug-in order, and profile INIs; MO2's installed mod directories are shared. A later promotion build must therefore detect shared-content drift and cannot pretend that profile separation makes an in-place mod update safe.
+
+## Verified MO2 setup
+
+MO2 setup has four plain-language preview/apply outcomes:
+
+- **Create** — build and atomically activate a new contained instance only when the target is proven Empty.
+- **Adopt** — deeply compare a compatible existing instance and retain ModLab evidence without writing beneath that manager.
+- **Already managed** — perform an apply-time no-op when the exact current evidence still matches a verified receipt.
+- **Blocked** — refuse to apply because safety cannot be proven; preview may still retain the Blocked plan it reports.
+
+Setup never downloads MO2, closes programs, reads saves/co-saves, edits an existing manager, or launches MO2 or Skyrim. It does run and report the Windows system `tar.exe` version, listing, and—during Create or Adopt—extraction operations. Create writes only the new contained manager and ModLab evidence. Adopt may write ModLab-owned plans, journals, receipts, and temporary staging outside the existing manager.
+
+A receipt links the verified MO2 package subset and declared evidence only. It does not certify user mods, mutable extras, the whole manager, game playability, or machine state. If setup is interrupted or bytes cannot be proven safe, it retains a RecoveryRequired journal. `skyrim mo2 recover` acts only on that exact job and either verifies a proven result, quarantines/restores proven paths, or refuses without guessing; recovery is not promised to succeed when evidence has changed.
 
 ## Archive vault workflow
 
@@ -98,7 +126,7 @@ python -m modlab artifact list --workspace '.\workspace'
 python -m modlab artifact verify 'archive-sha256:<hash>' --workspace '.\workspace'
 ```
 
-Import means retention and byte identity only. It copies the source, never moves it, and performs no extraction, safety claim, compatibility decision, download, MO2 action, FOMOD selection, enablement, or installation. Guided MO2/FOMOD installation belongs to the later Skyrim adapter, where ModLab can show you conflicts and choices before anything is promoted to Play.
+Import means retention and byte identity only. It copies the source, never moves it, and performs no extraction, safety claim, compatibility decision, download, MO2 action, FOMOD selection, enablement, or installation. A later verified MO2 setup apply may extract the specifically curated MO2 package. Guided mod/FOMOD installation through MO2 remains later work, where ModLab can show conflicts and choices before anything is promoted to Play.
 
 ## Checkpoint records
 
@@ -124,7 +152,7 @@ python -m modlab transaction show 'transaction:<id>' --workspace '.\workspace'
 python -m modlab transaction verify 'transaction:<id>' --workspace '.\workspace'
 ```
 
-Prepare, apply, commit, and recover remain internal adapter methods. No current command can promote a Lab, restore files, or point this engine at Steam/MO2. Recovery snapshots remain retained after commit or rollback; any later cleanup feature must be explicit.
+Prepare, apply, commit, and recover for this Lab-to-Play transaction engine remain internal adapter methods. No current command can promote a Lab or point this engine at Steam/MO2. The separate public `skyrim mo2 recover` command handles only verified MO2 bootstrap jobs. Transaction recovery snapshots remain retained after commit or rollback; any later cleanup feature must be explicit.
 
 ## Skyrim Steam discovery
 
@@ -181,8 +209,8 @@ python -B -m modlab skyrim baseline use 'checkpoint-sha256:<hash>' --workspace '
 
 `status` compares game identity, manager identity and path containment, both Lab and Play profiles, shared installed-mod/Overwrite state, recipe intent, target environment, and the fixed coverage boundary. `Matched` means only that these observed facts still match. Status writes nothing; configure, capture, and use write only the exact ModLab paths they report. Saves and co-saves are structurally excluded.
 
-An Observed baseline is not an assembled, tested, promotable, or restorable build. Installed payload contents, asset conflicts, plug-in records, foundation assembly, runtime behavior, and smoke testing remain uninspected. MO2 bootstrap/installation, tool launching, smoke testing, promotion, rollback exposure, and the Morrowind/Oblivion adapters remain later work.
+An Observed baseline is not an assembled, tested, promotable, or restorable build. Installed mod payload contents, asset conflicts, plug-in records, foundation assembly, runtime behavior, and smoke testing remain uninspected. Mod installation, GUI use, tool launching, smoke testing, promotion, repair/upgrades, and the Morrowind/Oblivion adapters remain later work.
 
 ## Build sequence
 
-The proven current slice is explicit Skyrim registration, immutable Observed baseline capture, recovery selection, and read-only drift reporting. The next independent builds are verified MO2 bootstrap/configuration, payload/archive linkage, and contained external-tool execution. Changes to the real MO2 interface will use computer-control testing when that work begins. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.
+The proven current slice is explicit Skyrim registration, immutable Observed baseline capture, recovery selection, read-only drift reporting, verified MO2 2.5.2 package linkage, contained Create, zero-existing-manager-write Adopt, and exact-job recovery. Live computer-control validation is the final proof for this slice. Mod installation, conflict analysis, runtime smoke testing, Lab-to-Play promotion, and repair/upgrades come next. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.

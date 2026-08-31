@@ -1354,7 +1354,7 @@ git commit -m "feat: expose verified MO2 setup"
 - Consumes: complete public CLI, retained real archive, real Skyrim installation, computer-control validation.
 - Produces: automated regression evidence, live adoption receipt, disposable Create proof, concise validation log, README, and pushed commits.
 
-- [ ] **Step 1: Add opt-in real-archive integration test**
+- [x] **Step 1: Add opt-in real-archive integration test**
 
 The test skips unless `MODLAB_MO2_ARCHIVE` points to the retained archive and `MODLAB_STEAM_ROOT` points to Steam. It imports the archive into a temporary workspace, uses real `C:\Windows\System32\tar.exe`, prepares/applies Create, and requires Ready projection.
 
@@ -1378,12 +1378,12 @@ def test_real_archive_creates_ready_disposable_instance(self):
     self.assertEqual(BootstrapReceiptMode.CREATED, applied.receipt.mode)
 ```
 
-- [ ] **Step 2: Run the complete automated suite**
+- [x] **Step 2: Run the complete automated suite**
 
 Run: `& 'C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m unittest discover -s tests -v`
 Expected: all tests PASS; only documented platform/opt-in skips remain.
 
-- [ ] **Step 3: Run the real-archive integration**
+- [x] **Step 3: Run the real-archive integration**
 
 Set:
 
@@ -1395,7 +1395,7 @@ $env:MODLAB_STEAM_ROOT = 'C:\Users\red\Desktop\Steam'
 
 Expected: PASS, with temporary workspace removed by `TemporaryDirectory` and no live ModLab/Steam/Skyrim changes.
 
-- [ ] **Step 4: Document the plain-language workflow**
+- [x] **Step 4: Document the plain-language workflow**
 
 Update README Current Build, Commands, Folder Organization, MO2 section, safety claims, recovery, and Build Sequence. Show:
 
@@ -1407,7 +1407,7 @@ python -B -m modlab skyrim mo2 recover bootstrap-job:<id> --workspace .\workspac
 
 Explain Create vs Adopt vs Already managed vs Blocked in one sentence each. State that setup never downloads MO2, closes programs, edits an existing manager, reads saves, or launches MO2/a game; it does run the recorded Windows system extractor. State that the receipt links only the verified MO2 package subset.
 
-- [ ] **Step 5: Commit code/docs after automated proof**
+- [x] **Step 5: Commit code/docs after automated proof**
 
 ```powershell
 git add tests/test_mo2_bootstrap_windows_integration.py README.md
