@@ -212,10 +212,12 @@ def comparison_result_from_dict(data: object) -> Mo2ComparisonReport:
     if manager["direction"] != "Play-to-Lab":
         raise Mo2ComparisonFormatError("direction must be Play-to-Lab")
 
-    context = _context(manager["observationContext"])
-    capabilities = _capabilities(manager["capabilities"])
+    context = observation_context_from_dict(manager["observationContext"])
+    capabilities = capabilities_from_dict(manager["capabilities"])
     adapter_state = (
-        None if manager["adapterState"] is None else _adapter_state(manager["adapterState"])
+        None
+        if manager["adapterState"] is None
+        else adapter_state_from_dict(manager["adapterState"])
     )
     adapter_hash = _optional_sha256(
         manager["adapterStateSha256"], "adapterStateSha256"
@@ -224,8 +226,8 @@ def comparison_result_from_dict(data: object) -> Mo2ComparisonReport:
         None if manager["differences"] is None else _differences(manager["differences"])
     )
     observations = _observations(manager["observations"])
-    coverage = _coverage(manager["coverage"])
-    findings = _findings(manager["findings"])
+    coverage = coverage_from_dict(manager["coverage"])
+    findings = findings_from_dict(manager["findings"])
 
     if readiness is Mo2Readiness.READY:
         if adapter_state is None or differences is None or adapter_hash is None:
@@ -421,42 +423,15 @@ def comparison_result_to_text(report: Mo2ComparisonReport) -> str:
 
 
 def _manager_to_dict(report: Mo2ComparisonReport) -> dict[str, object]:
-    context = report.observation_context
     return {
         "schemaVersion": report.schema_version,
         "adapterId": report.adapter_id,
         "readiness": report.readiness.value,
         "direction": report.direction,
-        "observationContext": {
-            "mo2Root": context.mo2_root,
-            "gameRoot": context.game_root,
-            "activeProfile": context.active_profile,
-            "executable": (
-                None
-                if context.executable is None
-                else {
-                    "relativePath": context.executable.relative_path,
-                    "fileVersion": context.executable.file_version,
-                    "sha256": context.executable.sha256,
-                    "size": context.executable.size,
-                }
-            ),
-            "configuredPaths": [
-                {
-                    "kind": item.kind,
-                    "configuredPath": item.configured_path,
-                    "resolvedPath": item.resolved_path,
-                    "contained": item.contained,
-                }
-                for item in context.configured_paths
-            ],
-            "readSetSha256": context.read_set_sha256,
-            "readSetStable": context.read_set_stable,
-        },
-        "capabilities": [
-            {"name": item.name, "status": item.status, "detail": item.detail}
-            for item in report.capabilities
-        ],
+        "observationContext": observation_context_to_dict(
+            report.observation_context
+        ),
+        "capabilities": capabilities_to_dict(report.capabilities),
         "adapterState": (
             None
             if report.adapter_state is None
@@ -471,22 +446,92 @@ def _manager_to_dict(report: Mo2ComparisonReport) -> dict[str, object]:
             "installedModFolders": list(report.observations.installed_mod_folders),
             "installedPayloadContent": report.observations.installed_payload_content,
         },
-        "coverage": {
-            "profileState": report.coverage.profile_state,
-            "installedPayloadContent": report.coverage.installed_payload_content,
-            "assetConflicts": report.coverage.asset_conflicts,
-            "pluginRecordConflicts": report.coverage.plugin_record_conflicts,
-            "runtimeValidation": report.coverage.runtime_validation,
-        },
-        "findings": [
-            {
-                "state": item.state.value,
-                "code": item.code,
-                "message": item.message,
-            }
-            for item in report.findings
-        ],
+        "coverage": coverage_to_dict(report.coverage),
+        "findings": findings_to_dict(report.findings),
     }
+
+
+def observation_context_to_dict(
+    context: Mo2ObservationContext,
+) -> dict[str, object]:
+    return {
+        "mo2Root": context.mo2_root,
+        "gameRoot": context.game_root,
+        "activeProfile": context.active_profile,
+        "executable": (
+            None
+            if context.executable is None
+            else {
+                "relativePath": context.executable.relative_path,
+                "fileVersion": context.executable.file_version,
+                "sha256": context.executable.sha256,
+                "size": context.executable.size,
+            }
+        ),
+        "configuredPaths": [
+            {
+                "kind": item.kind,
+                "configuredPath": item.configured_path,
+                "resolvedPath": item.resolved_path,
+                "contained": item.contained,
+            }
+            for item in context.configured_paths
+        ],
+        "readSetSha256": context.read_set_sha256,
+        "readSetStable": context.read_set_stable,
+    }
+
+
+def observation_context_from_dict(value: object) -> Mo2ObservationContext:
+    return _context(value)
+
+
+def capabilities_to_dict(
+    capabilities: tuple[Mo2Capability, ...],
+) -> list[dict[str, object]]:
+    return [
+        {"name": item.name, "status": item.status, "detail": item.detail}
+        for item in capabilities
+    ]
+
+
+def capabilities_from_dict(value: object) -> tuple[Mo2Capability, ...]:
+    return _capabilities(value)
+
+
+def adapter_state_from_dict(value: object) -> Mo2AdapterState:
+    return _adapter_state(value)
+
+
+def coverage_to_dict(coverage: Mo2Coverage) -> dict[str, object]:
+    return {
+        "profileState": coverage.profile_state,
+        "installedPayloadContent": coverage.installed_payload_content,
+        "assetConflicts": coverage.asset_conflicts,
+        "pluginRecordConflicts": coverage.plugin_record_conflicts,
+        "runtimeValidation": coverage.runtime_validation,
+    }
+
+
+def coverage_from_dict(value: object) -> Mo2Coverage:
+    return _coverage(value)
+
+
+def findings_to_dict(
+    findings: tuple[Mo2Finding, ...],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "state": item.state.value,
+            "code": item.code,
+            "message": item.message,
+        }
+        for item in findings
+    ]
+
+
+def findings_from_dict(value: object) -> tuple[Mo2Finding, ...]:
+    return _findings(value)
 
 
 def _differences_to_dict(value: Mo2Differences) -> dict[str, object]:

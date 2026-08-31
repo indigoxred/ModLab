@@ -6,11 +6,20 @@ import unittest
 from modlab.adapters.mo2.comparison import compare_mo2_profiles
 from modlab.adapters.mo2.comparison_serialization import (
     Mo2ComparisonFormatError,
+    adapter_state_from_dict,
+    capabilities_from_dict,
+    capabilities_to_dict,
     comparison_result_from_dict,
     comparison_result_from_json,
     comparison_result_to_dict,
     comparison_result_to_json,
     comparison_result_to_text,
+    coverage_from_dict,
+    coverage_to_dict,
+    findings_from_dict,
+    findings_to_dict,
+    observation_context_from_dict,
+    observation_context_to_dict,
 )
 from modlab.adapters.mo2.model import (
     Mo2ExecutableEvidence,
@@ -80,6 +89,36 @@ def make_large_order_difference(*, size: int, first_divergence: int):
 
 
 class Mo2ComparisonSerializationTests(unittest.TestCase):
+    def test_public_adapter_state_parser_round_trips_canonical_state(self):
+        # Catches evidence consumers needing a weaker duplicate state parser.
+        state = make_comparison_report().adapter_state
+
+        restored = adapter_state_from_dict(
+            comparison_result_to_dict(make_comparison_report())[
+                "managerComparison"
+            ]["adapterState"]
+        )
+
+        self.assertEqual(state, restored)
+
+    def test_public_observation_parts_retain_strict_validation(self):
+        # Catches promoted substructure helpers drifting from comparison parsing.
+        report = make_comparison_report()
+
+        context = observation_context_from_dict(
+            observation_context_to_dict(report.observation_context)
+        )
+        capabilities = capabilities_from_dict(
+            capabilities_to_dict(report.capabilities)
+        )
+        coverage = coverage_from_dict(coverage_to_dict(report.coverage))
+        findings = findings_from_dict(findings_to_dict(report.findings))
+
+        self.assertEqual(report.observation_context, context)
+        self.assertEqual(report.capabilities, capabilities)
+        self.assertEqual(report.coverage, coverage)
+        self.assertEqual(report.findings, findings)
+
     def test_ready_result_round_trip_is_canonical_and_hash_checked(self):
         report = make_comparison_report()
         mapping = comparison_result_to_dict(report)
