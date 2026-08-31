@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from pathlib import PurePosixPath
 from subprocess import CompletedProcess
+from unittest.mock import patch
 
 from modlab.adapters.mo2.archive import PackageFile, PackageInventory
+from modlab.adapters.mo2.bootstrap_config import (
+    observe_profile_seed,
+    render_modorganizer_ini,
+    render_profile_files,
+)
+from modlab.adapters.mo2.projection import project_mo2_state
+from modlab.adapters.mo2.scanner import inspect_skyrim_mo2
 
 from modlab.adapters.mo2.bootstrap_model import (
     ArchiveEvidence,
@@ -37,13 +46,26 @@ from modlab.adapters.mo2.bootstrap_serialization import (
     receipt_id_for,
     receipt_to_bytes,
 )
-from modlab.recipes.model import CheckState
+from modlab.recipes.model import CheckState, RecipeIdentity, RecipeMaturity
 from modlab.adapters.mo2.release import (
+    LoadedMo2Release,
     Mo2ReleaseDescriptor,
     ReleaseFileIdentity,
     bundled_mo2_252_path,
     load_mo2_release,
 )
+from modlab.artifacts.model import ArchiveArtifact
+from modlab.artifacts.serialization import artifact_to_dict
+from modlab.workflows.skyrim.configuration import (
+    ManagerRegistration,
+    RecipeIntent,
+    SkyrimEnvironmentConfiguration,
+    StoredSourceReference,
+    TargetEnvironmentIntent,
+)
+from modlab.workflows.skyrim.store import SkyrimEnvironmentStore
+from modlab.workflows.skyrim.mo2_bootstrap_store import Mo2BootstrapStore
+from modlab.workspace import initialize_workspace
 
 
 @dataclass
@@ -567,3 +589,361 @@ def malformed_bootstrap_documents():
         (_with_save_root(journal_to_bytes(make_journal_fixture())), journal_from_bytes),
         (_with_extra_field(receipt_to_bytes(make_receipt_fixture())), receipt_from_bytes),
     )
+
+
+def tree_state(root: Path) -> tuple[tuple[str, str, bytes | str | None], ...]:
+    """Record a tree without following redirected entries."""
+    source = Path(root)
+    if not source.exists() and not source.is_symlink():
+        return ()
+    rows: list[tuple[str, str, bytes | str | None]] = []
+
+    def visit(directory: Path, relative: PurePosixPath) -> None:
+        with os.scandir(directory) as entries:
+            children = sorted(entries, key=lambda item: (item.name.casefold(), item.name))
+        for child in children:
+            path = Path(child.path)
+            child_relative = relative / child.name
+            name = child_relative.as_posix()
+            if child.is_symlink():
+                rows.append((name, "redirect", os.readlink(path)))
+            elif child.is_dir(follow_symlinks=False):
+                rows.append((name, "directory", None))
+                visit(path, child_relative)
+            elif child.is_file(follow_symlinks=False):
+                rows.append((name, "file", path.read_bytes()))
+            else:
+                rows.append((name, "other", None))
+
+    if source.is_symlink():
+        return ((".", "redirect", os.readlink(source)),)
+    if source.is_file():
+        return ((".", "file", source.read_bytes()),)
+    visit(source, PurePosixPath())
+    return tuple(rows)
+
+
+@dataclass
+class BootstrapPlanningFixture:
+    root: Path
+
+    def __post_init__(self) -> None:
+        self.root = Path(self.root)
+        self.workspace = self.root / "ModLab" / "workspace"
+        self.layout = initialize_workspace(self.workspace)
+        self.steam_root = self.root / "Steam"
+        self.game_root = (
+            self.steam_root
+            / "steamapps"
+            / "common"
+            / "Skyrim Special Edition"
+        )
+        self.documents_root = self.root / "Documents"
+        self.release_path = bundled_mo2_252_path()
+        self.processes = ProcessObservation(complete=True, relevant=(), error=None)
+        self.free_bytes = 10_000_000
+        self.game_version = "1.6.1170.0"
+        self.mo2_version = "2.5.2.0"
+        self._make_game()
+        self._make_documents()
+        self._make_archive_and_release()
+
+    def _make_game(self) -> None:
+        manifest = self.steam_root / "steamapps" / "appmanifest_489830.acf"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            '"AppState"\n'
+            "{\n"
+            '    "appid" "489830"\n'
+            '    "name" "The Elder Scrolls V: Skyrim Special Edition"\n'
+            '    "StateFlags" "4"\n'
+            '    "installdir" "Skyrim Special Edition"\n'
+            "}\n",
+            encoding="utf-8",
+        )
+        self.game_root.mkdir(parents=True)
+        (self.game_root / "SkyrimSE.exe").write_bytes(b"fixture Skyrim executable")
+        make_primary_policy_fixture(
+            self.game_root,
+            ccc_plugins=("ccBGSSSE001-Fish.esm",),
+        )
+
+    def _make_documents(self) -> None:
+        ini_root = self.documents_root / "My Games" / "Skyrim Special Edition"
+        ini_root.mkdir(parents=True)
+        (ini_root / "Skyrim.ini").write_bytes(b"[General]\r\nfixture=true\r\n")
+        (ini_root / "SkyrimPrefs.ini").write_bytes(
+            b"[Display]\nquality=fixture\n"
+        )
+        (ini_root / "SkyrimCustom.ini").write_bytes(b"[Archive]\nfixture=true\n")
+
+    def _make_archive_and_release(self) -> None:
+        archive_data = b"tiny retained MO2 archive fixture"
+        archive_sha = hashlib.sha256(archive_data).hexdigest()
+        self.artifact_id = f"archive-sha256:{archive_sha}"
+        stored_relative = (
+            f"library/archives/{archive_sha[:2]}/{archive_sha}/payload.7z"
+        )
+        archive_path = self.workspace.joinpath(*PurePosixPath(stored_relative).parts)
+        archive_path.parent.mkdir(parents=True)
+        archive_path.write_bytes(archive_data)
+        record = ArchiveArtifact(
+            schema_version=1,
+            artifact_id=self.artifact_id,
+            sha256=archive_sha,
+            size=len(archive_data),
+            original_name="Mod.Organizer-2.5.2.7z",
+            stored_relative_path=stored_relative,
+            imported_at="2026-08-31T00:00:00Z",
+            source_note="planning fixture",
+            source_url=None,
+        )
+        metadata = (
+            json.dumps(
+                artifact_to_dict(record),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        metadata_path = self.layout.metadata / "artifacts" / f"{archive_sha}.json"
+        metadata_path.parent.mkdir(parents=True)
+        metadata_path.write_bytes(metadata)
+
+        self.package_files = {
+            "ModOrganizer.exe": b"fixture MO2 executable",
+            "loot/loot.dll": b"fixture LOOT library",
+            "plugins/game_skyrimse.dll": b"fixture Skyrim game plug-in",
+            "usvfs_x64.dll": b"fixture virtual filesystem",
+        }
+        self.archive_names = list(self.package_files)
+        self.archive_types = ["-"] * len(self.archive_names)
+        listing = ("\n".join(self.archive_names) + "\n").encode("utf-8")
+        executable_bytes = self.package_files["ModOrganizer.exe"]
+        base = load_mo2_release(bundled_mo2_252_path()).descriptor
+        descriptor = replace(
+            base,
+            archive_sha256=archive_sha,
+            archive_size=len(archive_data),
+            archive_entry_count=len(self.archive_names),
+            archive_listing_sha256=hashlib.sha256(listing).hexdigest(),
+            package_file_count=len(self.archive_names),
+            extracted_size=sum(len(data) for data in self.package_files.values()),
+            minimum_free_bytes=1024,
+            executable=_release_file(
+                "ModOrganizer.exe", executable_bytes, self.mo2_version
+            ),
+            sentinels=tuple(
+                _release_file(path, self.package_files[path])
+                for path in (
+                    "loot/loot.dll",
+                    "plugins/game_skyrimse.dll",
+                    "usvfs_x64.dll",
+                )
+            ),
+        )
+        descriptor_data = b"fixture release descriptor\n"
+        self.release = LoadedMo2Release(
+            descriptor=descriptor,
+            path=self.release_path,
+            data=descriptor_data,
+            sha256=hashlib.sha256(descriptor_data).hexdigest(),
+        )
+        self.mo2_executable_bytes = executable_bytes
+        self.runner = FakeRunner.for_listing(self.archive_names, self.archive_types)
+        self.runner.responses["--version"] = CompletedProcess(
+            (), 0, b"bsdtar 3.8.8 - libarchive fixture\n", b""
+        )
+
+    def prepare(self, **overrides: object):
+        from modlab.workflows.skyrim import mo2_bootstrap
+
+        arguments: dict[str, object] = {
+            "artifact_id": self.artifact_id,
+            "workspace_root": self.workspace,
+            "steam_root": self.steam_root,
+            "release_path": self.release_path,
+            "documents_root": self.documents_root,
+            "version_reader": self.version_reader,
+            "process_inspector": lambda _: self.processes,
+            "command_runner": self.runner,
+            "free_space_reader": lambda _: self.free_bytes,
+        }
+        arguments.update(overrides)
+        with patch.object(
+            mo2_bootstrap, "load_mo2_release", return_value=self.release
+        ):
+            return mo2_bootstrap.prepare_mo2_setup(**arguments)
+
+    def version_reader(self, path: Path) -> str | None:
+        return (
+            self.mo2_version
+            if Path(path).name.casefold() == "modorganizer.exe"
+            else self.game_version
+        )
+
+    def make_ready_existing(self) -> None:
+        app = self.layout.skyrim_mo2_app
+        app.mkdir(parents=True, exist_ok=True)
+        for relative, data in self.package_files.items():
+            target = app.joinpath(*PurePosixPath(relative).parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        (app / "ModOrganizer.ini").write_bytes(
+            render_modorganizer_ini(self.layout, self.game_root, self.release.descriptor)
+        )
+        seed = observe_profile_seed(self.game_root, self.documents_root)
+        for relative, data in render_profile_files(seed).items():
+            target = self.layout.skyrim_mo2.joinpath(*relative.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+
+    def make_unknown_target(self) -> None:
+        (self.layout.skyrim_mo2 / "unknown.txt").write_bytes(b"user-owned")
+
+    def make_environment(
+        self,
+        *,
+        steam_root: Path | None = None,
+        game_root: Path | None = None,
+        baseline_id: str | None = None,
+    ) -> None:
+        recipe_sha = "a" * 64
+        target_sha = "b" * 64
+        configuration = SkyrimEnvironmentConfiguration(
+            schema_version=1,
+            game_key="skyrim-se-ae",
+            environment_id="skyrim.fixture.steam",
+            lineage_id="skyrim-main",
+            steam_root=str(steam_root or self.steam_root),
+            game_root=str(game_root or self.game_root),
+            manager=ManagerRegistration(
+                adapter_id="portable-mo2-skyrim",
+                root="tools/mo2/skyrim-se-ae/app",
+            ),
+            recipe=RecipeIntent(
+                recipe_id="skyrim.fixture.foundation",
+                revision="2026.08.31.1",
+                maturity=RecipeMaturity.DRAFT,
+                identity=RecipeIdentity.ORIGINAL,
+                source=StoredSourceReference(
+                    source_sha256=recipe_sha,
+                    stored_path=(
+                        f"games/skyrim-se-ae/recipes/{recipe_sha}/recipe.json"
+                    ),
+                ),
+                selected=("foundation-core",),
+                omitted=(),
+            ),
+            target_environment=TargetEnvironmentIntent(
+                environment_id="skyrim.fixture.steam",
+                source=StoredSourceReference(
+                    source_sha256=target_sha,
+                    stored_path=(
+                        "games/skyrim-se-ae/target-environments/"
+                        f"{target_sha}/environment.json"
+                    ),
+                ),
+                dimensions=(
+                    ("adapterVersion", "2.5.2"),
+                    ("executableRuntime", "1.6.1170"),
+                ),
+            ),
+            baseline_checkpoint_id=baseline_id,
+        )
+        SkyrimEnvironmentStore(self.workspace).write(configuration, replace=False)
+
+    def make_receipt_covered(self):
+        self.make_ready_existing()
+        planned = self.prepare()
+        store = Mo2BootstrapStore(self.workspace)
+        journal = store.create_job(planned.plan)
+        staging = replace(
+            journal.journal,
+            state=BootstrapJobState.STAGING,
+            updated_at=journal.journal.updated_at,
+        )
+        journal = store.transition_job(
+            journal,
+            BootstrapJobState.PLANNED,
+            staging,
+        )
+        staged = replace(
+            journal.journal,
+            state=BootstrapJobState.STAGED,
+            stage_inventory_sha256="d" * 64,
+            stage_entry_count=self.release.descriptor.package_file_count,
+            updated_at=journal.journal.updated_at,
+        )
+        journal = store.transition_job(
+            journal,
+            BootstrapJobState.STAGING,
+            staged,
+        )
+        projection = project_mo2_state(
+            inspect_skyrim_mo2(
+                self.layout.skyrim_mo2_app,
+                self.game_root,
+                workspace_root=self.workspace,
+                version_reader=self.version_reader,
+            )
+        )
+        assert projection.adapter_state_sha256 is not None
+        executable = self.layout.skyrim_mo2_app / "ModOrganizer.exe"
+        executable_data = executable.read_bytes()
+        package_inventory = _package_inventory(self.package_files)
+        receipt = make_receipt_fixture(
+            mode=BootstrapReceiptMode.ADOPTED,
+            plan_id=planned.plan.plan_id,
+            job_id=journal.journal.job_id,
+            release_id=planned.plan.release_id,
+            release_descriptor_sha256=planned.plan.release_descriptor_sha256,
+            archive_artifact_id=planned.plan.archive.artifact_id,
+            archive_metadata_sha256=planned.plan.archive.metadata_sha256,
+            archive_sha256=planned.plan.archive.sha256,
+            archive_size=planned.plan.archive.size,
+            skyrim_executable=planned.plan.skyrim_executable,
+            mo2_executable=FileIdentity(
+                path=str(executable),
+                sha256=hashlib.sha256(executable_data).hexdigest(),
+                size=len(executable_data),
+            ),
+            final_root=str(self.layout.skyrim_mo2),
+            downloads_root=str(self.layout.skyrim_mo2_downloads),
+            mods_root=str(self.layout.skyrim_mo2_mods),
+            profiles_root=str(self.layout.skyrim_mo2_profiles),
+            overwrite_root=str(self.layout.skyrim_mo2_overwrite),
+            webcache_root=str(self.layout.skyrim_mo2 / "webcache"),
+            package_inventory_sha256=package_inventory.sha256,
+            package_file_count=package_inventory.file_count,
+            package_size=package_inventory.total_size,
+            mutable_package_paths=self.release.descriptor.mutable_package_paths,
+            extra_entries=("ModOrganizer.ini",),
+            profile_state_sha256=projection.adapter_state_sha256,
+            extractor=planned.plan.extractor,
+            verified_at="2026-08-31T00:00:03Z",
+            coverage=planned.plan.coverage,
+        )
+        stored_receipt = store.write_receipt(receipt)
+        verified = replace(
+            journal.journal,
+            state=BootstrapJobState.VERIFIED,
+            receipt_id=stored_receipt.receipt.receipt_id,
+            updated_at=journal.journal.updated_at,
+        )
+        store.transition_job(
+            journal,
+            BootstrapJobState.STAGED,
+            verified,
+        )
+        return planned, stored_receipt
+
+    def external_state(self):
+        return (
+            tree_state(self.steam_root),
+            tree_state(self.documents_root),
+        )
+
+    def workspace_state(self):
+        return tree_state(self.workspace)

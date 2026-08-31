@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
 from modlab.recipes.model import CheckState
 
@@ -203,8 +204,8 @@ class BootstrapReceipt:
 @dataclass(frozen=True)
 class SetupPlanResult:
     plan: BootstrapPlan
-    plan_path: str
-    paths_written: tuple[str, ...]
+    plan_path: Path
+    paths_written: tuple[Path, ...]
     downloads: tuple[str, ...]
     installations: tuple[str, ...]
     manager_changes: tuple[str, ...]

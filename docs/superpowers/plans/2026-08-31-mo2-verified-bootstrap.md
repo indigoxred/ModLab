@@ -858,7 +858,7 @@ git commit -m "feat: retain MO2 bootstrap state"
 - Consumes: release/vault/archive/host/seed/target evidence; optional existing environment and baseline.
 - Produces: `Mo2BootstrapError`, `Mo2BootstrapRefusal`, `SetupPlanResult`, and the exact `prepare_mo2_setup` API shown in Step 3.
 
-- [ ] **Step 1: Build a realistic bootstrap fixture**
+- [x] **Step 1: Build a realistic bootstrap fixture**
 
 Extend `tests/support/mo2_bootstrap.py` so it creates:
 
@@ -871,7 +871,7 @@ Extend `tests/support/mo2_bootstrap.py` so it creates:
 
 The fixture exposes `tree_state(root)` that records directory/file kind and bytes without following links.
 
-- [ ] **Step 2: Write failing disposition and idempotency tests**
+- [x] **Step 2: Write failing disposition and idempotency tests**
 
 ```python
 class Mo2BootstrapPlanningTests(unittest.TestCase):
@@ -897,7 +897,7 @@ class Mo2BootstrapPlanningTests(unittest.TestCase):
         self.assertEqual((), second.paths_written)
 ```
 
-- [ ] **Step 3: Implement Steam/environment selection**
+- [x] **Step 3: Implement Steam/environment selection**
 
 `prepare_mo2_setup` signature:
 
@@ -921,7 +921,7 @@ def prepare_mo2_setup(
 
 If `environment.json` is absent, require explicit Steam root. If present, load it strictly; omitted Steam root inherits it and supplied Steam root must resolve identically. Discover Skyrim and require Ready executable/app `489830` evidence. For existing configured state with a selected baseline, call the read-only status service and block Drifted/Blocked; allow Matched or NoBaseline.
 
-- [ ] **Step 4: Implement complete evidence collection**
+- [x] **Step 4: Implement complete evidence collection**
 
 In order, with no writes before all evidence is coherent:
 
@@ -958,20 +958,20 @@ Plan and receipt coverage maps are sorted tuples with exact values `managerArtif
 
 Disposition is AlreadyManaged only with a matching verified receipt; otherwise Existing Ready is Adopt, Empty is Create, and any blocked finding forces Blocked.
 
-- [ ] **Step 5: Freeze and store the plan**
+- [x] **Step 5: Freeze and store the plan**
 
 Construct a plan with no timestamp. `write_templates` contains stable workspace-relative templates such as `runtime/jobs/mo2-bootstrap/plans/{planId}.json` and `games/skyrim-se-ae/tool-installations/mo2/{receiptId}.json`; it never embeds the derived plan ID. Manager, game, download, and installation action tuples remain empty for preview. Derive `plan_id` from the complete body, write through `Mo2BootstrapStore`, and report only the actual newly written plan path in `SetupPlanResult.paths_written`. Report the exact preflight extractor invocations as `<tar path> [version]`, `<tar path> [list-names]`, and `<tar path> [list-types]`.
 
-- [ ] **Step 6: Add the full refusal matrix**
+- [x] **Step 6: Add the full refusal matrix**
 
 Test missing Steam root, conflicting environment root, invalid/mutated archive, descriptor mismatch, archive listing drift, extractor Unknown, low disk, missing master, invalid `Skyrim.ccc`, redirected INI, unknown nonempty target, existing scanner/projection Blocked, wrong executable, drifted baseline, malformed receipt, process-inspection Unknown, redirected workspace, and evidence changed during its stability re-read. Each case must preserve external tree bytes and write no plan when input safety cannot be represented; a coherent Blocked plan may be retained and exits 3 later.
 
-- [ ] **Step 7: Run tests**
+- [x] **Step 7: Run tests**
 
 Run: `& 'C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m unittest tests.test_mo2_bootstrap_planning -v`
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```powershell
 git add modlab/workflows/skyrim/mo2_bootstrap.py tests/support/mo2_bootstrap.py tests/test_mo2_bootstrap_planning.py
