@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-31
 
-**Status:** Approved design, awaiting written-spec review
+**Status:** Approved for implementation planning
 
 **Scope:** Skyrim SE/AE on Steam and the contained portable Mod Organizer 2 instance
 
