@@ -70,6 +70,7 @@ class Mo2ArchiveTests(unittest.TestCase):
         allowed = existing_app_fixture(
             extras={
                 "categories.dat": b"categories",
+                "nxmhandler.ini": b"[General]\nnoregister=false\n",
                 "logs/session.log": b"log",
                 "plugins/tool/__pycache__/module.pyc": b"bytecode",
             }
@@ -88,6 +89,7 @@ class Mo2ArchiveTests(unittest.TestCase):
             (
                 "categories.dat",
                 "logs/session.log",
+                "nxmhandler.ini",
                 "plugins/tool/__pycache__/module.pyc",
             ),
             accepted.allowed_extras,

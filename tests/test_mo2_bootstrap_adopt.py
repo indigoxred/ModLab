@@ -204,16 +204,28 @@ class Mo2BootstrapAdoptTests(unittest.TestCase):
             .exists()
         )
 
-    def test_missing_package_file_is_refused_without_manager_writes(self):
+    def test_missing_package_file_blocks_before_apply(self):
         (self.fixture.layout.skyrim_mo2_app / "resources" / "base.dat").unlink()
-        plan = self._plan_adopt()
         before = tree_state(self.fixture.layout.skyrim_mo2)
 
-        with self.assertRaisesRegex(Mo2BootstrapRefusal, "missing"):
-            self._apply(plan.plan_id)
+        planned = self.fixture.prepare()
 
         self.assertEqual(before, tree_state(self.fixture.layout.skyrim_mo2))
-        self._assert_recovery_required()
+        self.assertEqual(BootstrapDisposition.BLOCKED, planned.plan.disposition)
+        finding = next(
+            item
+            for item in planned.plan.findings
+            if item.code == "existing-package-mismatch"
+        )
+        self.assertEqual("Blocked", finding.state.value)
+        self.assertEqual(
+            (),
+            tuple(
+                entry
+                for entry in self.fixture.layout.mo2_bootstrap_jobs.iterdir()
+                if entry.name != "plans"
+            ),
+        )
 
     def test_modified_package_file_is_refused_without_manager_writes(self):
         package_file = self.fixture.layout.skyrim_mo2_app / "resources" / "base.dat"
@@ -244,16 +256,16 @@ class Mo2BootstrapAdoptTests(unittest.TestCase):
 
         self.assertEqual(before, self.fixture.workspace_state())
 
-    def test_unknown_extra_dll_is_refused_without_manager_writes(self):
-        (self.fixture.layout.skyrim_mo2_app / "unknown.dll").write_bytes(b"unknown")
+    def test_generated_nxmhandler_settings_are_recorded_and_adopted(self):
+        settings = self.fixture.layout.skyrim_mo2_app / "nxmhandler.ini"
+        settings.write_bytes(b"[General]\nnoregister=false\n")
         plan = self._plan_adopt()
         before = tree_state(self.fixture.layout.skyrim_mo2)
 
-        with self.assertRaisesRegex(Mo2BootstrapRefusal, "unapproved extras"):
-            self._apply(plan.plan_id)
+        result = self._apply(plan.plan_id)
 
         self.assertEqual(before, tree_state(self.fixture.layout.skyrim_mo2))
-        self._assert_recovery_required()
+        self.assertIn("nxmhandler.ini", result.receipt.extra_entries)
 
     def test_allowed_root_log_is_recorded_and_adopted(self):
         log = self.fixture.layout.skyrim_mo2_app / "logs" / "session.log"

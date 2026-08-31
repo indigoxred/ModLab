@@ -132,13 +132,35 @@ class Mo2BootstrapPlanningTests(unittest.TestCase):
 
         self.assertEqual(BootstrapDisposition.ADOPT, result.plan.disposition)
 
-    def test_new_unknown_manager_extra_prevents_already_managed(self):
+    def test_new_unknown_manager_extra_blocks_before_apply(self):
         self.fixture.make_receipt_covered()
         (self.fixture.layout.skyrim_mo2_app / "unknown.dll").write_bytes(b"unknown")
 
         result = self.fixture.prepare()
 
+        self.assertEqual(BootstrapDisposition.BLOCKED, result.plan.disposition)
+        finding = next(
+            item
+            for item in result.plan.findings
+            if item.code == "existing-package-mismatch"
+        )
+        self.assertEqual("Blocked", finding.state.value)
+
+    def test_generated_nxmhandler_settings_are_a_known_adoption_extra(self):
+        self.fixture.make_ready_existing()
+        (self.fixture.layout.skyrim_mo2_app / "nxmhandler.ini").write_bytes(
+            b"[General]\nnoregister=false\n"
+        )
+
+        result = self.fixture.prepare()
+
         self.assertEqual(BootstrapDisposition.ADOPT, result.plan.disposition)
+        finding = next(
+            item
+            for item in result.plan.findings
+            if item.code == "existing-package-mismatch"
+        )
+        self.assertEqual("Passed", finding.state.value)
 
     def test_missing_explicit_steam_root_refuses_without_plan(self):
         from modlab.workflows.skyrim.mo2_bootstrap import Mo2BootstrapRefusal

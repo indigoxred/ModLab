@@ -134,6 +134,7 @@ _EXPECTED_ALLOWED_EXTRAS = (
     "categories.dat",
     "ModOrganizer.ini",
     "nexuscatmap.dat",
+    "nxmhandler.ini",
     "nxmhandler.log",
 )
 _RESERVED_WINDOWS_NAMES = {

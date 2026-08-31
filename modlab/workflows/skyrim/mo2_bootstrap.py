@@ -4221,12 +4221,6 @@ def _observe_existing_manager(
     _put_finding(
         findings,
         CheckState.PASSED,
-        "existing-package-mismatch",
-        "Existing MO2 is Ready and its executable matches the curated package.",
-    )
-    _put_finding(
-        findings,
-        CheckState.PASSED,
         "post-activation-not-ready",
         "Existing MO2 projects as the exact Ready Lab/Play layout.",
     )
@@ -4244,6 +4238,21 @@ def _observe_existing_manager(
             f"Existing MO2 package paths are unsafe: {error}",
         )
         package_inventory, extra_entries = None, None
+    if package_inventory is None or extra_entries is None:
+        if "existing-package-mismatch" not in findings:
+            _put_finding(
+                findings,
+                CheckState.BLOCKED,
+                "existing-package-mismatch",
+                "Existing MO2 has missing package paths or unapproved runtime extras.",
+            )
+    else:
+        _put_finding(
+            findings,
+            CheckState.PASSED,
+            "existing-package-mismatch",
+            "Existing MO2 has every curated package path and only approved runtime extras.",
+        )
     return _ExistingObservation(
         projection=projection,
         executable=identity,

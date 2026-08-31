@@ -18,6 +18,7 @@ VALID_RELEASE = {
         "categories.dat",
         "ModOrganizer.ini",
         "nexuscatmap.dat",
+        "nxmhandler.ini",
         "nxmhandler.log",
     ],
     "allowPluginPythonBytecode": True,
@@ -147,6 +148,7 @@ class Mo2ReleaseTests(unittest.TestCase):
         self.assertEqual(1626, value.package_file_count)
         self.assertEqual(408536933, value.extracted_size)
         self.assertEqual("2.5.2.0", value.executable.file_version)
+        self.assertIn("nxmhandler.ini", value.allowed_extra_files)
         self.assertEqual(loaded.path.read_bytes(), loaded.data)
         self.assertEqual(hashlib.sha256(loaded.data).hexdigest(), loaded.sha256)
 
