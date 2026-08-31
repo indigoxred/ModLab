@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-31
 
-**Status:** Revised after written-spec review; pending final written-spec approval
+**Status:** Approved by the user on 2026-09-01 after written-spec review
 
 **Scope:** One guided archive installation at a time for the verified Skyrim SE/AE portable MO2 2.5.2 instance
 
