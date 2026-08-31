@@ -36,6 +36,7 @@ from modlab.adapters.mo2.bootstrap_config import (
 )
 from modlab.adapters.mo2.bootstrap_model import (
     ArchiveEvidence,
+    BootstrapFailureResult,
     BootstrapDisposition,
     BootstrapFinding,
     BootstrapJobState,
@@ -84,6 +85,7 @@ from modlab.workflows.skyrim.mo2_bootstrap_store import (
     BootstrapReceiptMatch,
     Mo2BootstrapStore,
     Mo2BootstrapStoreError,
+    Mo2BootstrapStorePromotionError,
     StoredBootstrapJournal,
     StoredBootstrapReceipt,
     new_bootstrap_job_id,
@@ -106,8 +108,15 @@ class Mo2BootstrapError(RuntimeError):
 class Mo2BootstrapRefusal(Mo2BootstrapError):
     """Planning refused a specific unsafe or incomplete input."""
 
-    def __init__(self, code: str, message: str):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        failure: BootstrapFailureResult | None = None,
+    ):
         self.code = code
+        self.failure = failure
         super().__init__(message)
 
 
@@ -220,6 +229,38 @@ class _EntryIdentity:
     changed_ns: int | None
 
 
+@dataclass(frozen=True)
+class _RecoveryActionState:
+    journal_data: bytes
+    receipt_data: tuple[tuple[Path, bytes], ...]
+    manager_trees: tuple[tuple[Path, _ManagerSnapshot | None], ...]
+
+
+class _RecordingCommandRunner:
+    def __init__(self, runner: CommandRunner | None):
+        self._runner = runner or SubprocessCommandRunner()
+        self._calls: list[tuple[str, ...]] = []
+
+    def run(self, args: tuple[str, ...]):
+        self._calls.append(args)
+        return self._runner.run(args)
+
+    def programs_launched(self) -> tuple[str, ...]:
+        labels = {
+            "--version": "version",
+            "-tf": "list-names",
+            "-tvf": "list-types",
+            "-xf": "extract",
+        }
+        result: list[str] = []
+        for args in self._calls:
+            operation = labels.get(args[1] if len(args) > 1 else "")
+            if operation is None or not args:
+                raise Mo2BootstrapError("unrecognized bootstrap extractor invocation")
+            result.append(f"{args[0]} [{operation}]")
+        return tuple(result)
+
+
 def prepare_mo2_setup(
     *,
     artifact_id: str,
@@ -234,24 +275,43 @@ def prepare_mo2_setup(
     free_space_reader: Callable[[Path], int] = free_bytes_at,
 ) -> SetupPlanResult:
     """Collect stable evidence and retain one immutable, side-effect-free plan."""
-    collected = _collect_mo2_setup(
-        artifact_id=artifact_id,
-        workspace_root=workspace_root,
-        steam_root=steam_root,
-        release_path=release_path,
-        extractor_path=extractor_path,
-        documents_root=documents_root,
-        version_reader=version_reader,
-        process_inspector=process_inspector,
-        command_runner=command_runner,
-        free_space_reader=free_space_reader,
-    )
+    runner = _RecordingCommandRunner(command_runner)
+    try:
+        collected = _collect_mo2_setup(
+            artifact_id=artifact_id,
+            workspace_root=workspace_root,
+            steam_root=steam_root,
+            release_path=release_path,
+            extractor_path=extractor_path,
+            documents_root=documents_root,
+            version_reader=version_reader,
+            process_inspector=process_inspector,
+            command_runner=runner,
+            free_space_reader=free_space_reader,
+        )
+    except Mo2BootstrapRefusal as error:
+        failure = _bootstrap_failure_result(
+            error,
+            outcome=BootstrapDisposition.BLOCKED.value,
+            plan_id=None,
+            actions_complete=True,
+            programs_launched=runner.programs_launched(),
+        )
+        raise _refusal_with_failure(error, failure) from error
     try:
         stored = Mo2BootstrapStore(collected.layout.root).write_plan(collected.plan)
     except (BootstrapFormatError, Mo2BootstrapStoreError, OSError) as error:
-        raise Mo2BootstrapRefusal(
+        refusal = Mo2BootstrapRefusal(
             "plan-invalid", f"bootstrap plan could not be retained safely: {error}"
-        ) from error
+        )
+        failure = _bootstrap_failure_result(
+            refusal,
+            outcome=BootstrapDisposition.BLOCKED.value,
+            plan_id=collected.plan.plan_id,
+            actions_complete=False,
+            programs_launched=runner.programs_launched(),
+        )
+        raise _refusal_with_failure(refusal, failure) from error
     written = (stored.path,) if stored.changed else ()
     return SetupPlanResult(
         plan=stored.plan,
@@ -261,7 +321,7 @@ def prepare_mo2_setup(
         installations=(),
         manager_changes=(),
         game_changes=(),
-        programs_launched=stored.plan.programs_launched,
+        programs_launched=runner.programs_launched(),
     )
 
 
@@ -534,6 +594,7 @@ def apply_mo2_setup(
     branches. The transactional Create branch is added by Task 9 without
     changing this public signature.
     """
+    runner = _RecordingCommandRunner(command_runner)
     requested_workspace = Path(workspace_root).expanduser().absolute()
     try:
         _require_direct_workspace(requested_workspace)
@@ -546,39 +607,99 @@ def apply_mo2_setup(
         )
         stored_plan = store.load_plan(plan_id)
     except (Mo2BootstrapStoreError, OSError) as error:
-        raise Mo2BootstrapRefusal(
+        refusal = Mo2BootstrapRefusal(
             "plan-invalid", f"stored bootstrap plan is unavailable or invalid: {error}"
-        ) from error
+        )
+        failure = _bootstrap_failure_result(
+            refusal,
+            outcome=BootstrapDisposition.BLOCKED.value,
+            plan_id=plan_id,
+            actions_complete=True,
+        )
+        raise _refusal_with_failure(refusal, failure) from error
 
     plan = stored_plan.plan
     if plan.disposition is BootstrapDisposition.BLOCKED:
-        raise Mo2BootstrapRefusal(
+        refusal = Mo2BootstrapRefusal(
             "plan-invalid", "Blocked bootstrap plans cannot be applied"
+        )
+        raise _refusal_with_failure(
+            refusal,
+            _bootstrap_failure_result(
+                refusal,
+                outcome=BootstrapDisposition.BLOCKED.value,
+                plan_id=plan.plan_id,
+                actions_complete=True,
+            ),
         )
     if plan.disposition not in {
         BootstrapDisposition.CREATE,
         BootstrapDisposition.ADOPT,
         BootstrapDisposition.ALREADY_MANAGED,
     }:
-        raise Mo2BootstrapRefusal(
+        refusal = Mo2BootstrapRefusal(
             "plan-invalid", f"unsupported bootstrap disposition: {plan.disposition}"
         )
+        raise _refusal_with_failure(
+            refusal,
+            _bootstrap_failure_result(
+                refusal,
+                outcome=BootstrapDisposition.BLOCKED.value,
+                plan_id=plan.plan_id,
+                actions_complete=True,
+            ),
+        )
 
-    collected = _collect_mo2_setup(
-        artifact_id=plan.archive.artifact_id,
-        workspace_root=layout.root,
-        steam_root=Path(plan.steam_root),
-        release_path=release_path,
-        extractor_path=extractor_path,
-        documents_root=documents_root,
-        version_reader=version_reader,
-        process_inspector=process_inspector,
-        command_runner=command_runner,
-        free_space_reader=free_space_reader,
-    )
+    try:
+        collected = _collect_mo2_setup(
+            artifact_id=plan.archive.artifact_id,
+            workspace_root=layout.root,
+            steam_root=Path(plan.steam_root),
+            release_path=release_path,
+            extractor_path=extractor_path,
+            documents_root=documents_root,
+            version_reader=version_reader,
+            process_inspector=process_inspector,
+            command_runner=runner,
+            free_space_reader=free_space_reader,
+        )
+        return _apply_collected_mo2_setup(
+            plan=plan,
+            collected=collected,
+            store=store,
+            process_inspector=process_inspector,
+            command_runner=runner,
+            free_space_reader=free_space_reader,
+            clock=clock,
+            version_reader=version_reader,
+        )
+    except Mo2BootstrapRefusal as error:
+        failure = _bootstrap_failure_result(
+            error,
+            outcome=BootstrapDisposition.BLOCKED.value,
+            plan_id=plan.plan_id,
+            actions_complete=True,
+            programs_launched=runner.programs_launched(),
+        )
+        raise _refusal_with_failure(error, failure) from error
+
+
+def _apply_collected_mo2_setup(
+    *,
+    plan: BootstrapPlan,
+    collected: _CollectedSetup,
+    store: Mo2BootstrapStore,
+    process_inspector: Callable[[Path], ProcessObservation],
+    command_runner: CommandRunner,
+    free_space_reader: Callable[[Path], int],
+    clock: Callable[[], datetime],
+    version_reader: Callable[[Path], str | None],
+) -> SetupApplyResult:
     _require_apply_revalidation(plan, collected.plan)
     _require_stopped_processes(collected.plan.processes)
-    latest_processes = _observe_processes(process_inspector, layout.skyrim_mo2, {})
+    latest_processes = _observe_processes(
+        process_inspector, collected.layout.skyrim_mo2, {}
+    )
     _require_stopped_processes(latest_processes)
 
     if plan.disposition is BootstrapDisposition.CREATE:
@@ -646,6 +767,7 @@ def recover_mo2_setup(
     clock: Callable[[], datetime] = utc_now,
 ) -> RecoveryResult:
     """Recover one exact retained bootstrap job without guessing or deleting data."""
+    runner = _RecordingCommandRunner(command_runner)
     requested_workspace = Path(workspace_root).expanduser().absolute()
     try:
         _require_direct_workspace(requested_workspace)
@@ -669,21 +791,60 @@ def recover_mo2_setup(
         Mo2BootstrapStoreError,
         OSError,
     ) as error:
-        raise Mo2BootstrapRefusal(
+        refusal = Mo2BootstrapRefusal(
             "journal-invalid", f"bootstrap recovery evidence is invalid: {error}"
-        ) from error
+        )
+        failure = _bootstrap_failure_result(
+            refusal,
+            outcome=BootstrapDisposition.BLOCKED.value,
+            plan_id=None,
+            actions_complete=True,
+            programs_launched=runner.programs_launched(),
+        )
+        raise _refusal_with_failure(refusal, failure) from error
+
+    try:
+        recovery_before = _capture_recovery_action_state(store, observed, layout)
+    except Exception:
+        recovery_before = None
 
     if observed.journal.state is BootstrapJobState.VERIFIED:
-        return _verified_recovery_result(
-            store, observed, plan, manager_ancestry
-        )
+        try:
+            return _verified_recovery_result(
+                store, observed, plan, manager_ancestry
+            )
+        except Mo2BootstrapRefusal as error:
+            failure = _recovery_failure_evidence(
+                error,
+                store=store,
+                original=observed,
+                layout=layout,
+                before=recovery_before,
+                runner=runner,
+            )
+            raise _refusal_with_failure(error, failure) from error
     if observed.journal.state is BootstrapJobState.RECOVERED:
-        _validate_captured_ancestry(manager_ancestry)
-        return _recovery_result(
-            outcome=BootstrapJobState.RECOVERED.value,
-            observed=observed,
-            receipt=None,
-        )
+        try:
+            _validate_captured_ancestry(manager_ancestry)
+            return _recovery_result(
+                outcome=BootstrapJobState.RECOVERED.value,
+                observed=observed,
+                receipt=None,
+            )
+        except (Mo2ArchiveError, OSError) as error:
+            refusal = Mo2BootstrapRefusal(
+                "recovery-required",
+                f"bootstrap recovery could not validate its workspace: {error}",
+            )
+            failure = _recovery_failure_evidence(
+                refusal,
+                store=store,
+                original=observed,
+                layout=layout,
+                before=recovery_before,
+                runner=runner,
+            )
+            raise _refusal_with_failure(refusal, failure) from error
 
     changed_manager_paths: list[str] = []
     try:
@@ -741,7 +902,7 @@ def recover_mo2_setup(
                 documents_root=documents_root,
                 version_reader=version_reader,
                 process_inspector=process_inspector,
-                command_runner=command_runner,
+                command_runner=runner,
                 clock=clock,
                 manager_ancestry=manager_ancestry,
             )
@@ -798,7 +959,15 @@ def recover_mo2_setup(
         )
     except Mo2BootstrapRefusal as error:
         _mark_recovery_attempt(store, job_id, error, clock)
-        raise
+        failure = _recovery_failure_evidence(
+            error,
+            store=store,
+            original=observed,
+            layout=layout,
+            before=recovery_before,
+            runner=runner,
+        )
+        raise _refusal_with_failure(error, failure) from error
     except (
         BootstrapFormatError,
         Mo2ArchiveError,
@@ -808,14 +977,32 @@ def recover_mo2_setup(
         OSError,
     ) as error:
         _mark_recovery_attempt(store, job_id, error, clock)
-        raise Mo2BootstrapRefusal(
+        refusal = Mo2BootstrapRefusal(
             "recovery-required", f"bootstrap recovery could not continue safely: {error}"
-        ) from error
+        )
+        failure = _recovery_failure_evidence(
+            refusal,
+            store=store,
+            original=observed,
+            layout=layout,
+            before=recovery_before,
+            runner=runner,
+        )
+        raise _refusal_with_failure(refusal, failure) from error
     except Exception as error:
         _mark_recovery_attempt(store, job_id, error, clock)
-        raise Mo2BootstrapRefusal(
+        refusal = Mo2BootstrapRefusal(
             "recovery-required", f"bootstrap recovery failed safely: {error}"
-        ) from error
+        )
+        failure = _recovery_failure_evidence(
+            refusal,
+            store=store,
+            original=observed,
+            layout=layout,
+            before=recovery_before,
+            runner=runner,
+        )
+        raise _refusal_with_failure(refusal, failure) from error
 
 
 def _require_recovery_job_plan(
@@ -1273,6 +1460,257 @@ def _recovery_result(
         manager_changes=tuple(sorted(set(manager_changes), key=str.casefold)),
         game_changes=(),
         programs_launched=programs_launched,
+    )
+
+
+def _bootstrap_failure_result(
+    error: Mo2BootstrapRefusal,
+    *,
+    outcome: str,
+    plan_id: str | None,
+    job_id: str | None = None,
+    journal: BootstrapJournal | None = None,
+    receipt: BootstrapReceipt | None = None,
+    actions_complete: bool,
+    paths_written: tuple[str, ...] = (),
+    installations: tuple[str, ...] = (),
+    manager_changes: tuple[str, ...] = (),
+    programs_launched: tuple[str, ...] = (),
+) -> BootstrapFailureResult:
+    if journal is not None:
+        if job_id is not None and job_id != journal.job_id:
+            raise Mo2BootstrapError("failure job and journal evidence disagree")
+        job_id = journal.job_id
+    return BootstrapFailureResult(
+        outcome=outcome,
+        code=error.code,
+        message=str(error),
+        plan_id=plan_id,
+        job_id=job_id,
+        journal=journal,
+        receipt=receipt,
+        actions_complete=actions_complete,
+        paths_written=tuple(sorted(set(paths_written), key=lambda value: (value.casefold(), value))),
+        downloads=(),
+        installations=tuple(
+            sorted(set(installations), key=lambda value: (value.casefold(), value))
+        ),
+        manager_changes=tuple(
+            sorted(set(manager_changes), key=lambda value: (value.casefold(), value))
+        ),
+        game_changes=(),
+        programs_launched=programs_launched,
+    )
+
+
+def _refusal_with_failure(
+    error: Mo2BootstrapRefusal,
+    failure: BootstrapFailureResult,
+) -> Mo2BootstrapRefusal:
+    if error.failure is not None:
+        return error
+    return Mo2BootstrapRefusal(error.code, str(error), failure=failure)
+
+
+def _recorded_programs(runner: CommandRunner) -> tuple[str, ...]:
+    if not isinstance(runner, _RecordingCommandRunner):
+        raise Mo2BootstrapError("bootstrap action recording is unavailable")
+    return runner.programs_launched()
+
+
+def _create_failure_evidence(
+    error: Mo2BootstrapRefusal,
+    *,
+    collected: _CollectedSetup,
+    job: StoredBootstrapJournal,
+    runner: CommandRunner,
+    stage_created: bool,
+    stage_snapshot: _ManagerSnapshot | None,
+    prior_moved: bool,
+    activated: bool,
+    stored_receipt: StoredBootstrapReceipt | None,
+    promoted_paths: tuple[Path, ...] = (),
+) -> BootstrapFailureResult:
+    paths = [_workspace_relative(collected.layout, job.path)]
+    if stored_receipt is not None and stored_receipt.changed:
+        paths.append(_workspace_relative(collected.layout, stored_receipt.path))
+    paths.extend(
+        _workspace_relative(collected.layout, path) for path in promoted_paths
+    )
+    changes: list[str] = []
+    stage_root = Path(job.journal.stage_root)
+    if stage_created:
+        stage_relative = _workspace_relative(collected.layout, stage_root)
+        changes.append(stage_relative)
+        if stage_snapshot is not None:
+            changes.extend(
+                f"{stage_relative}/{item.relative_path}"
+                for item in stage_snapshot.inventory.files
+            )
+    if prior_moved:
+        changes.extend(
+            (
+                _workspace_relative(collected.layout, Path(job.journal.prior_root)),
+                _workspace_relative(collected.layout, collected.layout.skyrim_mo2),
+            )
+        )
+    if activated and stage_snapshot is not None:
+        final_relative = _workspace_relative(
+            collected.layout, collected.layout.skyrim_mo2
+        )
+        changes.append(final_relative)
+        changes.extend(
+            f"{final_relative}/{item.relative_path}"
+            for item in stage_snapshot.inventory.files
+        )
+    receipt = None if stored_receipt is None else stored_receipt.receipt
+    return _bootstrap_failure_result(
+        error,
+        outcome="RecoveryRequired",
+        plan_id=job.journal.plan_id,
+        journal=job.journal,
+        receipt=receipt,
+        actions_complete=True,
+        paths_written=tuple(paths),
+        installations=(
+            ("portable-mo2-create",)
+            if job.journal.state is BootstrapJobState.VERIFIED
+            else ()
+        ),
+        manager_changes=tuple(changes),
+        programs_launched=_recorded_programs(runner),
+    )
+
+
+def _adopt_failure_evidence(
+    error: Mo2BootstrapRefusal,
+    *,
+    collected: _CollectedSetup,
+    job: StoredBootstrapJournal,
+    runner: CommandRunner,
+    stored_receipt: StoredBootstrapReceipt | None,
+    promoted_paths: tuple[Path, ...] = (),
+) -> BootstrapFailureResult:
+    paths = [_workspace_relative(collected.layout, job.path)]
+    if stored_receipt is not None and stored_receipt.changed:
+        paths.append(_workspace_relative(collected.layout, stored_receipt.path))
+    paths.extend(
+        _workspace_relative(collected.layout, path) for path in promoted_paths
+    )
+    stage_root = Path(job.journal.stage_root)
+    changes = (
+        (_workspace_relative(collected.layout, stage_root),)
+        if _lstat_if_exists(stage_root) is not None
+        else ()
+    )
+    return _bootstrap_failure_result(
+        error,
+        outcome="RecoveryRequired",
+        plan_id=job.journal.plan_id,
+        journal=job.journal,
+        receipt=None if stored_receipt is None else stored_receipt.receipt,
+        actions_complete=True,
+        paths_written=tuple(paths),
+        manager_changes=changes,
+        programs_launched=_recorded_programs(runner),
+    )
+
+
+def _capture_recovery_action_state(
+    store: Mo2BootstrapStore,
+    observed: StoredBootstrapJournal,
+    layout: WorkspaceLayout,
+) -> _RecoveryActionState:
+    job_directory = store.job_directory(observed.journal.job_id)
+    manager_paths = (
+        Path(observed.journal.stage_root),
+        Path(observed.journal.prior_root),
+        layout.skyrim_mo2,
+        job_directory / "recovered-stage",
+        job_directory / "recovered-activated",
+    )
+    manager_trees: list[tuple[Path, _ManagerSnapshot | None]] = []
+    for path in manager_paths:
+        snapshot = None
+        if _lstat_if_exists(path) is not None:
+            snapshot = _snapshot_manager_tree(path)
+        manager_trees.append((path, snapshot))
+
+    receipt_data: list[tuple[Path, bytes]] = []
+    directory = layout.mo2_bootstrap_receipts
+    if _lstat_if_exists(directory) is not None:
+        for path in sorted(directory.iterdir(), key=lambda item: (item.name.casefold(), item.name)):
+            receipt_data.append((path, _stable_direct_file_bytes(path, "bootstrap receipt")))
+    return _RecoveryActionState(
+        journal_data=observed.data,
+        receipt_data=tuple(receipt_data),
+        manager_trees=tuple(manager_trees),
+    )
+
+
+def _recovery_failure_evidence(
+    error: Mo2BootstrapRefusal,
+    *,
+    store: Mo2BootstrapStore,
+    original: StoredBootstrapJournal,
+    layout: WorkspaceLayout,
+    before: _RecoveryActionState | None,
+    runner: CommandRunner,
+) -> BootstrapFailureResult:
+    current = original
+    after: _RecoveryActionState | None = None
+    actions_complete = before is not None
+    try:
+        current = store.load_job(original.journal.job_id)
+        after = _capture_recovery_action_state(store, current, layout)
+    except Exception:
+        actions_complete = False
+
+    paths: list[str] = []
+    changes: list[str] = []
+    receipt: BootstrapReceipt | None = None
+    if before is not None and after is not None:
+        if before.journal_data != after.journal_data:
+            paths.append(_workspace_relative(layout, current.path))
+        before_receipts = dict(before.receipt_data)
+        for path, data in after.receipt_data:
+            if before_receipts.get(path) != data:
+                paths.append(_workspace_relative(layout, path))
+        before_trees = dict(before.manager_trees)
+        for path, snapshot in after.manager_trees:
+            if before_trees.get(path) != snapshot:
+                changes.append(_workspace_relative(layout, path))
+    if current.journal.receipt_id is not None:
+        try:
+            receipt = store.load_receipt(current.journal.receipt_id).receipt
+        except Exception:
+            actions_complete = False
+
+    outcome = (
+        "RecoveryRequired"
+        if current.journal.state is BootstrapJobState.RECOVERY_REQUIRED
+        or error.code == "recovery-required"
+        else BootstrapDisposition.BLOCKED.value
+    )
+    installations = (
+        ("portable-mo2-create",)
+        if receipt is not None
+        and receipt.mode is BootstrapReceiptMode.CREATED
+        and current.journal.state is BootstrapJobState.VERIFIED
+        and original.journal.state is not BootstrapJobState.VERIFIED
+        else ()
+    )
+    return _bootstrap_failure_result(
+        error,
+        outcome=outcome,
+        plan_id=current.journal.plan_id,
+        journal=current.journal,
+        receipt=receipt,
+        actions_complete=actions_complete,
+        paths_written=tuple(paths),
+        installations=installations,
+        manager_changes=tuple(changes),
+        programs_launched=_recorded_programs(runner),
     )
 
 
@@ -1885,6 +2323,26 @@ def _apply_create_plan(
     runner = command_runner or SubprocessCommandRunner()
     try:
         job = store.create_job(plan)
+    except Mo2BootstrapStorePromotionError as error:
+        refusal = Mo2BootstrapRefusal(
+            "recovery-required",
+            "bootstrap creation journal reached disk but could not be verified: "
+            f"{error}",
+        )
+        failure = _bootstrap_failure_result(
+            refusal,
+            outcome="RecoveryRequired",
+            plan_id=plan.plan_id,
+            job_id=error.record_id,
+            actions_complete=True,
+            paths_written=(
+                (_workspace_relative(collected.layout, error.path),)
+                if error.changed
+                else ()
+            ),
+            programs_launched=_recorded_programs(runner),
+        )
+        raise _refusal_with_failure(refusal, failure) from error
     except (Mo2BootstrapStoreError, OSError) as error:
         raise Mo2BootstrapRefusal(
             "journal-invalid", f"bootstrap creation job could not be created: {error}"
@@ -1892,6 +2350,7 @@ def _apply_create_plan(
 
     journal_path = job.path.relative_to(collected.layout.root).as_posix()
     package: PackageInventory | None = None
+    stored_receipt: StoredBootstrapReceipt | None = None
     stage_snapshot: _ManagerSnapshot | None = None
     stage_identity: _EntryIdentity | None = None
     prior_snapshot: _ManagerSnapshot | None = None
@@ -1899,6 +2358,8 @@ def _apply_create_plan(
     prior_present = False
     prior_moved = False
     activated = False
+    stage_created = False
+    promoted_paths: tuple[Path, ...] = ()
     manager_ancestry: tuple[tuple[Path, _EntryIdentity], ...] | None = None
     prior_parent_ancestry: tuple[tuple[Path, _EntryIdentity], ...] | None = None
     try:
@@ -1922,6 +2383,7 @@ def _apply_create_plan(
         stage_root = Path(job.journal.stage_root)
         try:
             stage_root.mkdir()
+            stage_created = True
         except OSError as error:
             raise Mo2ArchiveError(
                 f"cannot create exact bootstrap staging root: {error}"
@@ -2091,7 +2553,15 @@ def _apply_create_plan(
             package=package,
             clock=clock,
         )
-        stored_receipt = store.write_receipt(receipt)
+        try:
+            stored_receipt = store.write_receipt(receipt)
+        except Mo2BootstrapStorePromotionError as error:
+            if error.record_kind != "receipt" or error.record_id != receipt.receipt_id:
+                raise Mo2BootstrapError(
+                    "receipt promotion failure identifies another record"
+                ) from error
+            promoted_paths = (error.path,) if error.changed else ()
+            raise
         _require_stopped_processes(
             _observe_processes(process_inspector, collected.layout.skyrim_mo2, {})
         )
@@ -2121,13 +2591,27 @@ def _apply_create_plan(
             manager_ancestry=manager_ancestry,
             prior_parent_ancestry=prior_parent_ancestry,
         )
-        _mark_create_recovery(store, job, error, clock, rollback_error)
+        job = _mark_create_recovery(store, job, error, clock, rollback_error)
         if rollback_error is not None:
-            raise Mo2BootstrapRefusal(
+            refusal = Mo2BootstrapRefusal(
                 "recovery-required",
                 f"MO2 creation failed and prior restoration also failed: {rollback_error}",
-            ) from error
-        raise
+            )
+        else:
+            refusal = error
+        failure = _create_failure_evidence(
+            refusal,
+            collected=collected,
+            job=job,
+            runner=runner,
+            stage_created=stage_created,
+            stage_snapshot=stage_snapshot,
+            prior_moved=prior_moved,
+            activated=activated,
+            stored_receipt=stored_receipt,
+            promoted_paths=promoted_paths,
+        )
+        raise _refusal_with_failure(refusal, failure) from error
     except (
         BootstrapFormatError,
         Mo2ArchiveError,
@@ -2147,11 +2631,24 @@ def _apply_create_plan(
             manager_ancestry=manager_ancestry,
             prior_parent_ancestry=prior_parent_ancestry,
         )
-        _mark_create_recovery(store, job, error, clock, rollback_error)
+        job = _mark_create_recovery(store, job, error, clock, rollback_error)
         detail = f"MO2 creation requires recovery: {error}"
         if rollback_error is not None:
             detail += f"; prior restoration failed: {rollback_error}"
-        raise Mo2BootstrapRefusal("recovery-required", detail) from error
+        refusal = Mo2BootstrapRefusal("recovery-required", detail)
+        failure = _create_failure_evidence(
+            refusal,
+            collected=collected,
+            job=job,
+            runner=runner,
+            stage_created=stage_created,
+            stage_snapshot=stage_snapshot,
+            prior_moved=prior_moved,
+            activated=activated,
+            stored_receipt=stored_receipt,
+            promoted_paths=promoted_paths,
+        )
+        raise _refusal_with_failure(refusal, failure) from error
     except Exception as error:
         rollback_error = _restore_create_prior(
             collected.layout.skyrim_mo2,
@@ -2164,11 +2661,24 @@ def _apply_create_plan(
             manager_ancestry=manager_ancestry,
             prior_parent_ancestry=prior_parent_ancestry,
         )
-        _mark_create_recovery(store, job, error, clock, rollback_error)
+        job = _mark_create_recovery(store, job, error, clock, rollback_error)
         detail = f"MO2 creation failed safely: {error}"
         if rollback_error is not None:
             detail += f"; prior restoration failed: {rollback_error}"
-        raise Mo2BootstrapRefusal("recovery-required", detail) from error
+        refusal = Mo2BootstrapRefusal("recovery-required", detail)
+        failure = _create_failure_evidence(
+            refusal,
+            collected=collected,
+            job=job,
+            runner=runner,
+            stage_created=stage_created,
+            stage_snapshot=stage_snapshot,
+            prior_moved=prior_moved,
+            activated=activated,
+            stored_receipt=stored_receipt,
+            promoted_paths=promoted_paths,
+        )
+        raise _refusal_with_failure(refusal, failure) from error
 
     if prior_moved:
         assert prior_snapshot is not None and prior_identity is not None
@@ -2179,15 +2689,29 @@ def _apply_create_plan(
                 prior_snapshot,
             )
         except (Mo2ArchiveError, OSError) as error:
-            raise Mo2BootstrapRefusal(
+            refusal = Mo2BootstrapRefusal(
                 "recovery-required",
                 f"creation verified but preserved empty target was not cleaned: {error}",
-            ) from error
+            )
+            assert stored_receipt is not None
+            failure = _create_failure_evidence(
+                refusal,
+                collected=collected,
+                job=job,
+                runner=runner,
+                stage_created=stage_created,
+                stage_snapshot=stage_snapshot,
+                prior_moved=prior_moved,
+                activated=activated,
+                stored_receipt=stored_receipt,
+            )
+            raise _refusal_with_failure(refusal, failure) from error
 
     programs = (
         *collected.plan.programs_launched,
         f"{plan.extractor.executable.path} [extract]",
     )
+    assert stored_receipt is not None
     return SetupApplyResult(
         outcome=BootstrapReceiptMode.CREATED.value,
         plan_id=plan.plan_id,
@@ -2605,6 +3129,26 @@ def _apply_adopt_plan(
     runner = command_runner or SubprocessCommandRunner()
     try:
         job = store.create_job(plan)
+    except Mo2BootstrapStorePromotionError as error:
+        refusal = Mo2BootstrapRefusal(
+            "recovery-required",
+            "bootstrap adoption journal reached disk but could not be verified: "
+            f"{error}",
+        )
+        failure = _bootstrap_failure_result(
+            refusal,
+            outcome="RecoveryRequired",
+            plan_id=plan.plan_id,
+            job_id=error.record_id,
+            actions_complete=True,
+            paths_written=(
+                (_workspace_relative(collected.layout, error.path),)
+                if error.changed
+                else ()
+            ),
+            programs_launched=_recorded_programs(runner),
+        )
+        raise _refusal_with_failure(refusal, failure) from error
     except (Mo2BootstrapStoreError, OSError) as error:
         raise Mo2BootstrapRefusal(
             "journal-invalid", f"bootstrap adoption job could not be created: {error}"
@@ -2612,6 +3156,8 @@ def _apply_adopt_plan(
 
     journal_path = job.path.relative_to(collected.layout.root).as_posix()
     stage_inventory: PackageInventory | None = None
+    stored_receipt: StoredBootstrapReceipt | None = None
+    promoted_paths: tuple[Path, ...] = ()
     try:
         _require_stopped_processes(
             _observe_processes(process_inspector, collected.layout.skyrim_mo2, {})
@@ -2698,7 +3244,15 @@ def _apply_adopt_plan(
             allowed_extras=comparison.allowed_extras,
             clock=clock,
         )
-        stored_receipt = store.write_receipt(receipt)
+        try:
+            stored_receipt = store.write_receipt(receipt)
+        except Mo2BootstrapStorePromotionError as error:
+            if error.record_kind != "receipt" or error.record_id != receipt.receipt_id:
+                raise Mo2BootstrapError(
+                    "receipt promotion failure identifies another record"
+                ) from error
+            promoted_paths = (error.path,) if error.changed else ()
+            raise
         _require_stopped_processes(
             _observe_processes(process_inspector, collected.layout.skyrim_mo2, {})
         )
@@ -2716,18 +3270,44 @@ def _apply_adopt_plan(
             receipt_id=stored_receipt.receipt.receipt_id,
         )
     except Mo2BootstrapRefusal as error:
-        _mark_adopt_recovery(store, job, error, clock)
-        raise
+        job = _mark_adopt_recovery(store, job, error, clock)
+        failure = _adopt_failure_evidence(
+            error,
+            collected=collected,
+            job=job,
+            runner=runner,
+            stored_receipt=stored_receipt,
+            promoted_paths=promoted_paths,
+        )
+        raise _refusal_with_failure(error, failure) from error
     except (BootstrapFormatError, Mo2ArchiveError, Mo2BootstrapStoreError, OSError) as error:
-        _mark_adopt_recovery(store, job, error, clock)
-        raise Mo2BootstrapRefusal(
+        job = _mark_adopt_recovery(store, job, error, clock)
+        refusal = Mo2BootstrapRefusal(
             "recovery-required", f"MO2 adoption requires recovery: {error}"
-        ) from error
+        )
+        failure = _adopt_failure_evidence(
+            refusal,
+            collected=collected,
+            job=job,
+            runner=runner,
+            stored_receipt=stored_receipt,
+            promoted_paths=promoted_paths,
+        )
+        raise _refusal_with_failure(refusal, failure) from error
     except Exception as error:
-        _mark_adopt_recovery(store, job, error, clock)
-        raise Mo2BootstrapRefusal(
+        job = _mark_adopt_recovery(store, job, error, clock)
+        refusal = Mo2BootstrapRefusal(
             "recovery-required", f"MO2 adoption failed safely: {error}"
-        ) from error
+        )
+        failure = _adopt_failure_evidence(
+            refusal,
+            collected=collected,
+            job=job,
+            runner=runner,
+            stored_receipt=stored_receipt,
+            promoted_paths=promoted_paths,
+        )
+        raise _refusal_with_failure(refusal, failure) from error
 
     if stage_inventory is None:
         raise Mo2BootstrapError("verified adoption has no recorded stage inventory")
@@ -2740,12 +3320,22 @@ def _apply_adopt_plan(
             collected.listing,
         )
     except (Mo2ArchiveError, OSError) as error:
-        raise Mo2BootstrapRefusal(
+        refusal = Mo2BootstrapRefusal(
             "recovery-required",
             f"adoption verified but its exact staging directory was not cleaned: {error}",
-        ) from error
+        )
+        assert stored_receipt is not None
+        failure = _adopt_failure_evidence(
+            refusal,
+            collected=collected,
+            job=job,
+            runner=runner,
+            stored_receipt=stored_receipt,
+        )
+        raise _refusal_with_failure(refusal, failure) from error
 
     programs = (*collected.plan.programs_launched, f"{plan.extractor.executable.path} [extract]")
+    assert stored_receipt is not None
     return SetupApplyResult(
         outcome=BootstrapReceiptMode.ADOPTED.value,
         plan_id=plan.plan_id,

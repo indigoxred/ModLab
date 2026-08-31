@@ -238,3 +238,21 @@ class RecoveryResult:
     manager_changes: tuple[str, ...]
     game_changes: tuple[str, ...]
     programs_launched: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BootstrapFailureResult:
+    outcome: str
+    code: str
+    message: str
+    plan_id: str | None
+    job_id: str | None
+    journal: BootstrapJournal | None
+    receipt: BootstrapReceipt | None
+    actions_complete: bool
+    paths_written: tuple[str, ...]
+    downloads: tuple[str, ...]
+    installations: tuple[str, ...]
+    manager_changes: tuple[str, ...]
+    game_changes: tuple[str, ...]
+    programs_launched: tuple[str, ...]

@@ -237,7 +237,7 @@ Reject unsafe POSIX paths, saves/co-saves, unordered/duplicate arrays, booleans 
 Run: `& 'C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m unittest tests.test_mo2_release -v`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add catalogue/tools/mo2-2.5.2.json modlab/adapters/mo2/release.py tests/test_mo2_release.py
@@ -1246,7 +1246,7 @@ git commit -m "feat: recover MO2 bootstrap jobs"
 - Consumes: planning/apply/recovery services.
 - Produces: `plan_result_to_dict/text`, `apply_result_to_dict/text`, `recovery_result_to_dict/text`, and CLI commands from the spec.
 
-- [ ] **Step 1: Write failing parser/contract tests**
+- [x] **Step 1: Write failing parser/contract tests**
 
 ```python
 class Mo2BootstrapCliTests(unittest.TestCase):
@@ -1282,7 +1282,7 @@ class Mo2BootstrapCliTests(unittest.TestCase):
 
 The test module imports the private `_parser` only to test argparse rejection without dispatch. Its `run_cli` helper calls `main(argv, stdout, stderr)` with fresh `StringIO` objects and returns a small record containing `code`, `stdout`, and `stderr`.
 
-- [ ] **Step 2: Add the exact argparse tree**
+- [x] **Step 2: Add the exact argparse tree**
 
 ```python
 skyrim_mo2 = skyrim_commands.add_parser('mo2', help='set up contained portable MO2')
@@ -1304,7 +1304,7 @@ recover.add_argument('--format', choices=('text', 'json'), default='text')
 
 Reject `--steam-root` with `--apply` in dispatch as an invalid command (exit 2).
 
-- [ ] **Step 3: Implement exact JSON/text rendering**
+- [x] **Step 3: Implement exact JSON/text rendering**
 
 Top-level JSON always contains:
 
@@ -1325,11 +1325,11 @@ Preview may report only its plan path. Adopt must report only ModLab plan/job/re
 
 Exit 0 for prepared non-Blocked plan, verified apply, AlreadyManaged, or completed recovery; exit 2 for invalid identifier/schema/unsupported release; exit 3 for coherent Blocked plans, safe refusals, changed preconditions, verification failure, or RecoveryRequired. Catch only `BootstrapFormatError` as invalid and `Mo2BootstrapRefusal` as safe refusal; unexpected exceptions remain visible to developers.
 
-- [ ] **Step 4: Add CLI failure and side-effect tests**
+- [x] **Step 4: Add CLI failure and side-effect tests**
 
 Cover text/JSON for all outcomes, fallback Steam root, invalid argument combinations, modified plan, running process, changed target, blocked plan, invalid job, recovery required, idempotent apply/recovery, and exception boundaries. For every refusal compare external tree state before/after and assert no traceback for expected errors.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `& 'C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m unittest tests.test_mo2_bootstrap_cli tests.test_cli -v`
 Expected: PASS.

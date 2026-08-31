@@ -39,6 +39,33 @@ class Mo2BootstrapStoreError(RuntimeError):
     """Bootstrap state could not be retained without weakening its evidence."""
 
 
+class Mo2BootstrapStorePromotionError(Mo2BootstrapStoreError):
+    """An immutable record reached its target but could not be reloaded safely."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        record_kind: str,
+        record_id: str,
+        path: Path,
+        changed: bool,
+    ):
+        self.record_kind = record_kind
+        self.record_id = record_id
+        self.path = path
+        self.changed = changed
+        super().__init__(message)
+
+
+class _AtomicCreatePromotionError(Mo2BootstrapStoreError):
+    """A no-replace promotion succeeded before its readback failed."""
+
+    def __init__(self, message: str, *, path: Path):
+        self.path = path
+        super().__init__(message)
+
+
 class Mo2BootstrapNotFoundError(LookupError):
     """A requested bootstrap record does not exist in this workspace."""
 
@@ -249,7 +276,16 @@ class Mo2BootstrapStore:
         data = self._serialize(plan_to_bytes, plan, "plan")
         self._validate_plan_workspace(plan)
         target = self.plan_path(plan.plan_id)
-        changed = self._write_immutable(target, data, "plan")
+        try:
+            changed = self._write_immutable(target, data, "plan")
+        except _AtomicCreatePromotionError as error:
+            raise Mo2BootstrapStorePromotionError(
+                f"bootstrap plan was promoted but could not be verified: {error}",
+                record_kind="plan",
+                record_id=plan.plan_id,
+                path=error.path,
+                changed=True,
+            ) from error
         loaded = self.load_plan(plan.plan_id)
         if loaded.plan != plan or loaded.data != data:
             raise Mo2BootstrapStoreError("stored plan differs after write")
@@ -352,16 +388,35 @@ class Mo2BootstrapStore:
             job_directory.mkdir()
             created_job_directory = True
             self._validate_existing_directory(job_directory, "bootstrap job directory")
-            changed = self._atomic_create(
-                self.journal_path(job_id),
-                journal_data,
-                f"journal-{job_id.removeprefix('bootstrap-job:')}",
-            )
+            try:
+                changed = self._atomic_create(
+                    self.journal_path(job_id),
+                    journal_data,
+                    f"journal-{job_id.removeprefix('bootstrap-job:')}",
+                )
+            except _AtomicCreatePromotionError as error:
+                raise Mo2BootstrapStorePromotionError(
+                    "bootstrap journal was promoted but could not be verified: "
+                    f"{error}",
+                    record_kind="journal",
+                    record_id=job_id,
+                    path=error.path,
+                    changed=True,
+                ) from error
             if not changed:
                 raise Mo2BootstrapStoreError(
                     "bootstrap journal appeared during job creation"
                 )
-            return self.load_job(job_id, changed=True)
+            try:
+                return self.load_job(job_id, changed=True)
+            except (Mo2BootstrapStoreError, Mo2BootstrapNotFoundError) as error:
+                raise Mo2BootstrapStorePromotionError(
+                    f"bootstrap journal was promoted but could not be reloaded: {error}",
+                    record_kind="journal",
+                    record_id=job_id,
+                    path=self.journal_path(job_id),
+                    changed=True,
+                ) from error
         except Mo2BootstrapStoreError:
             if created_job_directory:
                 self._remove_empty_directory(job_directory)
@@ -460,8 +515,26 @@ class Mo2BootstrapStore:
                 "receipt final root does not match this workspace's Skyrim MO2 target"
             )
         target = self.receipt_path(receipt.receipt_id)
-        changed = self._write_immutable(target, data, "receipt")
-        loaded = self.load_receipt(receipt.receipt_id)
+        try:
+            changed = self._write_immutable(target, data, "receipt")
+        except _AtomicCreatePromotionError as error:
+            raise Mo2BootstrapStorePromotionError(
+                f"bootstrap receipt was promoted but could not be verified: {error}",
+                record_kind="receipt",
+                record_id=receipt.receipt_id,
+                path=error.path,
+                changed=True,
+            ) from error
+        try:
+            loaded = self.load_receipt(receipt.receipt_id)
+        except (Mo2BootstrapStoreError, Mo2BootstrapNotFoundError) as error:
+            raise Mo2BootstrapStorePromotionError(
+                f"bootstrap receipt was promoted but could not be reloaded: {error}",
+                record_kind="receipt",
+                record_id=receipt.receipt_id,
+                path=target,
+                changed=changed,
+            ) from error
         if loaded.receipt != receipt or loaded.data != data:
             raise Mo2BootstrapStoreError("stored receipt differs after write")
         return StoredBootstrapReceipt(
@@ -577,12 +650,21 @@ class Mo2BootstrapStore:
                     f"stored {label} differs after atomic promotion: {target}"
                 )
             return True
-        except Mo2BootstrapStoreError:
+        except Mo2BootstrapStoreError as error:
+            if promoted:
+                raise _AtomicCreatePromotionError(
+                    f"could not verify promoted bootstrap {label} at {target}: {error}",
+                    path=target,
+                ) from error
             raise
         except Exception as error:
-            phase = "after promotion" if promoted else "before promotion"
+            if promoted:
+                raise _AtomicCreatePromotionError(
+                    f"could not verify promoted bootstrap {label} at {target}: {error}",
+                    path=target,
+                ) from error
             raise Mo2BootstrapStoreError(
-                f"could not write bootstrap {label} {phase} at {target}: {error}"
+                f"could not write bootstrap {label} before promotion at {target}: {error}"
             ) from error
         finally:
             self._cleanup_part(part)
@@ -1107,6 +1189,7 @@ __all__ = [
     "Mo2BootstrapNotFoundError",
     "Mo2BootstrapStore",
     "Mo2BootstrapStoreError",
+    "Mo2BootstrapStorePromotionError",
     "StoredBootstrapJournal",
     "StoredBootstrapPlan",
     "StoredBootstrapReceipt",

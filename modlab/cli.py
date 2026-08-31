@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,8 @@ from .adapters.mo2.comparison_serialization import (
 from .adapters.mo2.projection import Mo2Readiness, project_mo2_state
 from .adapters.mo2.scanner import inspect_skyrim_mo2
 from .adapters.mo2.serialization import Mo2EvidenceFormatError, report_to_dict
+from .adapters.mo2.bootstrap_model import BootstrapDisposition
+from .adapters.mo2.bootstrap_serialization import BootstrapFormatError
 from .adapters.skyrim.scanner import discover_skyrim_steam
 from .adapters.skyrim.serialization import (
     SkyrimDiscoveryFormatError,
@@ -61,9 +64,28 @@ from .workflows.skyrim.service import (
     get_skyrim_status,
     use_skyrim_baseline,
 )
+from .workflows.skyrim.mo2_bootstrap import (
+    Mo2BootstrapRefusal,
+    apply_mo2_setup,
+    prepare_mo2_setup,
+    recover_mo2_setup,
+)
+from .workflows.skyrim.mo2_bootstrap_rendering import (
+    apply_result_to_dict,
+    apply_result_to_text,
+    plan_result_to_dict,
+    plan_result_to_text,
+    recovery_result_to_dict,
+    recovery_result_to_text,
+    refusal_result_to_dict,
+    refusal_result_to_text,
+)
 
 
 NO_ACTIONS = "No downloads or installation actions were performed."
+_BOOTSTRAP_ARTIFACT_ID = re.compile(r"^archive-sha256:[0-9a-f]{64}$")
+_BOOTSTRAP_PLAN_ID = re.compile(r"^bootstrap-plan-sha256:[0-9a-f]{64}$")
+_BOOTSTRAP_JOB_ID = re.compile(r"^bootstrap-job:[0-9a-f]{32}$")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -294,6 +316,32 @@ def _parser() -> argparse.ArgumentParser:
     skyrim_status.add_argument(
         "--format", choices=("text", "json"), default="text"
     )
+
+    skyrim_mo2 = skyrim_commands.add_parser(
+        "mo2", help="set up contained portable MO2"
+    )
+    skyrim_mo2_commands = skyrim_mo2.add_subparsers(
+        dest="skyrim_mo2_command", required=True
+    )
+    skyrim_mo2_setup = skyrim_mo2_commands.add_parser(
+        "setup", help="preview or apply verified MO2 setup"
+    )
+    skyrim_mo2_mode = skyrim_mo2_setup.add_mutually_exclusive_group(required=True)
+    skyrim_mo2_mode.add_argument("--artifact")
+    skyrim_mo2_mode.add_argument("--apply", dest="plan_id")
+    skyrim_mo2_setup.add_argument("--steam-root", type=Path)
+    skyrim_mo2_setup.add_argument("--workspace", type=Path, default=None)
+    skyrim_mo2_setup.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
+    skyrim_mo2_recover = skyrim_mo2_commands.add_parser(
+        "recover", help="recover one interrupted MO2 setup"
+    )
+    skyrim_mo2_recover.add_argument("job_id")
+    skyrim_mo2_recover.add_argument("--workspace", type=Path, default=None)
+    skyrim_mo2_recover.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
     return parser
 
 
@@ -388,6 +436,84 @@ def _write_json(output: TextIO, value: object) -> None:
     print(file=output)
 
 
+def _run_mo2_command(args: argparse.Namespace, output: TextIO, errors: TextIO) -> int:
+    workspace_root = (
+        args.workspace if args.workspace is not None else default_workspace_root()
+    )
+    if args.skyrim_mo2_command == "setup" and args.artifact is not None:
+        if _BOOTSTRAP_ARTIFACT_ID.fullmatch(args.artifact) is None:
+            print(
+                "MO2 setup error: artifact ID must use "
+                "archive-sha256:<64 lowercase hex characters>",
+                file=errors,
+            )
+            return 2
+        result = prepare_mo2_setup(
+            artifact_id=args.artifact,
+            workspace_root=workspace_root,
+            steam_root=args.steam_root,
+        )
+        if args.format == "json":
+            _write_json(output, plan_result_to_dict(result))
+        else:
+            print(plan_result_to_text(result), end="", file=output)
+        return 3 if result.plan.disposition is BootstrapDisposition.BLOCKED else 0
+
+    if args.skyrim_mo2_command == "setup":
+        if args.steam_root is not None:
+            print(
+                "MO2 setup error: --steam-root is valid only with --artifact",
+                file=errors,
+            )
+            return 2
+        if _BOOTSTRAP_PLAN_ID.fullmatch(args.plan_id or "") is None:
+            print(
+                "MO2 setup error: plan ID must use "
+                "bootstrap-plan-sha256:<64 lowercase hex characters>",
+                file=errors,
+            )
+            return 2
+        result = apply_mo2_setup(args.plan_id, workspace_root)
+        if args.format == "json":
+            _write_json(output, apply_result_to_dict(result))
+        else:
+            print(apply_result_to_text(result), end="", file=output)
+        return 0
+
+    if _BOOTSTRAP_JOB_ID.fullmatch(args.job_id) is None:
+        print(
+            "MO2 setup error: job ID must use "
+            "bootstrap-job:<32 lowercase hex characters>",
+            file=errors,
+        )
+        return 2
+    result = recover_mo2_setup(args.job_id, workspace_root)
+    if args.format == "json":
+        _write_json(output, recovery_result_to_dict(result))
+    else:
+        print(recovery_result_to_text(result), end="", file=output)
+    return 0
+
+
+def _write_mo2_refusal(
+    args: argparse.Namespace,
+    error: Mo2BootstrapRefusal,
+    output: TextIO,
+) -> int:
+    if args.format == "json":
+        _write_json(
+            output,
+            refusal_result_to_dict(error.code, str(error), error.failure),
+        )
+    else:
+        print(
+            refusal_result_to_text(error.code, str(error), error.failure),
+            end="",
+            file=output,
+        )
+    return 2 if error.code == "release-unsupported" else 3
+
+
 def main(
     argv: list[str] | None = None,
     stdout: TextIO | None = None,
@@ -396,6 +522,14 @@ def main(
     output = stdout if stdout is not None else sys.stdout
     errors = stderr if stderr is not None else sys.stderr
     args = _parser().parse_args(argv)
+    if args.command == "skyrim" and args.skyrim_command == "mo2":
+        try:
+            return _run_mo2_command(args, output, errors)
+        except BootstrapFormatError as error:
+            print(f"MO2 setup error: {error}", file=errors)
+            return 2
+        except Mo2BootstrapRefusal as error:
+            return _write_mo2_refusal(args, error, output)
     try:
         if args.command == "workspace" and args.workspace_command == "init":
             root = args.root if args.root is not None else default_workspace_root()

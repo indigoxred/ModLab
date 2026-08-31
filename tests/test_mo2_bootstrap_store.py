@@ -25,6 +25,7 @@ from modlab.workflows.skyrim.mo2_bootstrap_store import (
     Mo2BootstrapNotFoundError,
     Mo2BootstrapStore,
     Mo2BootstrapStoreError,
+    Mo2BootstrapStorePromotionError,
     _promote_no_replace,
 )
 from modlab.workspace import initialize_workspace
@@ -480,6 +481,82 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
 
         self.assertFalse(target.exists())
         self.assertEqual([], list(self.layout.mo2_bootstrap_jobs.glob("*.part")))
+
+    def test_initial_journal_validation_failure_preserves_promotion_evidence(self):
+        self.store.write_plan(self.plan)
+        target = self.store.journal_path(JOB_ID)
+        validate = Mo2BootstrapStore._validate_existing_file
+
+        def fail_promoted_target(store, path, label):
+            if path == target and target.exists():
+                raise Mo2BootstrapStoreError(
+                    "fixture target validation failed after promotion"
+                )
+            return validate(store, path, label)
+
+        with patch.object(
+            Mo2BootstrapStore,
+            "_validate_existing_file",
+            new=fail_promoted_target,
+        ):
+            with self.assertRaises(Mo2BootstrapStorePromotionError) as raised:
+                self.store.create_job(self.plan)
+
+        self.assertEqual("journal", raised.exception.record_kind)
+        self.assertEqual(JOB_ID, raised.exception.record_id)
+        self.assertEqual(target, raised.exception.path)
+        self.assertTrue(raised.exception.changed)
+
+    def test_receipt_read_failure_preserves_promotion_evidence(self):
+        receipt = self._receipt()
+        target = self.store.receipt_path(receipt.receipt_id)
+        read = Mo2BootstrapStore._read_existing_bytes
+
+        def fail_promoted_target(path, label):
+            if path == target and target.exists():
+                raise Mo2BootstrapStoreError(
+                    "fixture target read failed after promotion"
+                )
+            return read(path, label)
+
+        with patch.object(
+            Mo2BootstrapStore,
+            "_read_existing_bytes",
+            new=staticmethod(fail_promoted_target),
+        ):
+            with self.assertRaises(Mo2BootstrapStorePromotionError) as raised:
+                self.store.write_receipt(receipt)
+
+        self.assertEqual("receipt", raised.exception.record_kind)
+        self.assertEqual(receipt.receipt_id, raised.exception.record_id)
+        self.assertEqual(target, raised.exception.path)
+        self.assertTrue(raised.exception.changed)
+
+    def test_post_promotion_disappearance_preserves_record_identity(self):
+        self.store.write_plan(self.plan)
+        with patch.object(
+            self.store,
+            "load_job",
+            side_effect=Mo2BootstrapNotFoundError("fixture journal disappeared"),
+        ):
+            with self.assertRaises(Mo2BootstrapStorePromotionError) as journal_error:
+                self.store.create_job(self.plan)
+
+        receipt = self._receipt()
+        with patch.object(
+            self.store,
+            "load_receipt",
+            side_effect=Mo2BootstrapNotFoundError("fixture receipt disappeared"),
+        ):
+            with self.assertRaises(Mo2BootstrapStorePromotionError) as receipt_error:
+                self.store.write_receipt(receipt)
+
+        self.assertEqual("journal", journal_error.exception.record_kind)
+        self.assertEqual(JOB_ID, journal_error.exception.record_id)
+        self.assertTrue(journal_error.exception.changed)
+        self.assertEqual("receipt", receipt_error.exception.record_kind)
+        self.assertEqual(receipt.receipt_id, receipt_error.exception.record_id)
+        self.assertTrue(receipt_error.exception.changed)
 
     def test_immutable_race_never_overwrites_bytes_that_appear_at_target(self):
         target = self.store.plan_path(self.plan.plan_id)
