@@ -235,6 +235,17 @@ class Mo2ContainmentSerializationTests(unittest.TestCase):
                 with self.assertRaises(ContainmentFormatError):
                     scenario_result_to_bytes(result)
 
+    def test_failed_adoption_with_unknown_integrity_is_incomplete(self):
+        result = replace(
+            valid_scenario_result(ContainmentScenario.NEW_FOLDER),
+            outcome=ScenarioOutcome.FAILED,
+            adopted_integrity=IntegrityObservation.UNKNOWN,
+            reasons=("adopted integrity was unavailable",),
+        )
+
+        with self.assertRaises(ContainmentFormatError):
+            scenario_result_to_bytes(result)
+
     def test_journal_round_trips_and_rejects_captured_without_mo2_pid(self):
         value = ScenarioJournal(
             schema_version=1,

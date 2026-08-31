@@ -82,7 +82,7 @@ def _check_result(r):
   elif any(x is not None for x in adopt) or r.staging_new_names or r.staging_output_names: raise ContainmentFormatError(f"Passed {r.scenario.value} result cannot record adopted output")
  elif r.outcome is ScenarioOutcome.FAILED:
   if not r.reasons: raise ContainmentFormatError("Failed result requires reasons")
-  if not r.watcher_complete or r.mo2_process is None or IntegrityObservation.UNKNOWN in {r.source_integrity,r.stage_integrity} or (r.mo2_process is not None and r.mo2_process.integrity is IntegrityObservation.UNKNOWN): raise ContainmentFormatError("incomplete or unknown evidence must be Incomplete")
+  if not r.watcher_complete or r.mo2_process is None or IntegrityObservation.UNKNOWN in {r.source_integrity,r.stage_integrity} or (r.mo2_process is not None and r.mo2_process.integrity is IntegrityObservation.UNKNOWN) or r.adopted_integrity is IntegrityObservation.UNKNOWN: raise ContainmentFormatError("incomplete or unknown evidence must be Incomplete")
  elif r.outcome is ScenarioOutcome.INCOMPLETE and not r.reasons: raise ContainmentFormatError("Incomplete result requires reasons")
 
 def _journal_dict(v): return {"schemaVersion":v.schema_version,"runId":v.run_id,"scenario":v.scenario.value,"state":v.state.value,"sourceRoot":v.source_root,"stageRoot":v.stage_root,"archivePath":v.archive_path,"protectedModName":v.protected_mod_name,"expectedNewModName":v.expected_new_mod_name,"protectedBefore":_protected_dict(v.protected_before),"monitorPid":v.monitor_pid,"mo2Pid":v.mo2_pid,"error":v.error}
