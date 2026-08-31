@@ -146,7 +146,7 @@ The plan records:
 - release descriptor identity;
 - retained archive ID, size, SHA-256, metadata identity, and health;
 - system extractor path, version, size, and SHA-256;
-- exact final and staging roots;
+- exact final root plus the fixed staging parent and job-derived naming rule;
 - current target classification and bounded inventory identity;
 - running-process observations and the required process-absence predicate for apply;
 - profile seed source identities;
@@ -155,7 +155,7 @@ The plan records:
 - exclusions and Unknowns;
 - outcome and blocking findings.
 
-Paths are recorded as both workspace-relative logical paths and resolved physical identities where needed for containment. Volatile timestamps do not contribute to the plan ID. The stored plan file is itself verified before apply.
+Paths are recorded as both workspace-relative logical paths and resolved physical identities where needed for containment. The exact staging root cannot exist until apply creates a job; it is derived solely from the stored plan ID and new `bootstrap-job:<32-lowercase-hex>` identity, then recorded in that job's journal before extraction. Volatile timestamps and the later job identity do not contribute to the plan ID. The stored plan file is itself verified before apply.
 
 Repeating plan with unchanged inputs returns the same plan ID and does not replace its bytes. A conflicting file at that content-addressed path blocks.
 
@@ -244,11 +244,14 @@ The four writable paths are derived from the fixed base directory rather than in
 Create produces both exact profile directories. Each begins with:
 
 - `settings.ini` containing `LocalSaves=false`, `LocalSettings=true`, and `AutomaticArchiveInvalidation=true`;
-- comment-only `modlist.txt`, `plugins.txt`, `loadorder.txt`, and `lockedorder.txt`;
+- comment-only `modlist.txt`, `plugins.txt`, and `lockedorder.txt`;
+- `loadorder.txt` containing the five fixed Skyrim masters followed by the exact valid plug-in sequence read from the fixed root `Skyrim.ccc`, when present;
 - an empty `archives.txt`;
 - `Skyrim.ini`, `SkyrimPrefs.ini`, and `SkyrimCustom.ini` copied only from the three exact game-scoped INI paths when present as regular, nonredirected files; a missing source becomes an explicit empty seed.
 
-ModLab never enumerates or copies the adjacent saves directory. The exact three source paths, presence, size, and SHA-256 values are frozen in the plan and rechecked at apply.
+The five fixed masters are `Skyrim.esm`, `Update.esm`, `Dawnguard.esm`, `HearthFires.esm`, and `Dragonborn.esm`. Each must exist as an observed top-level `Data` plug-in before Create is eligible. `Skyrim.ccc` is parsed with the same strict plug-in-name rules used by the current MO2 adapter; duplicates, unsafe names, or missing listed files block. Its presence, bytes, size, SHA-256, and resulting ordered plug-in sequence are frozen in the plan and rechecked at apply.
+
+ModLab never enumerates or copies the adjacent saves directory. The exact three INI source paths, presence, size, and SHA-256 values are frozen in the plan and rechecked at apply.
 
 Lab and Play seeds are byte-identical at creation. Their selections and generated outputs diverge only through later explicit work. MO2 may populate implicit DLC and Creation Club entries on first launch; that later normalization is observed and checkpointed rather than guessed during bootstrap.
 
@@ -374,7 +377,7 @@ Development is test-driven. Unit and integration coverage includes:
 7. unsafe archive names, case collisions, link/device entries, listing drift, extraction failure, and post-extraction redirects;
 8. extractor argument-array construction without a shell;
 9. staged executable and package-sentinel verification;
-10. deterministic minimal MO2 configuration and both profile seeds;
+10. deterministic minimal MO2 configuration, authoritative primary load order, and both profile seeds;
 11. exact INI-only source reads with saves structurally unreachable;
 12. process-path detection and Unknown inspection failure;
 13. changed archive, game, target, extractor, profile seed, environment, or baseline between plan and apply;
