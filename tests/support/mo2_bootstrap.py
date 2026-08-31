@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+import hashlib
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from subprocess import CompletedProcess
+
+from modlab.adapters.mo2.archive import PackageFile, PackageInventory
 
 from modlab.adapters.mo2.bootstrap_model import (
     ArchiveEvidence,
@@ -32,6 +37,178 @@ from modlab.adapters.mo2.bootstrap_serialization import (
     receipt_to_bytes,
 )
 from modlab.recipes.model import CheckState
+from modlab.adapters.mo2.release import (
+    Mo2ReleaseDescriptor,
+    ReleaseFileIdentity,
+    bundled_mo2_252_path,
+    load_mo2_release,
+)
+
+
+@dataclass
+class FakeRunner:
+    responses: dict[str, CompletedProcess[bytes]]
+    extraction_files: dict[str, bytes] = field(default_factory=dict)
+    calls: list[list[str]] = field(default_factory=list)
+
+    @classmethod
+    def for_listing(cls, names: list[str], types: list[str]):
+        name_bytes = ("\n".join(names) + "\n").encode("utf-8")
+        verbose = "\n".join(
+            f"{kind}rw-r--r--  0 0 0 0 Jan 01 2026 {name}"
+            for name, kind in zip(names, types, strict=True)
+        )
+        return cls(
+            {
+                "-tf": CompletedProcess((), 0, name_bytes, b""),
+                "-tvf": CompletedProcess(
+                    (), 0, (verbose + "\n").encode("utf-8"), b""
+                ),
+            }
+        )
+
+    @classmethod
+    def for_extraction(cls, files: dict[str, bytes]):
+        return cls(
+            {"-xf": CompletedProcess((), 0, b"", b"")},
+            extraction_files=dict(files),
+        )
+
+    def run(self, args: tuple[str, ...]) -> CompletedProcess[bytes]:
+        self.calls.append(list(args))
+        operation = args[1]
+        if operation == "-xf":
+            destination = Path(args[args.index("-C") + 1])
+            for relative_path, data in self.extraction_files.items():
+                target = destination / Path(*relative_path.split("/"))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+        try:
+            response = self.responses[operation]
+        except KeyError as error:
+            raise AssertionError(f"unexpected fake command: {args}") from error
+        return CompletedProcess(args, response.returncode, response.stdout, response.stderr)
+
+
+def valid_names() -> list[str]:
+    directories = [f"directory-{index:04d}/" for index in range(154)]
+    files = [f"files/file-{index:04d}.bin" for index in range(1626)]
+    return directories + files
+
+
+def valid_types() -> list[str]:
+    return ["d"] * 154 + ["-"] * 1626
+
+
+def descriptor_for(names: list[str]) -> Mo2ReleaseDescriptor:
+    listing = ("\n".join(names) + "\n").encode("utf-8")
+    return replace(
+        load_mo2_release(bundled_mo2_252_path()).descriptor,
+        archive_entry_count=len(names),
+        archive_listing_sha256=hashlib.sha256(listing).hexdigest(),
+    )
+
+
+def unsafe_listing_cases():
+    return (
+        (["../outside.dll"], ["-"], "safe relative path"),
+        (["File.dll", "file.dll"], ["-", "-"], "duplicate"),
+        (["linked.dll"], ["l"], "regular files and directories"),
+    )
+
+
+def package_inventory_fixture() -> PackageInventory:
+    return _package_inventory(
+        {
+            "ModOrganizer.exe": b"organizer",
+            "plugins/game_skyrimse.dll": b"game plugin",
+            "usvfs_x64.dll": b"usvfs",
+        }
+    )
+
+
+def existing_app_fixture(
+    *, missing: str | None = None, extras: dict[str, bytes] | None = None
+) -> PackageInventory:
+    files = {
+        item.relative_path: (item.sha256, item.size)
+        for item in package_inventory_fixture().files
+        if item.relative_path != missing
+    }
+    for path, data in (extras or {}).items():
+        files[path] = (hashlib.sha256(data).hexdigest(), len(data))
+    return _package_inventory_from_identities(files)
+
+
+def extraction_package_files() -> dict[str, bytes]:
+    return {
+        "ModOrganizer.exe": b"portable organizer",
+        "loot/loot.dll": b"loot library",
+        "plugins/game_skyrimse.dll": b"skyrim game plugin",
+        "usvfs_x64.dll": b"virtual filesystem",
+    }
+
+
+def descriptor_for_package(files: dict[str, bytes]) -> Mo2ReleaseDescriptor:
+    base = load_mo2_release(bundled_mo2_252_path()).descriptor
+    executable = _release_file("ModOrganizer.exe", files["ModOrganizer.exe"], "2.5.2.0")
+    sentinels = tuple(
+        _release_file(path, files[path])
+        for path in (
+            "loot/loot.dll",
+            "plugins/game_skyrimse.dll",
+            "usvfs_x64.dll",
+        )
+    )
+    return replace(
+        base,
+        package_file_count=len(files),
+        extracted_size=sum(len(data) for data in files.values()),
+        minimum_free_bytes=1024,
+        executable=executable,
+        sentinels=sentinels,
+    )
+
+
+def _release_file(
+    path: str, data: bytes, version: str | None = None
+) -> ReleaseFileIdentity:
+    return ReleaseFileIdentity(
+        relative_path=path,
+        sha256=hashlib.sha256(data).hexdigest(),
+        size=len(data),
+        file_version=version,
+    )
+
+
+def _package_inventory(files: dict[str, bytes]) -> PackageInventory:
+    return _package_inventory_from_identities(
+        {
+            path: (hashlib.sha256(data).hexdigest(), len(data))
+            for path, data in files.items()
+        }
+    )
+
+
+def _package_inventory_from_identities(
+    files: dict[str, tuple[str, int]],
+) -> PackageInventory:
+    rows = tuple(
+        PackageFile(path, sha256, size)
+        for path, (sha256, size) in sorted(
+            files.items(), key=lambda item: (item[0].casefold(), item[0])
+        )
+    )
+    canonical = json.dumps(
+        [[item.relative_path, item.sha256, item.size] for item in rows],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return PackageInventory(
+        files=rows,
+        total_size=sum(item.size for item in rows),
+        sha256=hashlib.sha256(canonical).hexdigest(),
+    )
 
 
 def make_plan_fixture(**overrides: object) -> BootstrapPlan:
