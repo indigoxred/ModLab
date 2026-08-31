@@ -103,9 +103,11 @@ def configure_skyrim_environment(
     select: tuple[str, ...] = (),
     omit: tuple[str, ...] = (),
     replace_existing: bool = False,
-    skyrim_version_reader: Callable[[Path], str | None] = read_windows_file_version,
-    mo2_version_reader: Callable[[Path], str | None] = read_windows_file_version,
+    skyrim_version_reader: Callable[[Path], str | None] | None = None,
+    mo2_version_reader: Callable[[Path], str | None] | None = None,
 ) -> ConfigureResult:
+    skyrim_reader = skyrim_version_reader or read_windows_file_version
+    mo2_reader = mo2_version_reader or read_windows_file_version
     try:
         recipe_source = load_recipe_source(recipe_path)
         target_source = load_environment_source(target_environment_path)
@@ -113,8 +115,8 @@ def configure_skyrim_environment(
             steam_root,
             workspace_root,
             target_source.environment,
-            skyrim_version_reader=skyrim_version_reader,
-            mo2_version_reader=mo2_version_reader,
+            skyrim_version_reader=skyrim_reader,
+            mo2_version_reader=mo2_reader,
         )
         review = review_recipe(
             recipe_source.recipe,
@@ -188,9 +190,11 @@ def create_skyrim_baseline(
     workspace_root: Path,
     *,
     clock,
-    skyrim_version_reader: Callable[[Path], str | None] = read_windows_file_version,
-    mo2_version_reader: Callable[[Path], str | None] = read_windows_file_version,
+    skyrim_version_reader: Callable[[Path], str | None] | None = None,
+    mo2_version_reader: Callable[[Path], str | None] | None = None,
 ) -> BaselineCaptureResult:
+    skyrim_reader = skyrim_version_reader or read_windows_file_version
+    mo2_reader = mo2_version_reader or read_windows_file_version
     store = SkyrimEnvironmentStore(workspace_root)
     try:
         snapshot = store.load()
@@ -199,8 +203,8 @@ def create_skyrim_baseline(
             Path(snapshot.configuration.steam_root),
             workspace_root,
             target_source.environment,
-            skyrim_version_reader=skyrim_version_reader,
-            mo2_version_reader=mo2_version_reader,
+            skyrim_version_reader=skyrim_reader,
+            mo2_version_reader=mo2_reader,
         )
         return create_observed_baseline(
             snapshot,
@@ -256,9 +260,11 @@ def use_skyrim_baseline(
 def get_skyrim_status(
     workspace_root: Path,
     *,
-    skyrim_version_reader: Callable[[Path], str | None] = read_windows_file_version,
-    mo2_version_reader: Callable[[Path], str | None] = read_windows_file_version,
+    skyrim_version_reader: Callable[[Path], str | None] | None = None,
+    mo2_version_reader: Callable[[Path], str | None] | None = None,
 ) -> SkyrimDriftReport:
+    skyrim_reader = skyrim_version_reader or read_windows_file_version
+    mo2_reader = mo2_version_reader or read_windows_file_version
     store = SkyrimEnvironmentStore(workspace_root)
     try:
         snapshot = store.load()
@@ -271,8 +277,8 @@ def get_skyrim_status(
             Path(configuration.steam_root),
             workspace_root,
             target_source.environment,
-            skyrim_version_reader=skyrim_version_reader,
-            mo2_version_reader=mo2_version_reader,
+            skyrim_version_reader=skyrim_reader,
+            mo2_version_reader=mo2_reader,
         )
     except (RecipeFormatError, SkyrimWorkflowError, ValueError, OSError) as error:
         return _blocked_status(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
@@ -40,6 +41,26 @@ from .transactions.manager import TransactionManager, TransactionManagerError
 from .transactions.model import TransactionFinding, TransactionHealth
 from .transactions.serialization import TransactionFormatError, journal_to_dict
 from .workspace import default_workspace_root, initialize_workspace
+from .workflows.skyrim.drift import SkyrimStatusOutcome
+from .workflows.skyrim.serialization import (
+    SkyrimWorkflowFormatError,
+    capture_result_to_dict,
+    capture_result_to_text,
+    configure_result_to_dict,
+    configure_result_to_text,
+    status_result_to_dict,
+    status_result_to_text,
+    use_result_to_dict,
+    use_result_to_text,
+)
+from .workflows.skyrim.service import (
+    SkyrimConfigurationConflictError,
+    SkyrimWorkflowError,
+    configure_skyrim_environment,
+    create_skyrim_baseline,
+    get_skyrim_status,
+    use_skyrim_baseline,
+)
 
 
 NO_ACTIONS = "No downloads or installation actions were performed."
@@ -221,6 +242,58 @@ def _parser() -> argparse.ArgumentParser:
     review.add_argument("--select", action="append", default=[], metavar="ID")
     review.add_argument("--omit", action="append", default=[], metavar="ID")
     review.add_argument("--format", choices=("text", "json"), default="text")
+
+    skyrim = commands.add_parser(
+        "skyrim",
+        help="register Skyrim intent and compare observed baselines",
+    )
+    skyrim_commands = skyrim.add_subparsers(
+        dest="skyrim_command", required=True
+    )
+    skyrim_configure = skyrim_commands.add_parser(
+        "configure",
+        help="register explicit Skyrim, recipe, and target-environment paths",
+    )
+    skyrim_configure.add_argument("--steam-root", required=True, type=Path)
+    skyrim_configure.add_argument("--recipe", required=True, type=Path)
+    skyrim_configure.add_argument("--environment", required=True, type=Path)
+    skyrim_configure.add_argument("--select", action="append", default=[], metavar="ID")
+    skyrim_configure.add_argument("--omit", action="append", default=[], metavar="ID")
+    skyrim_configure.add_argument("--replace", action="store_true")
+    skyrim_configure.add_argument("--workspace", type=Path, default=None)
+    skyrim_configure.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
+
+    skyrim_baseline = skyrim_commands.add_parser(
+        "baseline", help="capture or select observed Skyrim baselines"
+    )
+    skyrim_baseline_commands = skyrim_baseline.add_subparsers(
+        dest="skyrim_baseline_command", required=True
+    )
+    skyrim_baseline_create = skyrim_baseline_commands.add_parser(
+        "create", help="capture current observed state without installing anything"
+    )
+    skyrim_baseline_create.add_argument("--workspace", type=Path, default=None)
+    skyrim_baseline_create.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
+    skyrim_baseline_use = skyrim_baseline_commands.add_parser(
+        "use", help="select an existing compatible observed checkpoint"
+    )
+    skyrim_baseline_use.add_argument("checkpoint_id")
+    skyrim_baseline_use.add_argument("--workspace", type=Path, default=None)
+    skyrim_baseline_use.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
+
+    skyrim_status = skyrim_commands.add_parser(
+        "status", help="compare current state with the selected baseline read-only"
+    )
+    skyrim_status.add_argument("--workspace", type=Path, default=None)
+    skyrim_status.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
     return parser
 
 
@@ -336,6 +409,95 @@ def main(
             print(f"Runtime: {layout.cache.parent}", file=output)
             print("Existing files were preserved.", file=output)
             return 0
+
+        if args.command == "skyrim":
+            workspace_root = (
+                args.workspace
+                if args.workspace is not None
+                else default_workspace_root()
+            )
+            if args.skyrim_command == "configure":
+                result = configure_skyrim_environment(
+                    steam_root=args.steam_root,
+                    recipe_path=args.recipe,
+                    target_environment_path=args.environment,
+                    workspace_root=workspace_root,
+                    select=tuple(args.select),
+                    omit=tuple(args.omit),
+                    replace_existing=args.replace,
+                )
+                if args.format == "json":
+                    _write_json(
+                        output,
+                        configure_result_to_dict(
+                            result, workspace_root=workspace_root
+                        ),
+                    )
+                else:
+                    print(
+                        configure_result_to_text(
+                            result, workspace_root=workspace_root
+                        ),
+                        end="",
+                        file=output,
+                    )
+                return 0
+
+            if (
+                args.skyrim_command == "baseline"
+                and args.skyrim_baseline_command == "create"
+            ):
+                result = create_skyrim_baseline(
+                    workspace_root,
+                    clock=lambda: datetime.now(timezone.utc),
+                )
+                if args.format == "json":
+                    _write_json(
+                        output,
+                        capture_result_to_dict(
+                            result, workspace_root=workspace_root
+                        ),
+                    )
+                else:
+                    print(
+                        capture_result_to_text(
+                            result, workspace_root=workspace_root
+                        ),
+                        end="",
+                        file=output,
+                    )
+                return 0 if result.selected else 3
+
+            if (
+                args.skyrim_command == "baseline"
+                and args.skyrim_baseline_command == "use"
+            ):
+                result = use_skyrim_baseline(
+                    workspace_root, args.checkpoint_id
+                )
+                if args.format == "json":
+                    _write_json(
+                        output,
+                        use_result_to_dict(
+                            result, workspace_root=workspace_root
+                        ),
+                    )
+                else:
+                    print(
+                        use_result_to_text(
+                            result, workspace_root=workspace_root
+                        ),
+                        end="",
+                        file=output,
+                    )
+                return 0
+
+            result = get_skyrim_status(workspace_root)
+            if args.format == "json":
+                _write_json(output, status_result_to_dict(result))
+            else:
+                print(status_result_to_text(result), end="", file=output)
+            return 0 if result.outcome is SkyrimStatusOutcome.MATCHED else 3
 
         if args.command == "game" and args.game_command == "discover":
             report = discover_skyrim_steam(
@@ -781,6 +943,17 @@ def main(
     except Mo2ComparisonFormatError as error:
         print(f"Manager comparison error: {error}", file=errors)
         return 2
+    except SkyrimConfigurationConflictError as error:
+        changes = ", ".join(
+            f"{item.field}: {item.before!r} -> {item.after!r}"
+            for item in error.changes
+        )
+        suffix = f"; changes: {changes}" if changes else ""
+        print(f"Skyrim workflow refused: {error}{suffix}", file=errors)
+        return 3
+    except (SkyrimWorkflowError, SkyrimWorkflowFormatError) as error:
+        print(f"Skyrim workflow refused: {error}", file=errors)
+        return 3
     except (RecipeFormatError, ValueError) as error:
         print(f"Recipe error: {error}", file=errors)
         return 2
