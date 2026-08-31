@@ -1007,7 +1007,7 @@ def apply_mo2_setup(
 ) -> SetupApplyResult:
 ```
 
-- [ ] **Step 1: Write failing Adopt invariance tests**
+- [x] **Step 1: Write failing Adopt invariance tests**
 
 ```python
 class Mo2BootstrapAdoptTests(unittest.TestCase):
@@ -1029,7 +1029,7 @@ class Mo2BootstrapAdoptTests(unittest.TestCase):
         self.assertEqual(before, self.fixture.workspace_state())
 ```
 
-- [ ] **Step 2: Implement apply revalidation**
+- [x] **Step 2: Implement apply revalidation**
 
 Load and verify the stored plan. Reject Blocked. Re-observe every immutable precondition through the planner's pure evidence function and compare field-by-field while allowing only:
 
@@ -1038,13 +1038,13 @@ Load and verify the stored plan. Reject Blocked. Re-observe every immutable prec
 
 Current process inspection must be complete and empty. Changed game/archive/listing/extractor/target/environment/baseline/seed/release evidence blocks before `create_job`.
 
-- [ ] **Step 3: Implement Adopt staging and deep comparison**
+- [x] **Step 3: Implement Adopt staging and deep comparison**
 
 Create the journal in `Planned`, transition `Staging`, extract the archive to the exact job stage, inventory it, transition `Staged`, and compare all 1626 package files to the existing app. Require no packaged difference and only descriptor-allowed extras.
 
 Before and after comparison, capture the existing manager's complete regular-file inventory and direct directory-entry identity. If it changes during verification, set `RecoveryRequired` with an error but never write beneath the manager.
 
-- [ ] **Step 4: Write and verify the adoption receipt**
+- [x] **Step 4: Write and verify the adoption receipt**
 
 Build `BootstrapReceipt(mode=ADOPTED)` from the exact comparison, current scanner/projection, archive/release/extractor, profile-state hash, allowed extras, and coverage exclusions. Write/reload the receipt, set journal `Verified` with receipt ID, then clean only the exact job stage after checking it remains a direct sibling with the recorded inventory.
 
@@ -1052,16 +1052,16 @@ Build `BootstrapReceipt(mode=ADOPTED)` from the exact comparison, current scanne
 
 For an Adopt apply, `programs_launched` is exactly `<tar path> [version]`, `<tar path> [list-names]`, `<tar path> [list-types]`, then `<tar path> [extract]`. AlreadyManaged performs the first three revalidation invocations but does not extract, create a job, or report a write.
 
-- [ ] **Step 5: Add deep-comparison and failure tests**
+- [x] **Step 5: Add deep-comparison and failure tests**
 
 Cover one missing package file, one changed byte, one redirected file, unknown extra DLL, allowed root log, allowed generated Python bytecode, extractor failure, manager mutation during comparison, receipt-write failure, journal failure, cleanup failure, repeated apply, and a pre-existing valid receipt. Assert manager bytes remain exactly equal in every case.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run: `& 'C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m unittest tests.test_mo2_bootstrap_adopt -v`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add modlab/workflows/skyrim/mo2_bootstrap.py tests/test_mo2_bootstrap_adopt.py

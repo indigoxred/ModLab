@@ -7,7 +7,8 @@ import json
 import os
 import re
 import stat
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable
 
@@ -19,6 +20,7 @@ from modlab.adapters.mo2.archive import (
     PackageInventory,
     SubprocessCommandRunner,
     compare_package_to_existing,
+    extract_and_inventory,
     free_bytes_at,
     inventory_tree,
     observe_bsdtar,
@@ -33,18 +35,24 @@ from modlab.adapters.mo2.bootstrap_model import (
     ArchiveEvidence,
     BootstrapDisposition,
     BootstrapFinding,
+    BootstrapJobState,
+    BootstrapJournal,
     BootstrapPlan,
+    BootstrapReceipt,
+    BootstrapReceiptMode,
     CoverageEntry,
     ExtractorIdentity,
     FileIdentity,
     ProcessObservation,
     ProfileSeedEvidence,
+    SetupApplyResult,
     SetupPlanResult,
     TargetSnapshot,
 )
 from modlab.adapters.mo2.bootstrap_serialization import (
     BootstrapFormatError,
     plan_id_for,
+    receipt_id_for,
 )
 from modlab.adapters.mo2.processes import (
     ProcessInspectionError,
@@ -71,7 +79,10 @@ from modlab.workflows.skyrim.mo2_bootstrap_store import (
     BootstrapReceiptMatch,
     Mo2BootstrapStore,
     Mo2BootstrapStoreError,
+    StoredBootstrapJournal,
     StoredBootstrapReceipt,
+    new_bootstrap_job_id,
+    utc_now,
 )
 from modlab.workflows.skyrim.service import get_skyrim_status
 from modlab.workflows.skyrim.store import (
@@ -172,6 +183,36 @@ class _ExistingObservation:
     extra_entries: tuple[str, ...] | None
 
 
+@dataclass(frozen=True)
+class _CollectedSetup:
+    plan: BootstrapPlan
+    layout: WorkspaceLayout
+    release: LoadedMo2Release
+    artifact: _ArtifactObservation
+    listing: ArchiveListing
+    existing: _ExistingObservation | None
+    compatible_receipt: StoredBootstrapReceipt | None
+
+
+@dataclass(frozen=True)
+class _ManagerSnapshot:
+    inventory: PackageInventory
+    entries: tuple["_EntryIdentity", ...]
+
+
+@dataclass(frozen=True)
+class _EntryIdentity:
+    relative_path: str
+    kind: str
+    device: int
+    inode: int
+    mode_type: int
+    file_attributes: int
+    size: int | None
+    modified_ns: int | None
+    changed_ns: int | None
+
+
 def prepare_mo2_setup(
     *,
     artifact_id: str,
@@ -186,6 +227,51 @@ def prepare_mo2_setup(
     free_space_reader: Callable[[Path], int] = free_bytes_at,
 ) -> SetupPlanResult:
     """Collect stable evidence and retain one immutable, side-effect-free plan."""
+    collected = _collect_mo2_setup(
+        artifact_id=artifact_id,
+        workspace_root=workspace_root,
+        steam_root=steam_root,
+        release_path=release_path,
+        extractor_path=extractor_path,
+        documents_root=documents_root,
+        version_reader=version_reader,
+        process_inspector=process_inspector,
+        command_runner=command_runner,
+        free_space_reader=free_space_reader,
+    )
+    try:
+        stored = Mo2BootstrapStore(collected.layout.root).write_plan(collected.plan)
+    except (BootstrapFormatError, Mo2BootstrapStoreError, OSError) as error:
+        raise Mo2BootstrapRefusal(
+            "plan-invalid", f"bootstrap plan could not be retained safely: {error}"
+        ) from error
+    written = (stored.path,) if stored.changed else ()
+    return SetupPlanResult(
+        plan=stored.plan,
+        plan_path=stored.path,
+        paths_written=written,
+        downloads=(),
+        installations=(),
+        manager_changes=(),
+        game_changes=(),
+        programs_launched=stored.plan.programs_launched,
+    )
+
+
+def _collect_mo2_setup(
+    *,
+    artifact_id: str,
+    workspace_root: Path,
+    steam_root: Path | None,
+    release_path: Path,
+    extractor_path: Path,
+    documents_root: Path | None,
+    version_reader: Callable[[Path], str | None],
+    process_inspector: Callable[[Path], ProcessObservation],
+    command_runner: CommandRunner | None,
+    free_space_reader: Callable[[Path], int],
+) -> _CollectedSetup:
+    """Collect stable bootstrap evidence without retaining any new state."""
     requested_workspace = Path(workspace_root).expanduser().absolute()
     _require_direct_workspace(requested_workspace)
     layout = workspace_layout(requested_workspace)
@@ -406,22 +492,729 @@ def prepare_mo2_setup(
     )
     try:
         plan = replace(plan, plan_id=plan_id_for(plan))
-        stored = Mo2BootstrapStore(layout.root).write_plan(plan)
-    except (BootstrapFormatError, Mo2BootstrapStoreError, OSError) as error:
+    except BootstrapFormatError as error:
         raise Mo2BootstrapRefusal(
-            "plan-invalid", f"bootstrap plan could not be retained safely: {error}"
+            "plan-invalid", f"bootstrap plan could not be derived safely: {error}"
         ) from error
-    written = (stored.path,) if stored.changed else ()
-    return SetupPlanResult(
-        plan=stored.plan,
-        plan_path=stored.path,
-        paths_written=written,
+    return _CollectedSetup(
+        plan=plan,
+        layout=layout,
+        release=release,
+        artifact=artifact,
+        listing=listing,
+        existing=existing,
+        compatible_receipt=compatible_receipt,
+    )
+
+
+def apply_mo2_setup(
+    plan_id: str,
+    workspace_root: Path,
+    *,
+    release_path: Path = bundled_mo2_252_path(),
+    extractor_path: Path = Path(r"C:\Windows\System32\tar.exe"),
+    documents_root: Path | None = None,
+    version_reader: Callable[[Path], str | None] = read_windows_file_version,
+    process_inspector: Callable[[Path], ProcessObservation] = inspect_mo2_processes,
+    command_runner: CommandRunner | None = None,
+    free_space_reader: Callable[[Path], int] = free_bytes_at,
+    clock: Callable[[], datetime] = utc_now,
+    job_id_factory: Callable[[], str] = new_bootstrap_job_id,
+) -> SetupApplyResult:
+    """Revalidate and apply an immutable MO2 setup plan.
+
+    Task 8 implements only the zero-manager-write Adopt and AlreadyManaged
+    branches. The transactional Create branch is added by Task 9 without
+    changing this public signature.
+    """
+    requested_workspace = Path(workspace_root).expanduser().absolute()
+    try:
+        _require_direct_workspace(requested_workspace)
+        layout = workspace_layout(requested_workspace)
+        _require_direct_workspace_branches(layout)
+        store = Mo2BootstrapStore(
+            layout.root,
+            clock=clock,
+            job_id_factory=job_id_factory,
+        )
+        stored_plan = store.load_plan(plan_id)
+    except (Mo2BootstrapStoreError, OSError) as error:
+        raise Mo2BootstrapRefusal(
+            "plan-invalid", f"stored bootstrap plan is unavailable or invalid: {error}"
+        ) from error
+
+    plan = stored_plan.plan
+    if plan.disposition is BootstrapDisposition.BLOCKED:
+        raise Mo2BootstrapRefusal(
+            "plan-invalid", "Blocked bootstrap plans cannot be applied"
+        )
+    if plan.disposition is BootstrapDisposition.CREATE:
+        raise Mo2BootstrapRefusal(
+            "plan-invalid", "Create apply is not available until Task 9"
+        )
+    if plan.disposition not in {
+        BootstrapDisposition.ADOPT,
+        BootstrapDisposition.ALREADY_MANAGED,
+    }:
+        raise Mo2BootstrapRefusal(
+            "plan-invalid", f"unsupported bootstrap disposition: {plan.disposition}"
+        )
+
+    collected = _collect_mo2_setup(
+        artifact_id=plan.archive.artifact_id,
+        workspace_root=layout.root,
+        steam_root=Path(plan.steam_root),
+        release_path=release_path,
+        extractor_path=extractor_path,
+        documents_root=documents_root,
+        version_reader=version_reader,
+        process_inspector=process_inspector,
+        command_runner=command_runner,
+        free_space_reader=free_space_reader,
+    )
+    _require_apply_revalidation(plan, collected.plan)
+    _require_stopped_processes(collected.plan.processes)
+    latest_processes = _observe_processes(process_inspector, layout.skyrim_mo2, {})
+    _require_stopped_processes(latest_processes)
+
+    if collected.compatible_receipt is not None:
+        return SetupApplyResult(
+            outcome=BootstrapDisposition.ALREADY_MANAGED.value,
+            plan_id=plan.plan_id,
+            journal=None,
+            receipt=collected.compatible_receipt.receipt,
+            paths_written=(),
+            downloads=(),
+            installations=(),
+            manager_changes=(),
+            game_changes=(),
+            programs_launched=collected.plan.programs_launched,
+        )
+    if plan.disposition is BootstrapDisposition.ALREADY_MANAGED:
+        raise Mo2BootstrapRefusal(
+            "receipt-invalid",
+            "the plan's verified bootstrap receipt is no longer compatible",
+        )
+    if collected.plan.disposition is not BootstrapDisposition.ADOPT:
+        raise Mo2BootstrapRefusal(
+            "target-changed",
+            "the current target no longer qualifies for safe adoption",
+        )
+    return _apply_adopt_plan(
+        plan=plan,
+        collected=collected,
+        store=store,
+        process_inspector=process_inspector,
+        command_runner=command_runner,
+        free_space_reader=free_space_reader,
+        clock=clock,
+        version_reader=version_reader,
+    )
+
+
+def _require_apply_revalidation(
+    planned: BootstrapPlan,
+    current: BootstrapPlan,
+) -> None:
+    if not current.processes.complete or current.processes.error is not None:
+        raise Mo2BootstrapRefusal(
+            "process-inspection-unknown",
+            "current MO2 process inspection is incomplete",
+        )
+    if current.processes.relevant:
+        raise Mo2BootstrapRefusal(
+            "mo2-process-running",
+            "a relevant MO2 process is still running",
+        )
+    if planned.processes.complete is not True or planned.processes.error is not None:
+        raise Mo2BootstrapRefusal(
+            "plan-invalid", "stored plan contains incomplete process evidence"
+        )
+    if planned.processes.relevant and current.processes.relevant:
+        raise Mo2BootstrapRefusal(
+            "mo2-process-running", "a relevant MO2 process is still running"
+        )
+
+    allowed_dispositions = {planned.disposition}
+    if planned.disposition is BootstrapDisposition.ADOPT:
+        allowed_dispositions.add(BootstrapDisposition.ALREADY_MANAGED)
+    if current.disposition not in allowed_dispositions:
+        raise Mo2BootstrapRefusal(
+            "target-changed",
+            "bootstrap disposition changed outside the allowed receipt transition",
+        )
+
+    ignored = {"plan_id", "disposition", "processes", "findings"}
+    for field in fields(BootstrapPlan):
+        if field.name in ignored:
+            continue
+        if getattr(planned, field.name) != getattr(current, field.name):
+            raise Mo2BootstrapRefusal(
+                _revalidation_code_for(field.name),
+                f"bootstrap evidence changed after planning: {field.name}",
+            )
+
+    allowed_finding_changes = {"mo2-process-running"}
+    if current.disposition is BootstrapDisposition.ALREADY_MANAGED:
+        allowed_finding_changes.add("disk-space-insufficient")
+    planned_findings = {
+        item.code: item
+        for item in planned.findings
+        if item.code not in allowed_finding_changes
+    }
+    current_findings = {
+        item.code: item
+        for item in current.findings
+        if item.code not in allowed_finding_changes
+    }
+    if planned_findings != current_findings:
+        raise Mo2BootstrapRefusal(
+            "target-changed", "bootstrap findings changed after planning"
+        )
+
+
+def _revalidation_code_for(field_name: str) -> str:
+    return {
+        "release_descriptor_path": "release-modified",
+        "release_descriptor_sha256": "release-modified",
+        "release_id": "release-unsupported",
+        "archive": "artifact-modified",
+        "extractor": "extractor-changed",
+        "skyrim_executable": "skyrim-discovery-blocked",
+        "steam_root": "environment-mismatch",
+        "game_root": "environment-mismatch",
+        "environment_sha256": "environment-mismatch",
+        "baseline_id": "baseline-drifted",
+        "baseline_status": "baseline-drifted",
+        "profile_seed": "profile-seed-changed",
+        "target": "target-changed",
+    }.get(field_name, "plan-invalid")
+
+
+def _require_stopped_processes(observation: ProcessObservation) -> None:
+    if not observation.complete or observation.error is not None:
+        raise Mo2BootstrapRefusal(
+            "process-inspection-unknown", "MO2 process inspection is incomplete"
+        )
+    if observation.relevant:
+        raise Mo2BootstrapRefusal(
+            "mo2-process-running", "a relevant MO2 process is still running"
+        )
+
+
+def _apply_adopt_plan(
+    *,
+    plan: BootstrapPlan,
+    collected: _CollectedSetup,
+    store: Mo2BootstrapStore,
+    process_inspector: Callable[[Path], ProcessObservation],
+    command_runner: CommandRunner | None,
+    free_space_reader: Callable[[Path], int],
+    clock: Callable[[], datetime],
+    version_reader: Callable[[Path], str | None],
+) -> SetupApplyResult:
+    runner = command_runner or SubprocessCommandRunner()
+    try:
+        job = store.create_job(plan)
+    except (Mo2BootstrapStoreError, OSError) as error:
+        raise Mo2BootstrapRefusal(
+            "journal-invalid", f"bootstrap adoption job could not be created: {error}"
+        ) from error
+
+    journal_path = str(job.path)
+    stage_inventory: PackageInventory | None = None
+    try:
+        _require_stopped_processes(
+            _observe_processes(process_inspector, collected.layout.skyrim_mo2, {})
+        )
+        job = _transition_adopt_job(
+            store,
+            job,
+            BootstrapJobState.PLANNED,
+            BootstrapJobState.STAGING,
+            clock,
+        )
+        stage_root = Path(job.journal.stage_root)
+        stage_inventory = extract_and_inventory(
+            collected.artifact.payload_path,
+            collected.release.descriptor,
+            Path(collected.plan.extractor.executable.path),
+            stage_root,
+            runner=runner,
+            free_space_reader=free_space_reader,
+        )
+        job = _transition_adopt_job(
+            store,
+            job,
+            BootstrapJobState.STAGING,
+            BootstrapJobState.STAGED,
+            clock,
+            stage_inventory_sha256=stage_inventory.sha256,
+            stage_entry_count=stage_inventory.file_count,
+        )
+
+        manager_before = _snapshot_manager_tree(collected.layout.skyrim_mo2)
+        existing_app = inventory_tree(collected.layout.skyrim_mo2_app)
+        comparison = compare_package_to_existing(
+            stage_inventory,
+            existing_app,
+            collected.release.descriptor,
+        )
+        if not comparison.compatible:
+            raise Mo2BootstrapRefusal(
+                "existing-package-mismatch",
+                _comparison_refusal_message(comparison),
+            )
+        refreshed_findings: dict[str, BootstrapFinding] = {}
+        refreshed_existing = _observe_existing_manager(
+            collected.layout,
+            Path(plan.game_root),
+            collected.release.descriptor,
+            collected.listing,
+            version_reader,
+            refreshed_findings,
+        )
+        manager_after = _snapshot_manager_tree(collected.layout.skyrim_mo2)
+        if manager_after != manager_before:
+            raise Mo2BootstrapRefusal(
+                "target-changed",
+                "existing MO2 changed while ModLab was verifying it",
+            )
+        blocked_refresh = tuple(
+            finding
+            for finding in refreshed_findings.values()
+            if finding.state is CheckState.BLOCKED
+        )
+        if (
+            refreshed_existing is None
+            or refreshed_existing.projection.readiness is not Mo2Readiness.READY
+            or refreshed_existing.projection.adapter_state_sha256 is None
+            or blocked_refresh
+            or refreshed_existing.package_inventory != stage_inventory
+            or refreshed_existing.extra_entries != comparison.allowed_extras
+        ):
+            raise Mo2BootstrapRefusal(
+                "post-activation-not-ready",
+                "existing MO2 no longer has complete, exact Ready package evidence",
+            )
+
+        receipt = _adoption_receipt(
+            plan=plan,
+            job=job.journal,
+            collected=collected,
+            existing=refreshed_existing,
+            package=stage_inventory,
+            allowed_extras=comparison.allowed_extras,
+            clock=clock,
+        )
+        stored_receipt = store.write_receipt(receipt)
+        _require_stopped_processes(
+            _observe_processes(process_inspector, collected.layout.skyrim_mo2, {})
+        )
+        if _snapshot_manager_tree(collected.layout.skyrim_mo2) != manager_before:
+            raise Mo2BootstrapRefusal(
+                "target-changed",
+                "existing MO2 changed before adoption verification was committed",
+            )
+        job = _transition_adopt_job(
+            store,
+            job,
+            BootstrapJobState.STAGED,
+            BootstrapJobState.VERIFIED,
+            clock,
+            receipt_id=stored_receipt.receipt.receipt_id,
+        )
+    except Mo2BootstrapRefusal as error:
+        _mark_adopt_recovery(store, job, error, clock)
+        raise
+    except (BootstrapFormatError, Mo2ArchiveError, Mo2BootstrapStoreError, OSError) as error:
+        _mark_adopt_recovery(store, job, error, clock)
+        raise Mo2BootstrapRefusal(
+            "recovery-required", f"MO2 adoption requires recovery: {error}"
+        ) from error
+    except Exception as error:
+        _mark_adopt_recovery(store, job, error, clock)
+        raise Mo2BootstrapRefusal(
+            "recovery-required", f"MO2 adoption failed safely: {error}"
+        ) from error
+
+    if stage_inventory is None:
+        raise Mo2BootstrapError("verified adoption has no recorded stage inventory")
+    try:
+        _remove_verified_stage(
+            Path(job.journal.stage_root),
+            collected.layout.skyrim_mo2.parent,
+            job.journal.job_id,
+            stage_inventory,
+            collected.listing,
+        )
+    except (Mo2ArchiveError, OSError) as error:
+        raise Mo2BootstrapRefusal(
+            "recovery-required",
+            f"adoption verified but its exact staging directory was not cleaned: {error}",
+        ) from error
+
+    programs = (*collected.plan.programs_launched, f"{plan.extractor.executable.path} [extract]")
+    return SetupApplyResult(
+        outcome=BootstrapReceiptMode.ADOPTED.value,
+        plan_id=plan.plan_id,
+        journal=job.journal,
+        receipt=stored_receipt.receipt,
+        paths_written=(journal_path, str(stored_receipt.path)),
         downloads=(),
         installations=(),
         manager_changes=(),
         game_changes=(),
         programs_launched=programs,
     )
+
+
+def _transition_adopt_job(
+    store: Mo2BootstrapStore,
+    observed: StoredBootstrapJournal,
+    expected: BootstrapJobState,
+    target: BootstrapJobState,
+    clock: Callable[[], datetime],
+    **changes: object,
+) -> StoredBootstrapJournal:
+    replacement = replace(
+        observed.journal,
+        state=target,
+        updated_at=_bootstrap_timestamp(clock()),
+        error=None,
+        **changes,
+    )
+    return store.transition_job(observed, expected, replacement)
+
+
+def _mark_adopt_recovery(
+    store: Mo2BootstrapStore,
+    observed: StoredBootstrapJournal,
+    error: Exception,
+    clock: Callable[[], datetime],
+) -> StoredBootstrapJournal:
+    try:
+        current = store.load_job(observed.journal.job_id)
+        if current.journal.state not in {
+            BootstrapJobState.PLANNED,
+            BootstrapJobState.STAGING,
+            BootstrapJobState.STAGED,
+        }:
+            return current
+        try:
+            timestamp = _bootstrap_timestamp(clock())
+        except Exception:
+            timestamp = current.journal.updated_at
+        replacement = replace(
+            current.journal,
+            state=BootstrapJobState.RECOVERY_REQUIRED,
+            updated_at=timestamp,
+            error=str(error) or type(error).__name__,
+        )
+        return store.transition_job(current, current.journal.state, replacement)
+    except Exception:
+        return observed
+
+
+def _adoption_receipt(
+    *,
+    plan: BootstrapPlan,
+    job: BootstrapJournal,
+    collected: _CollectedSetup,
+    existing: _ExistingObservation,
+    package: PackageInventory,
+    allowed_extras: tuple[str, ...],
+    clock: Callable[[], datetime],
+) -> BootstrapReceipt:
+    projection_hash = existing.projection.adapter_state_sha256
+    if projection_hash is None:
+        raise Mo2BootstrapRefusal(
+            "post-activation-not-ready", "Ready MO2 projection has no state identity"
+        )
+    layout = collected.layout
+    draft = BootstrapReceipt(
+        schema_version=1,
+        receipt_id="bootstrap-receipt-sha256:" + "0" * 64,
+        qualification="VerifiedBootstrap",
+        mode=BootstrapReceiptMode.ADOPTED,
+        plan_id=plan.plan_id,
+        job_id=job.job_id,
+        release_id=plan.release_id,
+        release_descriptor_sha256=plan.release_descriptor_sha256,
+        archive_artifact_id=plan.archive.artifact_id,
+        archive_metadata_sha256=plan.archive.metadata_sha256,
+        archive_sha256=plan.archive.sha256,
+        archive_size=plan.archive.size,
+        skyrim_executable=plan.skyrim_executable,
+        mo2_executable=existing.executable,
+        final_root=str(layout.skyrim_mo2),
+        downloads_root=str(layout.skyrim_mo2_downloads),
+        mods_root=str(layout.skyrim_mo2_mods),
+        profiles_root=str(layout.skyrim_mo2_profiles),
+        overwrite_root=str(layout.skyrim_mo2_overwrite),
+        webcache_root=str(layout.skyrim_mo2 / "webcache"),
+        package_inventory_sha256=package.sha256,
+        package_file_count=package.file_count,
+        package_size=package.total_size,
+        mutable_package_paths=collected.release.descriptor.mutable_package_paths,
+        extra_entries=allowed_extras,
+        profile_state_sha256=projection_hash,
+        extractor=plan.extractor,
+        verified_at=_bootstrap_timestamp(clock()),
+        findings=collected.plan.findings,
+        coverage=plan.coverage,
+        repairable=False,
+        upgrade_supported=False,
+    )
+    return replace(draft, receipt_id=receipt_id_for(draft))
+
+
+def _bootstrap_timestamp(value: datetime) -> str:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise Mo2BootstrapError("bootstrap clock must return a timezone-aware datetime")
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _comparison_refusal_message(comparison) -> str:
+    details = []
+    if comparison.missing:
+        details.append("missing: " + ", ".join(comparison.missing))
+    if comparison.modified:
+        details.append("modified: " + ", ".join(comparison.modified))
+    if comparison.unapproved_extras:
+        details.append("unapproved extras: " + ", ".join(comparison.unapproved_extras))
+    return "existing MO2 does not exactly match the retained package (" + "; ".join(details) + ")"
+
+
+def _snapshot_manager_tree(root: Path) -> _ManagerSnapshot:
+    source = Path(root)
+    inventory = inventory_tree(source)
+    entries: list[_EntryIdentity] = []
+
+    def walk(directory: Path, relative: PurePosixPath) -> None:
+        try:
+            with os.scandir(directory) as scanner:
+                children = sorted(
+                    scanner,
+                    key=lambda item: (item.name.casefold(), item.name),
+                )
+        except OSError as error:
+            raise Mo2ArchiveError(
+                f"cannot enumerate manager directory {directory}: {error}"
+            ) from error
+        for child in children:
+            path = Path(child.path)
+            child_relative = relative / child.name
+            try:
+                metadata = path.lstat()
+            except OSError as error:
+                raise Mo2ArchiveError(
+                    f"cannot inspect manager entry {child_relative.as_posix()}: {error}"
+                ) from error
+            if child.is_symlink() or _redirected(path, metadata):
+                raise Mo2ArchiveError(
+                    f"manager entry {child_relative.as_posix()} is redirected"
+                )
+            if stat.S_ISDIR(metadata.st_mode):
+                kind = "directory"
+            elif stat.S_ISREG(metadata.st_mode):
+                kind = "file"
+            else:
+                raise Mo2ArchiveError(
+                    f"manager entry {child_relative.as_posix()} is not regular"
+                )
+            entries.append(
+                _entry_identity(child_relative.as_posix(), kind, metadata)
+            )
+            if kind == "directory":
+                walk(path, child_relative)
+
+    walk(source, PurePosixPath())
+    return _ManagerSnapshot(inventory=inventory, entries=tuple(entries))
+
+
+def _entry_identity(relative_path: str, kind: str, metadata) -> _EntryIdentity:
+    is_file = kind == "file"
+    return _EntryIdentity(
+        relative_path=relative_path,
+        kind=kind,
+        device=int(getattr(metadata, "st_dev", 0)),
+        inode=int(getattr(metadata, "st_ino", 0)),
+        mode_type=stat.S_IFMT(metadata.st_mode),
+        file_attributes=int(getattr(metadata, "st_file_attributes", 0)),
+        size=int(metadata.st_size) if is_file else None,
+        modified_ns=int(metadata.st_mtime_ns) if is_file else None,
+        changed_ns=int(metadata.st_ctime_ns) if is_file else None,
+    )
+
+
+def _remove_verified_stage(
+    stage_root: Path,
+    staging_parent: Path,
+    job_id: str,
+    expected: PackageInventory,
+    listing: ArchiveListing,
+) -> None:
+    job_hex = job_id.removeprefix("bootstrap-job:")
+    expected_name = f".skyrim-se-ae.modlab-stage-{job_hex}"
+    if stage_root.name != expected_name or stage_root.parent != staging_parent:
+        raise Mo2ArchiveError("staging path does not match its exact job identity")
+    ancestry = _capture_cleanup_ancestry(staging_parent)
+    stage_metadata = _direct_cleanup_metadata(stage_root, "staging root")
+    if not stat.S_ISDIR(stage_metadata.st_mode):
+        raise Mo2ArchiveError("staging root is not a direct directory")
+    stage_identity = _entry_identity(".", "directory", stage_metadata)
+    snapshot = _snapshot_manager_tree(stage_root)
+    if snapshot.inventory != expected:
+        raise Mo2ArchiveError("staging inventory changed before cleanup")
+
+    expected_directories: set[str] = set()
+    for file in expected.files:
+        path = PurePosixPath(file.relative_path)
+        for depth in range(1, len(path.parts)):
+            expected_directories.add(PurePosixPath(*path.parts[:depth]).as_posix())
+    for entry in listing.entries:
+        if entry.kind == "directory":
+            path = PurePosixPath(entry.relative_path)
+            for depth in range(1, len(path.parts) + 1):
+                expected_directories.add(PurePosixPath(*path.parts[:depth]).as_posix())
+    observed_directories = {
+        entry.relative_path for entry in snapshot.entries if entry.kind == "directory"
+    }
+    if observed_directories != expected_directories:
+        raise Mo2ArchiveError("staging directory entries changed before cleanup")
+
+    by_path = {entry.relative_path: entry for entry in snapshot.entries}
+    expected_files = {file.relative_path: file for file in expected.files}
+    files = [entry for entry in snapshot.entries if entry.kind == "file"]
+    directories = [entry for entry in snapshot.entries if entry.kind == "directory"]
+    for entry in files:
+        target = stage_root.joinpath(*PurePosixPath(entry.relative_path).parts)
+        _validate_cleanup_entry(
+            stage_root,
+            stage_identity,
+            ancestry,
+            by_path,
+            entry,
+        )
+        expected_file = expected_files[entry.relative_path]
+        observed_hash, observed_size = _stable_direct_file_hash(
+            target,
+            f"verified staging file {entry.relative_path}",
+        )
+        if (
+            observed_hash != expected_file.sha256
+            or observed_size != expected_file.size
+        ):
+            raise Mo2ArchiveError(
+                f"staging file bytes changed before cleanup: {entry.relative_path}"
+            )
+        _validate_cleanup_entry(
+            stage_root,
+            stage_identity,
+            ancestry,
+            by_path,
+            entry,
+        )
+        target.unlink()
+    directories.sort(
+        key=lambda entry: (
+            -len(PurePosixPath(entry.relative_path).parts),
+            entry.relative_path.casefold(),
+            entry.relative_path,
+        )
+    )
+    for entry in directories:
+        _validate_cleanup_entry(
+            stage_root,
+            stage_identity,
+            ancestry,
+            by_path,
+            entry,
+        )
+        stage_root.joinpath(*PurePosixPath(entry.relative_path).parts).rmdir()
+    _validate_cleanup_root(stage_root, stage_identity, ancestry)
+    stage_root.rmdir()
+
+
+def _capture_cleanup_ancestry(
+    staging_parent: Path,
+) -> tuple[tuple[Path, _EntryIdentity], ...]:
+    result: list[tuple[Path, _EntryIdentity]] = []
+    for path in (staging_parent, *staging_parent.parents):
+        metadata = _direct_cleanup_metadata(path, "staging ancestor")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise Mo2ArchiveError(f"staging ancestor is not a directory: {path}")
+        result.append((path, _entry_identity(str(path), "directory", metadata)))
+    return tuple(result)
+
+
+def _validate_cleanup_root(
+    stage_root: Path,
+    expected_stage: _EntryIdentity,
+    ancestry: tuple[tuple[Path, _EntryIdentity], ...],
+) -> None:
+    for path, expected in ancestry:
+        metadata = _direct_cleanup_metadata(path, "staging ancestor")
+        current = _entry_identity(str(path), "directory", metadata)
+        if current != expected:
+            raise Mo2ArchiveError(f"staging ancestor identity changed: {path}")
+    metadata = _direct_cleanup_metadata(stage_root, "staging root")
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise Mo2ArchiveError("staging root is no longer a directory")
+    if _entry_identity(".", "directory", metadata) != expected_stage:
+        raise Mo2ArchiveError("staging root identity changed before cleanup")
+
+
+def _validate_cleanup_entry(
+    stage_root: Path,
+    expected_stage: _EntryIdentity,
+    ancestry: tuple[tuple[Path, _EntryIdentity], ...],
+    entries: dict[str, _EntryIdentity],
+    expected: _EntryIdentity,
+) -> None:
+    _validate_cleanup_root(stage_root, expected_stage, ancestry)
+    relative = PurePosixPath(expected.relative_path)
+    for depth in range(1, len(relative.parts)):
+        parent_relative = PurePosixPath(*relative.parts[:depth]).as_posix()
+        parent_expected = entries.get(parent_relative)
+        if parent_expected is None or parent_expected.kind != "directory":
+            raise Mo2ArchiveError(
+                f"staging ancestry was not recorded: {parent_relative}"
+            )
+        parent = stage_root.joinpath(*relative.parts[:depth])
+        metadata = _direct_cleanup_metadata(parent, "staging entry ancestor")
+        parent_observed = _entry_identity(parent_relative, "directory", metadata)
+        if parent_observed != parent_expected:
+            raise Mo2ArchiveError(
+                "staging entry ancestor changed before cleanup: "
+                f"{parent_relative} ({parent_expected!r} != {parent_observed!r})"
+            )
+    target = stage_root.joinpath(*relative.parts)
+    metadata = _direct_cleanup_metadata(target, "staging entry")
+    observed_kind = (
+        "directory" if stat.S_ISDIR(metadata.st_mode) else "file"
+        if stat.S_ISREG(metadata.st_mode)
+        else "other"
+    )
+    if observed_kind == "other" or _entry_identity(
+        expected.relative_path,
+        observed_kind,
+        metadata,
+    ) != expected:
+        raise Mo2ArchiveError(
+            f"staging entry identity changed before cleanup: {expected.relative_path}"
+        )
+
+
+def _direct_cleanup_metadata(path: Path, label: str):
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise Mo2ArchiveError(f"cannot inspect {label} {path}: {error}") from error
+    if _redirected(path, metadata):
+        raise Mo2ArchiveError(f"{label} is redirected: {path}")
+    return metadata
 
 
 def _select_environment(
@@ -1441,5 +2234,6 @@ __all__ = [
     "BOOTSTRAP_FINDING_CODES",
     "Mo2BootstrapError",
     "Mo2BootstrapRefusal",
+    "apply_mo2_setup",
     "prepare_mo2_setup",
 ]

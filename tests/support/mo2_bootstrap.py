@@ -715,6 +715,7 @@ class BootstrapPlanningFixture:
             "ModOrganizer.exe": b"fixture MO2 executable",
             "loot/loot.dll": b"fixture LOOT library",
             "plugins/game_skyrimse.dll": b"fixture Skyrim game plug-in",
+            "resources/base.dat": b"fixture optional package data",
             "usvfs_x64.dll": b"fixture virtual filesystem",
         }
         self.archive_names = list(self.package_files)
