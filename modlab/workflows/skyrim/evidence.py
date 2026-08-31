@@ -67,6 +67,14 @@ class ObservedBaselineEvidence:
     recipe_review: BaselineRecipeEvidence
     target_environment: BaselineTargetEnvironmentEvidence
 
+    @property
+    def promotion_ready(self) -> bool:
+        return False
+
+    @property
+    def restorable(self) -> bool:
+        return False
+
 
 _TOP_FIELDS = {
     "schemaVersion",
