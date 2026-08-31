@@ -35,7 +35,7 @@ _STATUS_DOMAINS = {
     "target-environment",
     "coverage",
 }
-_COVERAGE = {
+_COVERAGE_READY = {
     "foundationAssembly": "NotVerified",
     "profileState": "Complete",
     "installedPayloadContent": "NotInspected",
@@ -45,6 +45,7 @@ _COVERAGE = {
     "runtimeValidation": "NotPerformed",
     "smokeTest": "NotPerformed",
 }
+_COVERAGE_BLOCKED = {**_COVERAGE_READY, "profileState": "NotVerified"}
 
 
 def configure_result_to_dict(
@@ -111,6 +112,7 @@ def configure_result_to_dict(
             },
             "targetEnvironment": {
                 "environmentId": result.configuration.target_environment.environment_id,
+                "sourceSha256": result.configuration.target_environment.source.source_sha256,
                 "dimensions": dict(result.configuration.target_environment.dimensions),
                 "liveDimensions": live_dimensions,
                 "unverifiedDimensions": [
@@ -167,6 +169,14 @@ def configure_result_from_dict(
     )
     _literal(manager["adapterId"], "portable-mo2-skyrim", "configure.manager.adapterId")
     _path_text(manager["root"], "configure.manager.root")
+    expected_manager_root = (
+        Path(workspace_root).resolve()
+        / "tools" / "mo2" / "skyrim-se-ae" / "app"
+    )
+    if Path(manager["root"]).resolve() != expected_manager_root:
+        raise SkyrimWorkflowFormatError(
+            "configure.manager.root is not the contained Skyrim MO2 app"
+        )
     _optional_text(manager["fileVersion"], "configure.manager.fileVersion")
     _optional_text(manager["version"], "configure.manager.version")
     _optional_sha256(manager["sha256"], "configure.manager.sha256")
@@ -195,6 +205,7 @@ def configure_result_from_dict(
         summary["targetEnvironment"],
         {
             "environmentId",
+            "sourceSha256",
             "dimensions",
             "liveDimensions",
             "unverifiedDimensions",
@@ -203,6 +214,10 @@ def configure_result_from_dict(
         "configure.targetEnvironment",
     )
     _text(target["environmentId"], "configure.targetEnvironment.environmentId")
+    target_sha256 = _sha256(
+        target["sourceSha256"],
+        "configure.targetEnvironment.sourceSha256",
+    )
     dimensions = _string_mapping(
         target["dimensions"], "configure.targetEnvironment.dimensions"
     )
@@ -238,6 +253,20 @@ def configure_result_from_dict(
     _optional_checkpoint_id(
         summary["baselineCheckpointId"], "configure.baselineCheckpointId"
     )
+    workspace = Path(workspace_root).resolve()
+    allowed_actions = {
+        workspace / "games" / "skyrim-se-ae" / "environment.json",
+        workspace / "games" / "skyrim-se-ae" / "recipes"
+        / recipe["sourceSha256"] / "recipe.json",
+        workspace / "games" / "skyrim-se-ae" / "target-environments"
+        / target_sha256 / "environment.json",
+    }
+    actions = _validated_action_paths(root["actionsPerformed"], allowed_actions)
+    configuration_path = workspace / "games" / "skyrim-se-ae" / "environment.json"
+    if changed != (configuration_path in actions):
+        raise SkyrimWorkflowFormatError(
+            "configure.changed must match the configuration-file action"
+        )
     return _copy_tree(root)
 
 
@@ -353,6 +382,24 @@ def capture_result_from_dict(
     _literal(summary["smokeTest"], "NotPerformed", "baselineCapture.smokeTest")
     if summary["artifactIds"] != []:
         raise SkyrimWorkflowFormatError("observed baseline cannot link artifacts")
+    workspace = Path(workspace_root).resolve()
+    configuration_path = workspace / "games" / "skyrim-se-ae" / "environment.json"
+    checkpoint_path = (
+        workspace / "games" / "skyrim-se-ae" / "checkpoints"
+        / checkpoint_id.removeprefix("checkpoint-sha256:")
+        / "modlab.lock.json"
+    )
+    actions = _validated_action_paths(
+        root["actionsPerformed"], {configuration_path, checkpoint_path}
+    )
+    if not selected and configuration_path in actions:
+        raise SkyrimWorkflowFormatError(
+            "unselected capture cannot report a configuration-pointer write"
+        )
+    if selected and actions and configuration_path not in actions:
+        raise SkyrimWorkflowFormatError(
+            "a changed selected capture must report its pointer write"
+        )
     return _copy_tree(root)
 
 
@@ -410,7 +457,16 @@ def use_result_from_dict(
     )
     if checkpoint_id != selected:
         raise SkyrimWorkflowFormatError("baseline use pointer does not match checkpoint")
-    _boolean(summary["changed"], "baselineUse.changed")
+    changed = _boolean(summary["changed"], "baselineUse.changed")
+    workspace = Path(workspace_root).resolve()
+    configuration_path = workspace / "games" / "skyrim-se-ae" / "environment.json"
+    actions = _validated_action_paths(
+        root["actionsPerformed"], {configuration_path}
+    )
+    if changed != (configuration_path in actions):
+        raise SkyrimWorkflowFormatError(
+            "baselineUse.changed must match the configuration-pointer action"
+        )
     return _copy_tree(root)
 
 
@@ -449,7 +505,11 @@ def status_result_to_dict(result: SkyrimDriftReport) -> dict[str, object]:
                 for domain in result.domains
             ],
             "findings": list(result.findings),
-            "coverage": dict(_COVERAGE),
+            "coverage": dict(
+                _COVERAGE_BLOCKED
+                if result.outcome is SkyrimStatusOutcome.BLOCKED
+                else _COVERAGE_READY
+            ),
         },
         "actionsPerformed": [],
         "downloadsPerformed": [],
@@ -513,8 +573,15 @@ def status_result_from_dict(value: object) -> dict[str, object]:
         raise SkyrimWorkflowFormatError("matched or drifted status cannot contain refusal findings")
     if outcome in {SkyrimStatusOutcome.NO_BASELINE, SkyrimStatusOutcome.BLOCKED} and not findings:
         raise SkyrimWorkflowFormatError("NoBaseline or Blocked status needs a finding")
-    coverage = _mapping(summary["coverage"], set(_COVERAGE), "status.coverage")
-    if dict(coverage) != _COVERAGE:
+    expected_coverage = (
+        _COVERAGE_BLOCKED
+        if outcome is SkyrimStatusOutcome.BLOCKED
+        else _COVERAGE_READY
+    )
+    coverage = _mapping(
+        summary["coverage"], set(expected_coverage), "status.coverage"
+    )
+    if dict(coverage) != expected_coverage:
         raise SkyrimWorkflowFormatError("status coverage claims exceed the supported contract")
     return _copy_tree(root)
 
@@ -539,9 +606,8 @@ def status_result_to_text(result: SkyrimDriftReport) -> str:
     if summary["findings"]:
         lines.append("Findings:")
         lines.extend(f"  - {finding}" for finding in summary["findings"])
-    coverage = summary["coverage"]
     lines.append(
-        "Coverage: profile state Complete; payload content, asset conflicts, and plugin record conflicts NotInspected; runtime and smoke tests NotPerformed."
+        f"Coverage: profile state {summary['coverage']['profileState']}; payload content, asset conflicts, and plugin record conflicts NotInspected; runtime and smoke tests NotPerformed."
     )
     lines.append(
         "Nothing was written, launched, installed, repaired, restored, or promoted."
@@ -578,6 +644,19 @@ def _command_result(
             if not relative.parts:
                 raise SkyrimWorkflowFormatError("workspace root is not a file action")
     return root
+
+
+def _validated_action_paths(
+    values: object, allowed: set[Path]
+) -> set[Path]:
+    actions = _string_list(values, "actionsPerformed")
+    resolved = {Path(action).resolve() for action in actions}
+    expected = {path.resolve() for path in allowed}
+    if not resolved.issubset(expected):
+        raise SkyrimWorkflowFormatError(
+            "actionsPerformed contains a path this command cannot write"
+        )
+    return resolved
 
 
 def _mapping(value: object, expected: set[str], label: str) -> Mapping[str, object]:

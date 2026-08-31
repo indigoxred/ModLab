@@ -174,6 +174,14 @@ class SkyrimWorkflowSerializationTests(unittest.TestCase):
         with self.assertRaises(SkyrimWorkflowFormatError):
             status_result_from_dict(broken)
 
+        blocked = get_skyrim_status(self.fixture.root / "not-configured")
+        blocked_value = status_result_to_dict(blocked)
+        self.assertEqual("Blocked", blocked_value["status"]["outcome"])
+        self.assertEqual(
+            "NotVerified", blocked_value["status"]["coverage"]["profileState"]
+        )
+        self.assertIn("profile state NotVerified", status_result_to_text(blocked))
+
     def test_strict_result_fields_duplicate_domains_and_action_containment(self):
         configured = configure_result_to_dict(
             self.configure_result, workspace_root=self.fixture.workspace
@@ -192,7 +200,43 @@ class SkyrimWorkflowSerializationTests(unittest.TestCase):
                 escaped, workspace_root=self.fixture.workspace
             )
 
-        self.capture()
+        wrong_configure_target = copy.deepcopy(configured)
+        wrong_configure_target["actionsPerformed"] = [
+            str(self.fixture.mo2_root / "ModOrganizer.ini")
+        ]
+        with self.assertRaises(SkyrimWorkflowFormatError):
+            configure_result_from_dict(
+                wrong_configure_target, workspace_root=self.fixture.workspace
+            )
+
+        captured_result = self.capture()
+        captured = capture_result_to_dict(
+            captured_result, workspace_root=self.fixture.workspace
+        )
+        wrong_capture_target = copy.deepcopy(captured)
+        wrong_capture_target["actionsPerformed"] = [
+            str(self.fixture.mo2_root / "ModOrganizer.ini")
+        ]
+        with self.assertRaises(SkyrimWorkflowFormatError):
+            capture_result_from_dict(
+                wrong_capture_target, workspace_root=self.fixture.workspace
+            )
+
+        used_result = use_skyrim_baseline(
+            self.fixture.workspace, captured_result.checkpoint.checkpoint_id
+        )
+        used = use_result_to_dict(
+            used_result, workspace_root=self.fixture.workspace
+        )
+        wrong_use_target = copy.deepcopy(used)
+        wrong_use_target["actionsPerformed"] = [
+            str(self.fixture.mo2_root / "ModOrganizer.ini")
+        ]
+        with self.assertRaises(SkyrimWorkflowFormatError):
+            use_result_from_dict(
+                wrong_use_target, workspace_root=self.fixture.workspace
+            )
+
         profile = (
             self.fixture.workspace / "tools" / "mo2" / "skyrim-se-ae"
             / "profiles" / "ModLab - Lab" / "archives.txt"
