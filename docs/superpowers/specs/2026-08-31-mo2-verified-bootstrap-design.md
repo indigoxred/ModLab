@@ -1,7 +1,9 @@
 # Verified MO2 Bootstrap and Configuration Design
 
-**Date:** 2026-08-31  
-**Status:** Approved design, awaiting written-spec review  
+**Date:** 2026-08-31
+
+**Status:** Approved design, awaiting written-spec review
+
 **Scope:** Skyrim SE/AE on Steam and the contained portable Mod Organizer 2 instance
 
 ## Purpose
