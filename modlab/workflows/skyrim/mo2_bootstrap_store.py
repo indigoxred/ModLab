@@ -492,6 +492,11 @@ class Mo2BootstrapStore:
             changed=False,
         )
 
+    def load_verified_receipt(self, receipt_id: str) -> StoredBootstrapReceipt:
+        loaded = self.load_receipt(receipt_id)
+        self._require_verified_receipt(loaded.receipt)
+        return loaded
+
     def find_compatible_receipt(
         self, match: BootstrapReceiptMatch
     ) -> StoredBootstrapReceipt | None:
@@ -524,7 +529,12 @@ class Mo2BootstrapStore:
             receipt_id = f"bootstrap-receipt-sha256:{filename_match.group(1)}"
             loaded = self.load_receipt(receipt_id)
             if self._receipt_matches(loaded.receipt, match):
-                self._require_verified_receipt(loaded.receipt)
+                try:
+                    self._require_verified_receipt(loaded.receipt)
+                except Mo2BootstrapStoreError:
+                    if self._receipt_was_abandoned_by_recovery(loaded.receipt):
+                        continue
+                    raise
                 compatible.append(loaded)
         if not compatible:
             return None
@@ -782,6 +792,31 @@ class Mo2BootstrapStore:
             raise Mo2BootstrapStoreError(
                 "matching bootstrap receipt conflicts with its retained plan or job"
             )
+
+    def _receipt_was_abandoned_by_recovery(
+        self,
+        receipt: BootstrapReceipt,
+    ) -> bool:
+        try:
+            job = self.load_job(receipt.job_id).journal
+            plan = self.load_plan(receipt.plan_id).plan
+        except (Mo2BootstrapNotFoundError, Mo2BootstrapStoreError):
+            return False
+        expected_mode = (
+            BootstrapReceiptMode.CREATED
+            if job.disposition is BootstrapDisposition.CREATE
+            else BootstrapReceiptMode.ADOPTED
+        )
+        return (
+            job.state is BootstrapJobState.RECOVERED
+            and job.receipt_id is None
+            and job.plan_id == receipt.plan_id
+            and receipt.mode is expected_mode
+            and self._receipt_matches(
+                receipt,
+                BootstrapReceiptMatch.from_plan(plan),
+            )
+        )
 
     @staticmethod
     def _require_inventory_not_changed(

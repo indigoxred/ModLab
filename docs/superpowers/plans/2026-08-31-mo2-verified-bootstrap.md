@@ -1179,7 +1179,7 @@ def recover_mo2_setup(
 
 Recovery reports only the extractor invocations it actually performs. Safe restore-only branches launch nothing; branches that revalidate the archive before finalizing a receipt report `[version]`, `[list-names]`, and `[list-types]` in that order.
 
-- [ ] **Step 1: Write failing state-matrix recovery tests**
+- [x] **Step 1: Write failing state-matrix recovery tests**
 
 ```python
 class Mo2BootstrapRecoveryTests(unittest.TestCase):
@@ -1205,7 +1205,7 @@ class Mo2BootstrapRecoveryTests(unittest.TestCase):
         self.assertTrue((self.fixture.final_root / 'unknown.txt').is_file())
 ```
 
-- [ ] **Step 2: Implement fail-closed recovery**
+- [x] **Step 2: Implement fail-closed recovery**
 
 Validate job ID, journal bytes, referenced plan, all confined roots, and current empty process observation. State behavior:
 
@@ -1217,16 +1217,16 @@ Validate job ID, journal bytes, referenced plan, all confined roots, and current
 
 Write `RecoveryRequired` before raising after any failure that follows `Applying`.
 
-- [ ] **Step 3: Test every crash boundary**
+- [x] **Step 3: Test every crash boundary**
 
 Inject failures before/after each durable state write and rename. Restart with a new store/service object and prove recovery from filesystem evidence alone. Cover changed journal/plan/receipt, running process, missing prior, modified stage, modified activated target, rename failure, receipt failure, cleanup failure, and repeated recovery.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `& 'C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m unittest tests.test_mo2_bootstrap_recovery -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add modlab/workflows/skyrim/mo2_bootstrap.py tests/test_mo2_bootstrap_recovery.py
