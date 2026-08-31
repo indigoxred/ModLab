@@ -8,6 +8,7 @@ from modlab.adapters.mo2.projection import Mo2Readiness, project_mo2_state
 from modlab.adapters.mo2.serialization import report_to_dict
 from modlab.recipes.model import CheckState
 from modlab.workspace import initialize_workspace
+from tests.support.mo2_bootstrap import make_primary_policy_fixture
 
 
 class Mo2ScannerTests(unittest.TestCase):
@@ -21,9 +22,9 @@ class Mo2ScannerTests(unittest.TestCase):
             "common",
             "Skyrim Special Edition",
         )
-        game_root.mkdir(parents=True)
-        (game_root / "Skyrim.ccc").write_text(
-            "ccBGSSSE001-Fish.esm\n_ResourcePack.esl\n", encoding="utf-8"
+        make_primary_policy_fixture(
+            game_root,
+            ccc_plugins=("ccBGSSSE001-Fish.esm", "_ResourcePack.esl"),
         )
         primary = (
             "Skyrim.esm\nUpdate.esm\nDawnguard.esm\nHearthFires.esm\n"
@@ -401,8 +402,7 @@ class Mo2ScannerTests(unittest.TestCase):
     def test_missing_game_root_is_blocked_even_when_ini_text_matches(self):
         with tempfile.TemporaryDirectory() as directory:
             layout, game_root, _ = self.make_instance(directory)
-            (game_root / "Skyrim.ccc").unlink()
-            game_root.rmdir()
+            game_root.rename(game_root.with_name("Skyrim Special Edition moved"))
 
             report = inspect_skyrim_mo2(
                 layout.skyrim_mo2_app,

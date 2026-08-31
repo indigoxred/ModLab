@@ -6,13 +6,14 @@ from pathlib import Path
 
 from modlab.cli import main
 from modlab.workspace import initialize_workspace
+from tests.support.mo2_bootstrap import make_primary_policy_fixture
 
 
 class Mo2CliTests(unittest.TestCase):
     def make_instance(self, directory: str):
         layout = initialize_workspace(Path(directory, "ModLab", "workspace"))
         game_root = Path(directory, "Steam", "Skyrim Special Edition")
-        game_root.mkdir(parents=True)
+        make_primary_policy_fixture(game_root, ccc_plugins=())
         (layout.skyrim_mo2_app / "ModOrganizer.exe").write_bytes(b"fake mo2")
         for name in ("ModLab - Lab", "ModLab - Play"):
             profile = layout.skyrim_mo2_profiles / name

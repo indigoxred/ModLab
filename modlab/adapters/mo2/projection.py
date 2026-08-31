@@ -7,6 +7,7 @@ import json
 from pathlib import PurePosixPath
 
 from modlab.recipes.model import CheckState
+from modlab.adapters.skyrim.primary_plugins import CORE_PRIMARY_PLUGINS
 
 from .model import (
     Mo2ExecutableEvidence,
@@ -110,13 +111,6 @@ class Mo2Projection:
     findings: tuple[Mo2Finding, ...]
 
 
-_CORE_PRIMARY_PLUGINS = (
-    "Skyrim.esm",
-    "Update.esm",
-    "Dawnguard.esm",
-    "HearthFires.esm",
-    "Dragonborn.esm",
-)
 _REQUIRED_PROFILE_FILES = {
     "modlist.txt",
     "plugins.txt",
@@ -253,9 +247,9 @@ def project_mo2_state(report: Mo2InspectionReport) -> Mo2Projection:
     primary_keys = tuple(item.casefold() for item in primary_plugins)
     primary_policy = (
         evidence is not None
-        and len(primary_keys) >= len(_CORE_PRIMARY_PLUGINS)
-        and primary_keys[: len(_CORE_PRIMARY_PLUGINS)]
-        == tuple(item.casefold() for item in _CORE_PRIMARY_PLUGINS)
+        and len(primary_keys) >= len(CORE_PRIMARY_PLUGINS)
+        and primary_keys[: len(CORE_PRIMARY_PLUGINS)]
+        == tuple(item.casefold() for item in CORE_PRIMARY_PLUGINS)
         and len(primary_keys) == len(set(primary_keys))
     )
 
@@ -419,7 +413,7 @@ def _project_plugins(
         raise Mo2ProjectionError("loadorder.txt contains duplicate plug-ins")
     if len(state_keys) != len(set(state_keys)):
         raise Mo2ProjectionError("plugins.txt contains duplicate plug-ins")
-    core_count = len(_CORE_PRIMARY_PLUGINS)
+    core_count = len(CORE_PRIMARY_PLUGINS)
     if load_keys[:core_count] != primary_keys[:core_count]:
         raise Mo2ProjectionError(
             "expected core primary plug-ins are not the load-order prefix"

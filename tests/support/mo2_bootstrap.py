@@ -4,6 +4,7 @@ import json
 import hashlib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from pathlib import PurePosixPath
 from subprocess import CompletedProcess
 
 from modlab.adapters.mo2.archive import PackageFile, PackageInventory
@@ -115,6 +116,77 @@ def unsafe_listing_cases():
         (["File.dll", "file.dll"], ["-", "-"], "duplicate"),
         (["linked.dll"], ["l"], "regular files and directories"),
     )
+
+
+@dataclass(frozen=True)
+class PrimaryPolicyFixture:
+    game_root: Path
+
+
+def make_primary_policy_fixture(
+    root: Path,
+    *,
+    ccc_plugins: tuple[str, ...] = ("ccBGSSSE001-Fish.esm",),
+    missing_data_files: tuple[str, ...] = (),
+) -> PrimaryPolicyFixture:
+    game_root = Path(root)
+    data_root = game_root / "Data"
+    data_root.mkdir(parents=True)
+    core = (
+        "Skyrim.esm",
+        "Update.esm",
+        "Dawnguard.esm",
+        "HearthFires.esm",
+        "Dragonborn.esm",
+    )
+    missing = {item.casefold() for item in missing_data_files}
+    for name in core + ccc_plugins:
+        if name.casefold() not in missing:
+            (data_root / name).write_bytes((name + "\n").encode("utf-8"))
+    if ccc_plugins:
+        (game_root / "Skyrim.ccc").write_bytes(
+            ("\n".join(ccc_plugins) + "\n").encode("utf-8")
+        )
+    return PrimaryPolicyFixture(game_root=game_root)
+
+
+def invalid_primary_policy_cases(root: Path):
+    missing_core = make_primary_policy_fixture(
+        root / "missing-core",
+        missing_data_files=("Update.esm",),
+    )
+    duplicate_ccc = make_primary_policy_fixture(
+        root / "duplicate-ccc",
+        ccc_plugins=("skyrim.ESM",),
+    )
+    nonregular_ccc_file = make_primary_policy_fixture(
+        root / "nonregular-ccc-file",
+        missing_data_files=("ccBGSSSE001-Fish.esm",),
+    )
+    (
+        nonregular_ccc_file.game_root
+        / "Data"
+        / "ccBGSSSE001-Fish.esm"
+    ).mkdir()
+    return (
+        (missing_core, "Update.esm"),
+        (duplicate_ccc, "duplicate"),
+        (nonregular_ccc_file, "ccBGSSSE001-Fish.esm"),
+    )
+
+
+def files_for_profile(
+    files: dict[PurePosixPath, bytes], profile_name: str
+) -> tuple[tuple[str, bytes], ...]:
+    prefix = PurePosixPath("profiles", profile_name)
+    result = []
+    for path, data in files.items():
+        try:
+            relative = path.relative_to(prefix)
+        except ValueError:
+            continue
+        result.append((relative.as_posix(), data))
+    return tuple(sorted(result, key=lambda item: (item[0].casefold(), item[0])))
 
 
 def package_inventory_fixture() -> PackageInventory:

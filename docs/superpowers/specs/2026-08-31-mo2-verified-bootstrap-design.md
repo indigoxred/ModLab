@@ -245,15 +245,15 @@ Create produces both exact profile directories. Each begins with:
 
 - `settings.ini` containing `LocalSaves=false`, `LocalSettings=true`, and `AutomaticArchiveInvalidation=true`;
 - comment-only `modlist.txt`, `plugins.txt`, and `lockedorder.txt`;
-- `loadorder.txt` containing the five fixed Skyrim masters followed by the exact valid plug-in sequence read from the fixed root `Skyrim.ccc`, when present;
+- `loadorder.txt` containing the five fixed Skyrim masters followed by the exact installed subset of the fixed root `Skyrim.ccc`, preserving catalogue order;
 - an empty `archives.txt`;
 - `Skyrim.ini`, `SkyrimPrefs.ini`, and `SkyrimCustom.ini` copied only from the three exact game-scoped INI paths when present as regular, nonredirected files; a missing source becomes an explicit empty seed.
 
-The five fixed masters are `Skyrim.esm`, `Update.esm`, `Dawnguard.esm`, `HearthFires.esm`, and `Dragonborn.esm`. Each must exist as an observed top-level `Data` plug-in before Create is eligible. `Skyrim.ccc` is parsed with the same strict plug-in-name rules used by the current MO2 adapter; duplicates, unsafe names, or missing listed files block. Its presence, bytes, size, SHA-256, and resulting ordered plug-in sequence are frozen in the plan and rechecked at apply.
+The five fixed masters are `Skyrim.esm`, `Update.esm`, `Dawnguard.esm`, `HearthFires.esm`, and `Dragonborn.esm`. Each must exist as an observed top-level `Data` plug-in before Create is eligible. `Skyrim.ccc` is parsed with the same strict plug-in-name rules used by the current MO2 adapter. It is a catalogue/order source and can legitimately list Creation content not installed by an SE owner, so absent entries are omitted; present entries must be direct regular top-level `Data` files. Duplicates, unsafe names, or present-but-unsafe entries block. Its presence, bytes, size, SHA-256, and resulting installed ordered plug-in sequence are frozen in the plan and rechecked at apply.
 
 ModLab never enumerates or copies the adjacent saves directory. The exact three INI source paths, presence, size, and SHA-256 values are frozen in the plan and rechecked at apply.
 
-Lab and Play seeds are byte-identical at creation. Their selections and generated outputs diverge only through later explicit work. MO2 may populate implicit DLC and Creation Club entries on first launch; that later normalization is observed and checkpointed rather than guessed during bootstrap.
+Lab and Play seeds are byte-identical at creation. Their selections and generated outputs diverge only through later explicit work. MO2 may normalize its own implicit state on first launch; that later normalization is observed and checkpointed rather than guessed during bootstrap.
 
 ## Activation and recovery
 

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from modlab.cli import main
 from modlab.workspace import initialize_workspace
+from tests.support.mo2_bootstrap import make_primary_policy_fixture
 
 
 CORE = (
@@ -27,8 +28,7 @@ class Mo2CompareCliTests(unittest.TestCase):
             "common",
             "Skyrim Special Edition",
         )
-        game_root.mkdir(parents=True)
-        (game_root / "Skyrim.ccc").write_bytes(b"")
+        make_primary_policy_fixture(game_root, ccc_plugins=())
         (layout.skyrim_mo2_app / "ModOrganizer.exe").write_bytes(b"fake mo2")
         primary = "\n".join(CORE) + "\n"
         for name in ("ModLab - Lab", "ModLab - Play"):

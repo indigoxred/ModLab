@@ -7,6 +7,11 @@ from dataclasses import replace
 from pathlib import Path, PureWindowsPath
 
 from modlab.adapters.skyrim.windows_version import read_windows_file_version
+from modlab.adapters.skyrim.primary_plugins import (
+    CORE_PRIMARY_PLUGINS,
+    SkyrimPrimaryPluginError,
+    observe_skyrim_primary_plugins,
+)
 from modlab.recipes.model import CheckState
 
 from .ini import Mo2IniError, decode_qsettings_path, parse_ini_bytes
@@ -20,7 +25,7 @@ from .model import (
     Mo2ProfileEvidence,
     Mo2StateFileEvidence,
 )
-from .profile import Mo2ProfileError, inspect_profile, parse_load_order_bytes
+from .profile import Mo2ProfileError, inspect_profile
 from .readset import Mo2ReadSet
 from .serialization import report_from_dict, report_to_dict
 
@@ -33,15 +38,6 @@ _PATH_KEYS = {
 }
 _LAB_PROFILE = "ModLab - Lab"
 _PLAY_PROFILE = "ModLab - Play"
-_CORE_PRIMARY_PLUGINS = (
-    "Skyrim.esm",
-    "Update.esm",
-    "Dawnguard.esm",
-    "HearthFires.esm",
-    "Dragonborn.esm",
-)
-
-
 def inspect_skyrim_mo2(
     mo2_root: Path,
     game_root: Path,
@@ -192,11 +188,21 @@ def inspect_skyrim_mo2(
     )
 
     try:
-        primary_plugins, skyrim_ccc = _observe_primary_plugins(
-            requested_game, read_set, findings
+        primary_evidence = observe_skyrim_primary_plugins(
+            requested_game, read_set=read_set
         )
-    except (OSError, Mo2ProfileError) as error:
-        primary_plugins = _CORE_PRIMARY_PLUGINS
+        primary_plugins = primary_evidence.plugins
+        skyrim_ccc = (
+            Mo2StateFileEvidence(
+                relative_path="Skyrim.ccc",
+                sha256=primary_evidence.ccc_sha256,
+                size=primary_evidence.ccc_size,
+            )
+            if primary_evidence.ccc_present
+            else None
+        )
+    except (OSError, SkyrimPrimaryPluginError) as error:
+        primary_plugins = CORE_PRIMARY_PLUGINS
         skyrim_ccc = None
         findings.append(
             _finding(
@@ -381,33 +387,6 @@ def _observe_executable(
         hashlib.sha256(data).hexdigest(),
         len(data),
     )
-
-
-def _observe_primary_plugins(
-    game_root: Path,
-    read_set: Mo2ReadSet,
-    findings: list[Mo2Finding],
-) -> tuple[tuple[str, ...], Mo2StateFileEvidence | None]:
-    ccc_path = game_root / "Skyrim.ccc"
-    data = read_set.optional_bytes(ccc_path)
-    if data is None:
-        return _CORE_PRIMARY_PLUGINS, None
-    creation_plugins = parse_load_order_bytes(data)
-    combined = _CORE_PRIMARY_PLUGINS + creation_plugins
-    if len({item.casefold() for item in combined}) != len(combined):
-        findings.append(
-            _finding(
-                CheckState.BLOCKED,
-                "skyrim-primary-plugin-policy-invalid",
-                "Skyrim.ccc duplicates a primary plug-in identity.",
-            )
-        )
-    state_file = Mo2StateFileEvidence(
-        relative_path="Skyrim.ccc",
-        sha256=hashlib.sha256(data).hexdigest(),
-        size=len(data),
-    )
-    return combined, state_file
 
 
 def _observe_paths(config, instance_root: Path, workspace: Path, findings: list[Mo2Finding]) -> tuple[Mo2PathEvidence, ...]:
