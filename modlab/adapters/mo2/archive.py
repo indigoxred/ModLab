@@ -319,7 +319,7 @@ def compare_package_to_existing(
 
 def _allowed_extra(path: PurePosixPath, release: Mo2ReleaseDescriptor) -> bool:
     text = path.as_posix()
-    if text in release.allowed_extra_files:
+    if text.casefold() in {item.casefold() for item in release.allowed_extra_files}:
         return True
     if release.allow_root_logs and len(path.parts) == 2:
         return path.parts[0].casefold() == "logs" and path.suffix.casefold() == ".log"

@@ -267,6 +267,17 @@ class Mo2BootstrapAdoptTests(unittest.TestCase):
         self.assertEqual(before, tree_state(self.fixture.layout.skyrim_mo2))
         self.assertIn("nxmhandler.ini", result.receipt.extra_entries)
 
+    def test_allowed_extra_casing_is_preserved_when_adopted(self):
+        settings = self.fixture.layout.skyrim_mo2_app / "NxmHandler.ini"
+        original = b"[General]\nnoregister=false\n"
+        settings.write_bytes(original)
+
+        plan = self._plan_adopt()
+        result = self._apply(plan.plan_id)
+
+        self.assertEqual(original, settings.read_bytes())
+        self.assertIn("NxmHandler.ini", result.receipt.extra_entries)
+
     def test_allowed_root_log_is_recorded_and_adopted(self):
         log = self.fixture.layout.skyrim_mo2_app / "logs" / "session.log"
         log.parent.mkdir()
