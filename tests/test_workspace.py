@@ -2,9 +2,11 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from modlab.cli import main
 from modlab.workspace import (
+    WorkspaceError,
     default_workspace_root,
     initialize_workspace,
     workspace_layout,
@@ -27,6 +29,8 @@ EXPECTED_RELATIVE_DIRECTORIES = {
     "games/skyrim-se-ae/logs",
     "games/skyrim-se-ae/recipes",
     "games/skyrim-se-ae/target-environments",
+    "games/skyrim-se-ae/tool-installations",
+    "games/skyrim-se-ae/tool-installations/mo2",
     "tools",
     "tools/mo2",
     "tools/mo2/skyrim-se-ae",
@@ -39,6 +43,8 @@ EXPECTED_RELATIVE_DIRECTORIES = {
     "runtime",
     "runtime/cache",
     "runtime/jobs",
+    "runtime/jobs/mo2-bootstrap",
+    "runtime/jobs/mo2-bootstrap/plans",
     "runtime/transactions",
 }
 
@@ -76,6 +82,33 @@ class WorkspaceTests(unittest.TestCase):
                 layout.skyrim_environment_configuration,
             )
 
+    def test_bootstrap_paths_are_organized_under_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory, "workspace")
+
+            layout = initialize_workspace(workspace)
+
+            self.assertEqual(
+                workspace.resolve() / "runtime" / "jobs" / "mo2-bootstrap",
+                layout.mo2_bootstrap_jobs,
+            )
+            self.assertEqual(
+                workspace.resolve()
+                / "runtime"
+                / "jobs"
+                / "mo2-bootstrap"
+                / "plans",
+                layout.mo2_bootstrap_plans,
+            )
+            self.assertEqual(
+                workspace.resolve()
+                / "games"
+                / "skyrim-se-ae"
+                / "tool-installations"
+                / "mo2",
+                layout.mo2_bootstrap_receipts,
+            )
+
     def test_reinitializing_never_removes_an_unknown_user_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory, "workspace")
@@ -86,6 +119,39 @@ class WorkspaceTests(unittest.TestCase):
             initialize_workspace(root)
 
             self.assertEqual(b"user-owned archive", archive.read_bytes())
+
+    def test_initialize_rejects_redirected_ancestor_before_creating_children(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory, "workspace")
+            runtime = root / "runtime"
+            runtime.mkdir(parents=True)
+            real_is_symlink = Path.is_symlink
+
+            def report_redirect(path):
+                return Path(path) == runtime or real_is_symlink(path)
+
+            with patch.object(
+                Path,
+                "is_symlink",
+                autospec=True,
+                side_effect=report_redirect,
+            ):
+                with self.assertRaisesRegex(WorkspaceError, "redirected"):
+                    initialize_workspace(root)
+
+            self.assertEqual([], list(runtime.iterdir()))
+            self.assertFalse((root / "inbox").exists())
+
+    def test_initialize_rejects_non_directory_ancestor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory, "workspace")
+            root.mkdir()
+            (root / "runtime").write_bytes(b"not a directory")
+
+            with self.assertRaisesRegex(WorkspaceError, "not a directory"):
+                initialize_workspace(root)
+
+            self.assertFalse((root / "runtime" / "jobs").exists())
 
     def test_layout_keeps_recovery_state_separate_from_mod_archives(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -111,6 +177,34 @@ class WorkspaceTests(unittest.TestCase):
             self.assertIn(str(root.resolve()), stdout.getvalue())
             self.assertIn("Inbox:", stdout.getvalue())
             self.assertEqual("", stderr.getvalue())
+
+    def test_cli_reports_redirected_workspace_without_traceback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory, "workspace")
+            runtime = root / "runtime"
+            runtime.mkdir(parents=True)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            real_is_symlink = Path.is_symlink
+
+            def report_redirect(path):
+                return Path(path) == runtime or real_is_symlink(path)
+
+            with patch.object(
+                Path,
+                "is_symlink",
+                autospec=True,
+                side_effect=report_redirect,
+            ):
+                code = main(
+                    ["workspace", "init", "--root", str(root)],
+                    stdout,
+                    stderr,
+                )
+
+            self.assertEqual(3, code)
+            self.assertEqual("", stdout.getvalue())
+            self.assertIn("Workspace error:", stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_default_workspace_is_inside_the_modlab_application_root(self):
         application_root = Path(__file__).resolve().parents[1]

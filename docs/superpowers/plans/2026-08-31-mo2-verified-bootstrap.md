@@ -815,7 +815,7 @@ Initialize only `runtime/jobs/mo2-bootstrap/plans` and `games/skyrim-se-ae/tool-
 
 - [ ] **Step 3: Implement confined atomic writes**
 
-Every store path is derived from a validated identity; never accept a raw relative path. Use an exclusive `.part` file beneath `mo2_bootstrap_jobs`, `flush` + `os.fsync`, then `os.replace`. Validate every existing ancestor with `lstat` and reject symlinks/reparse points/non-directories.
+Every store path is derived from a validated identity; never accept a raw relative path. Use an exclusive `.part` file beneath `mo2_bootstrap_jobs` with `flush` + `os.fsync`. Promote immutable plans and receipts with Windows atomic no-replace semantics; serialize journal compare-and-swap beneath a workspace-derived cross-session mutex and promote it with `os.replace`. Validate every existing ancestor with `lstat` and reject symlinks/reparse points/non-directories.
 
 ```python
 def write_plan(self, plan: BootstrapPlan) -> StoredBootstrapDocument:
@@ -827,7 +827,7 @@ def write_plan(self, plan: BootstrapPlan) -> StoredBootstrapDocument:
 
 `create_job` derives a new UUID-backed `bootstrap-job:<32 hex>`, exact sibling stage root `tools/mo2/.skyrim-se-ae.modlab-stage-<job hex>`, and prior root beneath the job directory. It writes `Planned` before returning.
 
-`transition_job` requires the stored journal bytes/hash and expected prior state, validates only the allowed transition table, writes atomically, and re-loads exact bytes. Create permits `Planned -> Staging -> Staged -> Applying -> Activated -> Verified` plus failure transitions to `RecoveryRequired` and safe completion to `Recovered`. Adopt permits `Planned -> Staging -> Staged -> Verified` plus `RecoveryRequired -> Recovered`. `write_receipt` is content-addressed and immutable. `find_compatible_receipt` returns only a fully verified parsed receipt or no result; malformed matching files raise.
+`transition_job` requires the stored journal bytes/hash and expected prior state, validates only the allowed transition table, writes atomically, and re-loads exact bytes. Create permits `Planned -> Staging -> Staged -> Applying -> Activated -> Verified`, failure transitions to `RecoveryRequired`, safe restoration to `Recovered`, and verified recovery through `RecoveryRequired -> Activated -> Verified`. Adopt permits `Planned -> Staging -> Staged -> Verified` plus `RecoveryRequired -> Recovered`. `write_receipt` is content-addressed and immutable. `find_compatible_receipt` returns only a fully verified parsed receipt or no result; malformed matching files raise.
 
 - [ ] **Step 4: Add redirection, crash, and CAS tests**
 

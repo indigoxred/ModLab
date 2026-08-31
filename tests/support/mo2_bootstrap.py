@@ -414,7 +414,10 @@ def make_plan_fixture(**overrides: object) -> BootstrapPlan:
 
 
 def make_journal_fixture(
-    *, state: BootstrapJobState = BootstrapJobState.PLANNED, **overrides: object
+    *,
+    state: BootstrapJobState = BootstrapJobState.PLANNED,
+    disposition: BootstrapDisposition = BootstrapDisposition.CREATE,
+    **overrides: object,
 ) -> BootstrapJournal:
     has_stage = state in {
         BootstrapJobState.STAGED,
@@ -430,7 +433,7 @@ def make_journal_fixture(
         schema_version=1,
         job_id="bootstrap-job:0123456789abcdef0123456789abcdef",
         plan_id="bootstrap-plan-sha256:" + "c" * 64,
-        disposition=BootstrapDisposition.CREATE,
+        disposition=disposition,
         state=state,
         stage_root=(
             r"C:\ModLab\workspace\tools\mo2\.skyrim-se-ae.modlab-stage-0123456789abcdef0123456789abcdef"
@@ -439,7 +442,11 @@ def make_journal_fixture(
             r"C:\ModLab\workspace\runtime\jobs\mo2-bootstrap\0123456789abcdef0123456789abcdef\prior"
         ),
         final_root=r"C:\ModLab\workspace\tools\mo2\skyrim-se-ae",
-        prior_target_kind="Empty",
+        prior_target_kind=(
+            "Existing"
+            if disposition is BootstrapDisposition.ADOPT
+            else "Empty"
+        ),
         prior_inventory_sha256="d" * 64,
         prior_entry_count=0,
         stage_inventory_sha256="e" * 64 if has_stage else None,

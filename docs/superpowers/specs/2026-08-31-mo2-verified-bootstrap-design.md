@@ -112,6 +112,8 @@ workspace/games/skyrim-se-ae/tool-installations/mo2/
 
 Temporary activation staging is a uniquely named sibling of the final Skyrim MO2 instance under `workspace/tools/mo2/`. This keeps the final directory rename on the same volume. It may exist only while a journal identifies it. Orphan staging directories block later setup until recovered; they are never silently removed.
 
+Immutable bootstrap documents use atomic no-replace promotion. Journal compare-and-swap is serialized by a workspace-derived Windows global mutex, so concurrent ModLab processes in different sessions cannot both advance the same journal. A workspace remains a single-machine, single-user local store; network-share coordination is outside this increment.
+
 All path comparisons use resolved, case-insensitive Windows identities. Existing symlinks, junctions, reparse points, alternate data streams, nonregular files, or paths escaping the resolved workspace block the operation.
 
 ## Supported release descriptor
@@ -262,6 +264,7 @@ Create uses a job journal with these durable states:
 ```text
 Planned -> Staging -> Staged -> Applying -> Activated -> Verified
                                       \-> RecoveryRequired -> Recovered
+RecoveryRequired -> Activated -> Verified
 ```
 
 Before the first final-target rename, the journal is durably `Applying`. The staged and final instance directories are siblings on the same volume.

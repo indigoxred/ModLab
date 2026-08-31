@@ -248,8 +248,16 @@ def journal_from_dict(value: object) -> BootstrapJournal:
         raise BootstrapFormatError("stageRoot must use the job-derived sibling name")
 
     prior_kind = _one_of(data["priorTargetKind"], _TARGET_KINDS, "priorTargetKind")
-    if prior_kind != "Empty":
-        raise BootstrapFormatError("journal priorTargetKind must be Empty")
+    expected_prior_kind = (
+        "Empty"
+        if disposition is BootstrapDisposition.CREATE
+        else "Existing"
+    )
+    if prior_kind != expected_prior_kind:
+        raise BootstrapFormatError(
+            "journal priorTargetKind must be "
+            f"{expected_prior_kind} for {disposition.value}"
+        )
     stage_sha, stage_count = _optional_inventory_pair(
         data["stageInventorySha256"], data["stageEntryCount"], "stage"
     )

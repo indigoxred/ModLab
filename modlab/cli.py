@@ -40,7 +40,7 @@ from .recipes.serialization import review_to_dict
 from .transactions.manager import TransactionManager, TransactionManagerError
 from .transactions.model import TransactionFinding, TransactionHealth
 from .transactions.serialization import TransactionFormatError, journal_to_dict
-from .workspace import default_workspace_root, initialize_workspace
+from .workspace import WorkspaceError, default_workspace_root, initialize_workspace
 from .workflows.skyrim.drift import SkyrimStatusOutcome
 from .workflows.skyrim.serialization import (
     SkyrimWorkflowFormatError,
@@ -953,6 +953,9 @@ def main(
         return 3
     except (SkyrimWorkflowError, SkyrimWorkflowFormatError) as error:
         print(f"Skyrim workflow refused: {error}", file=errors)
+        return 3
+    except WorkspaceError as error:
+        print(f"Workspace error: {error}", file=errors)
         return 3
     except (RecipeFormatError, ValueError) as error:
         print(f"Recipe error: {error}", file=errors)

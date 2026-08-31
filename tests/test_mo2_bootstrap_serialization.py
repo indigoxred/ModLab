@@ -2,7 +2,10 @@ import json
 import unittest
 from dataclasses import replace
 
-from modlab.adapters.mo2.bootstrap_model import BootstrapJobState
+from modlab.adapters.mo2.bootstrap_model import (
+    BootstrapDisposition,
+    BootstrapJobState,
+)
 from modlab.adapters.mo2.bootstrap_serialization import (
     BootstrapFormatError,
     journal_from_bytes,
@@ -47,6 +50,20 @@ class BootstrapSerializationTests(unittest.TestCase):
         journal = make_journal_fixture(state=BootstrapJobState.STAGED)
 
         self.assertEqual(journal, journal_from_bytes(journal_to_bytes(journal)))
+
+    def test_journal_prior_kind_matches_create_or_adopt_disposition(self):
+        adopt = make_journal_fixture(
+            disposition=BootstrapDisposition.ADOPT,
+        )
+
+        self.assertEqual(adopt, journal_from_bytes(journal_to_bytes(adopt)))
+        for invalid in (
+            replace(adopt, prior_target_kind="Empty"),
+            replace(make_journal_fixture(), prior_target_kind="Existing"),
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(BootstrapFormatError):
+                    journal_to_bytes(invalid)
 
     def test_receipt_identity_covers_package_extras_and_profiles(self):
         receipt = make_receipt_fixture()
