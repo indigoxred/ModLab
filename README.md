@@ -4,7 +4,7 @@ ModLab is a Windows companion for building a hand-picked Bethesda mod setup with
 
 ## Current build
 
-The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, stores immutable checkpoint lockfiles supplied by future game adapters, contains a tested internal Lab-to-Play file transaction engine, and can inspect one explicitly selected Skyrim Steam library plus one contained portable MO2 instance read-only. It can also compare the exact `ModLab - Lab` and `ModLab - Play` MO2 profile state without writing a report or changing either profile. Transactions retain prior and desired bytes, refuse drift, structurally exclude saves/co-saves, and can roll back after failure or process interruption. Their immutable file plan and roots have a SHA-256 identity. It does **not** launch MO2 or a game, download mods, extract archives, install files, expose a promotion command, or change a real game yet.
+The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, and can register one explicitly selected Skyrim Steam library plus one contained portable MO2 instance. It captures immutable **Observed** Skyrim baselines and reports bounded drift across the game, manager, Lab/Play profiles, shared manager state, recipe intent, target environment, and inspection coverage. It also contains a tested internal Lab-to-Play file transaction engine. Transactions retain prior and desired bytes, refuse drift, structurally exclude saves/co-saves, and can roll back after failure or process interruption. Their immutable file plan and roots have a SHA-256 identity. The public Skyrim workflow does **not** launch MO2 or a game, download mods, extract archives, install files, expose a promotion command, restore files, or change the real game.
 
 The bundled Skyrim and OpenMW recipes are **Drafts**. Draft means researched, not assembled and smoke-tested as an exact combination.
 
@@ -32,6 +32,9 @@ python -m modlab game discover skyrim --steam-root 'C:\Path\To\Steam'
 python -m modlab manager discover mo2 --root '.\workspace\tools\mo2\skyrim-se-ae\app' --game-root 'C:\Path\To\Skyrim Special Edition'
 python -B -m modlab manager compare mo2 --root '.\workspace\tools\mo2\skyrim-se-ae\app' --game-root 'C:\Path\To\Skyrim Special Edition' --workspace '.\workspace'
 python -B -m modlab manager compare mo2 --root '.\workspace\tools\mo2\skyrim-se-ae\app' --game-root 'C:\Path\To\Skyrim Special Edition' --workspace '.\workspace' --format json
+python -B -m modlab skyrim configure --steam-root 'C:\Path\To\Steam' --recipe '.\catalogue\recipes\skyrim-se-ae-current-draft.json' --environment '.\catalogue\environments\skyrim-steam-1.7.104.json' --workspace '.\workspace'
+python -B -m modlab skyrim baseline create --workspace '.\workspace'
+python -B -m modlab skyrim status --workspace '.\workspace'
 python -m unittest discover -s tests -v
 ```
 
@@ -43,9 +46,9 @@ python -m modlab recipe review RECIPE.json --environment ENVIRONMENT.json --sele
 
 Exit codes are stable:
 
-- `0` — valid input, a review ready to be considered, or a complete manager comparison.
+- `0` — valid input, a successful Skyrim configure/capture/use, a ready review or manager comparison, or a Matched Skyrim status.
 - `2` — invalid file, schema, or component request.
-- `3` — incomplete selection, proven compatibility block, or missing/modified retained state.
+- `3` — incomplete selection, safe Skyrim workflow refusal, Drifted/NoBaseline/Blocked status, proven compatibility block, or missing/modified retained state.
 
 Every review result includes an explicit empty action list or the message `No downloads or installation actions were performed.`
 
@@ -107,7 +110,7 @@ python -m modlab checkpoint show 'checkpoint-sha256:<hash>' --workspace '.\works
 python -m modlab checkpoint verify 'checkpoint-sha256:<hash>' --workspace '.\workspace' --game skyrim-se-ae
 ```
 
-Checkpoint creation is adapter-facing in this build. A lockfile does not prove that Skyrim or MO2 was inspected merely because it contains a field named `adapterState`; the Skyrim adapter must collect and independently verify authoritative profile, mod, plug-in, INI, root, and evidence state before ModLab can call a checkpoint Candidate or promotion-ready. These commands never promote, restore, repair, install, or touch saves and co-saves.
+The Skyrim workflow can create a strictly qualified Observed checkpoint after independently verifying authoritative profile, mod, plug-in, INI, root, and evidence state. A generic lockfile still does not prove inspection merely because it contains a field named `adapterState`, and an Observed Skyrim baseline is neither a Candidate nor promotion-ready. These commands never promote, restore, repair, install, or touch saves and co-saves.
 
 ## Transaction recovery
 
@@ -160,6 +163,26 @@ It compares MO2 priority, enablement, plug-in order, and profile configuration. 
 
 The command reads no save or co-save and writes no cache, report, profile, mod, game, checkpoint, temporary, or workspace file. Its scope does not inspect installed mod payload contents, asset conflicts, plug-in records, or runtime stability, so it does not claim that conflicts are solved or that Skyrim will run correctly.
 
+## Skyrim observed-baseline workflow
+
+Enter the external paths once. ModLab retains the exact recipe and target-environment source bytes by SHA-256 and records only its own registration files:
+
+```powershell
+python -B -m modlab skyrim configure --steam-root 'C:\Users\red\Desktop\Steam' --recipe '.\catalogue\recipes\skyrim-se-ae-current-draft.json' --environment '.\catalogue\environments\skyrim-steam-1.7.104.json' --workspace '.\workspace'
+python -B -m modlab skyrim baseline create --workspace '.\workspace'
+python -B -m modlab skyrim status --workspace '.\workspace'
+```
+
+`configure` reports the verified game and MO2 identities, chosen recipe components, target-only Unknowns, and every ModLab file it wrote. `baseline create` captures an immutable Observed checkpoint and selects it as the comparison baseline. If a valid checkpoint was created but its pointer could not be selected, recover explicitly with:
+
+```powershell
+python -B -m modlab skyrim baseline use 'checkpoint-sha256:<hash>' --workspace '.\workspace'
+```
+
+`status` compares game identity, manager identity and path containment, both Lab and Play profiles, shared installed-mod/Overwrite state, recipe intent, target environment, and the fixed coverage boundary. `Matched` means only that these observed facts still match. Status writes nothing; configure, capture, and use write only the exact ModLab paths they report. Saves and co-saves are structurally excluded.
+
+An Observed baseline is not an assembled, tested, promotable, or restorable build. Installed payload contents, asset conflicts, plug-in records, foundation assembly, runtime behavior, and smoke testing remain uninspected. MO2 bootstrap/installation, tool launching, smoke testing, promotion, rollback exposure, and the Morrowind/Oblivion adapters remain later work.
+
 ## Build sequence
 
-The next independent builds are verified MO2 bootstrap/configuration, checkpoint persistence using the now-proven MO2 projection, and the contained generator runner. Changes to the real MO2 interface will use computer-control testing when that work begins. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.
+The proven current slice is explicit Skyrim registration, immutable Observed baseline capture, recovery selection, and read-only drift reporting. The next independent builds are verified MO2 bootstrap/configuration, payload/archive linkage, and contained external-tool execution. Changes to the real MO2 interface will use computer-control testing when that work begins. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.
