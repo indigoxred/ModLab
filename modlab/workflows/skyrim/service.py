@@ -25,7 +25,7 @@ from modlab.recipes.loading import (
     load_environment_source,
     load_recipe_source,
 )
-from modlab.recipes.model import RecipeReview
+from modlab.recipes.model import CheckState, RecipeReview
 from modlab.recipes.reviewing import review_recipe
 
 from .capture import (
@@ -129,9 +129,7 @@ def configure_skyrim_environment(
             f"Skyrim configuration input is invalid: {error}"
         ) from error
     if not observation.ready:
-        raise SkyrimWorkflowError(
-            "Skyrim and portable MO2 are not complete, coherent, and Ready"
-        )
+        raise SkyrimWorkflowError(_observation_refusal(observation))
     if not review.ready_for_approval:
         raise SkyrimWorkflowError(
             "Foundation Recipe selection is incomplete or incompatible"
@@ -206,6 +204,8 @@ def create_skyrim_baseline(
             skyrim_version_reader=skyrim_reader,
             mo2_version_reader=mo2_reader,
         )
+        if not observation.ready:
+            raise SkyrimWorkflowError(_observation_refusal(observation))
         return create_observed_baseline(
             snapshot,
             observation,
@@ -284,6 +284,12 @@ def get_skyrim_status(
         return _blocked_status(
             configuration.baseline_checkpoint_id,
             f"Cannot verify retained Skyrim intent: {error}",
+        )
+
+    if not observation.ready:
+        return _blocked_status(
+            configuration.baseline_checkpoint_id,
+            _observation_refusal(observation),
         )
 
     checkpoint_id = configuration.baseline_checkpoint_id
@@ -478,3 +484,24 @@ def _blocked_status(
         (),
         (message,),
     )
+
+
+def _observation_refusal(observation: SkyrimLiveObservation) -> str:
+    details: list[str] = []
+    for finding in observation.discovery.findings:
+        if finding.state is not CheckState.PASSED:
+            details.append(f"{finding.code}: {finding.message}")
+    if observation.projection is not None:
+        for finding in observation.projection.findings:
+            if finding.state is not CheckState.PASSED:
+                details.append(f"{finding.code}: {finding.message}")
+    for finding in observation.dimension_findings:
+        if finding.state is CheckState.BLOCKED:
+            details.append(f"{finding.dimension}: {finding.message}")
+    unique = tuple(dict.fromkeys(details))
+    explanation = "; ".join(unique[:12])
+    if len(unique) > 12:
+        explanation += f"; and {len(unique) - 12} more finding(s)"
+    if not explanation:
+        explanation = "required live evidence is incomplete"
+    return f"Skyrim/MO2 observation is not Ready: {explanation}"

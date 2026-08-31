@@ -3,10 +3,12 @@ import io
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 from modlab.cli import main
+from modlab.adapters.mo2.readset import Mo2ReadSet
 from modlab.workflows.skyrim.store import (
     SkyrimEnvironmentConflictError,
     SkyrimEnvironmentStore,
@@ -64,6 +66,20 @@ class SkyrimWorkflowCliTests(unittest.TestCase):
             str(self.fixture.workspace),
             *extra,
         ]
+
+    def assert_refused_without_changes(self, arguments, reason):
+        before = tree_state(self.fixture.root)
+        code, output, error = self.run_cli(arguments)
+        self.assertEqual(3, code)
+        self.assertIn(reason.casefold(), (output + error).casefold())
+        self.assertNotIn("Traceback", error)
+        self.assertEqual(before, tree_state(self.fixture.root))
+        if output.lstrip().startswith("{"):
+            value = json.loads(output)
+            self.assertEqual([], value["actionsPerformed"])
+            self.assertEqual([], value["downloadsPerformed"])
+            self.assertEqual([], value["installationActionsPerformed"])
+            self.assertEqual([], value["programsLaunched"])
 
     def test_full_cli_flow_requires_paths_once_then_matches(self):
         configure_code, configure_out, configure_err = self.run_cli(
@@ -260,6 +276,216 @@ class SkyrimWorkflowCliTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "developer failure"):
                 self.run_cli(self.configure_arguments())
+
+    def test_configure_failure_matrix_is_named_and_side_effect_free(self):
+        cases = []
+
+        manifest_fixture = create_skyrim_workflow_fixture(
+            self.fixture.root / "missing-manifest"
+        )
+        (manifest_fixture.steam_root / "steamapps" / "appmanifest_489830.acf").unlink()
+        cases.append((manifest_fixture, "manifest", None))
+
+        game_fixture = create_skyrim_workflow_fixture(
+            self.fixture.root / "missing-game-identity"
+        )
+        (game_fixture.game_root / "SkyrimSE.exe").unlink()
+        cases.append((game_fixture, "executable-not-observed", None))
+
+        manager_fixture = create_skyrim_workflow_fixture(
+            self.fixture.root / "missing-manager-identity"
+        )
+        (manager_fixture.mo2_root / "ModOrganizer.exe").unlink()
+        cases.append((manager_fixture, "mo2-executable-not-observed", None))
+
+        escaped_fixture = create_skyrim_workflow_fixture(
+            self.fixture.root / "escaped-path"
+        )
+        ini = escaped_fixture.mo2_root / "ModOrganizer.ini"
+        ini.write_text(
+            ini.read_text(encoding="utf-8").replace(
+                "mod_directory=%BASE_DIR%/mods",
+                f"mod_directory={(escaped_fixture.root / 'outside-mods').as_posix()}",
+            ),
+            encoding="utf-8",
+        )
+        cases.append((escaped_fixture, "paths-escaped", None))
+
+        profile_fixture = create_skyrim_workflow_fixture(
+            self.fixture.root / "missing-lab-profile"
+        )
+        lab = (
+            profile_fixture.workspace / "tools" / "mo2" / "skyrim-se-ae"
+            / "profiles" / "ModLab - Lab"
+        )
+        lab.rename(lab.with_name("Lab profile removed"))
+        cases.append((profile_fixture, "lab-play", None))
+
+        runtime_fixture = create_skyrim_workflow_fixture(
+            self.fixture.root / "runtime-mismatch"
+        )
+        target = json.loads(runtime_fixture.environment_path.read_text(encoding="utf-8"))
+        target["dimensions"]["executableRuntime"] = "9.9.9"
+        runtime_target = runtime_fixture.root / "intent" / "runtime-mismatch.json"
+        runtime_target.write_text(json.dumps(target), encoding="utf-8")
+        cases.append((runtime_fixture, "executableRuntime", runtime_target))
+
+        duplicate_fixture = create_skyrim_workflow_fixture(
+            self.fixture.root / "duplicate-recipe-key"
+        )
+        original_recipe = duplicate_fixture.recipe_path.read_text(encoding="utf-8")
+        duplicate_recipe = duplicate_fixture.root / "intent" / "duplicate.json"
+        duplicate_recipe.write_text(
+            original_recipe.replace(
+                '"schemaVersion": 1,',
+                '"schemaVersion": 1, "schemaVersion": 1,',
+                1,
+            ),
+            encoding="utf-8",
+        )
+        cases.append((duplicate_fixture, "duplicate", None, duplicate_recipe))
+
+        for item in cases:
+            fixture, reason, target_override, *recipe_override = item
+            with self.subTest(reason=reason):
+                self.fixture = fixture
+                arguments = self.configure_arguments()
+                if target_override is not None:
+                    arguments[arguments.index(str(fixture.environment_path))] = str(
+                        target_override
+                    )
+                if recipe_override:
+                    arguments[arguments.index(str(fixture.recipe_path))] = str(
+                        recipe_override[0]
+                    )
+                self.assert_refused_without_changes(arguments, reason)
+
+    def test_unstable_read_set_blocks_capture_and_status_without_writes(self):
+        self.assertEqual(0, self.run_cli(self.configure_arguments())[0])
+        self.assertEqual(0, self.run_cli([
+            "skyrim", "baseline", "create",
+            "--workspace", str(self.fixture.workspace),
+        ])[0])
+        real_verify = Mo2ReadSet.verify
+
+        def unstable(read_set):
+            result = real_verify(read_set)
+            return replace(
+                result,
+                stable=False,
+                changed_paths=(str(self.fixture.mo2_root / "ModOrganizer.ini"),),
+            )
+
+        for arguments in (
+            [
+                "skyrim", "baseline", "create",
+                "--workspace", str(self.fixture.workspace),
+            ],
+            [
+                "skyrim", "status",
+                "--workspace", str(self.fixture.workspace),
+                "--format", "json",
+            ],
+        ):
+            with self.subTest(command=arguments[1:3]):
+                with patch.object(Mo2ReadSet, "verify", autospec=True, side_effect=unstable):
+                    self.assert_refused_without_changes(
+                        arguments, "mo2-state-changed-during-inspection"
+                    )
+
+    def test_mutated_retained_source_blocks_capture_and_status_without_writes(self):
+        self.assertEqual(0, self.run_cli(self.configure_arguments())[0])
+        configuration = SkyrimEnvironmentStore(
+            self.fixture.workspace
+        ).load().configuration
+        retained_recipe = (
+            self.fixture.workspace / configuration.recipe.source.stored_path
+        )
+        retained_recipe.write_bytes(retained_recipe.read_bytes() + b" ")
+
+        for arguments in (
+            [
+                "skyrim", "baseline", "create",
+                "--workspace", str(self.fixture.workspace),
+            ],
+            [
+                "skyrim", "status",
+                "--workspace", str(self.fixture.workspace),
+                "--format", "json",
+            ],
+        ):
+            with self.subTest(command=arguments[1:3]):
+                self.assert_refused_without_changes(arguments, "retained recipe")
+
+    def test_modified_checkpoint_blocks_use_and_status_without_writes(self):
+        self.assertEqual(0, self.run_cli(self.configure_arguments())[0])
+        _, capture_output, _ = self.run_cli([
+            "skyrim", "baseline", "create",
+            "--workspace", str(self.fixture.workspace),
+            "--format", "json",
+        ])
+        checkpoint_id = json.loads(capture_output)["baselineCapture"]["checkpointId"]
+        checkpoint_path = (
+            self.fixture.workspace / "games" / "skyrim-se-ae" / "checkpoints"
+            / checkpoint_id.removeprefix("checkpoint-sha256:")
+            / "modlab.lock.json"
+        )
+        checkpoint_value = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        checkpoint_value["recipeRevision"] = "tampered"
+        checkpoint_path.write_text(json.dumps(checkpoint_value), encoding="utf-8")
+
+        for arguments, reason in (
+            ([
+                "skyrim", "baseline", "use", checkpoint_id,
+                "--workspace", str(self.fixture.workspace),
+            ], "modified"),
+            ([
+                "skyrim", "status",
+                "--workspace", str(self.fixture.workspace),
+                "--format", "json",
+            ], "recorded identity"),
+        ):
+            with self.subTest(command=arguments[1:3]):
+                self.assert_refused_without_changes(arguments, reason)
+
+    def test_redirected_configuration_blocks_every_operation_without_writes(self):
+        self.assertEqual(0, self.run_cli(self.configure_arguments())[0])
+        _, capture_output, _ = self.run_cli([
+            "skyrim", "baseline", "create",
+            "--workspace", str(self.fixture.workspace),
+            "--format", "json",
+        ])
+        checkpoint_id = json.loads(capture_output)["baselineCapture"]["checkpointId"]
+        configuration_path = (
+            self.fixture.workspace / "games" / "skyrim-se-ae" / "environment.json"
+        )
+        real_is_symlink = Path.is_symlink
+
+        def report_redirect(path):
+            return path == configuration_path or real_is_symlink(path)
+
+        commands = (
+            self.configure_arguments(),
+            [
+                "skyrim", "baseline", "create",
+                "--workspace", str(self.fixture.workspace),
+            ],
+            [
+                "skyrim", "baseline", "use", checkpoint_id,
+                "--workspace", str(self.fixture.workspace),
+            ],
+            [
+                "skyrim", "status",
+                "--workspace", str(self.fixture.workspace),
+                "--format", "json",
+            ],
+        )
+        with patch.object(
+            Path, "is_symlink", autospec=True, side_effect=report_redirect
+        ):
+            for arguments in commands:
+                with self.subTest(command=arguments[1:3]):
+                    self.assert_refused_without_changes(arguments, "redirected")
 
 
 if __name__ == "__main__":
