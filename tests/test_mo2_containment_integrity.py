@@ -11,6 +11,7 @@ from unittest import mock
 from modlab.validation.mo2_containment_model import IntegrityObservation
 from modlab.validation import windows_integrity
 from modlab.validation.windows_integrity import (
+    IntegrityLabelError,
     IntegrityLevel,
     inspect_path_integrity,
     inspect_process_integrity,
@@ -134,6 +135,84 @@ class IntegrityPolicyTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Windows integrity APIs are unavailable")
 class WindowsIntegrityTests(unittest.TestCase):
+    def test_post_icacls_verification_error_preserves_receipt_and_cause(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-integrity-receipt-") as temporary:
+            root = Path(temporary)
+            stage = root / "stage"
+            stage.mkdir()
+            verification_error = OSError("injected native inspection failure")
+
+            with mock.patch.object(
+                windows_integrity,
+                "inspect_path_integrity",
+                side_effect=verification_error,
+            ):
+                with self.assertRaises(IntegrityLabelError) as captured:
+                    set_low_integrity_tree(stage)
+
+            error = captured.exception
+            self.assertIs(verification_error, error.__cause__)
+            self.assertEqual(r"C:\Windows\System32\icacls.exe", error.receipt.executable)
+            self.assertEqual(0, error.receipt.exit_code)
+            self.assertEqual(str(stage), error.receipt.arguments[0])
+            self.assertEqual("/setintegritylevel", error.receipt.arguments[1])
+            self.assertEqual("(OI)(CI)L", error.receipt.arguments[2])
+
+    def test_explicit_label_without_no_write_up_policy_is_rejected(self):
+        import ctypes
+
+        sid = struct.pack(
+            "<BB6sI",
+            1,
+            1,
+            b"\0\0\0\0\0\x10",
+            int(IntegrityLevel.LOW),
+        )
+
+        def label_ace(mask: int):
+            payload = struct.pack("<BBHI", 0x11, 0, 8 + len(sid), mask) + sid
+            return ctypes.create_string_buffer(payload)
+
+        enforced = label_ace(0x1)
+        self.assertEqual(
+            IntegrityLevel.LOW,
+            windows_integrity._integrity_from_label_ace(ctypes.addressof(enforced)),
+        )
+
+        unenforced = label_ace(0x0)
+        with self.assertRaisesRegex(OSError, "no-write-up"):
+            windows_integrity._integrity_from_label_ace(ctypes.addressof(unenforced))
+
+    def test_low_child_without_no_write_up_token_policy_is_terminated_before_resume(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-integrity-policy-") as temporary:
+            root = Path(temporary)
+            stage = root / "stage"
+            stage.mkdir()
+            marker = stage / "must-not-run.marker"
+            set_low_integrity_tree(stage)
+            launch = None
+
+            code = "from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b'ran')"
+            try:
+                with mock.patch.object(
+                    windows_integrity,
+                    "_token_mandatory_policy",
+                    return_value=0,
+                    create=True,
+                ):
+                    with self.assertRaisesRegex(OSError, "no-write-up"):
+                        launch = launch_low_integrity_process(
+                            PYTHON,
+                            ("-B", "-c", code, str(marker)),
+                            root,
+                            dict(os.environ),
+                        )
+            finally:
+                if launch is not None:
+                    self._wait_for_process_exit(launch.pid)
+
+            self.assertFalse(marker.exists())
+
     def test_child_is_low_before_its_first_instruction_runs(self):
         with tempfile.TemporaryDirectory(prefix="modlab-integrity-order-") as temporary:
             root = Path(temporary)

@@ -86,10 +86,13 @@ if os.name == "nt":
     _SE_FILE_OBJECT = 1
     _LABEL_SECURITY_INFORMATION = 0x00000010
     _SYSTEM_MANDATORY_LABEL_ACE_TYPE = 0x11
+    _SYSTEM_MANDATORY_LABEL_NO_WRITE_UP = 0x00000001
     _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     _TOKEN_QUERY = 0x0008
     _TOKEN_ADJUST_DEFAULT = 0x0080
     _TOKEN_INTEGRITY_LEVEL = 25
+    _TOKEN_MANDATORY_POLICY = 27
+    _TOKEN_MANDATORY_POLICY_NO_WRITE_UP = 0x00000001
     _SE_GROUP_INTEGRITY = 0x00000020
     _CREATE_SUSPENDED = 0x00000004
     _CREATE_UNICODE_ENVIRONMENT = 0x00000400
@@ -113,11 +116,21 @@ if os.name == "nt":
             ("AceSize", wintypes.WORD),
         ]
 
+    class _SYSTEM_MANDATORY_LABEL_ACE(ctypes.Structure):
+        _fields_ = [
+            ("Header", _ACE_HEADER),
+            ("Mask", wintypes.DWORD),
+            ("SidStart", wintypes.DWORD),
+        ]
+
     class _SID_AND_ATTRIBUTES(ctypes.Structure):
         _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
 
     class _TOKEN_MANDATORY_LABEL(ctypes.Structure):
         _fields_ = [("Label", _SID_AND_ATTRIBUTES)]
+
+    class _TOKEN_MANDATORY_POLICY_INFO(ctypes.Structure):
+        _fields_ = [("Policy", wintypes.DWORD)]
 
     class _SID_IDENTIFIER_AUTHORITY(ctypes.Structure):
         _fields_ = [("Value", wintypes.BYTE * 6)]
@@ -272,6 +285,16 @@ def _integrity_from_sid(sid: int) -> IntegrityLevel:
     return _integrity_from_rid(rid_pointer[0])
 
 
+def _integrity_from_label_ace(ace: int) -> IntegrityLevel:
+    label = ctypes.cast(ace, ctypes.POINTER(_SYSTEM_MANDATORY_LABEL_ACE)).contents
+    if label.Header.AceSize < ctypes.sizeof(_SYSTEM_MANDATORY_LABEL_ACE):
+        raise OSError("mandatory label ACE is truncated")
+    if not label.Mask & _SYSTEM_MANDATORY_LABEL_NO_WRITE_UP:
+        raise OSError("explicit mandatory label does not enforce no-write-up")
+    sid_address = ace + _SYSTEM_MANDATORY_LABEL_ACE.SidStart.offset
+    return _integrity_from_sid(sid_address)
+
+
 def inspect_path_integrity(path: Path) -> IntegrityLevel:
     _require_windows()
     target = Path(path)
@@ -303,7 +326,7 @@ def inspect_path_integrity(path: Path) -> IntegrityLevel:
                 raise _winerror(f"GetAce failed for {target}")
             header = ctypes.cast(ace, ctypes.POINTER(_ACE_HEADER)).contents
             if header.AceType == _SYSTEM_MANDATORY_LABEL_ACE_TYPE:
-                observed.append(_integrity_from_sid(ace.value + 8))
+                observed.append(_integrity_from_label_ace(ace.value))
         if not observed:
             return IntegrityLevel.MEDIUM
         if len(observed) != 1:
@@ -340,10 +363,34 @@ def inspect_process_integrity(pid: int) -> IntegrityLevel:
         label = ctypes.cast(buffer, ctypes.POINTER(_TOKEN_MANDATORY_LABEL)).contents
         if not label.Label.Sid:
             raise OSError(f"process {pid} returned an empty integrity SID")
+        mandatory_policy = _token_mandatory_policy(token)
+        if not mandatory_policy & _TOKEN_MANDATORY_POLICY_NO_WRITE_UP:
+            raise OSError(
+                f"process {pid} mandatory policy does not enforce no-write-up"
+            )
         return _integrity_from_sid(label.Label.Sid)
     finally:
         _close_handle(token.value)
         _close_handle(process)
+
+
+def _token_mandatory_policy(token: int) -> int:
+    policy = _TOKEN_MANDATORY_POLICY_INFO()
+    returned = wintypes.DWORD()
+    if not _advapi32.GetTokenInformation(
+        token,
+        _TOKEN_MANDATORY_POLICY,
+        ctypes.byref(policy),
+        ctypes.sizeof(policy),
+        ctypes.byref(returned),
+    ):
+        raise _winerror("GetTokenInformation(TokenMandatoryPolicy) failed")
+    if returned.value != ctypes.sizeof(policy):
+        raise OSError(
+            "GetTokenInformation(TokenMandatoryPolicy) returned an unexpected size: "
+            f"{returned.value}"
+        )
+    return policy.Policy
 
 
 def _is_reparse(path: Path) -> bool:
@@ -405,12 +452,19 @@ def _set_integrity_tree(path: Path, level: IntegrityLevel) -> IntegrityLabelAppl
             f"icacls failed with exit code {completed.returncode} for {target}", receipt
         )
 
-    entries = _direct_tree_entries(target)
-    mismatches = [entry for entry in entries if inspect_path_integrity(entry) is not level]
-    if mismatches:
+    try:
+        entries = _direct_tree_entries(target)
+        mismatches = [
+            entry for entry in entries if inspect_path_integrity(entry) is not level
+        ]
+        if mismatches:
+            raise OSError(
+                f"icacls did not apply {level.name} integrity to {mismatches[0]}"
+            )
+    except Exception as exc:
         raise IntegrityLabelError(
-            f"icacls did not apply {level.name} integrity to {mismatches[0]}", receipt
-        )
+            f"post-icacls verification failed for {target}: {exc}", receipt
+        ) from exc
     return receipt
 
 
