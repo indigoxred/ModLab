@@ -14,6 +14,8 @@ _DIRECTORIES = (
     "games/skyrim-se-ae/checkpoints",
     "games/skyrim-se-ae/generated",
     "games/skyrim-se-ae/logs",
+    "games/skyrim-se-ae/recipes",
+    "games/skyrim-se-ae/target-environments",
     "tools/mo2/skyrim-se-ae/app",
     "tools/mo2/skyrim-se-ae/downloads",
     "tools/mo2/skyrim-se-ae/mods",
@@ -51,17 +53,17 @@ class WorkspaceLayout:
     cache: Path
     jobs: Path
     transactions: Path
+    skyrim_environment_configuration: Path
+    skyrim_recipes: Path
+    skyrim_target_environments: Path
 
 
 def default_workspace_root() -> Path:
     return Path(__file__).resolve().parents[1] / "workspace"
 
 
-def initialize_workspace(root: Path) -> WorkspaceLayout:
+def workspace_layout(root: Path) -> WorkspaceLayout:
     resolved = Path(root).expanduser().resolve()
-    for relative in _DIRECTORIES:
-        (resolved / relative).mkdir(parents=True, exist_ok=True)
-
     skyrim = resolved / "games" / "skyrim-se-ae"
     skyrim_mo2 = resolved / "tools" / "mo2" / "skyrim-se-ae"
     return WorkspaceLayout(
@@ -88,4 +90,14 @@ def initialize_workspace(root: Path) -> WorkspaceLayout:
         cache=resolved / "runtime" / "cache",
         jobs=resolved / "runtime" / "jobs",
         transactions=resolved / "runtime" / "transactions",
+        skyrim_environment_configuration=skyrim / "environment.json",
+        skyrim_recipes=skyrim / "recipes",
+        skyrim_target_environments=skyrim / "target-environments",
     )
+
+
+def initialize_workspace(root: Path) -> WorkspaceLayout:
+    layout = workspace_layout(root)
+    for relative in _DIRECTORIES:
+        (layout.root / relative).mkdir(parents=True, exist_ok=True)
+    return layout

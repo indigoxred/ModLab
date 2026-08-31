@@ -4,7 +4,11 @@ import unittest
 from pathlib import Path
 
 from modlab.cli import main
-from modlab.workspace import default_workspace_root, initialize_workspace
+from modlab.workspace import (
+    default_workspace_root,
+    initialize_workspace,
+    workspace_layout,
+)
 
 
 EXPECTED_RELATIVE_DIRECTORIES = {
@@ -21,6 +25,8 @@ EXPECTED_RELATIVE_DIRECTORIES = {
     "games/skyrim-se-ae/checkpoints",
     "games/skyrim-se-ae/generated",
     "games/skyrim-se-ae/logs",
+    "games/skyrim-se-ae/recipes",
+    "games/skyrim-se-ae/target-environments",
     "tools",
     "tools/mo2",
     "tools/mo2/skyrim-se-ae",
@@ -38,6 +44,16 @@ EXPECTED_RELATIVE_DIRECTORIES = {
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_pure_workspace_layout_creates_nothing(self):
+        # Catches read-only observation accidentally initializing a workspace.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory, "absent-workspace")
+
+            layout = workspace_layout(root)
+
+            self.assertEqual(root.resolve(), layout.root)
+            self.assertFalse(root.exists())
+
     def test_initialize_creates_the_documented_tree(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory, "workspace")
@@ -54,6 +70,10 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(
                 root.resolve() / "tools" / "mo2" / "skyrim-se-ae" / "app",
                 layout.skyrim_mo2_app,
+            )
+            self.assertEqual(
+                root.resolve() / "games" / "skyrim-se-ae" / "environment.json",
+                layout.skyrim_environment_configuration,
             )
 
     def test_reinitializing_never_removes_an_unknown_user_file(self):
