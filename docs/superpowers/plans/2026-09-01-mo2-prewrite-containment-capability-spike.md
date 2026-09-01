@@ -81,27 +81,28 @@ This is the first of several dependency-ordered implementation plans. It impleme
 
 **Interfaces:**
 - Consumes: normalized evidence values only; no filesystem access.
-- Produces: `ContainmentScenario`, `ScenarioState`, `ScenarioOutcome`, `CapabilityVerdict`, `IntegrityObservation`, `TreeIdentity`, `ProtectedState`, `WatcherEvent`, `ProcessEvidence`, `ScenarioJournal`, `ScenarioResult`, `CapabilityDecision`, `scenario_journal_to_bytes()`, `scenario_journal_from_bytes()`, `scenario_result_to_bytes()`, `scenario_result_from_bytes()`, `capability_decision_to_bytes()`, `capability_decision_from_bytes()`, `scenario_result_id_for()`, and `capability_decision_id_for()`.
+- Produces: `ContainmentScenario`, `ScenarioState`, `ScenarioOutcome`, `WatchEvidenceCompletion`, `ScenarioCleanupStatus`, `CapabilityVerdict`, `IntegrityObservation`, `TreeIdentity`, `ProtectedState`, `WatcherEvent`, `ProcessEvidence`, `ScenarioJournal`, `WatchOutcome`, `ScenarioResult`, `ScenarioRecovery`, `CapabilityDecision`, `scenario_journal_to_bytes()`, `scenario_journal_from_bytes()`, `watch_outcome_to_bytes()`, `watch_outcome_from_bytes()`, `watch_outcome_id_for()`, `scenario_result_to_bytes()`, `scenario_result_from_bytes()`, `scenario_recovery_to_bytes()`, `scenario_recovery_from_bytes()`, `capability_decision_to_bytes()`, `capability_decision_from_bytes()`, `scenario_result_id_for()`, and `capability_decision_id_for()`.
 
 - [ ] **Step 1: Write failing round-trip and rejection tests**
 
 ```python
 class Mo2ContainmentSerializationTests(unittest.TestCase):
     def test_scenario_result_round_trips_canonically(self):
-        value = valid_scenario_result(ContainmentScenario.MERGE_EXISTING)
-        encoded = scenario_result_to_bytes(value)
-        self.assertEqual(value, scenario_result_from_bytes(encoded))
-        self.assertEqual(encoded, scenario_result_to_bytes(value))
+        watch_outcome = valid_watch_outcome(ContainmentScenario.MERGE_EXISTING)
+        value = valid_scenario_result(ContainmentScenario.MERGE_EXISTING, watch_outcome)
+        encoded = scenario_result_to_bytes(value, watch_outcome)
+        self.assertEqual(value, scenario_result_from_bytes(encoded, watch_outcome))
+        self.assertEqual(encoded, scenario_result_to_bytes(value, watch_outcome))
         self.assertEqual(
             f"containment-result-sha256:{hashlib.sha256(encoded).hexdigest()}",
-            scenario_result_id_for(value),
+            scenario_result_id_for(value, watch_outcome),
         )
 
     def test_unknown_duplicate_unsafe_and_impossible_values_are_rejected(self):
         for data, message in invalid_containment_documents():
             with self.subTest(message=message):
                 with self.assertRaisesRegex(ContainmentFormatError, message):
-                    scenario_result_from_bytes(data)
+                    scenario_result_from_bytes(data, valid_watch_outcome())
 ```
 
 `invalid_containment_documents()` must include duplicate JSON keys, an extra field, an absolute `relativePath`, mixed-case SHA-256, duplicate watcher sequence numbers, `Passed` with a mutation event, `Passed` with a changed protected hash, `Captured` without after evidence, `Supported` without four passing scenarios, and mismatched run/scenario IDs.
@@ -124,6 +125,7 @@ class ContainmentScenario(StrEnum):
 class ScenarioState(StrEnum):
     PREPARED = "Prepared"
     ARMED = "Armed"
+    SCENARIO_STARTED = "ScenarioStarted"
     LAUNCHED = "Launched"
     CAPTURED = "Captured"
     RECOVERY_REQUIRED = "RecoveryRequired"
@@ -132,6 +134,14 @@ class ScenarioOutcome(StrEnum):
     PASSED = "Passed"
     FAILED = "Failed"
     INCOMPLETE = "Incomplete"
+
+class WatchEvidenceCompletion(StrEnum):
+    COMPLETED = "Completed"
+    INCOMPLETE = "Incomplete"
+
+class ScenarioCleanupStatus(StrEnum):
+    SUCCEEDED = "Succeeded"
+    REFUSED = "Refused"
 
 class CapabilityVerdict(StrEnum):
     SUPPORTED = "Supported"
@@ -159,6 +169,33 @@ class WatcherEvent:
     root_kind: str
     action: str
     relative_path: str
+
+@dataclass(frozen=True)
+class WatchOutcome:
+    schema_version: int
+    request_id: str
+    request_sha256: str
+    session_id: str
+    run_id: str
+    scenario: ContainmentScenario
+    controller_pid: int
+    controller_creation_time: int
+    worker_pid: int
+    worker_creation_time: int
+    evidence_completion: WatchEvidenceCompletion
+    worker_exit_code: int | None
+    ready: bool
+    opened_root_kinds: tuple[str, ...]
+    events: tuple[WatcherEvent, ...]
+    event_bytes_sha256: str
+    journal_volume_serial: int
+    journal_file_id: int
+    journal_byte_count: int
+    journal_event_count: int
+    journal_final_sequence: int
+    terminal_bytes_sha256: str
+    root_identities_unchanged: bool
+    reason_codes: tuple[str, ...]
 
 @dataclass(frozen=True)
 class ProtectedState:
@@ -205,7 +242,10 @@ class ScenarioResult:
     mo2_process: ProcessEvidence | None
     source_integrity: IntegrityObservation
     stage_integrity: IntegrityObservation
-    watcher_complete: bool
+    watch_outcome_id: str
+    watch_evidence_completion: WatchEvidenceCompletion
+    scenario_started: bool
+    fresh_retry_eligible: bool
     watcher_events: tuple[WatcherEvent, ...]
     projection_count: int
     projection_targets_verified: bool
@@ -220,6 +260,17 @@ class ScenarioResult:
     reasons: tuple[str, ...]
 
 @dataclass(frozen=True)
+class ScenarioRecovery:
+    schema_version: int
+    run_id: str
+    scenario: ContainmentScenario
+    journal_id: str
+    result_id: str | None
+    cleanup_status: ScenarioCleanupStatus
+    fresh_run_permitted: bool
+    blockers: tuple[str, ...]
+
+@dataclass(frozen=True)
 class CapabilityDecision:
     schema_version: int
     run_id: str
@@ -229,7 +280,7 @@ class CapabilityDecision:
     reasons: tuple[str, ...]
 ```
 
-Use `mechanism="isolated-low-integrity-junction-projection-v1"`. Strictly require all four scenarios in enum order for `Supported`. Every passing result requires identical `protected_before`/`protected_after`, a complete watcher with no event, exact MO2 version `2.5.2.0`, a Low MO2 process and Low stage, Medium-or-higher source, verified projections with zero copied payload bytes, no production backup, and a restored source root after any adoption/quarantine. New-folder and FOMOD results additionally require the exact adopted name, a non-null tree, Medium adopted integrity, and exact expected staging outputs. Any failed scenario means `Rejected`; missing, malformed, watcher-incomplete, process-unknown, or recovery-required evidence means `Incomplete`.
+Use `mechanism="isolated-low-integrity-junction-projection-v1"`. Strictly require all four scenarios in enum order for `Supported`. Every passing result requires an exact content-addressed `WatchOutcome` bound to the same request, session, run, and scenario; identical `protected_before`/`protected_after`; `Completed` watcher evidence with no event; `scenario_started=True`; `fresh_retry_eligible=False`; exact MO2 version `2.5.2.0`; a Low MO2 process and Low stage; Medium-or-higher source; verified projections with zero copied payload bytes; no production backup; and a restored source root after any adoption/quarantine. New-folder and FOMOD results additionally require the exact adopted name, a non-null tree, Medium adopted integrity, and exact expected staging outputs. A `Failed` result requires durable `ScenarioStarted` plus positive bound watcher evidence or a protected-state delta, and can carry `Incomplete` watcher evidence only in that case. A result without such breach proof, with missing/malformed/incomplete watcher evidence, unknown process state, or unresolved recovery is `Incomplete`; it must never be promoted to `Passed` or `Failed` merely because a later cleanup succeeds.
 
 - [ ] **Step 4: Implement strict canonical JSON**
 
@@ -450,6 +501,8 @@ git commit -m "feat: add isolated mod projection and adoption proof"
 - Consumes: direct Medium-or-higher source directories and a contained evidence directory.
 - Produces: `WatchRequest`, `WatchReceipt`, `start_watch(request: WatchRequest) -> int`, `run_watch_worker(request_path: Path) -> int`, `stop_watch(request_path: Path) -> WatchReceipt`, and `watch_receipt_from_files(request: WatchRequest, worker_pid: int, ready_path: Path, events_path: Path, terminal_path: Path) -> WatchReceipt`.
 
+Watcher-controller ownership recovery is evidence-only and never restores a scenario to success. The former recoverable-owner-state path is replaced by the fail-closed [`Task 6` contract](#task-6-crash-safe-scenario-orchestration-and-adjudication) and the [approved containment spec](../specs/2026-08-31-guided-mo2-lab-installation-design.md): interruption remains incomplete unless Task 6 captures independent positive breach evidence, and cleanup cannot promote a prior run.
+
 Use these exact worker-boundary values:
 
 ```python
@@ -648,6 +701,8 @@ Use `b"always\n"` and `b"dependency-visible\n"` for the two payload files. The c
 
 - [ ] **Step 5: Prepare independent source and stage instances**
 
+Before Task 6 consumes them, `tests/support/mo2_containment.py` must implement deterministic disposable fail-closed fixtures: `capture_interrupted_with_valid_event(root_kind: str) -> ScenarioResult` creates one request-bound event and then kills the exact controller; `recover_pre_scenario_interruption() -> ScenarioRecovery` interrupts before the durable `ScenarioStarted` boundary and proves cleanup; `recover_with_uncertain_watcher_identity() -> ScenarioRecovery` injects access denial and records refusal; `old_run_id() -> str` and `fresh_run_id() -> str` return the two persisted run identities; and `fresh_launch_count() -> int` returns the fake process launch counter. These fixtures are test-owned and disposable, and must be complete before the Task 6 service tests consume them.
+
 For each scenario, verify the MO2 artifact in the source vault, import the exact retained payload into two fresh scenario-local vaults, and call the existing `prepare_mo2_setup()`/`apply_mo2_setup()` workflow twice. Require both receipts to be `Created`, executable version `2.5.2.0`, and all paths beneath the scenario run.
 
 Populate source `mods/Protected Existing` with `marker.txt`, `meshes/canary.bin`, and deterministic `meta.ini`. Add `+Protected Existing` to source Lab and Play. Copy the exact profile bytes into stage, replace stage's empty mod folder with a verified junction projection, and re-run the existing MO2 scanner against both instances.
@@ -679,7 +734,7 @@ git commit -m "feat: add disposable MO2 containment fixtures"
 
 **Interfaces:**
 - Consumes: Tasks 1-5 interfaces.
-- Produces: `ContainmentStore`, `prepare_run(source_workspace: Path, mo2_artifact_id: str, steam_root: Path, validation_root: Path) -> str`, `arm_scenario(validation_root: Path, run_id: str, scenario: ContainmentScenario) -> ScenarioJournal`, `launch_scenario(validation_root: Path, run_id: str, scenario: ContainmentScenario) -> ScenarioJournal`, `capture_scenario(validation_root: Path, run_id: str, scenario: ContainmentScenario) -> ScenarioResult`, `recover_scenario(validation_root: Path, run_id: str, scenario: ContainmentScenario) -> ScenarioJournal`, and `adjudicate_run(validation_root: Path, run_id: str) -> CapabilityDecision`.
+- Produces: `ContainmentStore`, `prepare_run(source_workspace: Path, mo2_artifact_id: str, steam_root: Path, validation_root: Path) -> str`, `arm_scenario(validation_root: Path, run_id: str, scenario: ContainmentScenario) -> ScenarioJournal`, `launch_scenario(validation_root: Path, run_id: str, scenario: ContainmentScenario) -> ScenarioJournal`, `capture_scenario(validation_root: Path, run_id: str, scenario: ContainmentScenario) -> ScenarioResult`, `recover_scenario(validation_root: Path, run_id: str, scenario: ContainmentScenario) -> ScenarioRecovery`, and `adjudicate_run(validation_root: Path, run_id: str) -> CapabilityDecision`.
 
 - [ ] **Step 1: Write failing store/state-machine tests**
 
@@ -709,7 +764,7 @@ class ContainmentServiceTests(unittest.TestCase):
         for scenario in (ContainmentScenario.MERGE_EXISTING, ContainmentScenario.REPLACE_EXISTING):
             result = capture_with_fakes(scenario=scenario)
             self.assertEqual(ScenarioOutcome.PASSED, result.outcome)
-            self.assertEqual(result.source_before, result.source_after)
+            self.assertEqual(result.protected_before, result.protected_after)
             self.assertEqual((), result.watcher_events)
             self.assertEqual((), result.production_backup_names)
             self.assertIsNone(result.adopted_name)
@@ -717,9 +772,27 @@ class ContainmentServiceTests(unittest.TestCase):
     def test_supported_requires_all_four_exact_passes(self):
         decision = adjudicate_results(tuple(valid_result(s) for s in ContainmentScenario))
         self.assertEqual(CapabilityVerdict.SUPPORTED, decision.verdict)
+
+    def test_valid_forbidden_event_then_controller_death_is_failed_without_retry(self):
+        result = capture_interrupted_with_valid_event("PlayProfile")
+        self.assertEqual(ScenarioOutcome.FAILED, result.outcome)
+        self.assertEqual(WatchEvidenceCompletion.INCOMPLETE, result.watch_evidence_completion)
+        self.assertFalse(result.fresh_retry_eligible)
+
+    def test_pre_scenario_interruption_may_retry_once_after_cleanup(self):
+        recovery = recover_pre_scenario_interruption()
+        self.assertEqual(ScenarioCleanupStatus.SUCCEEDED, recovery.cleanup_status)
+        self.assertTrue(recovery.fresh_run_permitted)
+        self.assertNotEqual(old_run_id(), fresh_run_id())
+
+    def test_cleanup_refusal_never_starts_fresh_run(self):
+        recovery = recover_with_uncertain_watcher_identity()
+        self.assertEqual(ScenarioCleanupStatus.REFUSED, recovery.cleanup_status)
+        self.assertFalse(recovery.fresh_run_permitted)
+        self.assertEqual(0, fresh_launch_count())
 ```
 
-Add explicit failure cases for source event, final hash mismatch, Play byte change, watcher overflow, MO2 still running, wrong process integrity, unexpected stage backup, source junction replaced, FOMOD marker absent, adoption collision, more than one new folder, and failed integrity normalization.
+Add explicit failure cases for source event, final hash mismatch, Play byte change, watcher overflow, MO2 still running, wrong process integrity, unexpected stage backup, source junction replaced, FOMOD marker absent, adoption collision, more than one new folder, and failed integrity normalization. Also prove that a protected-manifest delta plus damaged terminal is `Failed` with no retry; a malformed event after `ScenarioStarted` is `Incomplete` with no retry; a manual clean run after `Failed` preserves both immutable result IDs; and adjudication rejects `Failed` without hiding it behind a later `Passed` result.
 
 - [ ] **Step 3: Run and verify failure**
 
@@ -743,20 +816,20 @@ runtime/validation/mo2-containment/<run-hex>/
   decision.json
 ```
 
-Use a named Windows mutex per run, atomic create/no-replace for immutable documents, atomic replacement only for legal journal transitions, exact readback, and the transition graph `Prepared -> Armed -> Launched -> Captured`, with any nonterminal state able to enter `RecoveryRequired`. Recovery refuses while the exact MO2 process remains live; if only the watcher is live, it requests shutdown through the recorded stop token and verifies the exact PID exits. Recovery never kills MO2, restores/normalizes only stage integrity, never changes source integrity, quarantines only exact staging content, and re-verifies source evidence.
+Use a named Windows mutex per run, atomic create/no-replace for immutable documents, atomic replacement only for legal journal transitions, exact readback, and the transition graph `Prepared -> Armed -> ScenarioStarted -> Launched -> Captured`, with any nonterminal state able to enter `RecoveryRequired`. `ScenarioStarted` is the durable boundary: recovery never returns a journal or transitions a recovery state back to a success path. It returns `ScenarioRecovery`, records `Succeeded` or `Refused` cleanup, and makes a fresh run permissible only for one same-command retry before `ScenarioStarted`, after successful cleanup and proved absence of the exact MO2 and watcher processes. Recovery refuses fresh launch after cleanup refusal, access denial, identity uncertainty, live MO2, or unverified watcher liveness. Recovery never kills MO2, restores/normalizes only stage integrity, never changes source integrity, quarantines only exact staging content, and re-verifies source evidence.
 
 - [ ] **Step 5: Implement scenario policies**
 
-`prepare_run()` creates four independent fixtures. `arm_scenario()` captures the pre-existing source/Play/download/Overwrite/game evidence, verifies Medium-or-higher source and Low stage, starts watchers, and writes `Armed`. `launch_scenario()` launches exact stage `ModOrganizer.exe --profile "ModLab - Lab"` with the low token and contained environment, verifies its PID/path/integrity, and writes `Launched`.
+`prepare_run()` creates four independent fixtures. `arm_scenario()` captures the pre-existing source/Play/download/Overwrite/game evidence, verifies Medium-or-higher source and Low stage, starts watchers, and stops at watcher-ready while writing `Armed`. Immediately before `CreateProcess` launches MO2, `launch_scenario()` must durably transition to `ScenarioStarted`; it then launches exact stage `ModOrganizer.exe --profile "ModLab - Lab"` with the low token and contained environment, verifies its PID/path/integrity, and writes `Launched`. No retry after this boundary can reuse the prior run.
 
-`capture_scenario()` requires MO2 closed, stops and verifies watchers, captures the stable post-MO2 state, and inspects all stage projection entries. For new-folder and FOMOD, it then performs the isolated adoption/quarantine proof and captures a second stable final protected state; `ScenarioResult.protected_after` is this final state and must equal the pre-MO2 state. It applies these exact policies:
+`capture_scenario()` requires MO2 closed, loads the exact `WatchOutcome` by its content ID, verifies its request/session/run/scenario bindings, stops and verifies watchers, captures the stable post-MO2 state, and inspects all stage projection entries. For new-folder and FOMOD, it then performs the isolated adoption/quarantine proof and captures a second stable final protected state; `ScenarioResult.protected_after` is this final state and must equal the pre-MO2 state. Outcome precedence is `Failed`, then `Incomplete`, then `Passed`. A `Failed` result with `Incomplete` watcher evidence is allowed only when the bound watcher outcome records a positive event or the protected state changed; otherwise watcher damage, malformed events, or liveness uncertainty remain `Incomplete` and are never retry-eligible after `ScenarioStarted`. It applies these exact policies:
 
 - `NewFolder`: all pre-existing source evidence unchanged through the MO2 phase; one exact `ModLab Spike New` direct folder; after watchers stop, adopt the collision-free sibling, verify it, move it to quarantine, and prove the source root returned to its original identity; no extra folder.
 - `MergeExisting`: source unchanged with zero events; `Protected Existing` source junction still exact; no production backup; nothing adopted.
 - `ReplaceExisting`: same source guarantees; a replaced staging projection or staging backup is identified and quarantined; nothing adopted.
 - `FomodDependency`: all pre-existing source evidence unchanged through the MO2 phase; one exact `ModLab Spike FOMOD` folder containing `always.txt` and `dependency-seen.txt`; after watchers stop, adopt/verify/quarantine it and prove the source root returned to its original identity.
 
-`adjudicate_run()` computes `Supported` only from four immutable passing result IDs. Any safety failure is `Rejected`; missing or incomplete machine evidence is `Incomplete`.
+`adjudicate_run()` computes `Supported` only from four immutable passing result IDs. Any safety failure is `Rejected`; missing or incomplete machine evidence is `Incomplete`. Every earlier immutable result remains visible after a later explicit clean run. A prior `Failed` result causes `Rejected` and cannot be hidden by a later `Passed` result.
 
 - [ ] **Step 6: Run focused tests**
 
