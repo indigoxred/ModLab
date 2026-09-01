@@ -891,7 +891,9 @@ git commit -m "feat: orchestrate MO2 containment capability runs"
 
 **Interfaces:**
 - Consumes: Task 6 service functions.
-- Produces: `C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m modlab.validation.mo2_containment_cli prepare|arm|launch|capture|recover|show|adjudicate`.
+- Produces: `C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m modlab.validation.mo2_containment_cli prepare|validate|recover|show|adjudicate`.
+
+`validate` is the only public scenario-execution command. It remains one uninterrupted foreground controller from watcher startup through scenario result publication. The lower-level Task 6 `arm_scenario()`, `launch_scenario()`, and `capture_scenario()` functions remain internal service boundaries and are never exposed as independent CLI processes.
 
 - [ ] **Step 1: Write failing CLI tests**
 
@@ -903,13 +905,27 @@ class ContainmentCliTests(unittest.TestCase):
         self.assertIn("Disposable validation only", output)
         self.assertIn("Production MO2 changes: none", output)
 
-    def test_launch_prints_exact_visible_scenario_instructions(self):
-        code, output = invoke_cli("launch", merge_args(), service=fake_service())
+    def test_validate_prints_exact_visible_scenario_instructions(self):
+        code, output = invoke_cli("validate", merge_args(), service=passing_service())
         self.assertEqual(0, code)
         self.assertIn("Select overwrite-probe.zip", output)
         self.assertIn("rename the target to Protected Existing", output)
         self.assertIn("choose Merge", output)
         self.assertIn("MO2 PID", output)
+
+    def test_validate_keeps_arm_launch_and_capture_in_one_controller(self):
+        service = ordered_passing_service()
+        code, _ = invoke_cli("validate", merge_args(), service=service)
+        self.assertEqual(0, code)
+        self.assertEqual(("arm", "launch", "capture"), service.calls)
+
+    def test_validate_distinguishes_proven_failure_from_incomplete(self):
+        failed_code, _ = invoke_cli("validate", merge_args(), service=failed_service())
+        incomplete_code, _ = invoke_cli(
+            "validate", merge_args(), service=incomplete_service()
+        )
+        self.assertEqual(1, failed_code)
+        self.assertEqual(3, incomplete_code)
 
     def test_adjudicate_never_defaults_incomplete_to_supported(self):
         code, output = invoke_cli("adjudicate", run_args(), service=incomplete_service())
@@ -919,7 +935,28 @@ class ContainmentCliTests(unittest.TestCase):
     def test_json_output_exposes_exact_run_id_for_follow_up_commands(self):
         code, output = invoke_cli("prepare", json_prepare_args(), service=fake_service())
         self.assertEqual(0, code)
-        self.assertEqual("containment-run:" + "a" * 64, json.loads(output)["runId"])
+        self.assertEqual("containment-run:" + "a" * 32, json.loads(output)["runId"])
+
+    def test_json_validate_writes_one_final_object_to_stdout(self):
+        code, stdout, stderr = invoke_json_validate(service=passing_service())
+        self.assertEqual(0, code)
+        self.assertIsInstance(json.loads(stdout), dict)
+        self.assertNotIn("Select overwrite-probe.zip", stdout)
+        self.assertIn("Select overwrite-probe.zip", stderr)
+
+    def test_show_is_read_only_and_returns_zero_for_failed_history(self):
+        service = failed_history_service()
+        code, output = invoke_cli("show", run_args(), service=service)
+        self.assertEqual(0, code)
+        self.assertIn("Failed", output)
+        self.assertEqual((), service.mutations)
+
+    def test_recover_success_returns_zero_without_upgrading_old_result(self):
+        service = cleanup_succeeded_service()
+        code, output = invoke_cli("recover", scenario_args(), service=service)
+        self.assertEqual(0, code)
+        self.assertIn("Succeeded", output)
+        self.assertEqual("Incomplete", service.old_outcome)
 ```
 
 - [ ] **Step 2: Run and verify failure**
@@ -934,30 +971,32 @@ Use strict subcommands:
 
 ```text
 prepare --source-workspace PATH --artifact ARTIFACT_ID --steam-root PATH --workspace PATH [--format text|json]
-arm RUN_ID NewFolder|MergeExisting|ReplaceExisting|FomodDependency --workspace PATH [--format text|json]
-launch RUN_ID SCENARIO --workspace PATH [--format text|json]
-capture RUN_ID SCENARIO --workspace PATH [--format text|json]
+validate RUN_ID NewFolder|MergeExisting|ReplaceExisting|FomodDependency --workspace PATH [--format text|json]
 recover RUN_ID SCENARIO --workspace PATH [--format text|json]
 show RUN_ID --workspace PATH [--format text|json]
 adjudicate RUN_ID --workspace PATH [--format text|json]
 ```
 
-`ARTIFACT_ID` must match `archive-sha256:[0-9a-f]{64}`, `RUN_ID` must match `containment-run:[0-9a-f]{64}`, and `SCENARIO` must be one exact `ContainmentScenario` value. JSON output is a strict object with `command`, `runId`, `scenario`, `state`, `outcome`, `verdict`, `writtenPaths`, `launchedProcesses`, `sourceChanges`, `gameChanges`, `productionMo2Changes`, `instructions`, and `reasons`; non-applicable scalar fields are JSON `null`, and empty collections remain present.
+`ARTIFACT_ID` must match `archive-sha256:[0-9a-f]{64}`, `RUN_ID` must match `containment-run:[0-9a-f]{32}`, and `SCENARIO` must be one exact `ContainmentScenario` value. The CLI revalidates parsed identifiers through the strict Task 1/6 boundary before trusting them.
 
-Exit `0` for successful preparation/transition or a `Supported` decision, `2` for malformed IDs/arguments/schema, and `3` for safe refusal, `Rejected`, `Incomplete`, running processes, or RecoveryRequired. Every response lists paths written, processes launched, source changes, game changes, and production MO2 changes. It must say `none` rather than omit an empty category.
+JSON output is one strict final object with `command`, `runId`, `scenario`, `state`, `outcome`, `verdict`, `writtenPaths`, `launchedProcesses`, `sourceChanges`, `gameChanges`, `productionMo2Changes`, `instructions`, and `reasons`; non-applicable scalar fields are JSON `null`, and empty collections remain present. JSON stdout contains exactly that one object and no prompts or explanatory text. During an interactive JSON `validate`, live operator guidance and diagnostics go to stderr; the final object is written to stdout only after capture or safe refusal.
 
-The launch output gives one exact visible procedure:
+Exit `0` for successful preparation/recovery/display, a `Passed` validation result, or a `Supported` decision. Exit `1` only for a proven `Failed` validation result or `Rejected` adjudication. Exit `2` for malformed identifiers, arguments, or schemas. Exit `3` for safe refusal, invalid transition, `Incomplete`, running-process uncertainty, or `RecoveryRequired`. Unexpected operational uncertainty is reported as `Incomplete`/refused with exit `3`, never mislabeled as proven failure. `show` returns `0` when it successfully displays Failed, Rejected, or Incomplete history. `recover` returns `0` when cleanup succeeds even though the old attempt remains permanently Incomplete, and `3` when cleanup is refused.
+
+Every response lists paths written, processes launched, source changes, game changes, and production MO2 changes. Text output says `none` rather than omitting an empty category. `show` is strictly read-only and never recovers or adjudicates implicitly.
+
+`validate` performs `arm_scenario()`, `launch_scenario()`, operator guidance/wait, and `capture_scenario()` in one foreground process. After printing the exact procedure, it waits for the operator to close the disposable MO2 normally and explicitly continue; capture still independently proves the exact launched process is absent. Closing or interrupting the controller before publication permanently leaves the attempt Incomplete and eligible only for cleanup-only recovery. The procedure is:
 
 - `NewFolder`: install `new-folder.zip`, leave/enter `ModLab Spike New`, complete, close MO2.
 - `MergeExisting`: install `overwrite-probe.zip`, enter `Protected Existing`, choose Merge, leave backup unchecked, acknowledge any access-denied/cancel result, close MO2.
 - `ReplaceExisting`: same but choose Replace.
 - `FomodDependency`: install `fomod-dependency.zip` as `ModLab Spike FOMOD`, complete the normal FOMOD, close MO2.
 
-The CLI does not click, infer completion, close MO2, or kill a process.
+The CLI does not click, infer installer success, close MO2, or kill a process. The scenario service publishes immutable `result.json` once. `adjudicate` consumes authoritative scenario results and publishes immutable `decision.json` once; it never replaces or repurposes `result.json`.
 
 - [ ] **Step 4: Document the validation-only workflow**
 
-Add a README section that labels these commands developer validation, explains that source/stage instances are disposable, states that computer control is required only after `launch`, and warns that no `Supported` result enables production installation until the next reviewed implementation plan consumes its receipt.
+Add a README section that labels these commands developer validation, explains that source/stage instances are disposable, states that computer control is required only while foreground `validate` is displaying its procedure, and warns that no `Supported` result enables production installation until the next reviewed implementation plan consumes its receipt.
 
 - [ ] **Step 5: Run focused tests**
 
@@ -1041,50 +1080,30 @@ $prepareJson = & $pythonPath -B -m modlab.validation.mo2_containment_cli prepare
 if ($LASTEXITCODE -ne 0) { throw "containment preparation failed with exit $LASTEXITCODE" }
 $prepareRecord = $prepareJson | ConvertFrom-Json
 $runId = [string]$prepareRecord.runId
-if ($runId -notmatch '^containment-run:[0-9a-f]{64}$') { throw 'prepare returned an invalid run ID' }
+if ($runId -notmatch '^containment-run:[0-9a-f]{32}$') { throw 'prepare returned an invalid run ID' }
 ```
 
 Before invoking `prepare`, verify that the exact `$artifactId` is present by running `& $pythonPath -B -m modlab artifact list --workspace $workspacePath --format json`; abort instead of substituting any other archive if it is absent.
 
 - [ ] **Step 4: Execute all four visible scenarios with computer control**
 
-Before GUI action, the main agent reads `C:\Users\red\.codex\plugins\cache\openai-bundled\computer-use\26.825.51511\skills\computer-use\SKILL.md` completely and announces that computer control is now required by the plan. For each scenario in this order—`NewFolder`, `MergeExisting`, `ReplaceExisting`, `FomodDependency`—run `arm`, run `launch`, follow only the exact printed MO2 actions with computer control, close MO2 normally, then run `capture`:
+Before GUI action, the main agent reads `C:\Users\red\.codex\plugins\cache\openai-bundled\computer-use\26.825.51511\skills\computer-use\SKILL.md` completely and announces that computer control is now required by the plan. For each scenario in this order—`NewFolder`, `MergeExisting`, `ReplaceExisting`, `FomodDependency`—start one foreground `validate`, follow only its exact printed MO2 actions with computer control, close MO2 normally, and explicitly continue the same waiting CLI process so it can capture and publish the result without transferring watcher ownership:
 
 ```powershell
-& $pythonPath -B -m modlab.validation.mo2_containment_cli arm $runId NewFolder --workspace $workspacePath
-if ($LASTEXITCODE -ne 0) { throw 'NewFolder arm failed' }
-& $pythonPath -B -m modlab.validation.mo2_containment_cli launch $runId NewFolder --workspace $workspacePath
-if ($LASTEXITCODE -ne 0) { throw 'NewFolder launch failed' }
-# Complete only the printed NewFolder UI procedure, close MO2, then continue.
-& $pythonPath -B -m modlab.validation.mo2_containment_cli capture $runId NewFolder --workspace $workspacePath
-if ($LASTEXITCODE -ne 0) { throw 'NewFolder capture failed' }
+& $pythonPath -B -m modlab.validation.mo2_containment_cli validate $runId NewFolder --workspace $workspacePath
+if ($LASTEXITCODE -ne 0) { throw "NewFolder validation ended with exit $LASTEXITCODE" }
 
-& $pythonPath -B -m modlab.validation.mo2_containment_cli arm $runId MergeExisting --workspace $workspacePath
-if ($LASTEXITCODE -ne 0) { throw 'MergeExisting arm failed' }
-& $pythonPath -B -m modlab.validation.mo2_containment_cli launch $runId MergeExisting --workspace $workspacePath
-if ($LASTEXITCODE -ne 0) { throw 'MergeExisting launch failed' }
-# Complete only the printed MergeExisting UI procedure, close MO2, then continue.
-& $pythonPath -B -m modlab.validation.mo2_containment_cli capture $runId MergeExisting --workspace $workspacePath
-if ($LASTEXITCODE -ne 0) { throw 'MergeExisting capture failed' }
+& $pythonPath -B -m modlab.validation.mo2_containment_cli validate $runId MergeExisting --workspace $workspacePath
+if ($LASTEXITCODE -ne 0) { throw "MergeExisting validation ended with exit $LASTEXITCODE" }
 
-& $pythonPath -B -m modlab.validation.mo2_containment_cli arm $runId ReplaceExisting --workspace $workspacePath
-if ($LASTEXITCODE -ne 0) { throw 'ReplaceExisting arm failed' }
-& $pythonPath -B -m modlab.validation.mo2_containment_cli launch $runId ReplaceExisting --workspace $workspacePath
-if ($LASTEXITCODE -ne 0) { throw 'ReplaceExisting launch failed' }
-# Complete only the printed ReplaceExisting UI procedure, close MO2, then continue.
-& $pythonPath -B -m modlab.validation.mo2_containment_cli capture $runId ReplaceExisting --workspace $workspacePath
-if ($LASTEXITCODE -ne 0) { throw 'ReplaceExisting capture failed' }
+& $pythonPath -B -m modlab.validation.mo2_containment_cli validate $runId ReplaceExisting --workspace $workspacePath
+if ($LASTEXITCODE -ne 0) { throw "ReplaceExisting validation ended with exit $LASTEXITCODE" }
 
-& $pythonPath -B -m modlab.validation.mo2_containment_cli arm $runId FomodDependency --workspace $workspacePath
-if ($LASTEXITCODE -ne 0) { throw 'FomodDependency arm failed' }
-& $pythonPath -B -m modlab.validation.mo2_containment_cli launch $runId FomodDependency --workspace $workspacePath
-if ($LASTEXITCODE -ne 0) { throw 'FomodDependency launch failed' }
-# Complete only the printed FomodDependency UI procedure, close MO2, then continue.
-& $pythonPath -B -m modlab.validation.mo2_containment_cli capture $runId FomodDependency --workspace $workspacePath
-if ($LASTEXITCODE -ne 0) { throw 'FomodDependency capture failed' }
+& $pythonPath -B -m modlab.validation.mo2_containment_cli validate $runId FomodDependency --workspace $workspacePath
+if ($LASTEXITCODE -ne 0) { throw "FomodDependency validation ended with exit $LASTEXITCODE" }
 ```
 
-Do not improvise a mod name, backup choice, or installer option. If the UI differs from the printed procedure, do not click through it: close MO2 normally, run `recover` for that exact scenario, preserve the `Incomplete` evidence, and stop the live run.
+Each command stays foreground and owns its watcher until the result is durably published. Do not start the next scenario while it is running. Exit `1` is a proven containment failure: stop the remaining live scenarios and preserve it for `Rejected` adjudication. Exit `3` is Incomplete or a safe refusal: close MO2 normally if needed, run `recover` for that exact scenario, preserve the Incomplete evidence, and stop the live run. Do not improvise a mod name, backup choice, or installer option. If the UI differs from the printed procedure, do not click through it: close MO2 normally and continue the same foreground command only so it can fail closed, then recover if instructed.
 
 - [ ] **Step 5: Adjudicate and inspect the decision**
 
@@ -1094,13 +1113,13 @@ Run:
 $decisionJson = & $pythonPath -B -m modlab.validation.mo2_containment_cli adjudicate $runId --workspace $workspacePath --format json
 $decisionExit = $LASTEXITCODE
 $decisionRecord = $decisionJson | ConvertFrom-Json
-if ($decisionExit -notin 0, 3) { throw "unexpected adjudication exit $decisionExit" }
+if ($decisionExit -notin 0, 1, 3) { throw "unexpected adjudication exit $decisionExit" }
 if ([string]$decisionRecord.runId -ne $runId) { throw 'decision run ID mismatch' }
 ```
 
 Expected for `Supported`: four passing immutable result IDs; exact source before/after identities; zero source watcher events; no production backup; successful new-folder and FOMOD adoption/quarantine; source Play unchanged; Low MO2 process; Medium adopted tree; exact mechanism `isolated-low-integrity-junction-projection-v1`.
 
-Any missing field, watcher uncertainty, source mutation, integrity mismatch, FOMOD dependency miss, or adoption ambiguity must produce `Rejected` or `Incomplete` with exit `3`.
+Any positively proved source mutation or deterministic safety violation produces `Rejected` with exit `1`. Missing fields, watcher uncertainty, unproved process state, or adoption uncertainty produce `Incomplete` with exit `3`. Neither may produce exit `0`.
 
 - [ ] **Step 6: Write the sanitized verdict document**
 
