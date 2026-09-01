@@ -380,6 +380,36 @@ class WindowsIntegrityTests(unittest.TestCase):
             self.assertIsInstance(error.__cause__, OSError)
             self.assertIn("inheritance flags", str(error.__cause__))
 
+    def test_medium_directory_entry_rejects_low_second_native_observation(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-integrity-entries-inconsistent-"
+        ) as temporary:
+            directory = Path(temporary) / "directory"
+            directory.mkdir()
+            set_low_integrity_tree(directory)
+
+            with (
+                mock.patch.object(
+                    windows_integrity,
+                    "inspect_path_integrity",
+                    return_value=IntegrityLevel.MEDIUM,
+                ),
+                mock.patch.object(
+                    windows_integrity,
+                    "_inspect_path_integrity_evidence",
+                    return_value=(IntegrityLevel.LOW, 0x03),
+                ),
+            ):
+                with self.assertRaises(IntegrityLabelBatchError) as captured:
+                    set_medium_integrity_entries((directory,))
+
+            error = captured.exception
+            self.assertEqual(1, len(error.evidence.receipts))
+            self.assertEqual(0, error.evidence.receipts[0].exit_code)
+            self.assertEqual(str(directory), error.evidence.failed_path)
+            self.assertIsInstance(error.__cause__, OSError)
+            self.assertIn("LOW", str(error.__cause__))
+
     def test_post_icacls_verification_error_preserves_receipt_and_cause(self):
         with tempfile.TemporaryDirectory(prefix="modlab-integrity-receipt-") as temporary:
             root = Path(temporary)

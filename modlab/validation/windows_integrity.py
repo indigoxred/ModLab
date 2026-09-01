@@ -593,13 +593,16 @@ def set_medium_integrity_entries(
             is_regular = stat.S_ISREG(metadata.st_mode)
             if is_directory is not was_directory or not (is_directory or is_regular):
                 raise ValueError(f"integrity entry type changed: {path}")
-            observed = inspect_path_integrity(path)
+            if was_directory:
+                observed, ace_flags = _inspect_path_integrity_evidence(path)
+            else:
+                observed = inspect_path_integrity(path)
+                ace_flags = None
             if observed is not IntegrityLevel.MEDIUM:
                 raise OSError(
                     f"icacls did not apply MEDIUM integrity to {path}: {observed.name}"
                 )
             if was_directory:
-                _, ace_flags = _inspect_path_integrity_evidence(path)
                 required_flags = _OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE
                 if ace_flags is None or ace_flags & required_flags != required_flags:
                     raise OSError(
