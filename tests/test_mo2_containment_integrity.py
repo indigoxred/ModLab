@@ -529,9 +529,48 @@ class WindowsIntegrityTests(unittest.TestCase):
             if retained_root.exists():
                 shutil.rmtree(retained_root)
 
+    def test_ordering_test_retains_root_when_launch_raises_after_attempt(self):
+        primary_error = OSError("injected post-create launch failure")
+        retained_root = Path(tempfile.mkdtemp(prefix="modlab-integrity-launch-error-"))
+        deletion_attempts = []
+        caught = None
+
+        def record_deletion(path):
+            deletion_attempts.append(Path(path))
+
+        try:
+            with (
+                mock.patch.object(
+                    tempfile, "mkdtemp", return_value=str(retained_root)
+                ),
+                mock.patch(f"{__name__}.set_low_integrity_tree"),
+                mock.patch(
+                    f"{__name__}.launch_low_integrity_process",
+                    side_effect=primary_error,
+                ),
+                mock.patch.object(shutil, "rmtree", side_effect=record_deletion),
+            ):
+                try:
+                    self.test_child_is_low_before_its_first_instruction_runs()
+                except BaseException as observed:
+                    caught = observed
+                else:
+                    self.fail("ordering test unexpectedly accepted launch failure")
+
+            self.assertIs(primary_error, caught)
+            self.assertEqual("injected post-create launch failure", str(caught))
+            self.assertEqual([], deletion_attempts)
+            self.assertTrue(retained_root.is_dir())
+            notes = getattr(caught, "__notes__", ())
+            self.assertTrue(any(str(retained_root) in note for note in notes))
+        finally:
+            if retained_root.exists():
+                shutil.rmtree(retained_root)
+
     def test_child_is_low_before_its_first_instruction_runs(self):
         root = Path(tempfile.mkdtemp(prefix="modlab-integrity-order-"))
         launch = None
+        launch_attempted = False
         primary_error = None
         try:
             stage = root / "stage"
@@ -553,6 +592,7 @@ class WindowsIntegrityTests(unittest.TestCase):
                 "_resume_verified_child",
                 side_effect=inspect_barrier,
             ):
+                launch_attempted = True
                 launch = launch_low_integrity_process(
                     PYTHON,
                     ("-B", "-c", code, str(marker)),
@@ -567,7 +607,7 @@ class WindowsIntegrityTests(unittest.TestCase):
             primary_error = error
             raise
         finally:
-            exit_confirmed = launch is None
+            exit_confirmed = not launch_attempted
             if launch is not None:
                 try:
                     self._wait_for_process_exit(launch.pid)
@@ -582,6 +622,18 @@ class WindowsIntegrityTests(unittest.TestCase):
                     )
                 else:
                     exit_confirmed = True
+            elif launch_attempted:
+                retained = f"retained test root {root}"
+                if primary_error is None:
+                    lifecycle_error = RuntimeError(
+                        "launch attempt returned no exact child PID"
+                    )
+                    lifecycle_error.add_note(retained)
+                    raise lifecycle_error
+                primary_error.add_note(
+                    f"launch attempt returned no exact child PID; "
+                    f"exit unconfirmed; {retained}"
+                )
             if exit_confirmed:
                 try:
                     shutil.rmtree(root)
