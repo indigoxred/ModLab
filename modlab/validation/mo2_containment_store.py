@@ -604,18 +604,30 @@ class ContainmentStore:
         except OSError as error:
             raise ContainmentStoreError(f"cannot enumerate containment runs: {error}") from error
         for entry in entries:
-            if re.fullmatch(r"[0-9a-f]{32}", entry.name) is None:
+            if re.fullmatch(r"[0-9A-Fa-f]{32}", entry.name) is None:
                 continue
+            if re.fullmatch(r"[0-9a-f]{32}", entry.name) is None:
+                raise ContainmentStoreError(
+                    f"containment run entry name is noncanonical: {entry.name}"
+                )
             try:
                 metadata = entry.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            if (
-                not stat.S_ISDIR(metadata.st_mode)
-                or entry.is_symlink()
-                or bool(getattr(metadata, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
+            except OSError as error:
+                raise ContainmentStoreError(
+                    f"cannot prove containment run entry {entry.name}: {error}"
+                ) from error
+            if stat.S_ISLNK(metadata.st_mode) or bool(
+                getattr(metadata, "st_file_attributes", 0)
+                & _FILE_ATTRIBUTE_REPARSE_POINT
             ):
-                continue
+                raise ContainmentStoreError(
+                    f"containment run entry is a reparse object: {entry.name}"
+                )
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ContainmentStoreError(
+                    "containment run entry is not a direct non-reparse directory: "
+                    + entry.name
+                )
             rows.append("containment-run:" + entry.name)
         return tuple(sorted(rows))
 

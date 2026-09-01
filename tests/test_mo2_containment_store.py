@@ -1,11 +1,13 @@
 import hashlib
 import json
+import stat
 import tempfile
 import threading
 import unittest
 from unittest import mock
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from modlab.validation.mo2_containment_model import (
     CapabilityDecision,
@@ -415,6 +417,86 @@ class ContainmentStoreTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual([], errors)
         self.assertTrue(acquired.is_set())
+
+    def test_list_run_ids_accepts_valid_direct_directory_and_ignores_unrelated(self):
+        store = ContainmentStore(self.root)
+        valid_hex = RUN_ID.removeprefix("containment-run:")
+        (self.root / valid_hex).mkdir()
+        (self.root / "notes").mkdir()
+        (self.root / "not-a-containment-run.txt").write_text(
+            "unrelated\n", encoding="utf-8"
+        )
+
+        self.assertEqual((RUN_ID,), store.list_run_ids())
+
+    def test_list_run_ids_rejects_regular_file_impostor(self):
+        store = ContainmentStore(self.root)
+        (self.root / ("a" * 32)).write_bytes(b"not a run directory\n")
+
+        with self.assertRaisesRegex(ContainmentStoreError, "direct.*directory"):
+            store.list_run_ids()
+
+    def test_list_run_ids_rejects_case_variant_run_name(self):
+        store = ContainmentStore(self.root)
+        (self.root / ("A" * 32)).mkdir()
+
+        with self.assertRaisesRegex(ContainmentStoreError, "noncanonical"):
+            store.list_run_ids()
+
+    def test_list_run_ids_rejects_no_follow_stat_uncertainty(self):
+        for error in (PermissionError("access denied"), FileNotFoundError("gone")):
+            with self.subTest(error=type(error).__name__):
+                store = ContainmentStore(self.root)
+                entry = mock.Mock()
+                entry.name = "b" * 32
+                entry.stat.side_effect = error
+                with (
+                    mock.patch.object(
+                        containment_store.os,
+                        "scandir",
+                        return_value=(entry,),
+                    ),
+                    self.assertRaisesRegex(
+                        ContainmentStoreError,
+                        "cannot prove containment run entry",
+                    ),
+                ):
+                    store.list_run_ids()
+                entry.stat.assert_called_once_with(follow_symlinks=False)
+
+    def test_list_run_ids_rejects_reparse_directory_metadata(self):
+        store = ContainmentStore(self.root)
+        entry = mock.Mock()
+        entry.name = "c" * 32
+        entry.stat.return_value = SimpleNamespace(
+            st_mode=stat.S_IFDIR,
+            st_file_attributes=containment_store._FILE_ATTRIBUTE_REPARSE_POINT,
+        )
+        with (
+            mock.patch.object(
+                containment_store.os,
+                "scandir",
+                return_value=(entry,),
+            ),
+            self.assertRaisesRegex(ContainmentStoreError, "reparse"),
+        ):
+            store.list_run_ids()
+
+    def test_list_run_ids_rejects_symlink_when_supported(self):
+        store = ContainmentStore(self.root)
+        target = self.root / "target"
+        target.mkdir()
+        link = self.root / ("d" * 32)
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"directory symlink unavailable: {error}")
+
+        with self.assertRaisesRegex(
+            ContainmentStoreError,
+            "direct.*directory|reparse",
+        ):
+            store.list_run_ids()
 
 
 if __name__ == "__main__":

@@ -2197,7 +2197,13 @@ def _prepare_predecessor_run_ids(
     unresolved: list[str] = []
     available_retries: list[tuple[str, ContainmentScenario, str]] = []
     outstanding_retries: list[str] = []
-    for run_id in store.list_run_ids():
+    try:
+        listed_run_ids = store.list_run_ids()
+    except ContainmentStoreError as error:
+        raise ContainmentServiceError(
+            f"cannot enumerate containment runs: {error}"
+        ) from error
+    for run_id in listed_run_ids:
         try:
             intent = store.load_intent(run_id)
             fingerprint = _intent_command_fingerprint(intent, run_id)

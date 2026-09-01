@@ -894,6 +894,34 @@ class ContainmentServiceTests(unittest.TestCase):
                 ),
             )
 
+    def test_prepare_run_propagates_uncertain_run_enumeration_before_fixtures(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-prepare-enumeration-"
+        ) as directory:
+            source = Path(directory) / "source"
+            layout = initialize_workspace(source)
+            steam = Path(directory) / "steam"
+            (layout.mo2_containment_validation / ("f" * 32)).write_bytes(
+                b"run-shaped file impostor\n"
+            )
+
+            with (
+                patch.object(service, "prepare_containment_fixture") as fixture,
+                patch.object(service, "_fixture_record", return_value=object()),
+                patch.object(service, "_record_document", return_value={}),
+            ):
+                with self.assertRaisesRegex(
+                    service.ContainmentServiceError,
+                    "enumerate containment runs",
+                ):
+                    service.prepare_run(
+                        source,
+                        "artifact:enumeration",
+                        steam,
+                        layout.mo2_containment_validation,
+                    )
+            fixture.assert_not_called()
+
     def test_arm_scenario_public_workflow_persists_before_watcher_ready(self):
         with tempfile.TemporaryDirectory(prefix="modlab-arm-workflow-") as directory:
             root = Path(directory)
