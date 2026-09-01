@@ -591,11 +591,14 @@ def _read_exact_regular_file(
         if close_error is not None:
             if close_failure_is_fatal:
                 raise _HandleOwnershipError(close_error, handle, f"{label} readback")
-            warnings.warn(
-                f"{label} readback handle close warning: {close_error}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            try:
+                warnings.warn(
+                    f"{label} readback handle close warning: {close_error}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            except Exception:
+                pass
 
 
 def _require_windows() -> None:

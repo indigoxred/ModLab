@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+import warnings
 from unittest import mock
 
 from modlab.validation import windows_watch
@@ -539,6 +540,44 @@ class MutationWatchTests(unittest.TestCase):
                 )
 
         self.assertEqual(expected, receipt)
+
+    def test_outcome_reporting_warning_filter_preserves_captured_outcomes(self):
+        completed_path, completed_pid = self._start_case("reporting-filter-completed")
+        completed = stop_watch(completed_path)
+        incomplete_path, incomplete_pid = self._start_case("reporting-filter-incomplete")
+        with mock.patch.object(windows_watch, "_get_process_exit_code", return_value=73):
+            incomplete = stop_watch(incomplete_path)
+
+        for request_path, worker_pid, expected in (
+            (completed_path, completed_pid, completed),
+            (incomplete_path, incomplete_pid, incomplete),
+        ):
+            with self.subTest(completion=expected.evidence_completion.value):
+                request = windows_watch._load_request_path(request_path)
+                real_close = windows_watch._close_handle
+
+                def reporting_close_warning(handle: int, label: str) -> str | None:
+                    if label == "watch outcome readback":
+                        self.assertIsNone(real_close(handle, label))
+                        return "injected outcome reporting close warning"
+                    return real_close(handle, label)
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", RuntimeWarning)
+                    with mock.patch.object(
+                        windows_watch,
+                        "_close_handle",
+                        side_effect=reporting_close_warning,
+                    ):
+                        receipt = watch_receipt_from_files(
+                            request,
+                            worker_pid,
+                            request.evidence_root / "ready.json",
+                            request.evidence_root / "events.ndjson",
+                            request.evidence_root / "terminal.json",
+                        )
+
+                self.assertEqual(expected, receipt)
 
     def test_launch_publication_failure_uses_owned_incomplete_cleanup(self):
         request = self._request()
