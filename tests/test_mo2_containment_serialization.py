@@ -152,7 +152,7 @@ def valid_scenario_result(
             pid=42,
             executable=r"C:\Lab\MO2\ModOrganizer.exe",
             executable_version="2.5.2.0",
-            arguments=("--instance", "Lab"),
+            arguments=("--profile", "ModLab - Lab"),
             working_directory=r"C:\Lab\MO2",
             integrity=IntegrityObservation.LOW,
         ),
@@ -163,7 +163,7 @@ def valid_scenario_result(
         scenario_started=True,
         fresh_retry_eligible=False,
         watcher_events=watch_outcome.events,
-        projection_count=2,
+        projection_count=1,
         projection_targets_verified=True,
         projection_payload_bytes_copied=0,
         production_backup_names=(),
@@ -344,6 +344,21 @@ class Mo2ContainmentSerializationTests(unittest.TestCase):
     def test_incomplete_watch_without_positive_breach_cannot_be_failed(self):
         outcome = incomplete_watch_outcome()
         result = failed_result_for(outcome, reasons=("terminal-missing",))
+        with self.assertRaisesRegex(ContainmentFormatError, "positive breach"):
+            scenario_result_to_bytes(result, outcome)
+
+    def test_completed_typed_policy_violation_is_positive_failure_proof(self):
+        outcome = valid_watch_outcome()
+        result = replace(
+            failed_result_for(outcome, reasons=("production-backup-created",)),
+            production_backup_names=("Protected Existing_backup",),
+        )
+        encoded = scenario_result_to_bytes(result, outcome)
+        self.assertEqual(result, scenario_result_from_bytes(encoded, outcome))
+
+    def test_completed_arbitrary_reason_is_not_positive_failure_proof(self):
+        outcome = valid_watch_outcome()
+        result = failed_result_for(outcome, reasons=("operator-disliked-result",))
         with self.assertRaisesRegex(ContainmentFormatError, "positive breach"):
             scenario_result_to_bytes(result, outcome)
 

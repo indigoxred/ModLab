@@ -131,6 +131,8 @@ def prepare_containment_fixture(
     steam_root: Path,
     validation_root: Path,
     scenario: ContainmentScenario,
+    *,
+    fixture_parent: Path | None = None,
 ) -> ContainmentFixture:
     """Create two disposable portable instances and project the protected source mod."""
     if not isinstance(scenario, ContainmentScenario):
@@ -156,8 +158,29 @@ def prepare_containment_fixture(
         raise ContainmentFixtureError("exact MO2 artifact did not verify in source vault")
     payload = source_record.stored_path(source_layout.root)
 
-    run_root = validation / f"{scenario.value}-{uuid.uuid4().hex}"
-    _require_direct_directory(run_root, create=True)
+    if fixture_parent is None:
+        run_root = validation / f"{scenario.value}-{uuid.uuid4().hex}"
+    else:
+        requested_parent = Path(fixture_parent).expanduser().absolute()
+        try:
+            relative_parent = requested_parent.relative_to(validation)
+        except ValueError as error:
+            raise ContainmentFixtureError(
+                "fixture parent must be beneath the workspace containment root"
+            ) from error
+        if not relative_parent.parts:
+            raise ContainmentFixtureError(
+                "fixture parent must be beneath the workspace containment root"
+            )
+        if any(part in {"", ".", ".."} for part in relative_parent.parts):
+            raise ContainmentFixtureError("fixture parent contains an unsafe segment")
+        current = validation
+        for part in relative_parent.parts:
+            current = _require_direct_directory(current / part, create=True)
+            _require_beneath(validation, current)
+        run_root = current
+    run_root = _require_direct_directory(run_root, create=True)
+    _require_beneath(validation, run_root)
     source_instance = run_root / "source-workspace"
     stage_instance = run_root / "stage-workspace"
     source_documents = _write_documents_root(run_root / "source-documents")

@@ -53,6 +53,20 @@ class ContainmentFixtureTests(unittest.TestCase):
         )
         self.assertEqual(b"+Protected Existing\r\n", fixture.stage_lab_modlist.read_bytes())
 
+    def test_fixture_parent_override_is_exact_and_confined_below_validation_root(self):
+        from tests.support.mo2_containment import prepare_fixture_with_fake_bootstrap
+
+        parent = self.root / "source-vault" / "runtime" / "validation" / "mo2-containment" / ("a" * 32) / "fixtures" / "NewFolder"
+        fixture = prepare_fixture_with_fake_bootstrap(self.root, fixture_parent=parent)
+        self.assertEqual(parent.resolve(), fixture.run_root)
+
+        with self.assertRaisesRegex(fixtures.ContainmentFixtureError, "fixture parent"):
+            escaped_root = self.root / "escaped-case"
+            prepare_fixture_with_fake_bootstrap(
+                escaped_root,
+                fixture_parent=self.root / "escape",
+            )
+
     def test_stage_root_is_labeled_low_before_any_projection_can_exist(self):
         # Catches low labels being applied only to children, leaving the MO2 root Medium.
         layout = initialize_workspace(self.root / "stage-workspace")

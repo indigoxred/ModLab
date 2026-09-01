@@ -653,7 +653,14 @@ def _check_result(result: ScenarioResult) -> None:
             raise ContainmentFormatError("Failed result requires ScenarioStarted")
         if result.fresh_retry_eligible:
             raise ContainmentFormatError("Failed result cannot be retry eligible")
-        if not result.watcher_events and result.protected_before == result.protected_after:
+        if (
+            not result.watcher_events
+            and result.protected_before == result.protected_after
+            and not (
+                result.watch_evidence_completion is WatchEvidenceCompletion.COMPLETED
+                and deterministic_policy_violations(result)
+            )
+        ):
             raise ContainmentFormatError(
                 "Failed result requires positive breach evidence"
             )
@@ -672,6 +679,66 @@ def _check_result(result: ScenarioResult) -> None:
                 raise ContainmentFormatError(
                     "fresh retry eligibility requires Incomplete watcher evidence"
                 )
+
+
+def deterministic_policy_violations(result: ScenarioResult) -> tuple[str, ...]:
+    """Recompute typed, reason-independent deterministic scenario violations."""
+    violations: set[str] = set()
+    process = result.mo2_process
+    if process is not None:
+        expected_executable = PureWindowsPath(process.working_directory) / "ModOrganizer.exe"
+        if (
+            process.executable_version != "2.5.2.0"
+            or process.arguments != ("--profile", "ModLab - Lab")
+            or PureWindowsPath(process.executable) != expected_executable
+            or (
+                process.integrity is not IntegrityObservation.UNKNOWN
+                and process.integrity is not IntegrityObservation.LOW
+            )
+        ):
+            violations.add("mo2-process-evidence-invalid")
+    if result.source_integrity not in {
+        IntegrityObservation.UNKNOWN,
+        IntegrityObservation.MEDIUM,
+        IntegrityObservation.HIGH,
+        IntegrityObservation.SYSTEM,
+    }:
+        violations.add("source-integrity-invalid")
+    if result.stage_integrity not in {
+        IntegrityObservation.UNKNOWN,
+        IntegrityObservation.LOW,
+    }:
+        violations.add("stage-integrity-invalid")
+    if result.projection_count != 1:
+        violations.add("projection-count-invalid")
+    if not result.projection_targets_verified:
+        violations.add("projection-target-changed")
+    if result.projection_payload_bytes_copied != 0:
+        violations.add("projection-payload-copied")
+    if result.production_backup_names:
+        violations.add("production-backup-created")
+    if not result.source_restored_after_quarantine:
+        violations.add("source-not-restored-after-quarantine")
+
+    adoption = (result.adopted_name, result.adopted_tree, result.adopted_integrity)
+    if result.scenario in _ADOPTION:
+        name, staging_new, staging_output = _ADOPTION[result.scenario]
+        if result.staging_new_names != staging_new:
+            violations.add("staging-new-folder-set-invalid")
+        if result.staging_output_names != staging_output:
+            violations.add("staging-output-set-invalid")
+        if any(item is not None for item in adoption) and (
+            result.adopted_name != name
+            or result.adopted_tree is None
+            or result.adopted_integrity
+            not in {IntegrityObservation.UNKNOWN, IntegrityObservation.MEDIUM}
+        ):
+            violations.add("adoption-proof-invalid")
+    elif result.staging_new_names or result.staging_output_names or any(
+        item is not None for item in adoption
+    ):
+        violations.add("unexpected-staging-output")
+    return tuple(sorted(violations))
 
 
 def _check_passed_result(

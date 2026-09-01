@@ -15,7 +15,7 @@ from modlab.validation.windows_integrity import IntegrityLevel
 from modlab.workspace import initialize_workspace
 
 
-def prepare_fixture_with_fake_bootstrap(root: Path):
+def prepare_fixture_with_fake_bootstrap(root: Path, *, fixture_parent: Path | None = None):
     """Exercise fixture assembly without extracting or launching a real MO2 archive."""
     from modlab.validation import mo2_containment_fixtures as fixtures
 
@@ -80,6 +80,7 @@ def prepare_fixture_with_fake_bootstrap(root: Path):
             steam_root,
             initialize_workspace(source_workspace).mo2_containment_validation,
             ContainmentScenario.NEW_FOLDER,
+            fixture_parent=fixture_parent,
         )
 
 

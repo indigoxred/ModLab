@@ -31,6 +31,7 @@ class ProcessLaunch:
     arguments: tuple[str, ...]
     working_directory: str
     integrity: IntegrityLevel
+    creation_time: int
 
 
 @dataclass(frozen=True)
@@ -204,6 +205,14 @@ if os.name == "nt":
     _kernel32.TerminateProcess.restype = wintypes.BOOL
     _kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     _kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    _kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    _kernel32.GetProcessTimes.restype = wintypes.BOOL
 
     _advapi32.GetNamedSecurityInfoW.argtypes = [
         wintypes.LPWSTR,
@@ -692,6 +701,25 @@ def _resume_verified_child(process: int, thread: int, pid: int) -> None:
         )
 
 
+def _process_creation_time(process: int, pid: int) -> int:
+    creation = wintypes.FILETIME()
+    exit_time = wintypes.FILETIME()
+    kernel_time = wintypes.FILETIME()
+    user_time = wintypes.FILETIME()
+    if not _kernel32.GetProcessTimes(
+        process,
+        ctypes.byref(creation),
+        ctypes.byref(exit_time),
+        ctypes.byref(kernel_time),
+        ctypes.byref(user_time),
+    ):
+        raise _winerror(f"could not inspect created process {pid}")
+    value = (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
+    if value <= 0:
+        raise OSError(f"created process {pid} has invalid creation time")
+    return value
+
+
 def launch_low_integrity_process(
     executable: Path,
     args: tuple[str, ...],
@@ -749,6 +777,10 @@ def launch_low_integrity_process(
             raise OSError(
                 f"suspended process {process_information.dwProcessId} was {observed.name}, not LOW"
             )
+        creation_time = _process_creation_time(
+            process_information.hProcess,
+            process_information.dwProcessId,
+        )
         _resume_verified_child(
             process_information.hProcess,
             process_information.hThread,
@@ -761,6 +793,7 @@ def launch_low_integrity_process(
             arguments=args,
             working_directory=str(working_directory),
             integrity=observed,
+            creation_time=creation_time,
         )
     except BaseException:
         if not resumed:

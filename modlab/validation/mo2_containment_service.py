@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
+import re
 import secrets
 import stat
 from typing import Mapping
@@ -39,6 +41,7 @@ from .mo2_containment_model import (
 from .mo2_containment_serialization import (
     ContainmentFormatError,
     capability_decision_to_bytes,
+    deterministic_policy_violations,
     scenario_result_id_for,
     scenario_result_to_bytes,
     watch_outcome_id_for,
@@ -67,10 +70,13 @@ from .windows_junction import (
 from . import windows_watch as _windows_watch
 from .windows_watch import start_watch, stop_watch, watch_root
 from .windows_watch_protocol import (
+    CLAIM_NAME,
     LAUNCH_NAME,
     ROOT_KINDS,
     WatchRequest,
+    controller_claim_from_bytes,
     watch_request_from_bytes,
+    watch_request_sha256,
     worker_launch_from_bytes,
 )
 
@@ -91,9 +97,6 @@ _EXPECTED_OUTPUTS = {
         "dependency-seen.txt",
     ),
 }
-_LAUNCH_EVIDENCE: dict[tuple[str, str, ContainmentScenario], ProcessEvidence] = {}
-
-
 class ContainmentServiceError(RuntimeError):
     """The scenario cannot advance without weakening its evidence boundary."""
 
@@ -162,6 +165,13 @@ class RecoveryCleanupEvidence:
     projection_count: int
     projection_targets_verified: bool
     projection_payload_bytes_copied: int
+    blockers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RecoveryProofEvidence:
+    watch_outcome: WatchOutcome | None
+    protected_after: ProtectedState
     blockers: tuple[str, ...]
 
 
@@ -250,8 +260,27 @@ def evaluate_scenario(value: ScenarioEvidence) -> ScenarioResult:
     ):
         violations.add("unexpected-staging-output")
 
+    probe = ScenarioResult(
+        _SCHEMA_VERSION, value.run_id, value.scenario, ScenarioOutcome.INCOMPLETE,
+        value.protected_before, value.protected_after, value.mo2_process,
+        value.source_integrity, value.stage_integrity, watch_outcome_id_for(outcome),
+        outcome.evidence_completion, value.scenario_started, False, outcome.events,
+        value.projection_count, value.projection_targets_verified,
+        value.projection_payload_bytes_copied,
+        tuple(sorted(set(value.production_backup_names))),
+        tuple(sorted(set(value.staging_new_names))),
+        tuple(sorted(set(value.staging_output_names))), value.adopted_name,
+        value.adopted_tree, value.adopted_integrity,
+        value.source_restored_after_quarantine, ("classification-probe",),
+    )
+    typed_violations = set(deterministic_policy_violations(probe))
+    violations.update(typed_violations)
     positive_breach = bool(outcome.events) or value.protected_before != value.protected_after
-    if violations and positive_breach:
+    positive_failure = positive_breach or (
+        outcome.evidence_completion is WatchEvidenceCompletion.COMPLETED
+        and bool(typed_violations)
+    )
+    if violations and positive_failure:
         scenario_outcome = ScenarioOutcome.FAILED
         reasons = tuple(sorted(violations | incomplete))
         retry = False
@@ -375,6 +404,8 @@ def prepare_run(
     mo2_artifact_id: str,
     steam_root: Path,
     validation_root: Path,
+    *,
+    retry_of: ScenarioRecovery | None = None,
 ) -> str:
     """Create four independent disposable fixtures and one immutable request."""
     source = Path(source_workspace).expanduser().absolute()
@@ -382,6 +413,25 @@ def prepare_run(
     expected_validation = workspace_layout(source).mo2_containment_validation
     if not _same_path(validation, expected_validation):
         raise ContainmentServiceError("validation root must be the workspace containment root")
+    run_id = "containment-run:" + uuid.uuid4().hex
+    store = ContainmentStore(validation)
+    command_fingerprint = _command_fingerprint(source, mo2_artifact_id, Path(steam_root))
+    predecessor_run_ids = _prior_command_run_ids(store, command_fingerprint)
+    retry_binding = None
+    if retry_of is not None:
+        if not isinstance(retry_of, ScenarioRecovery):
+            raise ContainmentServiceError("retry_of must be an exact ScenarioRecovery")
+        try:
+            retry_binding = store.consume_retry_authority(
+                retry_of,
+                store.recovery_id_for(retry_of),
+                command_fingerprint,
+                run_id,
+            )
+        except ContainmentStoreError as error:
+            raise ContainmentServiceError(f"retry authority cannot be consumed: {error}") from error
+    store.prepare_run_root(run_id)
+    fixture_root = store.run_path(run_id) / "fixtures"
     fixtures = tuple(
         prepare_containment_fixture(
             source,
@@ -389,10 +439,10 @@ def prepare_run(
             Path(steam_root),
             validation,
             scenario,
+            fixture_parent=fixture_root / scenario.value,
         )
         for scenario in ContainmentScenario
     )
-    run_id = "containment-run:" + uuid.uuid4().hex
     records = tuple(
         _fixture_record(fixture, Path(steam_root))
         for fixture in fixtures
@@ -403,9 +453,12 @@ def prepare_run(
         "sourceWorkspace": str(source),
         "mo2ArtifactId": mo2_artifact_id,
         "steamRoot": str(Path(steam_root).expanduser().absolute()),
+        "commandFingerprint": command_fingerprint,
+        "predecessorRunIds": list(predecessor_run_ids),
+        "retryOf": retry_binding,
         "scenarios": [_record_document(record) for record in records],
     }
-    ContainmentStore(validation).write_request(run_id, document)
+    store.write_request(run_id, document)
     return run_id
 
 
@@ -498,6 +551,9 @@ def launch_scenario(
             error="protected state changed before ScenarioStarted",
         )
         raise ContainmentServiceError("protected state changed before ScenarioStarted")
+    retry_binding = _retry_binding_for_run(store, run_id)
+    if retry_binding is not None:
+        _reprove_retry_absence(store, run_id, retry_binding)
     started = store.transition(journal, ScenarioState.SCENARIO_STARTED)
     version = read_windows_file_version(record.executable)
     if version != "2.5.2.0":
@@ -547,8 +603,32 @@ def launch_scenario(
         str(record.stage_app),
         to_integrity_observation(observed_integrity),
     )
-    _LAUNCH_EVIDENCE[_launch_key(store, run_id, scenario)] = process
-    return store.transition(started, ScenarioState.LAUNCHED, mo2_pid=launch.pid)
+    launch_document = {
+        "schemaVersion": _SCHEMA_VERSION,
+        "runId": run_id,
+        "scenario": scenario.value,
+        "purpose": "stage-mo2-scenario",
+        "pid": process.pid,
+        "creationTime": launch.creation_time,
+        "executable": process.executable,
+        "executableVersion": process.executable_version,
+        "arguments": list(process.arguments),
+        "workingDirectory": process.working_directory,
+        "integrity": process.integrity.value,
+    }
+    try:
+        store.write_launch_evidence(run_id, scenario, launch_document)
+        return store.transition(started, ScenarioState.LAUNCHED, mo2_pid=launch.pid)
+    except (ContainmentStoreError, OSError) as error:
+        store.transition(
+            started,
+            ScenarioState.RECOVERY_REQUIRED,
+            mo2_pid=launch.pid,
+            error=f"post-ScenarioStarted launch evidence publication failed: {error}",
+        )
+        raise ContainmentServiceError(
+            f"post-ScenarioStarted launch evidence publication failed: {error}"
+        ) from error
 
 
 def capture_scenario(
@@ -569,14 +649,34 @@ def capture_scenario(
         raise ContainmentServiceError("MO2 process liveness is uncertain")
     if observation.relevant:
         raise ContainmentServiceError("MO2 must be closed before capture")
-    process = _LAUNCH_EVIDENCE.get(_launch_key(store, run_id, scenario))
-    if process is None or process.pid != journal.mo2_pid:
+    try:
+        launch_document = store.load_launch_evidence(run_id, scenario)
+        process = _load_launch_process(store, run_id, scenario, record)
+    except (ContainmentStoreError, ContainmentServiceError) as error:
         store.transition(
             journal,
             ScenarioState.RECOVERY_REQUIRED,
-            error="same-controller launch evidence is unavailable",
+            error=f"durable launch evidence is unavailable: {error}",
         )
-        raise ContainmentServiceError("same-controller launch evidence is unavailable")
+        raise ContainmentServiceError("durable launch evidence is unavailable") from error
+    if process.pid != journal.mo2_pid:
+        store.transition(
+            journal,
+            ScenarioState.RECOVERY_REQUIRED,
+            error="durable launch evidence PID differs from journal",
+        )
+        raise ContainmentServiceError("durable launch evidence PID differs from journal")
+    if not _exact_process_absent(
+        int(launch_document["pid"]),
+        int(launch_document["creationTime"]),
+        "captured-stage-mo2",
+    ):
+        store.transition(
+            journal,
+            ScenarioState.RECOVERY_REQUIRED,
+            error="exact launched MO2 absence is live or uncertain",
+        )
+        raise ContainmentServiceError("exact launched MO2 absence is live or uncertain")
 
     request_path = store.watch_path(run_id, scenario) / "request.json"
     receipt = stop_watch(request_path)
@@ -647,7 +747,6 @@ def capture_scenario(
     )
     store.write_result(result)
     store.transition(journal, ScenarioState.CAPTURED)
-    _LAUNCH_EVIDENCE.pop(_launch_key(store, run_id, scenario), None)
     return result
 
 
@@ -661,25 +760,63 @@ def recover_scenario(
     journal = store.load_journal(run_id, scenario)
     if journal.state is ScenarioState.CAPTURED:
         raise ContainmentServiceError("Captured scenario does not require recovery")
+    record = _load_fixture_record(store, run_id, scenario)
+    scenario_started = _scenario_was_started(store, journal)
+    proof = _prove_recovery(store, record, journal)
+    proof_blockers = tuple(sorted(set(proof.blockers)))
+    if proof_blockers:
+        if journal.state is not ScenarioState.RECOVERY_REQUIRED:
+            journal = store.transition(
+                journal,
+                ScenarioState.RECOVERY_REQUIRED,
+                error=f"recovery refused from {journal.state.value}",
+            )
+        result_id = _persist_proven_recovery_breach(
+            store,
+            journal,
+            proof,
+            scenario_started=scenario_started,
+        )
+        blockers = proof_blockers
+        if proof.watch_outcome is None:
+            blockers = tuple(sorted(set((*blockers, "durable-watch-outcome-unavailable"))))
+        recovery = ScenarioRecovery(
+            _SCHEMA_VERSION, run_id, scenario, store.journal_id_for(journal),
+            result_id, ScenarioCleanupStatus.REFUSED, False, blockers,
+        )
+        store.write_recovery(recovery)
+        return recovery
+
     if journal.state is not ScenarioState.RECOVERY_REQUIRED:
         journal = store.transition(
             journal,
             ScenarioState.RECOVERY_REQUIRED,
             error=f"interrupted in {journal.state.value}",
         )
-    cleanup = _perform_recovery_cleanup(store, _load_fixture_record(store, run_id, scenario), journal)
+    cleanup = _perform_recovery_cleanup(store, record, journal, proof=proof)
     blockers = tuple(sorted(set(cleanup.blockers)))
     result_id: str | None = None
-    pre_scenario = journal.mo2_pid is None and "ScenarioStarted" not in (journal.error or "")
+    pre_scenario = not scenario_started
     if blockers or cleanup.watch_outcome is None:
         if cleanup.watch_outcome is None:
             blockers = tuple(sorted(set((*blockers, "durable-watch-outcome-unavailable"))))
+        refused_proof = RecoveryProofEvidence(
+            cleanup.watch_outcome,
+            cleanup.protected_after,
+            blockers,
+        )
+        result_id = _persist_proven_recovery_breach(
+            store,
+            journal,
+            refused_proof,
+            scenario_started=scenario_started,
+        )
         recovery = ScenarioRecovery(
             _SCHEMA_VERSION,
             run_id,
             scenario,
             store.journal_id_for(journal),
-            None,
+            result_id,
             ScenarioCleanupStatus.REFUSED,
             False,
             blockers,
@@ -716,8 +853,9 @@ def recover_scenario(
             retry_existing,
             (),
         )
-        store.write_recovery(recovery)
-        _LAUNCH_EVIDENCE.pop(_launch_key(store, run_id, scenario), None)
+        recovery_write = store.write_recovery(recovery)
+        if retry_existing:
+            _ensure_retry_authority(store, recovery, recovery_write)
         return recovery
     retry = bool(
         pre_scenario
@@ -725,7 +863,10 @@ def recover_scenario(
         and "controller-session-lost" in outcome.reason_codes
         and cleanup.protected_after == journal.protected_before
     )
-    prior_process = _LAUNCH_EVIDENCE.get(_launch_key(store, run_id, scenario))
+    try:
+        prior_process = _load_launch_process(store, run_id, scenario, _load_fixture_record(store, run_id, scenario))
+    except (ContainmentStoreError, ContainmentServiceError):
+        prior_process = None
     result = evaluate_scenario(
         ScenarioEvidence(
             run_id,
@@ -764,8 +905,9 @@ def recover_scenario(
         retry,
         (),
     )
-    store.write_recovery(recovery)
-    _LAUNCH_EVIDENCE.pop(_launch_key(store, run_id, scenario), None)
+    recovery_write = store.write_recovery(recovery)
+    if retry:
+        _ensure_retry_authority(store, recovery, recovery_write)
     return recovery
 
 
@@ -774,12 +916,17 @@ def adjudicate_run(validation_root: Path, run_id: str) -> CapabilityDecision:
     store = ContainmentStore(validation_root)
     results: list[ScenarioResult] = []
     outcomes: list[WatchOutcome] = []
+    evidence_reasons: list[str] = []
     for scenario in ContainmentScenario:
         try:
             result = store.load_result(run_id, scenario)
-        except ContainmentStoreNotFound:
+            outcome = store.load_watch_outcome(run_id, scenario, result.watch_outcome_id)
+            scenario_result_id_for(result, outcome)
+        except ContainmentStoreError:
+            evidence_reasons.append(
+                f"current-evidence-unresolvable:{scenario.value}"
+            )
             continue
-        outcome = store.load_watch_outcome(run_id, scenario, result.watch_outcome_id)
         results.append(result)
         outcomes.append(outcome)
     if not results:
@@ -793,8 +940,76 @@ def adjudicate_run(validation_root: Path, run_id: str) -> CapabilityDecision:
         )
     else:
         decision = adjudicate_results(tuple(results), tuple(outcomes))
+    historical_reasons = _historical_failed_reasons(store, run_id)
+    if historical_reasons:
+        decision = CapabilityDecision(
+            _SCHEMA_VERSION,
+            run_id,
+            _MECHANISM,
+            CapabilityVerdict.REJECTED,
+            decision.scenario_result_ids,
+            tuple(sorted(set((*decision.reasons, *evidence_reasons, *historical_reasons)))),
+        )
+    elif evidence_reasons:
+        decision = CapabilityDecision(
+            _SCHEMA_VERSION,
+            run_id,
+            _MECHANISM,
+            (
+                CapabilityVerdict.REJECTED
+                if decision.verdict is CapabilityVerdict.REJECTED
+                else CapabilityVerdict.INCOMPLETE
+            ),
+            decision.scenario_result_ids,
+            tuple(sorted(set((*decision.reasons, *evidence_reasons)))),
+        )
     store.write_decision(decision)
     return decision
+
+
+def _historical_failed_reasons(
+    store: ContainmentStore,
+    current_run_id: str,
+) -> tuple[str, ...]:
+    try:
+        current_request = store.load_request(current_run_id)
+        current_fingerprint = _request_command_fingerprint(store, current_run_id)
+        predecessor_run_ids = current_request.get("predecessorRunIds")
+        if not _valid_predecessor_run_ids(predecessor_run_ids, current_run_id):
+            return ()
+    except (ContainmentStoreError, ContainmentServiceError):
+        return ()
+    reasons: list[str] = []
+    failed = False
+    for historical_run_id in predecessor_run_ids:
+        try:
+            historical_fingerprint = _request_command_fingerprint(
+                store, historical_run_id
+            )
+        except (ContainmentStoreError, ContainmentServiceError):
+            continue
+        if historical_fingerprint != current_fingerprint:
+            continue
+        for scenario in ContainmentScenario:
+            try:
+                result = store.load_result(historical_run_id, scenario)
+                outcome = store.load_watch_outcome(
+                    historical_run_id, scenario, result.watch_outcome_id
+                )
+                identifier = scenario_result_id_for(result, outcome)
+            except ContainmentStoreError:
+                continue
+            if result.outcome is ScenarioOutcome.FAILED:
+                failed = True
+                reasons.append(
+                    f"historical-failed:{historical_run_id}:{identifier}"
+                )
+            else:
+                reasons.append(
+                    f"historical-result:{result.outcome.value}:"
+                    f"{historical_run_id}:{identifier}"
+                )
+    return tuple(sorted(set(reasons))) if failed else ()
 
 
 def _fixture_record(fixture: ContainmentFixture, steam_root: Path) -> FixtureRecord:
@@ -873,6 +1088,9 @@ def _load_fixture_record(
         "sourceWorkspace",
         "mo2ArtifactId",
         "steamRoot",
+        "commandFingerprint",
+        "predecessorRunIds",
+        "retryOf",
         "scenarios",
     }
     if set(document) != request_fields:
@@ -884,6 +1102,20 @@ def _load_fixture_record(
         or type(document["mo2ArtifactId"]) is not str
         or not document["mo2ArtifactId"]
         or type(document["steamRoot"]) is not str
+        or type(document["commandFingerprint"]) is not str
+        or re.fullmatch(
+            r"containment-command-sha256:[0-9a-f]{64}",
+            document["commandFingerprint"],
+        )
+        is None
+        or _command_fingerprint(
+            Path(document["sourceWorkspace"]),
+            document["mo2ArtifactId"],
+            Path(document["steamRoot"]),
+        )
+        != document["commandFingerprint"]
+        or not _valid_predecessor_run_ids(document["predecessorRunIds"], run_id)
+        or not _valid_retry_binding(document["retryOf"], document["commandFingerprint"])
     ):
         raise ContainmentServiceError("request identity values are malformed")
     rows = document.get("scenarios")
@@ -935,8 +1167,8 @@ def _load_fixture_record(
     paths = {name: Path(str(row[name])) for name in path_names}
     if any(not path.is_absolute() for path in paths.values()):
         raise ContainmentServiceError("scenario request paths must be absolute")
-    if not _beneath(store.root, paths["runRoot"]):
-        raise ContainmentServiceError("scenario fixture root escapes validation root")
+    if not _beneath(store.run_path(run_id), paths["runRoot"]):
+        raise ContainmentServiceError("scenario fixture root escapes run root")
     confined_paths = tuple(
         paths[name]
         for name in path_names
@@ -1158,9 +1390,11 @@ def _perform_recovery_cleanup(
     store: ContainmentStore,
     record: FixtureRecord,
     journal: ScenarioJournal,
+    *,
+    proof: RecoveryProofEvidence,
 ) -> RecoveryCleanupEvidence:
     blockers: list[str] = []
-    watch: WatchOutcome | None = None
+    watch: WatchOutcome | None = proof.watch_outcome
     request_path = store.watch_path(journal.run_id, journal.scenario) / "request.json"
     if request_path.exists():
         receipt = stop_watch(request_path)
@@ -1175,28 +1409,32 @@ def _perform_recovery_cleanup(
                 )
             except ContainmentStoreError:
                 blockers.append("durable-watch-outcome-invalid")
-            dangerous = {
-                "worker-identity-uncertain",
-                "worker-cleanup-refused",
-                "claimed-controller-liveness-uncertain",
-                "same-controller-protocol-uncertain",
-            }
-            receipt_reasons = set() if receipt.error is None else {
-                reason for reason in dangerous if reason in receipt.error
-            }
             if (
                 watch is not None
-                and (dangerous.intersection(watch.reason_codes) or receipt_reasons)
+                and (
+                    receipt.run_id != journal.run_id
+                    or receipt.scenario is not journal.scenario
+                    or receipt.request_id != watch.request_id
+                    or receipt.session_id != watch.session_id
+                    or receipt.worker_pid != watch.worker_pid
+                    or receipt.request_bytes_sha256 != watch.request_sha256
+                )
             ):
-                blockers.append("watcher-cleanup-uncertain")
+                blockers.append("watch-receipt-outcome-binding-mismatch")
     else:
         blockers.append("watch-request-unavailable")
 
-    process_observation = inspect_mo2_processes(record.stage_root)
-    if not process_observation.complete:
-        blockers.append("mo2-process-identity-uncertain")
-    elif process_observation.relevant:
-        blockers.append("prior-mo2-process-still-live")
+    if blockers:
+        return RecoveryCleanupEvidence(
+            watch,
+            proof.protected_after,
+            IntegrityObservation.UNKNOWN,
+            IntegrityObservation.UNKNOWN,
+            0,
+            False,
+            0,
+            tuple(sorted(set(blockers))),
+        )
 
     recovery_quarantine = store.quarantine_path(journal.run_id) / (
         "Recovery-" + journal.scenario.value
@@ -1259,6 +1497,271 @@ def _perform_recovery_cleanup(
         0,
         tuple(sorted(set(blockers))),
     )
+
+
+def _prove_recovery(
+    store: ContainmentStore,
+    record: FixtureRecord,
+    journal: ScenarioJournal,
+) -> RecoveryProofEvidence:
+    """Read-only ownership and absence proof; no cleanup mutation is permitted here."""
+    blockers: list[str] = []
+    watch: WatchOutcome | None = None
+    after = journal.protected_before
+    if (
+        not _same_path(journal.source_root, record.source_root)
+        or not _same_path(journal.stage_root, record.stage_root)
+        or not _same_path(journal.archive_path, record.archive_path)
+        or journal.protected_mod_name != _PROTECTED_NAME
+        or journal.expected_new_mod_name != _EXPECTED_NEW[journal.scenario]
+    ):
+        blockers.append("journal-request-fixture-binding-mismatch")
+    request_path = store.watch_path(journal.run_id, journal.scenario) / "request.json"
+    try:
+        request_bytes = request_path.read_bytes()
+        request = watch_request_from_bytes(request_bytes)
+        if request_bytes != _windows_watch.watch_request_to_bytes(request):
+            raise ContainmentServiceError("watch request is not canonical")
+        claim = controller_claim_from_bytes(
+            (request.evidence_root / CLAIM_NAME).read_bytes(), request
+        )
+        launch = worker_launch_from_bytes(
+            (request.evidence_root / LAUNCH_NAME).read_bytes(), request
+        )
+        if (
+            request.run_id != journal.run_id
+            or request.scenario is not journal.scenario
+            or launch.worker_pid != journal.monitor_pid
+            or claim.request_sha256 != watch_request_sha256(request)
+            or launch.request_sha256 != claim.request_sha256
+            or launch.session_id != claim.session_id
+            or launch.run_id != claim.run_id
+            or launch.scenario is not claim.scenario
+        ):
+            raise ContainmentServiceError("watch request/claim/launch binding mismatch")
+        if not _exact_process_absent(
+            claim.controller_pid,
+            claim.controller_creation_time,
+            "prior-controller",
+        ):
+            blockers.append("prior-controller-live-or-uncertain")
+        if not _exact_process_absent(
+            launch.worker_pid,
+            launch.worker_creation_time,
+            "prior-watcher",
+        ):
+            blockers.append("prior-watcher-live-or-uncertain")
+        try:
+            watch = store.load_watch_outcome(journal.run_id, journal.scenario)
+        except ContainmentStoreNotFound:
+            watch = None
+        if watch is not None and (
+            watch.request_id != request.request_id
+            or watch.request_sha256 != claim.request_sha256
+            or watch.session_id != request.session_id
+            or watch.run_id != journal.run_id
+            or watch.scenario is not journal.scenario
+            or watch.controller_pid != claim.controller_pid
+            or watch.controller_creation_time != claim.controller_creation_time
+            or watch.worker_pid != launch.worker_pid
+            or watch.worker_creation_time != launch.worker_creation_time
+        ):
+            blockers.append("watch-outcome-binding-mismatch")
+            watch = None
+    except (OSError, RuntimeError, ValueError, ContainmentStoreError) as error:
+        blockers.append(f"watch-proof-unavailable:{type(error).__name__}")
+
+    try:
+        launch_document = store.load_launch_evidence(journal.run_id, journal.scenario)
+        launch_process = _load_launch_process(
+            store, journal.run_id, journal.scenario, record
+        )
+        if journal.mo2_pid is not None and launch_process.pid != journal.mo2_pid:
+            blockers.append("mo2-launch-journal-binding-mismatch")
+    except ContainmentStoreNotFound:
+        launch_document = None
+        if journal.mo2_pid is not None or "ScenarioStarted" in (journal.error or ""):
+            blockers.append("mo2-launch-proof-unavailable:missing")
+    except (ContainmentStoreError, ContainmentServiceError, ValueError) as error:
+        launch_document = None
+        blockers.append(f"mo2-launch-proof-unavailable:{type(error).__name__}")
+    if launch_document is not None and not _exact_process_absent(
+        int(launch_document["pid"]),
+        int(launch_document["creationTime"]),
+        "prior-stage-mo2",
+    ):
+        blockers.append("prior-mo2-live-or-uncertain")
+    observation = inspect_mo2_processes(record.stage_root)
+    if not observation.complete:
+        blockers.append("mo2-process-identity-uncertain")
+    elif observation.relevant:
+        blockers.append("prior-mo2-process-still-live")
+    try:
+        after = _capture_protected(record)
+    except (OSError, RuntimeError, ValueError, ContainmentSafetyError):
+        blockers.append("protected-state-proof-unavailable")
+    return RecoveryProofEvidence(watch, after, tuple(sorted(set(blockers))))
+
+
+def _exact_process_absent(pid: int, creation_time: int, label: str) -> bool:
+    status, handle, _detail = _windows_watch._exact_process_status(pid, creation_time)
+    close_error = None
+    if handle:
+        close_error = _windows_watch._close_handle(handle, label)
+    return status == "dead" and close_error is None
+
+
+def _scenario_was_started(store: ContainmentStore, journal: ScenarioJournal) -> bool:
+    if journal.state in {
+        ScenarioState.SCENARIO_STARTED,
+        ScenarioState.LAUNCHED,
+        ScenarioState.CAPTURED,
+    } or journal.mo2_pid is not None:
+        return True
+    try:
+        store.load_launch_evidence(journal.run_id, journal.scenario)
+    except ContainmentStoreNotFound:
+        return "post-ScenarioStarted" in (journal.error or "")
+    except ContainmentStoreError:
+        return True
+    return True
+
+
+def _persist_proven_recovery_breach(
+    store: ContainmentStore,
+    journal: ScenarioJournal,
+    proof: RecoveryProofEvidence,
+    *,
+    scenario_started: bool,
+) -> str | None:
+    outcome = proof.watch_outcome
+    if (
+        outcome is None
+        or not scenario_started
+        or (not outcome.events and proof.protected_after == journal.protected_before)
+    ):
+        return None
+    try:
+        existing = store.load_result(journal.run_id, journal.scenario)
+    except ContainmentStoreNotFound:
+        existing = None
+    if existing is not None:
+        return scenario_result_id_for(existing, outcome)
+    result = evaluate_scenario(
+        ScenarioEvidence(
+            journal.run_id, journal.scenario, journal.protected_before,
+            proof.protected_after, outcome, None, IntegrityObservation.UNKNOWN,
+            IntegrityObservation.UNKNOWN, True, False, 0, False, 0, (), (), (),
+            None, None, None, proof.protected_after == journal.protected_before,
+            (), proof.blockers,
+        )
+    )
+    if result.outcome is not ScenarioOutcome.FAILED:
+        return None
+    return store.write_result(result).content_id
+
+
+def _request_command_fingerprint(store: ContainmentStore, run_id: str) -> str:
+    document = store.load_request(run_id)
+    value = document.get("commandFingerprint")
+    if (
+        type(value) is not str
+        or re.fullmatch(r"containment-command-sha256:[0-9a-f]{64}", value) is None
+    ):
+        raise ContainmentServiceError("request command fingerprint is unavailable")
+    source = document.get("sourceWorkspace")
+    artifact = document.get("mo2ArtifactId")
+    steam = document.get("steamRoot")
+    if (
+        type(source) is not str
+        or type(artifact) is not str
+        or not artifact
+        or type(steam) is not str
+        or _command_fingerprint(Path(source), artifact, Path(steam)) != value
+    ):
+        raise ContainmentServiceError("request command fingerprint does not recompute")
+    return value
+
+
+def _ensure_retry_authority(
+    store: ContainmentStore,
+    recovery: ScenarioRecovery,
+    recovery_write,
+) -> None:
+    fingerprint = _request_command_fingerprint(store, recovery.run_id)
+    try:
+        authority = store.load_retry_authority(recovery.run_id, recovery.scenario)
+    except ContainmentStoreNotFound:
+        store.write_retry_authority(
+            recovery, recovery_write.content_id, fingerprint
+        )
+        return
+    if (
+        authority["recoveryId"] != recovery_write.content_id
+        or authority["commandFingerprint"] != fingerprint
+    ):
+        raise ContainmentServiceError("existing retry authority binding differs")
+
+
+def _retry_binding_for_run(
+    store: ContainmentStore,
+    run_id: str,
+) -> dict[str, object] | None:
+    try:
+        document = store.load_request(run_id)
+    except ContainmentStoreNotFound:
+        return None
+    value = document.get("retryOf")
+    fingerprint = document.get("commandFingerprint")
+    if not _valid_retry_binding(value, fingerprint):
+        raise ContainmentServiceError("retry-bound request is malformed")
+    return None if value is None else dict(value)
+
+
+def _reprove_retry_absence(
+    store: ContainmentStore,
+    new_run_id: str,
+    binding: dict[str, object],
+) -> None:
+    old_run_id = str(binding["runId"])
+    try:
+        old_scenario = ContainmentScenario(str(binding["scenario"]))
+        recovery = store.load_recovery(old_run_id, old_scenario)
+        authority = store.load_retry_authority(old_run_id, old_scenario)
+        old_request = store.load_request(old_run_id)
+        journal = store.load_journal(old_run_id, old_scenario)
+        record = _load_fixture_record(store, old_run_id, old_scenario)
+        result = store.load_result(old_run_id, old_scenario)
+        outcome = store.load_watch_outcome(
+            old_run_id, old_scenario, result.watch_outcome_id
+        )
+    except (ContainmentStoreError, ContainmentServiceError, ValueError) as error:
+        raise ContainmentServiceError(
+            f"retry prior evidence cannot be resolved: {error}"
+        ) from error
+    if (
+        store.recovery_id_for(recovery) != binding["recoveryId"]
+        or recovery.journal_id != store.journal_id_for(journal)
+        or not recovery.fresh_run_permitted
+        or recovery.cleanup_status is not ScenarioCleanupStatus.SUCCEEDED
+        or authority["authorityId"] != binding["authorityId"]
+        or authority["recoveryId"] != binding["recoveryId"]
+        or authority["commandFingerprint"] != binding["commandFingerprint"]
+        or authority["state"] != "Consumed"
+        or authority["consumedByRunId"] != new_run_id
+        or old_request.get("commandFingerprint") != binding["commandFingerprint"]
+        or recovery.result_id != scenario_result_id_for(result, outcome)
+        or result.outcome is not ScenarioOutcome.INCOMPLETE
+        or not result.fresh_retry_eligible
+        or result.scenario_started
+    ):
+        raise ContainmentServiceError("retry authority binding/replay proof differs")
+    proof = _prove_recovery(store, record, journal)
+    if proof.blockers:
+        raise ContainmentServiceError(
+            "retry prior controller/watcher/MO2 absence is not exact: "
+            + ",".join(proof.blockers)
+        )
 
 
 def _direct_names(root: Path) -> tuple[str, ...]:
@@ -1334,12 +1837,28 @@ def _watcher_live(request_path: Path, pid: int | None) -> bool:
     return status == "live" and close_error is None
 
 
-def _launch_key(
+def _load_launch_process(
     store: ContainmentStore,
     run_id: str,
     scenario: ContainmentScenario,
-) -> tuple[str, str, ContainmentScenario]:
-    return os.path.normcase(str(store.root)), run_id, scenario
+    record: FixtureRecord,
+) -> ProcessEvidence:
+    document = store.load_launch_evidence(run_id, scenario)
+    process = ProcessEvidence(
+        int(document["pid"]),
+        str(document["executable"]),
+        str(document["executableVersion"]),
+        tuple(document["arguments"]),
+        str(document["workingDirectory"]),
+        IntegrityObservation(str(document["integrity"])),
+    )
+    if (
+        not _same_path(process.executable, record.executable)
+        or not _same_path(process.working_directory, record.stage_app)
+        or process.arguments != ("--profile", "ModLab - Lab")
+    ):
+        raise ContainmentServiceError("launch evidence does not match exact fixture command")
+    return process
 
 
 def _same_path(left: Path | str, right: Path | str) -> bool:
@@ -1358,10 +1877,84 @@ def _beneath(root: Path, candidate: Path) -> bool:
     )
 
 
+def _command_fingerprint(
+    source_workspace: Path,
+    mo2_artifact_id: str,
+    steam_root: Path,
+) -> str:
+    document = {
+        "mechanism": _MECHANISM,
+        "mo2ArtifactId": mo2_artifact_id,
+        "scenarios": [item.value for item in ContainmentScenario],
+        "sourceWorkspace": os.path.normcase(
+            os.path.normpath(str(Path(source_workspace).expanduser().absolute()))
+        ),
+        "steamRoot": os.path.normcase(
+            os.path.normpath(str(Path(steam_root).expanduser().absolute()))
+        ),
+    }
+    data = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    return "containment-command-sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _prior_command_run_ids(
+    store: ContainmentStore,
+    command_fingerprint: str,
+) -> tuple[str, ...]:
+    run_ids: list[str] = []
+    for run_id in store.list_run_ids():
+        try:
+            if _request_command_fingerprint(store, run_id) == command_fingerprint:
+                run_ids.append(run_id)
+        except (ContainmentStoreError, ContainmentServiceError):
+            continue
+    return tuple(sorted(set(run_ids)))
+
+
+def _valid_predecessor_run_ids(
+    value: object,
+    current_run_id: str,
+) -> bool:
+    if type(value) is not list or any(type(item) is not str for item in value):
+        return False
+    run_ids = tuple(value)
+    if run_ids != tuple(sorted(set(run_ids))) or current_run_id in run_ids:
+        return False
+    try:
+        for run_id in run_ids:
+            ContainmentStore._run_hex(run_id)
+    except ContainmentStoreError:
+        return False
+    return True
+
+
+def _valid_retry_binding(value: object, command_fingerprint: object) -> bool:
+    if value is None:
+        return True
+    fields = {"runId", "scenario", "recoveryId", "authorityId", "commandFingerprint"}
+    if type(value) is not dict or set(value) != fields:
+        return False
+    try:
+        ContainmentStore._run_hex(value["runId"])
+        ContainmentScenario(value["scenario"])
+    except (ContainmentStoreError, TypeError, ValueError):
+        return False
+    return (
+        value["commandFingerprint"] == command_fingerprint
+        and type(value["recoveryId"]) is str
+        and re.fullmatch(r"containment-recovery-sha256:[0-9a-f]{64}", value["recoveryId"])
+        is not None
+        and type(value["authorityId"]) is str
+        and re.fullmatch(r"containment-retry-sha256:[0-9a-f]{64}", value["authorityId"])
+        is not None
+    )
+
+
 __all__ = [
     "ContainmentServiceError",
     "FixtureRecord",
     "RecoveryCleanupEvidence",
+    "RecoveryProofEvidence",
     "ScenarioEvidence",
     "adjudicate_results",
     "adjudicate_run",

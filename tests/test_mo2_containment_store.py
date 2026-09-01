@@ -2,6 +2,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from unittest import mock
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from modlab.validation.mo2_containment_model import (
     ProcessEvidence,
     ProtectedState,
     ScenarioJournal,
+    ScenarioCleanupStatus,
+    ScenarioRecovery,
     ScenarioOutcome,
     ScenarioResult,
     ScenarioState,
@@ -28,6 +31,7 @@ from modlab.validation.mo2_containment_store import (
     ContainmentStore,
     ContainmentStoreError,
 )
+from modlab.validation import mo2_containment_store as containment_store
 
 
 WATCH_ROOT_KINDS = (
@@ -246,6 +250,113 @@ class ContainmentStoreTests(unittest.TestCase):
             "Captured requires durable after/result",
         ):
             store.transition(launched, ScenarioState.CAPTURED)
+
+    def test_journal_replace_uses_post_rename_durability_helper(self):
+        store = ContainmentStore(self.root)
+        journal = store.create(valid_prepared_journal(self.root))
+        calls = []
+        real = containment_store._replace_durable
+        with mock.patch.object(
+            containment_store,
+            "_replace_durable",
+            side_effect=lambda source, target: (calls.append((source, target)), real(source, target))[1],
+        ):
+            store.transition(journal, ScenarioState.ARMED, monitor_pid=17)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(store.journal_path(RUN_ID, journal.scenario), calls[0][1])
+
+    def test_windows_durable_replace_uses_replace_existing_and_write_through(self):
+        calls = []
+
+        class FakeMove:
+            argtypes = None
+            restype = None
+
+            def __call__(self, source, target, flags):
+                calls.append((source, target, flags))
+                return True
+
+        with (
+            mock.patch.object(containment_store.os, "name", "nt"),
+            mock.patch.object(
+                containment_store.ctypes,
+                "WinDLL",
+                return_value=type("Kernel", (), {"MoveFileExW": FakeMove()})(),
+            ),
+        ):
+            containment_store._replace_durable(Path("source.part"), Path("journal.json"))
+        self.assertEqual(0x00000001 | 0x00000008, calls[0][2])
+
+    def test_posix_durable_replace_syncs_parent_directory(self):
+        source = self.root / "source.part"
+        target = self.root / "journal.json"
+        with (
+            mock.patch.object(containment_store.os, "name", "posix"),
+            mock.patch.object(containment_store.os, "replace") as replace_call,
+            mock.patch.object(containment_store.os, "open", return_value=71) as open_call,
+            mock.patch.object(containment_store.os, "fsync") as fsync_call,
+            mock.patch.object(containment_store.os, "close") as close_call,
+        ):
+            containment_store._replace_durable(source, target)
+        replace_call.assert_called_once_with(source, target)
+        self.assertEqual(self.root, open_call.call_args.args[0])
+        fsync_call.assert_called_once_with(71)
+        close_call.assert_called_once_with(71)
+
+    def test_launch_evidence_is_strict_immutable_and_restart_loadable(self):
+        store = ContainmentStore(self.root)
+        document = {
+            "schemaVersion": 1,
+            "runId": RUN_ID,
+            "scenario": ContainmentScenario.MERGE_EXISTING.value,
+            "purpose": "stage-mo2-scenario",
+            "pid": 51,
+            "creationTime": 123456,
+            "executable": r"C:\stage\app\ModOrganizer.exe",
+            "executableVersion": "2.5.2.0",
+            "arguments": ["--profile", "ModLab - Lab"],
+            "workingDirectory": r"C:\stage\app",
+            "integrity": IntegrityObservation.LOW.value,
+        }
+        first = store.write_launch_evidence(RUN_ID, ContainmentScenario.MERGE_EXISTING, document)
+        second = store.write_launch_evidence(RUN_ID, ContainmentScenario.MERGE_EXISTING, document)
+        self.assertFalse(first.existed)
+        self.assertTrue(second.existed)
+        self.assertEqual(document, store.load_launch_evidence(RUN_ID, ContainmentScenario.MERGE_EXISTING))
+        with self.assertRaisesRegex(ContainmentStoreError, "different bytes"):
+            store.write_launch_evidence(
+                RUN_ID,
+                ContainmentScenario.MERGE_EXISTING,
+                {**document, "creationTime": 999},
+            )
+
+    def test_retry_authority_is_exact_and_consumed_once(self):
+        store = ContainmentStore(self.root)
+        recovery = ScenarioRecovery(
+            1, RUN_ID, ContainmentScenario.MERGE_EXISTING,
+            "containment-journal-sha256:" + "a" * 64,
+            "containment-result-sha256:" + "b" * 64,
+            ScenarioCleanupStatus.SUCCEEDED, True, (),
+        )
+        written = store.write_recovery(recovery)
+        fingerprint = "containment-command-sha256:" + "c" * 64
+        available = store.write_retry_authority(recovery, written.content_id, fingerprint)
+        self.assertEqual("Available", available.value["state"])
+        retry_of = store.consume_retry_authority(
+            recovery,
+            written.content_id,
+            fingerprint,
+            "containment-run:" + "d" * 32,
+        )
+        self.assertEqual(available.value["authorityId"], retry_of["authorityId"])
+        self.assertEqual("Consumed", store.load_retry_authority(RUN_ID, recovery.scenario)["state"])
+        with self.assertRaisesRegex(ContainmentStoreError, "already consumed"):
+            store.consume_retry_authority(
+                recovery,
+                written.content_id,
+                fingerprint,
+                "containment-run:" + "e" * 32,
+            )
 
 
 if __name__ == "__main__":

@@ -721,6 +721,7 @@ class WindowsIntegrityTests(unittest.TestCase):
             self.assertEqual(0, low_receipt.exit_code)
             self.assertEqual(hashlib.sha256(b"").hexdigest(), low_receipt.stderr_sha256)
             self.assertEqual(IntegrityLevel.LOW, launch.integrity)
+            self.assertGreater(launch.creation_time, 0)
             self.assertEqual(IntegrityLevel.LOW, inspect_process_integrity(launch.pid))
             self.assertEqual(b"stage-write", stage_file.read_bytes())
             self.assertEqual(b"source-original", source_file.read_bytes())

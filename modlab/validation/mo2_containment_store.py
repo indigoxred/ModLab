@@ -20,6 +20,7 @@ from .mo2_containment_model import (
     CapabilityDecision,
     CapabilityVerdict,
     ContainmentScenario,
+    IntegrityObservation,
     ProtectedState,
     ScenarioJournal,
     ScenarioRecovery,
@@ -183,6 +184,11 @@ class ContainmentStore:
                 raise ContainmentStoreError("stored journal differs after create")
             return loaded
 
+    def prepare_run_root(self, run_id: str) -> Path:
+        with self._run_lock(run_id):
+            self._prepare_run(run_id)
+            return self.run_path(run_id)
+
     def transition(
         self,
         observed: ScenarioJournal,
@@ -302,6 +308,36 @@ class ContainmentStore:
         with self._run_lock(run_id):
             return self._load_request_unlocked(run_id)
 
+    def write_launch_evidence(
+        self,
+        run_id: str,
+        scenario: ContainmentScenario,
+        document: dict[str, object],
+    ) -> ImmutableWrite[dict[str, object]]:
+        checked = _launch_document(document, run_id, scenario)
+        data = _canonical(checked)
+        target = self.launch_path(run_id, scenario)
+        with self._run_lock(run_id):
+            self._prepare_scenario(run_id, scenario)
+            existed = self._write_immutable(target, data, "launch evidence")
+            loaded = self._load_launch_evidence_unlocked(run_id, scenario)
+            if loaded != checked:
+                raise ContainmentStoreError("stored launch evidence differs after write")
+            return ImmutableWrite(
+                loaded,
+                "containment-launch-sha256:" + hashlib.sha256(data).hexdigest(),
+                target,
+                existed,
+            )
+
+    def load_launch_evidence(
+        self,
+        run_id: str,
+        scenario: ContainmentScenario,
+    ) -> dict[str, object]:
+        with self._run_lock(run_id):
+            return self._load_launch_evidence_unlocked(run_id, scenario)
+
     def write_protected_state(
         self,
         run_id: str,
@@ -414,6 +450,97 @@ class ContainmentStore:
                 raise ContainmentStoreError("stored recovery differs after write")
             return ImmutableWrite(loaded, identifier, target, existed)
 
+    def load_recovery(
+        self,
+        run_id: str,
+        scenario: ContainmentScenario,
+    ) -> ScenarioRecovery:
+        with self._run_lock(run_id):
+            return self._load_recovery_unlocked(run_id, scenario)
+
+    def write_retry_authority(
+        self,
+        recovery: ScenarioRecovery,
+        recovery_id: str,
+        command_fingerprint: str,
+    ) -> ImmutableWrite[dict[str, object]]:
+        basis = _retry_basis(recovery, recovery_id, command_fingerprint)
+        authority_id = "containment-retry-sha256:" + hashlib.sha256(
+            _canonical(basis)
+        ).hexdigest()
+        document = {
+            **basis,
+            "authorityId": authority_id,
+            "state": "Available",
+            "consumedByRunId": None,
+        }
+        data = _canonical(document)
+        target = self.retry_path(recovery.run_id, recovery.scenario)
+        with self._run_lock(recovery.run_id):
+            stored_recovery = self._load_recovery_unlocked(
+                recovery.run_id, recovery.scenario
+            )
+            if stored_recovery != recovery or self.recovery_id_for(recovery) != recovery_id:
+                raise ContainmentStoreError("retry authority recovery binding differs")
+            self._prepare_scenario(recovery.run_id, recovery.scenario)
+            existed = self._write_immutable(target, data, "retry authority")
+            loaded = self._load_retry_authority_unlocked(
+                recovery.run_id, recovery.scenario
+            )
+            return ImmutableWrite(loaded, authority_id, target, existed)
+
+    def load_retry_authority(
+        self,
+        run_id: str,
+        scenario: ContainmentScenario,
+    ) -> dict[str, object]:
+        with self._run_lock(run_id):
+            return self._load_retry_authority_unlocked(run_id, scenario)
+
+    def consume_retry_authority(
+        self,
+        recovery: ScenarioRecovery,
+        recovery_id: str,
+        command_fingerprint: str,
+        new_run_id: str,
+    ) -> dict[str, object]:
+        self._run_hex(new_run_id)
+        with self._run_lock(recovery.run_id):
+            stored_recovery = self._load_recovery_unlocked(
+                recovery.run_id, recovery.scenario
+            )
+            if stored_recovery != recovery or self.recovery_id_for(recovery) != recovery_id:
+                raise ContainmentStoreError("retry authority recovery binding differs")
+            current = self._load_retry_authority_unlocked(
+                recovery.run_id, recovery.scenario
+            )
+            basis = _retry_basis(recovery, recovery_id, command_fingerprint)
+            if any(current[name] != value for name, value in basis.items()):
+                raise ContainmentStoreError("retry authority command/recovery binding differs")
+            if current["state"] != "Available" or current["consumedByRunId"] is not None:
+                raise ContainmentStoreError("retry authority is already consumed")
+            replacement = {
+                **current,
+                "state": "Consumed",
+                "consumedByRunId": new_run_id,
+            }
+            self._atomic_replace(
+                self.retry_path(recovery.run_id, recovery.scenario),
+                _canonical(replacement),
+                _canonical(current),
+                "retry authority",
+            )
+            loaded = self._load_retry_authority_unlocked(
+                recovery.run_id, recovery.scenario
+            )
+            return {
+                "runId": recovery.run_id,
+                "scenario": recovery.scenario.value,
+                "recoveryId": recovery_id,
+                "authorityId": str(loaded["authorityId"]),
+                "commandFingerprint": command_fingerprint,
+            }
+
     def write_decision(
         self,
         value: CapabilityDecision,
@@ -445,6 +572,28 @@ class ContainmentStore:
             results, outcomes = self._resolve_decision_evidence_unlocked(probe)
             return self._decision_from_bytes(raw, results, outcomes)
 
+    def list_run_ids(self) -> tuple[str, ...]:
+        rows: list[str] = []
+        try:
+            entries = tuple(os.scandir(self.root))
+        except OSError as error:
+            raise ContainmentStoreError(f"cannot enumerate containment runs: {error}") from error
+        for entry in entries:
+            if re.fullmatch(r"[0-9a-f]{32}", entry.name) is None:
+                continue
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or entry.is_symlink()
+                or bool(getattr(metadata, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
+            ):
+                continue
+            rows.append("containment-run:" + entry.name)
+        return tuple(sorted(rows))
+
     def run_path(self, run_id: str) -> Path:
         return self.root / self._run_hex(run_id)
 
@@ -465,6 +614,12 @@ class ContainmentStore:
     def result_path(self, run_id: str, scenario: ContainmentScenario) -> Path:
         return self.scenario_path(run_id, scenario) / "result.json"
 
+    def retry_path(self, run_id: str, scenario: ContainmentScenario) -> Path:
+        return self.scenario_path(run_id, scenario) / "retry.json"
+
+    def launch_path(self, run_id: str, scenario: ContainmentScenario) -> Path:
+        return self.scenario_path(run_id, scenario) / "launch.json"
+
     def quarantine_path(self, run_id: str) -> Path:
         return self.run_path(run_id) / "quarantine"
 
@@ -474,6 +629,10 @@ class ContainmentStore:
     def journal_id_for(self, journal: ScenarioJournal) -> str:
         data = self._serialize(scenario_journal_to_bytes, journal, "journal")
         return "containment-journal-sha256:" + hashlib.sha256(data).hexdigest()
+
+    def recovery_id_for(self, recovery: ScenarioRecovery) -> str:
+        data = self._serialize(scenario_recovery_to_bytes, recovery, "scenario recovery")
+        return "containment-recovery-sha256:" + hashlib.sha256(data).hexdigest()
 
     def _prepare_run(self, run_id: str) -> None:
         self._ensure_direct_directory(self.run_path(run_id))
@@ -509,6 +668,21 @@ class ContainmentStore:
         if _canonical(value) != data:
             raise ContainmentStoreError("request bytes are not canonical")
         return value
+
+    def _load_launch_evidence_unlocked(
+        self,
+        run_id: str,
+        scenario: ContainmentScenario,
+    ) -> dict[str, object]:
+        data = self._read(self.launch_path(run_id, scenario), "launch evidence")
+        try:
+            document = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_json)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ContainmentStoreError(f"launch evidence is malformed: {error}") from error
+        checked = _launch_document(document, run_id, scenario)
+        if _canonical(checked) != data:
+            raise ContainmentStoreError("stored launch evidence bytes are not canonical")
+        return checked
 
     def _load_protected_state_unlocked(
         self,
@@ -567,6 +741,37 @@ class ContainmentStore:
             raise ContainmentStoreError("scenario result bytes are not canonical")
         return value
 
+    def _load_recovery_unlocked(
+        self,
+        run_id: str,
+        scenario: ContainmentScenario,
+    ) -> ScenarioRecovery:
+        data = self._read(
+            self.scenario_path(run_id, scenario) / "recovery.json",
+            "scenario recovery",
+        )
+        value = self._parse(scenario_recovery_from_bytes, data, "scenario recovery")
+        if value.run_id != run_id or value.scenario is not scenario:
+            raise ContainmentStoreError("stored recovery has wrong run/scenario binding")
+        if scenario_recovery_to_bytes(value) != data:
+            raise ContainmentStoreError("stored recovery bytes are not canonical")
+        return value
+
+    def _load_retry_authority_unlocked(
+        self,
+        run_id: str,
+        scenario: ContainmentScenario,
+    ) -> dict[str, object]:
+        data = self._read(self.retry_path(run_id, scenario), "retry authority")
+        try:
+            document = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_json)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ContainmentStoreError(f"retry authority is malformed: {error}") from error
+        checked = _retry_document(document, run_id, scenario)
+        if _canonical(checked) != data:
+            raise ContainmentStoreError("stored retry authority bytes are not canonical")
+        return checked
+
     def _resolve_decision_evidence_unlocked(
         self,
         decision: CapabilityDecision,
@@ -578,7 +783,7 @@ class ContainmentStore:
         for scenario in ContainmentScenario:
             try:
                 result = self._load_result_unlocked(decision.run_id, scenario)
-            except ContainmentStoreNotFound:
+            except ContainmentStoreError:
                 continue
             watch = self._load_watch_outcome_unlocked(
                 decision.run_id,
@@ -746,7 +951,7 @@ class ContainmentStore:
             self._reject_redirect(part)
             if self._read(target, label) != expected:
                 raise ContainmentStoreError(f"{label} changed before atomic replacement")
-            os.replace(part, target)
+            _replace_durable(part, target)
             if self._read(target, label) != data:
                 raise ContainmentStoreError(f"{label} differs after atomic replacement")
         except ContainmentStoreError:
@@ -816,6 +1021,122 @@ class ContainmentStore:
             return converter(data)
         except ContainmentFormatError as error:
             raise ContainmentStoreError(f"stored {label} is invalid: {error}") from error
+
+
+def _retry_basis(
+    recovery: ScenarioRecovery,
+    recovery_id: str,
+    command_fingerprint: str,
+) -> dict[str, object]:
+    if (
+        not isinstance(recovery, ScenarioRecovery)
+        or not recovery.fresh_run_permitted
+        or recovery.cleanup_status.value != "Succeeded"
+        or type(recovery_id) is not str
+        or re.fullmatch(r"containment-recovery-sha256:[0-9a-f]{64}", recovery_id)
+        is None
+        or type(command_fingerprint) is not str
+        or re.fullmatch(r"containment-command-sha256:[0-9a-f]{64}", command_fingerprint)
+        is None
+    ):
+        raise ContainmentStoreError("retry authority basis is invalid")
+    return {
+        "schemaVersion": 1,
+        "oldRunId": recovery.run_id,
+        "scenario": recovery.scenario.value,
+        "recoveryId": recovery_id,
+        "commandFingerprint": command_fingerprint,
+    }
+
+
+def _retry_document(
+    value: object,
+    run_id: str,
+    scenario: ContainmentScenario,
+) -> dict[str, object]:
+    fields = {
+        "schemaVersion", "oldRunId", "scenario", "recoveryId",
+        "commandFingerprint", "authorityId", "state", "consumedByRunId",
+    }
+    if type(value) is not dict or set(value) != fields:
+        raise ContainmentStoreError("retry authority fields are not exact")
+    if (
+        value["schemaVersion"] != 1
+        or value["oldRunId"] != run_id
+        or value["scenario"] != scenario.value
+        or type(value["recoveryId"]) is not str
+        or re.fullmatch(r"containment-recovery-sha256:[0-9a-f]{64}", value["recoveryId"])
+        is None
+        or type(value["commandFingerprint"]) is not str
+        or re.fullmatch(r"containment-command-sha256:[0-9a-f]{64}", value["commandFingerprint"])
+        is None
+        or type(value["authorityId"]) is not str
+        or re.fullmatch(r"containment-retry-sha256:[0-9a-f]{64}", value["authorityId"])
+        is None
+        or type(value["state"]) is not str
+        or value["state"] not in {"Available", "Consumed"}
+        or (
+            value["consumedByRunId"] is not None
+            and (
+                type(value["consumedByRunId"]) is not str
+                or _RUN.fullmatch(value["consumedByRunId"]) is None
+            )
+        )
+        or (value["state"] == "Available") != (value["consumedByRunId"] is None)
+    ):
+        raise ContainmentStoreError("retry authority values are malformed")
+    basis = {
+        name: value[name]
+        for name in (
+            "schemaVersion", "oldRunId", "scenario", "recoveryId",
+            "commandFingerprint",
+        )
+    }
+    expected_id = "containment-retry-sha256:" + hashlib.sha256(
+        _canonical(basis)
+    ).hexdigest()
+    if value["authorityId"] != expected_id:
+        raise ContainmentStoreError("retry authority content ID is invalid")
+    return dict(value)
+
+
+def _launch_document(
+    value: object,
+    run_id: str,
+    scenario: ContainmentScenario,
+) -> dict[str, object]:
+    fields = {
+        "schemaVersion", "runId", "scenario", "purpose", "pid",
+        "creationTime", "executable", "executableVersion", "arguments",
+        "workingDirectory", "integrity",
+    }
+    if type(value) is not dict or set(value) != fields:
+        raise ContainmentStoreError("launch evidence fields are not exact")
+    if (
+        value["schemaVersion"] != 1
+        or value["runId"] != run_id
+        or value["scenario"] != scenario.value
+        or value["purpose"] != "stage-mo2-scenario"
+        or type(value["pid"]) is not int
+        or value["pid"] <= 0
+        or type(value["creationTime"]) is not int
+        or value["creationTime"] <= 0
+        or type(value["executable"]) is not str
+        or not value["executable"]
+        or type(value["executableVersion"]) is not str
+        or not value["executableVersion"]
+        or type(value["workingDirectory"]) is not str
+        or not value["workingDirectory"]
+        or type(value["arguments"]) is not list
+        or any(type(item) is not str for item in value["arguments"])
+        or type(value["integrity"]) is not str
+    ):
+        raise ContainmentStoreError("launch evidence values are malformed")
+    try:
+        IntegrityObservation(value["integrity"])
+    except ValueError as error:
+        raise ContainmentStoreError("launch evidence integrity is malformed") from error
+    return dict(value)
 
 
 def _tree_document(value: TreeIdentity) -> dict[str, object]:
@@ -896,6 +1217,28 @@ def _promote_no_replace(source: Path, target: Path) -> None:
         raise OSError(error, "atomic no-replace promotion failed", str(target))
     os.link(source, target, follow_symlinks=False)
     source.unlink()
+
+
+def _replace_durable(source: Path, target: Path) -> None:
+    if os.name == "nt":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.MoveFileExW.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+        )
+        kernel32.MoveFileExW.restype = wintypes.BOOL
+        flags = 0x00000001 | 0x00000008
+        if not kernel32.MoveFileExW(str(source), str(target), flags):
+            error = ctypes.get_last_error()
+            raise OSError(error, "durable atomic replacement failed", str(target))
+        return
+    os.replace(source, target)
+    directory = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 __all__ = [
