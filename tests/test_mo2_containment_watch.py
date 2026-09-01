@@ -155,6 +155,11 @@ def _protected_state(tag: str) -> ProtectedState:
     return ProtectedState(tree, tag * 64, tag * 64, tree, tree, tree)
 
 
+def _publish_controller_pid_barrier(path: Path, worker_pid: int) -> None:
+    payload = str(worker_pid).encode("ascii")
+    windows_watch.publish_new_verified(path, payload, lambda data: int(data))
+
+
 @unittest.skipUnless(os.name == "nt", "ReadDirectoryChangesW requires Windows")
 class MutationWatchTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -240,6 +245,7 @@ class MutationWatchTests(unittest.TestCase):
                 "import time",
                 "from modlab.validation.mo2_containment_model import ContainmentScenario",
                 "from modlab.validation.windows_watch import ROOT_KINDS, WatchRequest, start_watch, watch_root",
+                "from tests.test_mo2_containment_watch import _publish_controller_pid_barrier",
                 "evidence, watched, barrier = map(Path, sys.argv[1:4])",
                 "root = watch_root('SourceMods', watched)",
                 "request = WatchRequest(",
@@ -252,7 +258,7 @@ class MutationWatchTests(unittest.TestCase):
                 "    roots=tuple(replace(root, root_kind=kind) for kind in ROOT_KINDS),",
                 ")",
                 "worker_pid = start_watch(request)",
-                "barrier.write_text(str(worker_pid), encoding='ascii')",
+                "_publish_controller_pid_barrier(barrier, worker_pid)",
                 "while True: time.sleep(1)",
             )
         )
@@ -676,6 +682,47 @@ class MutationWatchTests(unittest.TestCase):
             if request_path.absolute() in windows_watch._LOCAL_SESSIONS:
                 stop_watch(request_path)
 
+    def test_startup_retries_transient_ready_sharing_error_for_exact_live_worker(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        self.active_requests.append(request_path)
+        real_read = windows_watch._read_exact_regular_file
+        ready_reads = 0
+
+        def share_locked_once(path: Path, label: str) -> bytes:
+            nonlocal ready_reads
+            if path.name == "ready.json":
+                ready_reads += 1
+                if ready_reads == 1:
+                    raise OSError(
+                        32,
+                        "injected transient ready sharing violation",
+                        str(path),
+                    )
+            return real_read(path, label)
+
+        with mock.patch.object(
+            windows_watch,
+            "_read_exact_regular_file",
+            side_effect=share_locked_once,
+        ):
+            worker_pid = start_watch(request)
+
+        session = windows_watch._LOCAL_SESSIONS[request_path.absolute()]
+        self.assertEqual(worker_pid, session.worker_pid)
+        process_handle, creation_time = windows_watch._open_process_identity(worker_pid)
+        try:
+            self.assertEqual(session.worker_creation_time, creation_time)
+            self.assertEqual(
+                windows_watch._WAIT_TIMEOUT,
+                windows_watch._kernel32.WaitForSingleObject(process_handle, 0),
+            )
+        finally:
+            self.assertIsNone(
+                windows_watch._close_handle(process_handle, "transient-ready test worker")
+            )
+        self.assertEqual(2, ready_reads)
+
     def test_same_controller_requires_exact_zero_exit_before_completion(self):
         request_path, _ = self._start()
 
@@ -1063,6 +1110,7 @@ class MutationWatchTests(unittest.TestCase):
                 "import time",
                 "from modlab.validation.mo2_containment_model import ContainmentScenario",
                 "from modlab.validation.windows_watch import ROOT_KINDS, WatchRequest, start_watch, watch_root",
+                "from tests.test_mo2_containment_watch import _publish_controller_pid_barrier",
                 "evidence, watched, ready, finish, terminal_ready = map(Path, sys.argv[1:6])",
                 "root = watch_root('SourceMods', watched)",
                 "request = WatchRequest(",
@@ -1075,7 +1123,7 @@ class MutationWatchTests(unittest.TestCase):
                 "    roots=tuple(replace(root, root_kind=kind) for kind in ROOT_KINDS),",
                 ")",
                 "worker_pid = start_watch(request)",
-                "ready.write_text(str(worker_pid), encoding='ascii')",
+                "_publish_controller_pid_barrier(ready, worker_pid)",
                 "while not finish.exists(): time.sleep(0.01)",
                 "request.stop_token_path.write_bytes(b'stop\\n')",
                 "while not (evidence / 'terminal.json').exists(): time.sleep(0.01)",
@@ -1161,11 +1209,12 @@ class MutationWatchTests(unittest.TestCase):
                 "import time",
                 "from modlab.validation.mo2_containment_model import ContainmentScenario",
                 "import modlab.validation.windows_watch as watch",
+                "from tests.test_mo2_containment_watch import _publish_controller_pid_barrier",
                 "evidence, watched, barrier = map(Path, sys.argv[1:4])",
                 "real_publish = watch.publish_new_verified",
                 "def stall_launch(path, data, parse):",
                 "    if path.name == 'worker-launch.json':",
-                "        barrier.write_text(str(json.loads(data)['workerPid']), encoding='ascii')",
+                "        _publish_controller_pid_barrier(barrier, json.loads(data)['workerPid'])",
                 "        while True: time.sleep(1)",
                 "    return real_publish(path, data, parse)",
                 "watch.publish_new_verified = stall_launch",
@@ -1246,9 +1295,10 @@ class MutationWatchTests(unittest.TestCase):
                 "import time",
                 "from modlab.validation.mo2_containment_model import ContainmentScenario",
                 "import modlab.validation.windows_watch as watch",
+                "from tests.test_mo2_containment_watch import _publish_controller_pid_barrier",
                 "evidence, watched, barrier = map(Path, sys.argv[1:4])",
                 "def stall_ready(data, request, worker_pid, request_sha256, worker_creation_time):",
-                "    barrier.write_text(str(worker_pid), encoding='ascii')",
+                "    _publish_controller_pid_barrier(barrier, worker_pid)",
                 "    while True: time.sleep(1)",
                 "watch._parse_ready = stall_ready",
                 "root = watch.watch_root('SourceMods', watched)",
@@ -1335,6 +1385,7 @@ class MutationWatchTests(unittest.TestCase):
                 "import time",
                 "from modlab.validation.mo2_containment_model import ContainmentScenario",
                 "from modlab.validation.windows_watch import ROOT_KINDS, WatchRequest, start_watch, watch_root",
+                "from tests.test_mo2_containment_watch import _publish_controller_pid_barrier",
                 "evidence, watched, ready, release, token_ready = map(Path, sys.argv[1:6])",
                 "root = watch_root('SourceMods', watched)",
                 "request = WatchRequest(",
@@ -1347,7 +1398,7 @@ class MutationWatchTests(unittest.TestCase):
                 "    roots=tuple(replace(root, root_kind=kind) for kind in ROOT_KINDS),",
                 ")",
                 "worker_pid = start_watch(request)",
-                "ready.write_text(str(worker_pid), encoding='ascii')",
+                "_publish_controller_pid_barrier(ready, worker_pid)",
                 "while not release.exists(): time.sleep(0.01)",
                 "request.stop_token_path.write_bytes(b'stop\\n')",
                 "token_ready.write_text('ready', encoding='ascii')",
@@ -2780,6 +2831,7 @@ class MutationWatchTests(unittest.TestCase):
                 "import time",
                 "from modlab.validation.mo2_containment_model import ContainmentScenario",
                 "from modlab.validation.windows_watch import ROOT_KINDS, WatchRequest, start_watch, watch_root",
+                "from tests.test_mo2_containment_watch import _publish_controller_pid_barrier",
                 "evidence, watched, barrier = map(Path, sys.argv[1:4])",
                 "root = watch_root('SourceMods', watched)",
                 "request = WatchRequest(",
@@ -2792,7 +2844,7 @@ class MutationWatchTests(unittest.TestCase):
                 "    roots=tuple(replace(root, root_kind=kind) for kind in ROOT_KINDS),",
                 ")",
                 "worker_pid = start_watch(request)",
-                "barrier.write_text(str(worker_pid), encoding='ascii')",
+                "_publish_controller_pid_barrier(barrier, worker_pid)",
                 "while True: time.sleep(1)",
             )
         )
@@ -3153,6 +3205,86 @@ class MutationWatchTests(unittest.TestCase):
                 writer.join()
 
         self.assertEqual(b"ready\n", target.read_bytes())
+
+    def test_controller_pid_barrier_is_nonempty_before_visibility(self):
+        target = self.root / "controller-pid.txt"
+        entered_write = threading.Event()
+        release_write = threading.Event()
+        real_os_write = os.write
+
+        def delayed_path_write_text(path: Path, data: str, **kwargs: object) -> int:
+            with path.open("w", **kwargs) as stream:
+                entered_write.set()
+                self.assertTrue(release_write.wait(5.0))
+                return stream.write(data)
+
+        def delayed_os_write(descriptor: int, data: object) -> int:
+            entered_write.set()
+            self.assertTrue(release_write.wait(5.0))
+            return real_os_write(descriptor, data)
+
+        with mock.patch.object(
+            Path,
+            "write_text",
+            new=delayed_path_write_text,
+        ), mock.patch.object(
+            windows_watch.os,
+            "write",
+            side_effect=delayed_os_write,
+        ):
+            writer = threading.Thread(
+                target=_publish_controller_pid_barrier,
+                args=(target, 4242),
+            )
+            writer.start()
+            self.assertTrue(entered_write.wait(5.0))
+            try:
+                self.assertFalse(target.exists())
+            finally:
+                release_write.set()
+                writer.join()
+
+        self.assertEqual("4242", target.read_text(encoding="ascii"))
+
+    def test_external_fixture_cleanup_waits_exact_worker_after_fixture_failure(self):
+        controller, _, _, worker_pid, cleanup_handle = (
+            self._external_controller_fixture("fixture-failure-cleanup")
+        )
+        observation_handle, creation_time = windows_watch._open_process_identity(worker_pid)
+        session_creation_time = windows_watch.worker_launch_from_bytes(
+            (self.root / "fixture-failure-cleanup" / "evidence" / "worker-launch.json").read_bytes(),
+            windows_watch._load_request_path(
+                self.root / "fixture-failure-cleanup" / "evidence" / "request.json"
+            ),
+        ).worker_creation_time
+        try:
+            self.assertEqual(session_creation_time, creation_time)
+            with self.assertRaisesRegex(AssertionError, "injected fixture failure"):
+                try:
+                    self.fail("injected fixture failure")
+                finally:
+                    self._finish_external_fixture(
+                        controller,
+                        worker_pid,
+                        cleanup_handle,
+                    )
+            cleanup_handle = 0
+            self.assertEqual(
+                windows_watch._WAIT_OBJECT_0,
+                windows_watch._kernel32.WaitForSingleObject(
+                    observation_handle,
+                    0,
+                ),
+            )
+        finally:
+            if cleanup_handle:
+                self._finish_external_fixture(controller, worker_pid, cleanup_handle)
+            self.assertIsNone(
+                windows_watch._close_handle(
+                    observation_handle,
+                    "fixture-failure observation worker",
+                )
+            )
 
     def test_events_and_manifests_are_independent_required_proofs(self):
         clean = WatchReceipt(

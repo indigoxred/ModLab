@@ -108,6 +108,8 @@ _NOTIFY_FILTER = (
     | _FILE_NOTIFY_CHANGE_SECURITY
 )
 _ERROR_INVALID_PARAMETER = 87
+_ERROR_SHARING_VIOLATION = 32
+_ERROR_LOCK_VIOLATION = 33
 _ERROR_FILE_EXISTS = 80
 _ERROR_ALREADY_EXISTS = 183
 _ERROR_IO_PENDING = 997
@@ -1158,8 +1160,31 @@ def start_watch(request: WatchRequest) -> int:
     try:
         while time.monotonic() < deadline:
             if ready_path.exists():
+                try:
+                    ready_bytes = _read_exact_regular_file(
+                        ready_path,
+                        "ready record",
+                    )
+                except OSError as error:
+                    error_code = getattr(error, "winerror", None)
+                    if error_code is None:
+                        error_code = error.errno
+                    if error_code not in {
+                        _ERROR_SHARING_VIOLATION,
+                        _ERROR_LOCK_VIOLATION,
+                    }:
+                        raise
+                    if (
+                        _kernel32.WaitForSingleObject(process_handle, 0)
+                        == _WAIT_OBJECT_0
+                    ):
+                        raise WatchProtocolError(
+                            "watch worker exited before ready"
+                        ) from error
+                    time.sleep(0.02)
+                    continue
                 _parse_ready(
-                    _read_exact_regular_file(ready_path, "ready record"),
+                    ready_bytes,
                     normalized,
                     process.pid,
                     request_sha256,
