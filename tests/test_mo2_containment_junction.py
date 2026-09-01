@@ -1,4 +1,6 @@
 import hashlib
+import ctypes
+from dataclasses import replace
 import os
 from pathlib import Path
 import struct
@@ -68,6 +70,9 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
         marker.write_bytes(b"changed-after-projection")
         self.assertEqual(b"changed-after-projection", (stage / "marker.txt").read_bytes())
 
+    def test_file_disposition_info_uses_the_one_byte_boolean_abi(self):
+        self.assertEqual(1, ctypes.sizeof(windows_junction._FILE_DISPOSITION_INFO))
+
     def test_projection_rejects_a_reparse_component_in_the_source_path(self):
         outside = self.root / "outside"
         alias = self.root / "source-alias"
@@ -93,7 +98,7 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
 
         with mock.patch.object(
             windows_junction,
-            "inspect_junction",
+            "_inspect_junction_handle",
             side_effect=ContainmentSafetyError("injected readback failure"),
         ):
             with self.assertRaisesRegex(ContainmentSafetyError, "readback failure"):
@@ -101,6 +106,126 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
 
         self.assertFalse(link.exists())
         self.assertEqual(b"protected", marker.read_bytes())
+
+    def test_projection_readback_retains_the_exact_link_against_reconstruction(self):
+        source = self.root / "source"
+        stage_root = self.root / "stage"
+        link = stage_root / "Projected"
+        source.mkdir()
+        stage_root.mkdir()
+        real_read = windows_junction._read_reparse_payload_handle
+        real_create = windows_junction.create_mod_projection
+        race = {"attempted": False, "blocked": False, "reconstructing": False}
+
+        def read_with_reconstruction(handle, path):
+            if Path(path) == link and not race["attempted"] and not race["reconstructing"]:
+                race["attempted"] = True
+                try:
+                    link.rmdir()
+                    race["reconstructing"] = True
+                    real_create(source, link)
+                except PermissionError:
+                    race["blocked"] = True
+                finally:
+                    race["reconstructing"] = False
+            return real_read(handle, path)
+
+        with mock.patch.object(
+            windows_junction,
+            "_read_reparse_payload_handle",
+            side_effect=read_with_reconstruction,
+        ):
+            evidence = create_mod_projection(source, link)
+
+        self.assertTrue(race["attempted"])
+        self.assertTrue(race["blocked"])
+        self.assertEqual(source.resolve(strict=True), evidence.target_path)
+
+    def test_projection_open_failure_leaves_unknown_identity_untouched(self):
+        source = self.root / "source"
+        stage_root = self.root / "stage"
+        link = stage_root / "Projected"
+        source.mkdir()
+        stage_root.mkdir()
+        real_open = windows_junction._open_no_follow
+
+        def fail_link_open(path, desired_access=0, **kwargs):
+            if Path(path) == link:
+                raise PermissionError("injected exact-identity failure")
+            return real_open(path, desired_access, **kwargs)
+
+        with mock.patch.object(
+            windows_junction,
+            "_open_no_follow",
+            side_effect=fail_link_open,
+        ):
+            with self.assertRaisesRegex(
+                ContainmentSafetyError,
+                "identity was never established",
+            ):
+                create_mod_projection(source, link)
+
+        self.assertTrue(link.is_dir())
+        self.assertEqual([], list(link.iterdir()))
+
+    def test_projection_identity_read_failure_closes_handle_and_leaves_path(self):
+        source = self.root / "source"
+        stage_root = self.root / "stage"
+        link = stage_root / "Projected"
+        source.mkdir()
+        stage_root.mkdir()
+        real_information = windows_junction._handle_information
+
+        def fail_link_identity(handle, path):
+            if Path(path) == link:
+                raise OSError("injected file-id failure")
+            return real_information(handle, path)
+
+        with mock.patch.object(
+            windows_junction,
+            "_handle_information",
+            side_effect=fail_link_identity,
+        ):
+            with self.assertRaisesRegex(
+                ContainmentSafetyError,
+                "identity was never established",
+            ):
+                create_mod_projection(source, link)
+
+        self.assertTrue(link.is_dir())
+        link.rmdir()
+        self.assertFalse(link.exists())
+
+    def test_projection_readback_cleanup_failure_is_explicit_and_retains_link(self):
+        source = self.root / "source"
+        stage_root = self.root / "stage"
+        link = stage_root / "Projected"
+        source.mkdir()
+        stage_root.mkdir()
+
+        def fail_disposition(*args):
+            ctypes.set_last_error(5)
+            return False
+
+        with (
+            mock.patch.object(
+                windows_junction,
+                "_inspect_junction_handle",
+                side_effect=ContainmentSafetyError("injected readback failure"),
+            ),
+            mock.patch.object(
+                windows_junction._kernel32,
+                "SetFileInformationByHandle",
+                side_effect=fail_disposition,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ContainmentSafetyError,
+                "readback failure.*exact-handle cleanup also failed",
+            ):
+                create_mod_projection(source, link)
+
+        self.assertTrue(link.exists())
 
     def test_build_projection_is_casefold_sorted_and_rejects_source_reparse_entries(self):
         source_mods = self.root / "source-mods"
@@ -138,10 +263,10 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
             mod.mkdir()
             (mod / "marker.txt").write_bytes(name.encode("ascii"))
 
-        real_create = windows_junction.create_mod_projection
-        real_inspect = windows_junction.inspect_junction
+        real_create = windows_junction._create_mod_projection_retained
+        real_delete = windows_junction._delete_exact_projection
         failure_started = False
-        rollback_inspections = []
+        rollback_deletions = []
 
         def create_or_fail(source_mod, staging_mod):
             nonlocal failure_started
@@ -150,28 +275,82 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
                 raise OSError("injected third projection failure")
             return real_create(source_mod, staging_mod)
 
-        def inspect_and_record(path):
-            evidence = real_inspect(path)
-            if failure_started:
-                rollback_inspections.append(Path(path).name)
-            return evidence
+        def delete_and_record(retained):
+            rollback_deletions.append(retained.pinned.path.name)
+            return real_delete(retained)
 
         with (
             mock.patch.object(
                 windows_junction,
-                "create_mod_projection",
+                "_create_mod_projection_retained",
                 side_effect=create_or_fail,
             ),
             mock.patch.object(
                 windows_junction,
-                "inspect_junction",
-                side_effect=inspect_and_record,
+                "_delete_exact_projection",
+                side_effect=delete_and_record,
             ),
         ):
             with self.assertRaisesRegex(OSError, "third projection failure"):
                 build_projection(source_mods, stage_mods)
 
-        self.assertEqual(["Beta", "Alpha"], rollback_inspections)
+        self.assertEqual(["Beta", "Alpha"], rollback_deletions)
+        self.assertEqual([], list(stage_mods.iterdir()))
+        for name in ("Alpha", "Beta", "Gamma"):
+            self.assertEqual(
+                name.encode("ascii"),
+                (source_mods / name / "marker.txt").read_bytes(),
+            )
+
+    def test_build_projection_blocks_identical_reconstruction_before_rollback(self):
+        source_mods = self.root / "source"
+        stage_mods = self.root / "stage"
+        source_mods.mkdir()
+        stage_mods.mkdir()
+        for name in ("Alpha", "Beta", "Gamma"):
+            mod = source_mods / name
+            mod.mkdir()
+            (mod / "marker.txt").write_bytes(name.encode("ascii"))
+
+        alpha_link = stage_mods / "Alpha"
+        real_ioctl = windows_junction._kernel32.DeviceIoControl
+        real_create = windows_junction.create_mod_projection
+        state = {
+            "set_calls": 0,
+            "attempted": False,
+            "blocked": False,
+            "reconstructing": False,
+        }
+
+        def fail_third_set(*args):
+            control_code = args[1]
+            if control_code == windows_junction._FSCTL_SET_REPARSE_POINT:
+                if not state["reconstructing"]:
+                    state["set_calls"] += 1
+                if state["set_calls"] == 3 and not state["attempted"]:
+                    state["attempted"] = True
+                    try:
+                        alpha_link.rmdir()
+                        state["reconstructing"] = True
+                        real_create(source_mods / "Alpha", alpha_link)
+                    except PermissionError:
+                        state["blocked"] = True
+                    finally:
+                        state["reconstructing"] = False
+                    ctypes.set_last_error(5)
+                    return False
+            return real_ioctl(*args)
+
+        with mock.patch.object(
+            windows_junction._kernel32,
+            "DeviceIoControl",
+            side_effect=fail_third_set,
+        ):
+            with self.assertRaisesRegex(OSError, "FSCTL_SET_REPARSE_POINT"):
+                build_projection(source_mods, stage_mods)
+
+        self.assertTrue(state["attempted"])
+        self.assertTrue(state["blocked"])
         self.assertEqual([], list(stage_mods.iterdir()))
         for name in ("Alpha", "Beta", "Gamma"):
             self.assertEqual(
@@ -182,29 +361,41 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
     def test_build_projection_rollback_leaves_a_changed_junction_untouched(self):
         source_mods = self.root / "source"
         stage_mods = self.root / "stage"
-        wrong_target = self.root / "wrong-target"
         source_mods.mkdir()
         stage_mods.mkdir()
-        wrong_target.mkdir()
-        (wrong_target / "marker.txt").write_bytes(b"wrong")
         for name in ("Alpha", "Beta", "Gamma"):
             mod = source_mods / name
             mod.mkdir()
             (mod / "marker.txt").write_bytes(name.encode("ascii"))
 
-        real_create = windows_junction.create_mod_projection
+        real_create = windows_junction._create_mod_projection_retained
+        real_inspect = windows_junction._inspect_junction_handle
+        failure_started = False
 
-        def create_replace_then_fail(source_mod, staging_mod):
+        def create_then_fail(source_mod, staging_mod):
+            nonlocal failure_started
             if Path(source_mod).name == "Gamma":
-                (stage_mods / "Alpha").rmdir()
-                real_create(wrong_target, stage_mods / "Alpha")
+                failure_started = True
                 raise OSError("injected third projection failure")
             return real_create(source_mod, staging_mod)
 
-        with mock.patch.object(
-            windows_junction,
-            "create_mod_projection",
-            side_effect=create_replace_then_fail,
+        def changed_readback(path, handle):
+            evidence = real_inspect(path, handle)
+            if failure_started and Path(path).name == "Alpha":
+                return replace(evidence, reparse_payload_sha256="0" * 64)
+            return evidence
+
+        with (
+            mock.patch.object(
+                windows_junction,
+                "_create_mod_projection_retained",
+                side_effect=create_then_fail,
+            ),
+            mock.patch.object(
+                windows_junction,
+                "_inspect_junction_handle",
+                side_effect=changed_readback,
+            ),
         ):
             with self.assertRaisesRegex(
                 ContainmentSafetyError,
@@ -214,8 +405,7 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
 
         self.assertFalse((stage_mods / "Beta").exists())
         changed = inspect_junction(stage_mods / "Alpha")
-        self.assertEqual(wrong_target.resolve(strict=True), changed.target_path)
-        self.assertEqual(b"wrong", (wrong_target / "marker.txt").read_bytes())
+        self.assertEqual((source_mods / "Alpha").resolve(strict=True), changed.target_path)
         for name in ("Alpha", "Beta", "Gamma"):
             self.assertEqual(
                 name.encode("ascii"),
@@ -399,6 +589,125 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
         self.assertEqual(external_integrity, inspect_path_integrity(external))
         self.assertEqual(b"outside", (external / "outside.txt").read_bytes())
 
+    def test_late_unpinned_directory_is_rejected_without_junction_traversal(self):
+        stage, source, quarantine = self._adoption_roots()
+        candidate = stage / "Expected"
+        late = candidate / "late"
+        external = self.root / "external"
+        candidate.mkdir()
+        external.mkdir()
+        (candidate / "inside.txt").write_bytes(b"inside")
+        (external / "outside.txt").write_bytes(b"outside")
+        set_low_integrity_tree(candidate)
+        external_integrity = inspect_path_integrity(external)
+        real_pin_descendants = windows_junction._pin_descendants
+        real_attribute_tag = windows_junction._attribute_tag
+        real_scandir = windows_junction.os.scandir
+        race = {
+            "inserted": False,
+            "swapped": False,
+            "external_traversed": False,
+        }
+
+        def pin_then_insert(tree):
+            result = real_pin_descendants(tree)
+            if not race["inserted"]:
+                late.mkdir()
+                race["inserted"] = True
+            return result
+
+        def attribute_then_swap(path):
+            observed = real_attribute_tag(path)
+            if Path(path) == late and not race["swapped"]:
+                race["swapped"] = True
+                late.rmdir()
+                create_mod_projection(external, late)
+            return observed
+
+        def record_scandir(path):
+            if Path(path) == late and race["swapped"]:
+                race["external_traversed"] = True
+            return real_scandir(path)
+
+        with (
+            mock.patch.object(
+                windows_junction,
+                "_pin_descendants",
+                side_effect=pin_then_insert,
+            ),
+            mock.patch.object(
+                windows_junction,
+                "_attribute_tag",
+                side_effect=attribute_then_swap,
+            ),
+            mock.patch.object(
+                windows_junction.os,
+                "scandir",
+                side_effect=record_scandir,
+            ),
+            mock.patch.object(
+                windows_junction,
+                "set_medium_integrity_entries",
+                wraps=windows_junction.set_medium_integrity_entries,
+            ) as normalize,
+        ):
+            with self.assertRaisesRegex(ContainmentSafetyError, "membership changed"):
+                adopt_unique_staged_mod(
+                    stage_mods=stage,
+                    source_mods=source,
+                    expected_name="Expected",
+                    before_names=(),
+                    quarantine_root=quarantine,
+                )
+
+        self.assertTrue(race["inserted"])
+        self.assertFalse(race["external_traversed"])
+        normalize.assert_not_called()
+        self.assertEqual(external_integrity, inspect_path_integrity(external))
+        self.assertEqual(b"outside", (external / "outside.txt").read_bytes())
+
+    def test_pin_first_type_validation_uses_the_retained_handle_not_direntry_stat(self):
+        stage, source, quarantine = self._adoption_roots()
+        candidate = stage / "Expected"
+        candidate.mkdir()
+        (candidate / "inside.txt").write_bytes(b"inside")
+        set_low_integrity_tree(candidate)
+        real_scandir = windows_junction.os.scandir
+
+        class EntryWithoutStat:
+            def __init__(self, entry):
+                self.name = entry.name
+                self.path = entry.path
+
+            def stat(self, *, follow_symlinks=True):
+                raise AssertionError("DirEntry.stat must not classify a retained child")
+
+        def scandir_without_stat(path):
+            entries = real_scandir(path)
+            if Path(path) != candidate:
+                return entries
+            try:
+                wrapped = tuple(EntryWithoutStat(entry) for entry in entries)
+            finally:
+                entries.close()
+            return iter(wrapped)
+
+        with mock.patch.object(
+            windows_junction.os,
+            "scandir",
+            side_effect=scandir_without_stat,
+        ):
+            result = adopt_unique_staged_mod(
+                stage_mods=stage,
+                source_mods=source,
+                expected_name="Expected",
+                before_names=(),
+                quarantine_root=quarantine,
+            )
+
+        self.assertEqual(result.before_tree, result.after_tree)
+        self.assertEqual(b"inside", (source / "Expected" / "inside.txt").read_bytes())
+
     def test_pinned_quarantine_never_moves_replacement_at_the_old_path(self):
         stage, source, quarantine = self._adoption_roots()
         candidate = stage / "Expected"
@@ -506,6 +815,144 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
         self.assertEqual(b"candidate", (quarantine / "Expected" / "marker.txt").read_bytes())
         self.assertEqual(b"protected", (protected / "marker.txt").read_bytes())
 
+    def test_wrong_baseline_quarantine_uses_the_classified_junction_handle(self):
+        stage, source, quarantine = self._adoption_roots()
+        protected = source / "Protected Existing"
+        wrong_target = self.root / "wrong-direct-target"
+        baseline = stage / "Protected Existing"
+        protected.mkdir()
+        wrong_target.mkdir()
+        (protected / "marker.txt").write_bytes(b"protected")
+        (wrong_target / "marker.txt").write_bytes(b"wrong")
+        create_mod_projection(wrong_target, baseline)
+        candidate = stage / "Expected"
+        candidate.mkdir()
+        (candidate / "marker.txt").write_bytes(b"candidate")
+        real_inspect_handle = windows_junction._inspect_junction_handle
+        race = {"attempted": False, "blocked": False}
+
+        def inspect_then_replace(path, handle):
+            evidence = real_inspect_handle(path, handle)
+            if Path(path) == baseline and not race["attempted"]:
+                race["attempted"] = True
+                try:
+                    baseline.rmdir()
+                    baseline.mkdir()
+                    (baseline / "marker.txt").write_bytes(b"replacement")
+                except PermissionError:
+                    race["blocked"] = True
+            return evidence
+
+        with mock.patch.object(
+            windows_junction,
+            "_inspect_junction_handle",
+            side_effect=inspect_then_replace,
+        ):
+            with self.assertRaisesRegex(ContainmentSafetyError, "changed staging projection"):
+                adopt_unique_staged_mod(
+                    stage_mods=stage,
+                    source_mods=source,
+                    expected_name="Expected",
+                    before_names=("Protected Existing",),
+                    quarantine_root=quarantine,
+                )
+
+        self.assertTrue(race["attempted"])
+        self.assertTrue(race["blocked"])
+        quarantined = inspect_junction(quarantine / "Protected Existing")
+        self.assertEqual(wrong_target.resolve(strict=True), quarantined.target_path)
+        self.assertEqual(b"wrong", (wrong_target / "marker.txt").read_bytes())
+        self.assertEqual(b"protected", (protected / "marker.txt").read_bytes())
+
+    def test_valid_baseline_handle_is_retained_through_candidate_normalization(self):
+        stage, source, quarantine = self._adoption_roots()
+        protected = source / "Protected Existing"
+        baseline = stage / "Protected Existing"
+        protected.mkdir()
+        (protected / "marker.txt").write_bytes(b"protected")
+        create_mod_projection(protected, baseline)
+        candidate = stage / "Expected"
+        candidate.mkdir()
+        (candidate / "marker.txt").write_bytes(b"candidate")
+        set_low_integrity_tree(candidate)
+        real_normalize = windows_junction.set_medium_integrity_entries
+        race = {"attempted": False, "blocked": False}
+
+        def normalize_with_baseline_replacement(paths):
+            race["attempted"] = True
+            try:
+                baseline.rmdir()
+                baseline.mkdir()
+                (baseline / "marker.txt").write_bytes(b"replacement")
+            except PermissionError:
+                race["blocked"] = True
+            return real_normalize(paths)
+
+        with mock.patch.object(
+            windows_junction,
+            "set_medium_integrity_entries",
+            side_effect=normalize_with_baseline_replacement,
+        ):
+            result = adopt_unique_staged_mod(
+                stage_mods=stage,
+                source_mods=source,
+                expected_name="Expected",
+                before_names=("Protected Existing",),
+                quarantine_root=quarantine,
+            )
+
+        self.assertTrue(race["attempted"])
+        self.assertTrue(race["blocked"])
+        self.assertEqual(result.before_tree, result.after_tree)
+        baseline_evidence = inspect_junction(baseline)
+        self.assertEqual(protected.resolve(strict=True), baseline_evidence.target_path)
+        self.assertEqual(b"protected", (protected / "marker.txt").read_bytes())
+
+    def test_early_reparse_rejection_quarantines_the_classified_handle(self):
+        stage, source, quarantine = self._adoption_roots()
+        external = self.root / "external"
+        candidate = stage / "Expected"
+        external.mkdir()
+        (external / "outside.txt").write_bytes(b"outside")
+        create_mod_projection(external, candidate)
+        real_attribute_tag = windows_junction._attribute_tag_for_handle
+        race = {"attempted": False, "blocked": False}
+
+        def classify_then_replace(handle, path):
+            attributes = real_attribute_tag(handle, path)
+            if Path(path) == candidate and not race["attempted"]:
+                race["attempted"] = True
+                try:
+                    candidate.rmdir()
+                    candidate.mkdir()
+                    (candidate / "marker.txt").write_bytes(b"replacement")
+                except PermissionError:
+                    race["blocked"] = True
+            return attributes
+
+        with mock.patch.object(
+            windows_junction,
+            "_attribute_tag_for_handle",
+            side_effect=classify_then_replace,
+        ):
+            with self.assertRaisesRegex(
+                ContainmentSafetyError,
+                "not a direct regular directory",
+            ):
+                adopt_unique_staged_mod(
+                    stage_mods=stage,
+                    source_mods=source,
+                    expected_name="Expected",
+                    before_names=(),
+                    quarantine_root=quarantine,
+                )
+
+        self.assertTrue(race["attempted"])
+        self.assertTrue(race["blocked"])
+        quarantined = inspect_junction(quarantine / "Expected")
+        self.assertEqual(external.resolve(strict=True), quarantined.target_path)
+        self.assertEqual(b"outside", (external / "outside.txt").read_bytes())
+
     def test_destination_appearing_at_rename_boundary_is_not_replaced(self):
         stage, source, quarantine = self._adoption_roots()
         candidate = stage / "Expected"
@@ -541,23 +988,23 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
         candidate = stage / "Expected"
         candidate.mkdir()
         (candidate / "marker.txt").write_bytes(b"before")
-        real_stable_identity = windows_junction.stable_tree_identity
+        real_stable_identity = windows_junction._stable_pinned_tree_identity
         calls = 0
         blocked = False
 
-        def mutate_before_second_identity(path: Path, *, required_equal_passes: int):
+        def mutate_before_second_identity(tree, *, required_equal_passes: int):
             nonlocal calls, blocked
             calls += 1
             if calls == 2:
                 try:
-                    (path / "marker.txt").write_bytes(b"after")
+                    (tree.root.path / "marker.txt").write_bytes(b"after")
                 except PermissionError:
                     blocked = True
-            return real_stable_identity(path, required_equal_passes=required_equal_passes)
+            return real_stable_identity(tree, required_equal_passes=required_equal_passes)
 
         with mock.patch.object(
             windows_junction,
-            "stable_tree_identity",
+            "_stable_pinned_tree_identity",
             side_effect=mutate_before_second_identity,
         ):
             result = adopt_unique_staged_mod(

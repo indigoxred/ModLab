@@ -40,6 +40,8 @@ _FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000
 _FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
 _FILE_RENAME_INFO_CLASS = 3
 _FILE_DISPOSITION_INFO_CLASS = 4
+_FILE_BEGIN = 0
+_FILE_TYPE_DISK = 0x0001
 _ERROR_FILE_EXISTS = 80
 _ERROR_ALREADY_EXISTS = 183
 _MAXIMUM_REPARSE_DATA_BUFFER_SIZE = 16 * 1024
@@ -112,6 +114,21 @@ class _PinnedTreeRejected(ContainmentSafetyError):
         self.tree = tree
 
 
+@dataclass
+class _RetainedJunction:
+    evidence: JunctionEvidence
+    pinned: _PinnedObject
+
+    def close(self) -> None:
+        self.pinned.close()
+
+
+@dataclass
+class _StagingSelection:
+    candidate: _PinnedObject
+    baselines: list[_RetainedJunction]
+
+
 if os.name == "nt":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
@@ -144,7 +161,7 @@ if os.name == "nt":
         ]
 
     class _FILE_DISPOSITION_INFO(ctypes.Structure):
-        _fields_ = [("DeleteFile", wintypes.BOOL)]
+        _fields_ = [("DeleteFile", wintypes.BOOLEAN)]
 
     _kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
@@ -194,6 +211,15 @@ if os.name == "nt":
         ctypes.c_void_p,
     ]
     _kernel32.ReadFile.restype = wintypes.BOOL
+    _kernel32.SetFilePointerEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_longlong,
+        ctypes.POINTER(ctypes.c_longlong),
+        wintypes.DWORD,
+    ]
+    _kernel32.SetFilePointerEx.restype = wintypes.BOOL
+    _kernel32.GetFileType.argtypes = [wintypes.HANDLE]
+    _kernel32.GetFileType.restype = wintypes.DWORD
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _kernel32.CloseHandle.restype = wintypes.BOOL
 
@@ -380,12 +406,11 @@ def _parse_mount_point_payload(payload: bytes) -> tuple[str, str]:
     return values[0], values[1]
 
 
-def inspect_junction(path: Path) -> JunctionEvidence:
-    link = _require_direct_components(path, allow_final_reparse=True)
-    attributes, tag = _attribute_tag(link)
+def _inspect_junction_handle(link: Path, handle: int) -> JunctionEvidence:
+    attributes, tag = _attribute_tag_for_handle(handle, link)
     if tag != IO_REPARSE_TAG_MOUNT_POINT or not attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
         raise ContainmentSafetyError(f"path is not a mount-point junction: {link}")
-    payload = _read_reparse_payload(link)
+    payload = _read_reparse_payload_handle(handle, link)
     substitute_name, print_name = _parse_mount_point_payload(payload)
     if not substitute_name.startswith("\\??\\") or not print_name:
         raise ContainmentSafetyError("mount-point target names are not canonical")
@@ -405,7 +430,33 @@ def inspect_junction(path: Path) -> JunctionEvidence:
     )
 
 
-def create_mod_projection(source_mod: Path, staging_mod: Path) -> JunctionEvidence:
+def inspect_junction(path: Path) -> JunctionEvidence:
+    link = _require_direct_components(path, allow_final_reparse=True)
+    handle = _open_no_follow(link, _GENERIC_READ)
+    try:
+        return _inspect_junction_handle(link, handle)
+    finally:
+        _close_handle(handle)
+
+
+def _delete_exact_pinned_object(pinned: _PinnedObject) -> None:
+    disposition = _FILE_DISPOSITION_INFO(True)
+    if not _kernel32.SetFileInformationByHandle(
+        pinned.handle,
+        _FILE_DISPOSITION_INFO_CLASS,
+        ctypes.byref(disposition),
+        ctypes.sizeof(disposition),
+    ):
+        raise _winerror(f"handle-based exact cleanup failed for {pinned.path}")
+    pinned.close()
+    if _exists_no_follow(pinned.path):
+        raise ContainmentSafetyError(f"exact object remained after cleanup: {pinned.path}")
+
+
+def _create_mod_projection_retained(
+    source_mod: Path,
+    staging_mod: Path,
+) -> _RetainedJunction:
     source = _require_direct_directory(source_mod).resolve(strict=True)
     link = _absolute(staging_mod)
     parent = _require_direct_directory(link.parent)
@@ -422,41 +473,73 @@ def create_mod_projection(source_mod: Path, staging_mod: Path) -> JunctionEviden
     print_name = str(source)
     payload = _mount_point_payload(substitute_name, print_name)
     created = False
+    pinned: _PinnedObject | None = None
     try:
         link.mkdir()
         created = True
-        handle = _open_no_follow(link, _GENERIC_WRITE)
         try:
-            native_buffer = ctypes.create_string_buffer(payload)
-            returned = wintypes.DWORD()
-            if not _kernel32.DeviceIoControl(
-                handle,
-                _FSCTL_SET_REPARSE_POINT,
-                native_buffer,
-                len(payload),
-                None,
-                0,
-                ctypes.byref(returned),
-                None,
-            ):
-                raise _winerror(f"FSCTL_SET_REPARSE_POINT failed for {link}")
-        finally:
+            handle = _open_no_follow(
+                link,
+                _DELETE | _GENERIC_READ | _GENERIC_WRITE,
+                share_mode=_FILE_SHARE_READ,
+            )
+        except BaseException as identity_error:
+            raise ContainmentSafetyError(
+                f"projection identity was never established; ambiguous path left untouched: {link}"
+            ) from identity_error
+        try:
+            identity = _file_identity(_handle_information(handle, link))
+        except BaseException as identity_error:
             _close_handle(handle)
-        evidence = inspect_junction(link)
+            raise ContainmentSafetyError(
+                f"projection identity was never established; ambiguous path left "
+                f"untouched: {link}"
+            ) from identity_error
+        pinned = _PinnedObject(link, handle, identity)
+        native_buffer = ctypes.create_string_buffer(payload)
+        returned = wintypes.DWORD()
+        if not _kernel32.DeviceIoControl(
+            handle,
+            _FSCTL_SET_REPARSE_POINT,
+            native_buffer,
+            len(payload),
+            None,
+            0,
+            ctypes.byref(returned),
+            None,
+        ):
+            raise _winerror(f"FSCTL_SET_REPARSE_POINT failed for {link}")
+        evidence = _inspect_junction_handle(link, handle)
         if not _same_path(evidence.target_path, source):
             raise ContainmentSafetyError("created junction target does not match requested source")
         if evidence.reparse_payload_sha256 != hashlib.sha256(payload).hexdigest():
             raise ContainmentSafetyError("created junction payload does not match requested payload")
-        return evidence
+        return _RetainedJunction(evidence, pinned)
     except BaseException as error:
-        if created and _exists_no_follow(link):
+        if pinned is not None and pinned.handle:
             try:
-                link.rmdir()
-            except OSError as cleanup_error:
+                _delete_exact_pinned_object(pinned)
+            except BaseException as cleanup_error:
+                pinned.close()
                 raise ContainmentSafetyError(
-                    f"junction creation failed and exact link cleanup also failed: {cleanup_error}"
+                    f"junction creation failed ({error}) and exact-handle cleanup also "
+                    f"failed: {cleanup_error}"
                 ) from error
+        elif created:
+            if isinstance(error, ContainmentSafetyError) and "identity was never established" in str(error):
+                raise
+            raise ContainmentSafetyError(
+                f"junction creation failed before exact identity was established; ambiguous path left untouched: {link}"
+            ) from error
         raise
+
+
+def create_mod_projection(source_mod: Path, staging_mod: Path) -> JunctionEvidence:
+    retained = _create_mod_projection_retained(source_mod, staging_mod)
+    try:
+        return retained.evidence
+    finally:
+        retained.close()
 
 
 def _top_level_entries(root: Path) -> tuple[Path, ...]:
@@ -467,45 +550,13 @@ def _top_level_entries(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(entries, key=lambda entry: (entry.name.casefold(), entry.name)))
 
 
-def _delete_exact_projection(expected: JunctionEvidence) -> None:
-    handle = _open_no_follow(
-        expected.link_path,
-        _DELETE | _GENERIC_READ,
-        share_mode=_FILE_SHARE_READ,
-    )
-    try:
-        attributes, tag = _attribute_tag_for_handle(handle, expected.link_path)
-        if tag != expected.reparse_tag or not attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-            raise ContainmentSafetyError(
-                f"projection changed before exact rollback: {expected.link_path}"
-            )
-        payload = _read_reparse_payload_handle(handle, expected.link_path)
-        substitute_name, print_name = _parse_mount_point_payload(payload)
-        if (
-            substitute_name != expected.substitute_name
-            or print_name != expected.print_name
-            or hashlib.sha256(payload).hexdigest()
-            != expected.reparse_payload_sha256
-        ):
-            raise ContainmentSafetyError(
-                f"projection changed before exact rollback: {expected.link_path}"
-            )
-        disposition = _FILE_DISPOSITION_INFO(True)
-        if not _kernel32.SetFileInformationByHandle(
-            handle,
-            _FILE_DISPOSITION_INFO_CLASS,
-            ctypes.byref(disposition),
-            ctypes.sizeof(disposition),
-        ):
-            raise _winerror(
-                f"handle-based exact junction rollback failed for {expected.link_path}"
-            )
-    finally:
-        _close_handle(handle)
-    if _exists_no_follow(expected.link_path):
+def _delete_exact_projection(retained: _RetainedJunction) -> None:
+    observed = _inspect_junction_handle(retained.pinned.path, retained.pinned.handle)
+    if observed != retained.evidence:
         raise ContainmentSafetyError(
-            f"projection remained after rollback: {expected.link_path}"
+            f"projection changed before exact rollback: {retained.pinned.path}"
         )
+    _delete_exact_pinned_object(retained.pinned)
 
 
 def build_projection(source_mods: Path, stage_mods: Path) -> tuple[JunctionEvidence, ...]:
@@ -521,29 +572,29 @@ def build_projection(source_mods: Path, stage_mods: Path) -> tuple[JunctionEvide
             raise ContainmentSafetyError(f"source mod is reparse: {entry.name}")
         if not attributes & _FILE_ATTRIBUTE_DIRECTORY:
             raise ContainmentSafetyError(f"source mod is not a direct directory: {entry.name}")
-    created: list[JunctionEvidence] = []
+    created: list[_RetainedJunction] = []
     try:
         for entry in source_entries:
-            created.append(create_mod_projection(entry, stage_root / entry.name))
+            created.append(_create_mod_projection_retained(entry, stage_root / entry.name))
     except BaseException as creation_error:
         cleanup_failures: list[str] = []
-        for expected in reversed(created):
+        for retained in reversed(created):
             try:
-                observed = inspect_junction(expected.link_path)
-                if observed != expected:
-                    raise ContainmentSafetyError(
-                        f"projection changed before rollback: {expected.link_path}"
-                    )
-                _delete_exact_projection(expected)
+                _delete_exact_projection(retained)
             except BaseException as cleanup_error:
-                cleanup_failures.append(f"{expected.link_path}: {cleanup_error}")
+                cleanup_failures.append(f"{retained.pinned.path}: {cleanup_error}")
+            finally:
+                retained.close()
         if cleanup_failures:
             details = "; ".join(cleanup_failures)
             raise ContainmentSafetyError(
                 f"projection creation failed and exact rollback failed: {details}"
             ) from creation_error
         raise
-    return tuple(created)
+    evidence = tuple(retained.evidence for retained in created)
+    for retained in reversed(created):
+        retained.close()
+    return evidence
 
 
 def _walk_direct_tree(root: Path) -> tuple[tuple[str, Path, bool], ...]:
@@ -671,41 +722,41 @@ def _pin_descendants(tree: _PinnedTree) -> None:
             raise ContainmentSafetyError(
                 f"case-insensitive tree collision beneath {directory}"
             )
+        retained_children: list[_PinnedEntry] = []
         for entry in entries:
             path = Path(entry.path)
             relative = "/".join((*parts, entry.name))
-            observed_identity = _identity_at_path(path)
-            metadata = entry.stat(follow_symlinks=False)
-            is_directory = stat.S_ISDIR(metadata.st_mode)
-            access = _DELETE | (
-                _FILE_READ_ATTRIBUTES if is_directory else _GENERIC_READ
-            )
             pinned = _pin_object(
                 path,
-                desired_access=access,
-                expected_identity=observed_identity,
+                desired_access=_DELETE | _GENERIC_READ,
                 allow_reparse=True,
             )
-            attributes, tag = _attribute_tag_for_handle(pinned.handle, path)
-            if _is_reparse(attributes, tag):
+            try:
+                attributes, tag = _attribute_tag_for_handle(pinned.handle, path)
+                if _is_reparse(attributes, tag):
+                    raise _PinnedTreeRejected(
+                        f"reparse descendant is not allowed: {relative}", tree
+                    )
+                pinned_is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
+                if (
+                    not pinned_is_directory
+                    and _kernel32.GetFileType(pinned.handle) != _FILE_TYPE_DISK
+                ):
+                    raise _PinnedTreeRejected(
+                        f"non-regular tree entry is not allowed: {relative}", tree
+                    )
+            except BaseException:
                 pinned.close()
-                raise _PinnedTreeRejected(
-                    f"reparse descendant is not allowed: {relative}", tree
+                raise
+            retained = _PinnedEntry(relative, pinned_is_directory, pinned)
+            tree.entries.append(retained)
+            retained_children.append(retained)
+        for retained in retained_children:
+            if retained.is_directory:
+                walk(
+                    retained.pinned.path,
+                    tuple(retained.relative_path.split("/")),
                 )
-            pinned_is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
-            if pinned_is_directory != is_directory:
-                pinned.close()
-                raise ContainmentSafetyError(
-                    f"tree entry type changed before identity pin: {relative}"
-                )
-            if not pinned_is_directory and not stat.S_ISREG(metadata.st_mode):
-                pinned.close()
-                raise _PinnedTreeRejected(
-                    f"non-regular tree entry is not allowed: {relative}", tree
-                )
-            tree.entries.append(_PinnedEntry(relative, pinned_is_directory, pinned))
-            if pinned_is_directory:
-                walk(path, (*parts, entry.name))
 
     try:
         if _identity_at_path(tree.current_path) != tree.root.identity:
@@ -726,7 +777,15 @@ def _pin_tree(root: Path) -> _PinnedTree:
         expected_identity=root_identity,
         allow_reparse=False,
     )
-    tree = _PinnedTree(root=root_pin, entries=[], current_path=root_path)
+    return _pin_tree_from_root(root_pin)
+
+
+def _pin_tree_from_root(root_pin: _PinnedObject) -> _PinnedTree:
+    attributes, tag = _attribute_tag_for_handle(root_pin.handle, root_pin.path)
+    if _is_reparse(attributes, tag) or not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+        root_pin.close()
+        raise ContainmentSafetyError(f"direct pinned tree root required: {root_pin.path}")
+    tree = _PinnedTree(root=root_pin, entries=[], current_path=root_pin.path)
     try:
         _pin_descendants(tree)
         return tree
@@ -739,16 +798,37 @@ def _pin_tree(root: Path) -> _PinnedTree:
 
 def _assert_pinned_tree(tree: _PinnedTree) -> None:
     _assert_pinned_root_path(tree)
-    observed = _walk_direct_tree(tree.current_path)
-    expected_by_relative = {entry.relative_path: entry for entry in tree.entries}
-    if {relative for relative, _, _ in observed} != set(expected_by_relative):
-        raise ContainmentSafetyError("pinned tree membership changed")
-    for relative, path, is_directory in observed:
-        expected = expected_by_relative[relative]
-        if expected.is_directory != is_directory:
-            raise ContainmentSafetyError(f"pinned tree entry type changed: {relative}")
-        if _identity_at_path(path) != expected.pinned.identity:
-            raise ContainmentSafetyError(f"pinned tree entry identity changed: {relative}")
+    directories: dict[str, Path] = {"": tree.current_path}
+    expected: dict[str, list[tuple[str, tuple[int, int]]]] = {"": []}
+    for entry in tree.entries:
+        parent, _, name = entry.relative_path.rpartition("/")
+        expected.setdefault(parent, []).append((name, entry.pinned.identity))
+        if entry.is_directory:
+            directories[entry.relative_path] = entry.pinned.path
+            expected.setdefault(entry.relative_path, [])
+    for relative, directory in sorted(directories.items()):
+        observed_entries = tuple(
+            sorted(
+                os.scandir(directory),
+                key=lambda entry: (entry.name.casefold(), entry.name),
+            )
+        )
+        observed_names = tuple(entry.name for entry in observed_entries)
+        expected_members = tuple(
+            sorted(expected[relative], key=lambda item: (item[0].casefold(), item[0]))
+        )
+        expected_names = tuple(name for name, _ in expected_members)
+        if observed_names != expected_names:
+            raise ContainmentSafetyError(
+                f"pinned directory membership changed: {directory}"
+            )
+        for observed_entry, (_, expected_identity) in zip(
+            observed_entries, expected_members, strict=True
+        ):
+            if _identity_at_path(Path(observed_entry.path)) != expected_identity:
+                raise ContainmentSafetyError(
+                    f"pinned directory member identity changed: {observed_entry.path}"
+                )
 
 
 def _assert_pinned_root_path(tree: _PinnedTree) -> None:
@@ -864,6 +944,86 @@ def stable_tree_identity(root: Path, *, required_equal_passes: int) -> TreeIdent
     return observed
 
 
+def _hash_pinned_file(pinned: _PinnedObject) -> tuple[str, int]:
+    if not _kernel32.SetFilePointerEx(
+        pinned.handle,
+        0,
+        None,
+        _FILE_BEGIN,
+    ):
+        raise _winerror(f"SetFilePointerEx failed for pinned file {pinned.path}")
+    before = _handle_information(pinned.handle, pinned.path)
+    digest = hashlib.sha256()
+    total = 0
+    buffer = ctypes.create_string_buffer(_READ_CHUNK_SIZE)
+    while True:
+        returned = wintypes.DWORD()
+        if not _kernel32.ReadFile(
+            pinned.handle,
+            buffer,
+            len(buffer),
+            ctypes.byref(returned),
+            None,
+        ):
+            raise _winerror(f"ReadFile failed for pinned file {pinned.path}")
+        if returned.value == 0:
+            break
+        digest.update(buffer.raw[: returned.value])
+        total += returned.value
+    after = _handle_information(pinned.handle, pinned.path)
+    expected_size = (after.nFileSizeHigh << 32) | after.nFileSizeLow
+    if _file_identity(before) != _file_identity(after) or total != expected_size:
+        raise ContainmentSafetyError(f"pinned file changed while hashing: {pinned.path}")
+    return digest.hexdigest(), total
+
+
+def _pinned_tree_identity(tree: _PinnedTree) -> TreeIdentity:
+    rows: list[list[str | int]] = []
+    regular_file_count = 0
+    directory_count = 0
+    total_size = 0
+    for entry in tree.entries:
+        if entry.is_directory:
+            directory_count += 1
+            rows.append(["D", entry.relative_path])
+        else:
+            digest, size = _hash_pinned_file(entry.pinned)
+            regular_file_count += 1
+            total_size += size
+            rows.append(["F", entry.relative_path, digest, size])
+    canonical = json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return TreeIdentity(
+        sha256=hashlib.sha256(canonical).hexdigest(),
+        regular_file_count=regular_file_count,
+        directory_count=directory_count,
+        total_size=total_size,
+    )
+
+
+def _stable_pinned_tree_identity(
+    tree: _PinnedTree,
+    *,
+    required_equal_passes: int,
+) -> TreeIdentity:
+    if (
+        not isinstance(required_equal_passes, int)
+        or isinstance(required_equal_passes, bool)
+        or required_equal_passes < 2
+    ):
+        raise ValueError("stable tree identity requires at least two equal passes")
+    _assert_pinned_tree(tree)
+    observed = _pinned_tree_identity(tree)
+    for _ in range(required_equal_passes - 1):
+        _assert_pinned_tree(tree)
+        repeated = _pinned_tree_identity(tree)
+        if repeated != observed:
+            raise ContainmentSafetyError("pinned tree identity changed between passes")
+    _assert_pinned_tree(tree)
+    return observed
+
+
 def require_tree_integrity(root: Path, expected: IntegrityLevel) -> None:
     paths = (Path(root), *(path for _, path, _ in _walk_direct_tree(root)))
     for path in paths:
@@ -874,6 +1034,21 @@ def require_tree_integrity(root: Path, expected: IntegrityLevel) -> None:
             )
 
 
+def _require_pinned_tree_integrity(
+    tree: _PinnedTree,
+    expected: IntegrityLevel,
+) -> None:
+    _assert_pinned_tree(tree)
+    for pinned in (tree.root, *(entry.pinned for entry in tree.entries)):
+        observed = inspect_path_integrity(pinned.path)
+        if observed is not expected:
+            raise ContainmentSafetyError(
+                f"integrity mismatch for {pinned.path}: expected {expected.name}, "
+                f"observed {observed.name}"
+            )
+    _assert_pinned_tree(tree)
+
+
 def _exists_no_follow(path: Path) -> bool:
     try:
         path.lstat()
@@ -882,24 +1057,13 @@ def _exists_no_follow(path: Path) -> bool:
     return True
 
 
-def _quarantine_entries(entries: tuple[Path, ...], quarantine_root: Path) -> None:
+def _quarantine_pinned_objects(
+    pinned_entries: tuple[_PinnedObject, ...],
+    quarantine_root: Path,
+) -> None:
     quarantine = _require_direct_directory(quarantine_root)
-    pinned_entries: list[_PinnedObject] = []
-    parent_pin: _PinnedObject | None = None
+    parent_pin = _pin_parent_directory(quarantine)
     try:
-        for entry in entries:
-            if not _exists_no_follow(entry):
-                continue
-            expected_identity = _identity_at_path(entry)
-            pinned_entries.append(
-                _pin_object(
-                    entry,
-                    desired_access=_DELETE | _FILE_READ_ATTRIBUTES,
-                    expected_identity=expected_identity,
-                    allow_reparse=True,
-                )
-            )
-        parent_pin = _pin_parent_directory(quarantine)
         for pinned in pinned_entries:
             destination = quarantine / pinned.path.name
             try:
@@ -913,10 +1077,7 @@ def _quarantine_entries(entries: tuple[Path, ...], quarantine_root: Path) -> Non
                     f"cannot quarantine {pinned.path.name}: {error}"
                 ) from error
     finally:
-        if parent_pin is not None:
-            parent_pin.close()
-        for pinned in reversed(pinned_entries):
-            pinned.close()
+        parent_pin.close()
 
 
 def _quarantine_pinned_tree(tree: _PinnedTree, quarantine_root: Path) -> None:
@@ -942,7 +1103,7 @@ def _select_unique_new_directory(
     expected_name: str,
     before_names: tuple[str, ...],
     quarantine_root: Path,
-) -> Path:
+) -> _StagingSelection:
     stage = _require_direct_directory(stage_mods)
     source = _require_direct_directory(source_mods)
     _require_direct_directory(quarantine_root)
@@ -954,55 +1115,104 @@ def _select_unique_new_directory(
     if len(before_folded) != len(set(before_folded)):
         raise ContainmentSafetyError("before names contain a case-insensitive collision")
 
-    entries = _top_level_entries(stage)
-    entry_by_fold = {entry.name.casefold(): entry for entry in entries}
-    changed: list[Path] = []
-    baseline_problem = False
-    for before_name in validated_before:
-        entry = entry_by_fold.get(before_name.casefold())
-        if entry is None:
-            baseline_problem = True
-            continue
-        if entry.name != before_name:
-            baseline_problem = True
-            changed.append(entry)
-            continue
-        try:
-            expected_target = _require_direct_directory(source / before_name).resolve(
-                strict=True
-            )
-            evidence = inspect_junction(entry)
-            if not _same_path(evidence.target_path, expected_target):
-                raise ContainmentSafetyError(
-                    f"projection target does not match {expected_target}"
+    observed_entries = tuple(
+        sorted(os.scandir(stage), key=lambda entry: (entry.name.casefold(), entry.name))
+    )
+    folded = [entry.name.casefold() for entry in observed_entries]
+    if len(folded) != len(set(folded)):
+        raise ContainmentSafetyError(
+            "staging entries contain a case-insensitive collision before identity pinning"
+        )
+    pinned_entries: list[_PinnedObject] = []
+    try:
+        for entry in observed_entries:
+            pinned_entries.append(
+                _pin_object(
+                    Path(entry.path),
+                    desired_access=_DELETE | _GENERIC_READ,
+                    allow_reparse=True,
                 )
-        except (ContainmentSafetyError, OSError):
-            baseline_problem = True
-            changed.append(entry)
-    new_entries = tuple(entry for entry in entries if entry.name.casefold() not in set(before_folded))
-    if baseline_problem:
-        _quarantine_entries(tuple(dict.fromkeys((*changed, *new_entries))), quarantine_root)
-        raise ContainmentSafetyError("changed staging projection prevents adoption")
-    if len(new_entries) != 1:
-        _quarantine_entries(new_entries, quarantine_root)
+            )
+    except BaseException as pin_error:
+        for pinned in reversed(pinned_entries):
+            pinned.close()
         raise ContainmentSafetyError(
-            f"exactly one new staging entry is required, observed {len(new_entries)}"
-        )
+            "staging classification could not establish every exact entry identity; "
+            "ambiguous paths were left untouched"
+        ) from pin_error
 
-    candidate = new_entries[0]
-    if candidate.name != expected:
-        _quarantine_entries((candidate,), quarantine_root)
-        raise ContainmentSafetyError(
-            f"new staging entry must have exact expected name {expected!r}"
+    entry_by_fold = {pinned.path.name.casefold(): pinned for pinned in pinned_entries}
+    changed: list[_PinnedObject] = []
+    baselines: list[_RetainedJunction] = []
+    baseline_problem = False
+    try:
+        for before_name in validated_before:
+            pinned = entry_by_fold.get(before_name.casefold())
+            if pinned is None:
+                baseline_problem = True
+                continue
+            if pinned.path.name != before_name:
+                baseline_problem = True
+                changed.append(pinned)
+                continue
+            try:
+                expected_target = _require_direct_directory(
+                    source / before_name
+                ).resolve(strict=True)
+                evidence = _inspect_junction_handle(pinned.path, pinned.handle)
+                if not _same_path(evidence.target_path, expected_target):
+                    raise ContainmentSafetyError(
+                        f"projection target does not match {expected_target}"
+                    )
+                baselines.append(_RetainedJunction(evidence, pinned))
+            except (ContainmentSafetyError, OSError):
+                baseline_problem = True
+                changed.append(pinned)
+        before_set = set(before_folded)
+        new_entries = tuple(
+            pinned
+            for pinned in pinned_entries
+            if pinned.path.name.casefold() not in before_set
         )
-    if any(entry.name.casefold() == expected.casefold() for entry in _top_level_entries(source)):
-        _quarantine_entries((candidate,), quarantine_root)
-        raise ContainmentSafetyError(f"case-insensitive source collision for {expected!r}")
-    attributes, tag = _attribute_tag(candidate)
-    if _is_reparse(attributes, tag) or not attributes & _FILE_ATTRIBUTE_DIRECTORY:
-        _quarantine_entries((candidate,), quarantine_root)
-        raise ContainmentSafetyError("new staging entry is not a direct regular directory")
-    return candidate
+        if baseline_problem:
+            quarantine_list: list[_PinnedObject] = []
+            for pinned in (*changed, *new_entries):
+                if not any(existing is pinned for existing in quarantine_list):
+                    quarantine_list.append(pinned)
+            quarantine = tuple(quarantine_list)
+            _quarantine_pinned_objects(quarantine, quarantine_root)
+            raise ContainmentSafetyError("changed staging projection prevents adoption")
+        if len(new_entries) != 1:
+            _quarantine_pinned_objects(new_entries, quarantine_root)
+            raise ContainmentSafetyError(
+                f"exactly one new staging entry is required, observed {len(new_entries)}"
+            )
+
+        candidate = new_entries[0]
+        if candidate.path.name != expected:
+            _quarantine_pinned_objects((candidate,), quarantine_root)
+            raise ContainmentSafetyError(
+                f"new staging entry must have exact expected name {expected!r}"
+            )
+        if any(
+            entry.name.casefold() == expected.casefold()
+            for entry in _top_level_entries(source)
+        ):
+            _quarantine_pinned_objects((candidate,), quarantine_root)
+            raise ContainmentSafetyError(
+                f"case-insensitive source collision for {expected!r}"
+            )
+        attributes, tag = _attribute_tag_for_handle(candidate.handle, candidate.path)
+        if _is_reparse(attributes, tag) or not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+            _quarantine_pinned_objects((candidate,), quarantine_root)
+            raise ContainmentSafetyError(
+                "new staging entry is not a direct regular directory"
+            )
+        return _StagingSelection(candidate, baselines)
+    except BaseException:
+        for pinned in reversed(pinned_entries):
+            pinned.close()
+        raise
 
 
 def _collision_free_destination(source_mods: Path, expected_name: str) -> Path:
@@ -1021,7 +1231,7 @@ def adopt_unique_staged_mod(
     before_names: tuple[str, ...],
     quarantine_root: Path,
 ) -> AdoptionEvidence:
-    candidate = _select_unique_new_directory(
+    selection = _select_unique_new_directory(
         stage_mods,
         source_mods,
         expected_name,
@@ -1029,12 +1239,14 @@ def adopt_unique_staged_mod(
         quarantine_root,
     )
     tree: _PinnedTree | None = None
+    baselines = selection.baselines
+    candidate = selection.candidate.path
     destination: Path | None = None
     quarantined = False
     source_parent: _PinnedObject | None = None
     try:
         try:
-            tree = _pin_tree(candidate)
+            tree = _pin_tree_from_root(selection.candidate)
         except _PinnedTreeRejected as rejection:
             tree = rejection.tree
             tree.close_descendants()
@@ -1042,14 +1254,14 @@ def adopt_unique_staged_mod(
             quarantined = True
             raise ContainmentSafetyError(str(rejection)) from rejection
         _assert_pinned_tree(tree)
-        before_tree = stable_tree_identity(candidate, required_equal_passes=2)
+        before_tree = _stable_pinned_tree_identity(tree, required_equal_passes=2)
         _assert_pinned_tree(tree)
         pinned_paths = (tree.root.path,) + tuple(
             entry.pinned.path for entry in tree.entries
         )
         set_medium_integrity_entries(pinned_paths)
         _assert_pinned_tree(tree)
-        require_tree_integrity(candidate, IntegrityLevel.MEDIUM)
+        _require_pinned_tree_integrity(tree, IntegrityLevel.MEDIUM)
         _assert_pinned_tree(tree)
         destination = _collision_free_destination(source_mods, expected_name)
         source_parent = _pin_parent_directory(destination.parent)
@@ -1061,13 +1273,16 @@ def adopt_unique_staged_mod(
         tree.current_path = destination
         _pin_descendants(tree)
         _assert_pinned_tree(tree)
-        after_tree = stable_tree_identity(destination, required_equal_passes=2)
+        after_tree = _stable_pinned_tree_identity(tree, required_equal_passes=2)
         _assert_pinned_tree(tree)
         if after_tree != before_tree:
             raise ContainmentSafetyError("adopted tree identity changed")
-        require_tree_integrity(destination, IntegrityLevel.MEDIUM)
+        _require_pinned_tree_integrity(tree, IntegrityLevel.MEDIUM)
         _assert_pinned_tree(tree)
-        final_attributes, final_tag = _attribute_tag(destination)
+        final_attributes, final_tag = _attribute_tag_for_handle(
+            tree.root.handle,
+            destination,
+        )
         final_is_reparse = _is_reparse(final_attributes, final_tag)
         if final_is_reparse:
             raise ContainmentSafetyError("adopted destination became reparse")
@@ -1101,6 +1316,8 @@ def adopt_unique_staged_mod(
             source_parent.close()
         if tree is not None:
             tree.close()
+        for baseline in reversed(baselines):
+            baseline.close()
 
 
 __all__ = [
