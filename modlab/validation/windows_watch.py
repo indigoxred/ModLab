@@ -60,6 +60,7 @@ from modlab.validation.windows_watch_protocol import (
     watch_request_from_bytes,
     watch_request_sha256,
     watch_request_to_bytes,
+    watch_worker_command,
 )
 
 
@@ -157,11 +158,10 @@ _LOCAL_SESSIONS: dict[Path, _LocalWatchSession] = {}
 _LOCAL_SESSIONS_LOCK = threading.Lock()
 
 
-def _make_watch_receipt(
+def _make_incomplete_receipt(
     request: WatchRequest | object,
     worker_pid: int,
     *,
-    complete: bool,
     ready: bool,
     opened_root_kinds: tuple[str, ...],
     events: tuple[WatcherEvent, ...],
@@ -185,16 +185,12 @@ def _make_watch_receipt(
         run_id=run_id,
         scenario=scenario,
         worker_pid=worker_pid,
-        evidence_completion=(
-            WatchEvidenceCompletion.COMPLETED
-            if complete
-            else WatchEvidenceCompletion.INCOMPLETE
-        ),
+        evidence_completion=WatchEvidenceCompletion.INCOMPLETE,
         ready=ready,
         opened_root_kinds=opened_root_kinds,
         events=events,
         event_bytes_sha256=event_bytes_sha256,
-        worker_exit_code=0 if complete else None,
+        worker_exit_code=None,
         watch_outcome_id=None,
         request_bytes_sha256=request_bytes_sha256,
         error=error,
@@ -1053,19 +1049,23 @@ def start_watch(request: WatchRequest) -> int:
                 f"watch protocol path already exists: {path.name}"
             )
     controller_pid, controller_creation_time = _current_controller_identity()
+    publish_new_verified(
+        request_path,
+        request_bytes,
+        watch_request_from_bytes,
+    )
+    canonical_request_path = request_path.resolve(strict=True)
+    command = watch_worker_command(canonical_request_path)
     claim = ControllerClaim(
         schema_version=_SCHEMA_VERSION,
         request_sha256=request_sha256,
         session_id=normalized.session_id,
         run_id=normalized.run_id,
         scenario=normalized.scenario,
+        request_path=canonical_request_path,
+        worker_command=command,
         controller_pid=controller_pid,
         controller_creation_time=controller_creation_time,
-    )
-    publish_new_verified(
-        request_path,
-        request_bytes,
-        watch_request_from_bytes,
     )
     claim_bytes = controller_claim_to_bytes(claim, normalized)
     publish_new_verified(
@@ -1073,17 +1073,9 @@ def start_watch(request: WatchRequest) -> int:
         claim_bytes,
         lambda data: controller_claim_from_bytes(data, normalized),
     )
-    command = (
-        sys.executable,
-        "-B",
-        "-m",
-        "modlab.validation.windows_watch",
-        "--worker",
-        str(request_path.resolve(strict=True)),
-    )
     try:
         process = subprocess.Popen(
-            command,
+            claim.worker_command,
             shell=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -1159,30 +1151,32 @@ def start_watch(request: WatchRequest) -> int:
     deadline = time.monotonic() + 15.0
     try:
         while time.monotonic() < deadline:
-            if ready_path.exists():
-                try:
-                    ready_bytes = _read_exact_regular_file(
-                        ready_path,
-                        "ready record",
-                    )
-                except OSError as error:
-                    error_code = getattr(error, "winerror", None)
-                    if error_code is None:
-                        error_code = error.errno
-                    if error_code not in {
-                        _ERROR_SHARING_VIOLATION,
-                        _ERROR_LOCK_VIOLATION,
-                    }:
-                        raise
-                    if (
-                        _kernel32.WaitForSingleObject(process_handle, 0)
-                        == _WAIT_OBJECT_0
-                    ):
-                        raise WatchProtocolError(
-                            "watch worker exited before ready"
-                        ) from error
-                    time.sleep(0.02)
-                    continue
+            try:
+                ready_bytes = _read_exact_regular_file(
+                    ready_path,
+                    "ready record",
+                )
+            except OSError as error:
+                error_code = getattr(error, "winerror", None)
+                if error_code is None:
+                    error_code = error.errno
+                if not isinstance(error, FileNotFoundError) and error_code not in {
+                    _ERROR_SHARING_VIOLATION,
+                    _ERROR_LOCK_VIOLATION,
+                }:
+                    raise
+                wait_result = _kernel32.WaitForSingleObject(process_handle, 0)
+                if wait_result == _WAIT_OBJECT_0:
+                    raise WatchProtocolError(
+                        "watch worker exited before ready"
+                    ) from error
+                if wait_result != _WAIT_TIMEOUT:
+                    raise WatchProtocolError(
+                        f"ready worker liveness wait failed: {wait_result}"
+                    ) from error
+                time.sleep(0.02)
+                continue
+            else:
                 _parse_ready(
                     ready_bytes,
                     normalized,
@@ -1191,9 +1185,6 @@ def start_watch(request: WatchRequest) -> int:
                     worker_creation_time,
                 )
                 return process.pid
-            if _kernel32.WaitForSingleObject(process_handle, 0) == _WAIT_OBJECT_0:
-                raise WatchProtocolError("watch worker exited before ready")
-            time.sleep(0.02)
         raise WatchProtocolError("watch worker did not become ready")
     except (OSError, WatchProtocolError) as error:
         receipt = _stop_local_session(
@@ -1503,12 +1494,23 @@ def run_watch_worker(request_path: Path) -> int:
     """Run one fail-closed worker: 0 complete, 1 incomplete, 2 untrustworthy."""
     _require_windows()
     try:
-        request = _load_request_path(request_path)
+        canonical_request_path = _reject_reparse_components(
+            Path(request_path),
+            "request path",
+        ).resolve(strict=True)
+        request = _load_request_path(canonical_request_path)
         _, request_sha256 = _request_bytes_and_sha256(request)
         claim = controller_claim_from_bytes(
             (request.evidence_root / _CLAIM_NAME).read_bytes(),
             request,
         )
+        if (
+            claim.request_path != canonical_request_path
+            or claim.worker_command != watch_worker_command(canonical_request_path)
+        ):
+            raise WatchProtocolError(
+                "controller claim does not bind this worker invocation"
+            )
     except (OSError, WatchProtocolError):
         return 2
     ready_path = request.evidence_root / _READY_NAME
@@ -2096,156 +2098,6 @@ def _process_alive(pid: int) -> bool:
     return result == _WAIT_TIMEOUT
 
 
-def _watch_receipt_from_files_impl(
-    request: WatchRequest,
-    worker_pid: int,
-    ready_path: Path,
-    events_path: Path,
-    terminal_path: Path,
-) -> WatchReceipt:
-    """Load strict protocol files and convert every uncertainty to incomplete."""
-    _require_windows()
-    expected_paths = (
-        Path(request.evidence_root) / _READY_NAME,
-        Path(request.evidence_root) / _EVENTS_NAME,
-        Path(request.evidence_root) / _TERMINAL_NAME,
-    )
-    supplied_paths = (Path(ready_path), Path(events_path), Path(terminal_path))
-    for supplied, expected in zip(supplied_paths, expected_paths, strict=True):
-        if supplied.absolute() != expected.absolute():
-            return _make_watch_receipt(
-                request,
-                worker_pid,
-                complete=False,
-                ready=False,
-                opened_root_kinds=(),
-                events=(),
-                event_bytes_sha256=hashlib.sha256(b"").hexdigest(),
-                error="evidence paths must be confined to the exact ready/events/terminal files",
-            )
-        if supplied.exists():
-            attributes = _kernel32.GetFileAttributesW(str(supplied))
-            if attributes == 0xFFFFFFFF or attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-                return _make_watch_receipt(
-                    request,
-                    worker_pid,
-                    complete=False,
-                    ready=False,
-                    opened_root_kinds=(),
-                    events=(),
-                    event_bytes_sha256=hashlib.sha256(b"").hexdigest(),
-                    error="evidence paths must be confined direct files",
-                )
-    errors: list[str] = []
-    ready = False
-    opened: tuple[str, ...] = ()
-    event_bytes = b""
-    journal_evidence = _JournalEvidence(0, 0, b"", 0, 0)
-    events: tuple[WatcherEvent, ...] = ()
-    terminal: dict[str, object] | None = None
-    request_sha256 = ""
-    worker_creation_time = 0
-    try:
-        normalized = _normalize_request(request, inspect_roots=False)
-        _, request_sha256 = _request_bytes_and_sha256(normalized)
-    except WatchProtocolError as error:
-        normalized = request
-        errors.append(str(error))
-    try:
-        launch = _load_worker_launch(normalized)
-        worker_creation_time = launch.worker_creation_time
-        if launch.worker_pid != worker_pid:
-            errors.append("worker launch PID does not match supplied worker")
-    except FileNotFoundError:
-        errors.append("worker launch record missing")
-    except (OSError, WatchProtocolError) as error:
-        errors.append(str(error))
-    try:
-        opened = _parse_ready(
-            Path(ready_path).read_bytes(),
-            normalized,
-            worker_pid,
-            request_sha256,
-            worker_creation_time,
-        )
-        ready = True
-    except FileNotFoundError:
-        errors.append("ready record missing")
-    except (OSError, WatchProtocolError) as error:
-        errors.append(str(error))
-    try:
-        journal_evidence = _read_exact_journal(Path(events_path))
-        event_bytes = journal_evidence.data
-        events = _parse_events(event_bytes, normalized)
-    except FileNotFoundError:
-        errors.append("events journal missing")
-    except _HandleOwnershipError:
-        raise
-    except (OSError, WatchProtocolError) as error:
-        errors.append(str(error))
-    event_digest = hashlib.sha256(event_bytes).hexdigest()
-    try:
-        terminal = _parse_terminal(
-            Path(terminal_path).read_bytes(),
-            normalized,
-            worker_pid,
-            request_sha256,
-            worker_creation_time,
-        )
-    except FileNotFoundError:
-        errors.append(
-            "worker death before terminal record"
-            if not _process_alive(worker_pid)
-            else "terminal record missing"
-        )
-    except (OSError, WatchProtocolError) as error:
-        errors.append(str(error))
-    if terminal is not None:
-        terminal_opened = tuple(terminal["openedRootKinds"])
-        if terminal["ready"]:
-            if not ready:
-                errors.append("terminal claims ready without a valid ready record")
-            if opened and terminal_opened != opened:
-                errors.append("ready and terminal root kinds disagree")
-        else:
-            ready = False
-            opened = terminal_opened
-        if terminal["eventBytesSha256"] != event_digest:
-            errors.append("event bytes SHA-256 mismatch")
-        if terminal["eventByteCount"] != len(event_bytes):
-            errors.append("event byte count mismatch")
-        if terminal["eventCount"] != len(events):
-            errors.append("event count mismatch")
-        final_sequence = 0 if not events else events[-1].sequence
-        if terminal["finalSequence"] != final_sequence:
-            errors.append("final sequence mismatch")
-        if (
-            terminal["journalVolumeSerial"] != journal_evidence.volume_serial
-            or terminal["journalFileId"] != journal_evidence.file_id
-        ):
-            errors.append("event journal identity mismatch")
-        if terminal["openHandleCount"] != 0:
-            errors.append(f"unclosed handle count: {terminal['openHandleCount']}")
-        if terminal["ready"] and not terminal["rootIdentitiesUnchanged"]:
-            errors.append("root identity changed after ready")
-        if not terminal["complete"]:
-            errors.append(str(terminal["error"]))
-    complete = terminal is not None and bool(terminal["complete"]) and not errors
-    return _make_watch_receipt(
-        request,
-        worker_pid,
-        complete=complete,
-        ready=ready,
-        opened_root_kinds=opened,
-        events=events,
-        event_bytes_sha256=event_digest,
-        error=None if complete else "; ".join(dict.fromkeys(errors)),
-        request_bytes_sha256=request_sha256,
-    )
-
-
-
-
 def watch_receipt_from_files(
     request: WatchRequest,
     worker_pid: int,
@@ -2364,6 +2216,7 @@ class _CapturedWatchEvidence:
     journal: _JournalEvidence
     terminal_bytes_sha256: str
     root_identities_unchanged: bool
+    completion_reasons: tuple[str, ...]
 
 
 def _capture_worker_evidence(
@@ -2374,13 +2227,6 @@ def _capture_worker_evidence(
     ready_path = request.evidence_root / _READY_NAME
     events_path = request.evidence_root / _EVENTS_NAME
     terminal_path = request.evidence_root / _TERMINAL_NAME
-    opened = _parse_ready(
-        _read_exact_regular_file(ready_path, "ready record"),
-        request,
-        launch.worker_pid,
-        request_sha256,
-        launch.worker_creation_time,
-    )
     journal = _read_exact_journal(events_path)
     events = _parse_events(journal.data, request)
     terminal_bytes = _read_exact_regular_file(terminal_path, "terminal record")
@@ -2391,38 +2237,74 @@ def _capture_worker_evidence(
         request_sha256,
         launch.worker_creation_time,
     )
-    errors: list[str] = []
-    if not terminal["complete"]:
-        errors.append(str(terminal["error"]))
-    if not terminal["ready"] or tuple(terminal["openedRootKinds"]) != opened:
-        errors.append("ready and terminal root coverage disagree")
+    integrity_errors: list[str] = []
     if terminal["eventBytesSha256"] != journal.sha256:
-        errors.append("terminal event hash mismatch")
+        integrity_errors.append("terminal event hash mismatch")
     if terminal["eventByteCount"] != len(journal.data):
-        errors.append("terminal event byte count mismatch")
+        integrity_errors.append("terminal event byte count mismatch")
     if terminal["eventCount"] != len(events):
-        errors.append("terminal event count mismatch")
+        integrity_errors.append("terminal event count mismatch")
     final_sequence = events[-1].sequence if events else 0
     if terminal["finalSequence"] != final_sequence:
-        errors.append("terminal final sequence mismatch")
+        integrity_errors.append("terminal final sequence mismatch")
     if (
         terminal["journalVolumeSerial"] != journal.volume_serial
         or terminal["journalFileId"] != journal.file_id
     ):
-        errors.append("terminal journal identity mismatch")
+        integrity_errors.append("terminal journal identity mismatch")
+    if integrity_errors:
+        raise WatchProtocolError("; ".join(integrity_errors))
+
+    completion_reasons: list[str] = []
+    terminal_opened = tuple(terminal["openedRootKinds"])
+    opened = terminal_opened
+    ready_record_valid = False
+    try:
+        opened = _parse_ready(
+            _read_exact_regular_file(ready_path, "ready record"),
+            request,
+            launch.worker_pid,
+            request_sha256,
+            launch.worker_creation_time,
+        )
+        ready_record_valid = True
+    except _HandleOwnershipError as error:
+        completion_reasons.append("evidence-handle-close-failed")
+        retry_error = _close_handle(error.handle, error.label)
+        if retry_error is not None:
+            raise
+    except (OSError, WatchProtocolError):
+        completion_reasons.append("worker-ready-invalid")
+
+    if not terminal["complete"]:
+        terminal_error = str(terminal["error"])
+        completion_reasons.append(
+            terminal_error
+            if terminal_error == "controller-session-lost"
+            else _worker_evidence_reason(WatchProtocolError(terminal_error))
+        )
+    if (
+        not ready_record_valid
+        or not terminal["ready"]
+        or terminal_opened != opened
+    ):
+        completion_reasons.append("worker-ready-invalid")
     if terminal["openHandleCount"] != 0:
-        errors.append("terminal reports unclosed worker handles")
+        completion_reasons.append("worker-handle-close-failed")
     if not terminal["rootIdentitiesUnchanged"]:
-        errors.append("terminal reports changed root identities")
-    if errors:
-        raise WatchProtocolError("; ".join(errors))
+        completion_reasons.append("root-identity-changed")
     return _CapturedWatchEvidence(
-        ready=True,
-        opened_root_kinds=opened,
+        ready=(
+            ready_record_valid
+            and bool(terminal["ready"])
+            and terminal_opened == opened
+        ),
+        opened_root_kinds=terminal_opened,
         events=events,
         journal=journal,
         terminal_bytes_sha256=hashlib.sha256(terminal_bytes).hexdigest(),
-        root_identities_unchanged=True,
+        root_identities_unchanged=bool(terminal["rootIdentitiesUnchanged"]),
+        completion_reasons=tuple(dict.fromkeys(completion_reasons)),
     )
 
 
@@ -2637,6 +2519,7 @@ def _publish_or_load_outcome(
 
 
 def _receipt_from_outcome(outcome: WatchOutcome) -> WatchReceipt:
+    outcome = watch_outcome_from_bytes(watch_outcome_to_bytes(outcome))
     complete = outcome.evidence_completion is WatchEvidenceCompletion.COMPLETED
     return WatchReceipt(
         request_id=outcome.request_id,
@@ -2667,10 +2550,9 @@ def _incomplete_without_outcome(
             request_sha256 = watch_request_sha256(request)
         except WatchProtocolError:
             pass
-    return _make_watch_receipt(
+    return _make_incomplete_receipt(
         request,
         worker_pid,
-        complete=False,
         ready=False,
         opened_root_kinds=(),
         events=(),
@@ -2773,6 +2655,7 @@ def _stop_local_session(
                 )
                 try:
                     captured = _capture_worker_evidence(request, launch)
+                    reasons.extend(captured.completion_reasons)
                 except _HandleOwnershipError as error:
                     reasons.append("evidence-handle-close-failed")
                     _close_handle(error.handle, error.label)
@@ -2787,8 +2670,6 @@ def _stop_local_session(
             else:
                 with _LOCAL_SESSIONS_LOCK:
                     _LOCAL_SESSIONS.pop(request_path.absolute(), None)
-        if worker_exit_code != 0:
-            captured = None if captured is None else captured
         completion = (
             WatchEvidenceCompletion.COMPLETED
             if not reasons and worker_exit_code == 0 and captured is not None
@@ -2927,6 +2808,8 @@ def _stop_non_owner(
         )
     reasons = ["controller-session-lost"]
     worker_exit_code: int | None = None
+    worker_quiescent = False
+    captured: _CapturedWatchEvidence | None = None
     worker_status, worker_handle, worker_error = _exact_process_status(
         launch.worker_pid,
         launch.worker_creation_time,
@@ -2948,14 +2831,17 @@ def _stop_non_owner(
                     launch.worker_pid,
                     launch.worker_creation_time,
                 )
+                worker_quiescent = True
                 worker_exit_code = _get_process_exit_code(worker_handle)
                 if worker_exit_code == _STILL_ACTIVE:
                     reasons.append("worker-cleanup-refused")
+                    worker_quiescent = False
             except (OSError, WatchProtocolError):
                 reasons.append("worker-cleanup-refused")
         else:
             reasons.append("worker-cleanup-refused")
     elif worker_status == "dead" and worker_handle:
+        worker_quiescent = True
         try:
             worker_exit_code = _get_process_exit_code(worker_handle)
         except OSError:
@@ -2972,6 +2858,15 @@ def _stop_non_owner(
     if existing_outcome is not None:
         outcome = existing_outcome
     else:
+        if worker_quiescent:
+            try:
+                captured = _capture_worker_evidence(request, launch)
+                reasons.extend(captured.completion_reasons)
+            except _HandleOwnershipError as error:
+                reasons.append("evidence-handle-close-failed")
+                _close_handle(error.handle, error.label)
+            except (OSError, WatchProtocolError) as error:
+                reasons.append(_worker_evidence_reason(error))
         outcome = _publish_or_load_outcome(
             _watch_outcome(
                 request,
@@ -2980,7 +2875,7 @@ def _stop_non_owner(
                 completion=WatchEvidenceCompletion.INCOMPLETE,
                 worker_exit_code=worker_exit_code,
                 reasons=tuple(reasons),
-                captured=None,
+                captured=captured,
             ),
             request,
             claim,
@@ -3053,13 +2948,24 @@ def watch_proves_unchanged(
 ) -> bool:
     """Prove no observed mutations without deciding the scenario verdict."""
     return (
-        receipt.evidence_completion is WatchEvidenceCompletion.COMPLETED
+        type(receipt) is WatchReceipt
+        and receipt.evidence_completion is WatchEvidenceCompletion.COMPLETED
         and receipt.ready
         and receipt.error is None
         and receipt.opened_root_kinds == ROOT_KINDS
         and receipt.worker_exit_code == 0
+        and type(receipt.watch_outcome_id) is str
+        and re.fullmatch(
+            r"watch-outcome-sha256:[0-9a-f]{64}",
+            receipt.watch_outcome_id,
+        )
+        is not None
+        and type(receipt.request_bytes_sha256) is str
+        and re.fullmatch(r"[0-9a-f]{64}", receipt.request_bytes_sha256) is not None
         and receipt.events == ()
         and receipt.event_bytes_sha256 == hashlib.sha256(b"").hexdigest()
+        and _complete_protected_state(before_manifest)
+        and _complete_protected_state(after_manifest)
         and before_manifest == after_manifest
     )
 

@@ -219,6 +219,20 @@ def failed_result_for(
     )
 
 
+def incomplete_result_for(outcome: WatchOutcome) -> ScenarioResult:
+    completed = valid_watch_outcome(scenario=outcome.scenario)
+    return replace(
+        valid_scenario_result(outcome.scenario, completed),
+        outcome=ScenarioOutcome.INCOMPLETE,
+        watch_outcome_id=watch_outcome_id_for(outcome),
+        watch_evidence_completion=outcome.evidence_completion,
+        watcher_events=outcome.events,
+        scenario_started=True,
+        fresh_retry_eligible=False,
+        reasons=("watch-evidence-incomplete",),
+    )
+
+
 def all_passing_evidence():
     outcomes = tuple(
         valid_watch_outcome(scenario=scenario)
@@ -416,6 +430,132 @@ class Mo2ContainmentSerializationTests(unittest.TestCase):
                         invalid_results,
                         invalid_outcomes,
                     )
+
+    def test_rejected_and_incomplete_decisions_deep_bind_every_supplied_pair(self):
+        failed_outcome = incomplete_watch_outcome(
+            scenario=ContainmentScenario.NEW_FOLDER,
+            events=(forbidden_play_event(),),
+        )
+        failed_result = failed_result_for(
+            failed_outcome,
+            reasons=("forbidden-play-profile-mutation",),
+        )
+        incomplete_outcome = incomplete_watch_outcome(
+            scenario=ContainmentScenario.MERGE_EXISTING,
+        )
+        incomplete_result = incomplete_result_for(incomplete_outcome)
+        results = (failed_result, incomplete_result)
+        outcomes = (failed_outcome, incomplete_outcome)
+        identifiers = tuple(
+            scenario_result_id_for(result, outcome)
+            for result, outcome in zip(results, outcomes, strict=True)
+        )
+        rejected = CapabilityDecision(
+            schema_version=1,
+            run_id=failed_result.run_id,
+            mechanism="isolated-low-integrity-junction-projection-v1",
+            verdict=CapabilityVerdict.REJECTED,
+            scenario_result_ids=identifiers,
+            reasons=("containment-breach",),
+        )
+
+        encoded = capability_decision_to_bytes(rejected, results, outcomes)
+        self.assertEqual(
+            rejected,
+            capability_decision_from_bytes(encoded, results, outcomes),
+        )
+
+        invalid_evidence = (
+            (replace(rejected, scenario_result_ids=identifiers[::-1]), results, outcomes),
+            (rejected, results[::-1], outcomes[::-1]),
+            (
+                rejected,
+                results,
+                (
+                    failed_outcome,
+                    replace(
+                        incomplete_outcome,
+                        run_id="containment-run:" + "f" * 32,
+                    ),
+                ),
+            ),
+            (rejected, results[:-1], outcomes),
+        )
+        for decision, supplied_results, supplied_outcomes in invalid_evidence:
+            with self.subTest(
+                ids=decision.scenario_result_ids,
+                results=tuple(result.scenario for result in supplied_results),
+            ):
+                with self.assertRaises(ContainmentFormatError):
+                    capability_decision_to_bytes(
+                        decision,
+                        supplied_results,
+                        supplied_outcomes,
+                    )
+
+        incomplete = replace(
+            rejected,
+            verdict=CapabilityVerdict.INCOMPLETE,
+            scenario_result_ids=(identifiers[1],),
+            reasons=("remaining-scenarios-unavailable",),
+        )
+        self.assertEqual(
+            incomplete,
+            capability_decision_from_bytes(
+                capability_decision_to_bytes(
+                    incomplete,
+                    (incomplete_result,),
+                    (incomplete_outcome,),
+                ),
+                (incomplete_result,),
+                (incomplete_outcome,),
+            ),
+        )
+        with self.assertRaisesRegex(ContainmentFormatError, "Failed.*Rejected"):
+            capability_decision_to_bytes(
+                replace(
+                    incomplete,
+                    scenario_result_ids=(identifiers[0],),
+                ),
+                (failed_result,),
+                (failed_outcome,),
+            )
+
+    def test_non_supported_decision_evidence_must_be_all_present_or_all_empty(self):
+        outcome = incomplete_watch_outcome()
+        result = incomplete_result_for(outcome)
+        identifier = scenario_result_id_for(result, outcome)
+        decision = CapabilityDecision(
+            schema_version=1,
+            run_id=result.run_id,
+            mechanism="isolated-low-integrity-junction-projection-v1",
+            verdict=CapabilityVerdict.INCOMPLETE,
+            scenario_result_ids=(identifier,),
+            reasons=("scenario-unavailable",),
+        )
+
+        with self.assertRaises(ContainmentFormatError):
+            capability_decision_to_bytes(decision)
+        with self.assertRaises(ContainmentFormatError):
+            capability_decision_to_bytes(
+                replace(decision, scenario_result_ids=()),
+                (result,),
+                (outcome,),
+            )
+
+        for verdict in (CapabilityVerdict.REJECTED, CapabilityVerdict.INCOMPLETE):
+            with self.subTest(verdict=verdict):
+                early = replace(
+                    decision,
+                    verdict=verdict,
+                    scenario_result_ids=(),
+                )
+                self.assertEqual(
+                    early,
+                    capability_decision_from_bytes(
+                        capability_decision_to_bytes(early),
+                    ),
+                )
 
     def test_watch_outcome_rejects_impossible_or_noncanonical_values(self):
         value = valid_watch_outcome(events=(forbidden_play_event(),))

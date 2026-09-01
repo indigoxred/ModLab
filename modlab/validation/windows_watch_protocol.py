@@ -10,6 +10,7 @@ import os
 from pathlib import Path, PureWindowsPath
 import re
 import secrets
+import sys
 import threading
 from typing import Any
 
@@ -47,6 +48,7 @@ _REQUEST_ID = re.compile(r"^watch-request:[0-9a-f]{64}$")
 _SESSION_ID = re.compile(r"^watch-session:[0-9a-f]{64}$")
 _RUN_ID = re.compile(r"^containment-run:[0-9a-f]{32}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_WATCH_OUTCOME_ID = re.compile(r"^watch-outcome-sha256:[0-9a-f]{64}$")
 
 _REQUEST_FIELDS = {
     "schemaVersion",
@@ -65,6 +67,8 @@ _CLAIM_FIELDS = {
     "sessionId",
     "runId",
     "scenario",
+    "requestPath",
+    "workerCommand",
     "controllerPid",
     "controllerCreationTime",
 }
@@ -121,6 +125,8 @@ class ControllerClaim:
     session_id: str
     run_id: str
     scenario: ContainmentScenario
+    request_path: Path
+    worker_command: tuple[str, ...]
     controller_pid: int
     controller_creation_time: int
 
@@ -166,6 +172,18 @@ class WatchReceipt:
     watch_outcome_id: str | None
     request_bytes_sha256: str
     error: str | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.evidence_completion is WatchEvidenceCompletion.COMPLETED
+            and (
+                type(self.watch_outcome_id) is not str
+                or _WATCH_OUTCOME_ID.fullmatch(self.watch_outcome_id) is None
+            )
+        ):
+            raise WatchProtocolError(
+                "Completed receipt requires a valid watch outcome ID"
+            )
 
     @property
     def complete(self) -> bool:
@@ -220,6 +238,19 @@ def watch_request_sha256(value: WatchRequest) -> str:
     return hashlib.sha256(watch_request_to_bytes(value)).hexdigest()
 
 
+def watch_worker_command(request_path: Path) -> tuple[str, ...]:
+    canonical_request_path = _path_value(request_path, "worker request path")
+    executable = _path_value(Path(sys.executable), "worker executable")
+    return (
+        str(executable),
+        "-B",
+        "-m",
+        "modlab.validation.windows_watch",
+        "--worker",
+        str(canonical_request_path),
+    )
+
+
 def controller_claim_to_bytes(
     value: ControllerClaim,
     request: WatchRequest,
@@ -246,6 +277,11 @@ def controller_claim_from_bytes(
         session_id=_pattern(value["sessionId"], _SESSION_ID, "claim sessionId"),
         run_id=_pattern(value["runId"], _RUN_ID, "claim runId"),
         scenario=_scenario(value["scenario"]),
+        request_path=_path(value["requestPath"], "claim requestPath"),
+        worker_command=_command_array(
+            value["workerCommand"],
+            "claim workerCommand",
+        ),
         controller_pid=_positive(value["controllerPid"], "claim controllerPid"),
         controller_creation_time=_positive(
             value["controllerCreationTime"],
@@ -472,9 +508,34 @@ def _validate_claim(
         request,
         "controller claim",
     )
-    _positive(value.controller_pid, "claim controllerPid")
-    _positive(value.controller_creation_time, "claim controllerCreationTime")
-    return value
+    request_path = _path_value(value.request_path, "claim requestPath")
+    expected_request_path = request.evidence_root / REQUEST_NAME
+    if request_path != expected_request_path:
+        raise WatchProtocolError("controller claim request path mismatch")
+    if type(value.worker_command) is not tuple:
+        raise WatchProtocolError("claim workerCommand must be a tuple")
+    worker_command = tuple(
+        _text(item, f"claim workerCommand[{index}]")
+        for index, item in enumerate(value.worker_command)
+    )
+    if worker_command != watch_worker_command(request_path):
+        raise WatchProtocolError("controller claim worker command mismatch")
+    controller_pid = _positive(value.controller_pid, "claim controllerPid")
+    controller_creation_time = _positive(
+        value.controller_creation_time,
+        "claim controllerCreationTime",
+    )
+    return ControllerClaim(
+        value.schema_version,
+        value.request_sha256,
+        value.session_id,
+        value.run_id,
+        value.scenario,
+        request_path,
+        worker_command,
+        controller_pid,
+        controller_creation_time,
+    )
 
 
 def _validate_launch(value: WorkerLaunch, request: WatchRequest) -> WorkerLaunch:
@@ -580,6 +641,8 @@ def _claim_dict(value: ControllerClaim) -> dict[str, Any]:
         "sessionId": value.session_id,
         "runId": value.run_id,
         "scenario": value.scenario.value,
+        "requestPath": str(value.request_path),
+        "workerCommand": list(value.worker_command),
         "controllerPid": value.controller_pid,
         "controllerCreationTime": value.controller_creation_time,
     }
@@ -693,6 +756,15 @@ def _text(value: Any, label: str) -> str:
     ):
         raise WatchProtocolError(f"{label} must be nonempty canonical text")
     return value
+
+
+def _command_array(value: Any, label: str) -> tuple[str, ...]:
+    if type(value) is not list:
+        raise WatchProtocolError(f"{label} must be an array")
+    return tuple(
+        _text(item, f"{label}[{index}]")
+        for index, item in enumerate(value)
+    )
 
 
 def _pattern(value: Any, pattern: re.Pattern[str], label: str) -> str:

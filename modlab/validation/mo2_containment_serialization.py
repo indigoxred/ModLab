@@ -564,11 +564,11 @@ def capability_decision_from_dict(
             raise ContainmentFormatError(
                 "Supported decision cannot record reasons"
             )
-        _check_supported_results(decision, scenario_results, watch_outcomes)
     elif not decision.reasons:
         raise ContainmentFormatError(
             f"{decision.verdict.value} decision requires reasons"
         )
+    _check_decision_results(decision, scenario_results, watch_outcomes)
     return decision
 
 
@@ -755,54 +755,105 @@ def _check_passed_result(
         )
 
 
-def _check_supported_results(
+def _check_decision_results(
     decision: CapabilityDecision,
     scenario_results: tuple[ScenarioResult, ...] | None,
     watch_outcomes: tuple[WatchOutcome, ...] | None,
 ) -> None:
+    if scenario_results is None and watch_outcomes is None:
+        if decision.scenario_result_ids:
+            raise ContainmentFormatError(
+                "decision result IDs require corresponding result/outcome pairs"
+            )
+        if decision.verdict is CapabilityVerdict.SUPPORTED:
+            raise ContainmentFormatError(
+                "Supported decision requires corresponding scenario results and watch outcomes"
+            )
+        return
     if scenario_results is None or watch_outcomes is None:
         raise ContainmentFormatError(
-            "Supported decision requires corresponding scenario results and watch outcomes"
+            "decision evidence requires both scenario results and watch outcomes"
         )
     results = tuple(scenario_results)
     outcomes = tuple(watch_outcomes)
-    if len(results) != len(ContainmentScenario) or len(outcomes) != len(results):
+    if (
+        len(results) != len(outcomes)
+        or len(results) != len(decision.scenario_result_ids)
+    ):
         raise ContainmentFormatError(
-            "Supported decision requires four corresponding result/outcome pairs"
+            "decision requires equal result ID, scenario result, and watch outcome counts"
         )
-    if tuple(result.scenario for result in results) != tuple(ContainmentScenario):
+    if not results:
+        if decision.verdict is CapabilityVerdict.SUPPORTED:
+            raise ContainmentFormatError(
+                "Supported decision requires four corresponding result/outcome pairs"
+            )
+        return
+
+    result_scenarios = tuple(result.scenario for result in results)
+    expected_scenarios = tuple(
+        scenario
+        for scenario in ContainmentScenario
+        if scenario in set(result_scenarios)
+    )
+    if result_scenarios != expected_scenarios:
         raise ContainmentFormatError(
-            "Supported decision scenario results must use enum order"
+            "decision scenario results must use enum order without duplicates"
         )
-    if tuple(outcome.scenario for outcome in outcomes) != tuple(ContainmentScenario):
+    if tuple(outcome.scenario for outcome in outcomes) != result_scenarios:
         raise ContainmentFormatError(
-            "Supported decision watch outcomes must use enum order"
+            "decision watch outcomes must match result scenarios in enum order"
         )
     if any(result.run_id != decision.run_id for result in results):
         raise ContainmentFormatError(
-            "Supported decision scenario results must share runId"
+            "decision scenario results must share runId"
         )
     if any(outcome.run_id != decision.run_id for outcome in outcomes):
         raise ContainmentFormatError(
-            "Supported decision watch outcomes must share runId"
-        )
-    if any(result.outcome is not ScenarioOutcome.PASSED for result in results):
-        raise ContainmentFormatError(
-            "Supported decision requires Passed scenario results"
+            "decision watch outcomes must share runId"
         )
 
+    checked_outcomes = tuple(
+        watch_outcome_from_dict(_watch_outcome_dict(outcome))
+        for outcome in outcomes
+    )
     checked_results = tuple(
         scenario_result_from_dict(_result_dict(result), outcome)
-        for result, outcome in zip(results, outcomes, strict=True)
+        for result, outcome in zip(results, checked_outcomes, strict=True)
     )
     identifiers = tuple(
         scenario_result_id_for(result, outcome)
-        for result, outcome in zip(checked_results, outcomes, strict=True)
+        for result, outcome in zip(checked_results, checked_outcomes, strict=True)
     )
     if identifiers != decision.scenario_result_ids:
         raise ContainmentFormatError(
-            "Supported decision scenario result IDs do not match evidence"
+            "decision scenario result IDs do not match evidence"
         )
+
+    has_failed = any(
+        result.outcome is ScenarioOutcome.FAILED
+        for result in checked_results
+    )
+    if has_failed and decision.verdict is not CapabilityVerdict.REJECTED:
+        raise ContainmentFormatError(
+            "Failed scenario result requires Rejected capability verdict"
+        )
+    if decision.verdict is CapabilityVerdict.SUPPORTED:
+        if len(checked_results) != len(ContainmentScenario):
+            raise ContainmentFormatError(
+                "Supported decision requires four corresponding result/outcome pairs"
+            )
+        if result_scenarios != tuple(ContainmentScenario):
+            raise ContainmentFormatError(
+                "Supported decision requires all scenarios in enum order"
+            )
+        if any(
+            result.outcome is not ScenarioOutcome.PASSED
+            for result in checked_results
+        ):
+            raise ContainmentFormatError(
+                "Supported decision requires Passed scenario results"
+            )
 
 
 def _journal_dict(value: ScenarioJournal) -> dict[str, Any]:

@@ -516,6 +516,9 @@ class WatchRoot:
 @dataclass(frozen=True)
 class WatchRequest:
     request_id: str
+    session_id: str
+    run_id: str
+    scenario: ContainmentScenario
     evidence_root: Path
     stop_token_path: Path
     roots: tuple[WatchRoot, ...]

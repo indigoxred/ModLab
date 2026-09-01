@@ -3,6 +3,7 @@ import json
 import os
 from dataclasses import fields, replace
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -38,6 +39,7 @@ from modlab.validation.windows_watch_protocol import (
     watch_request_from_bytes,
     watch_request_sha256,
     watch_request_to_bytes,
+    watch_worker_command,
     worker_launch_from_bytes,
     worker_launch_to_bytes,
 )
@@ -78,12 +80,15 @@ class WatchProtocolTests(unittest.TestCase):
         )
 
     def claim(self, request: WatchRequest) -> ControllerClaim:
+        request_path = request.evidence_root / REQUEST_NAME
         return ControllerClaim(
             schema_version=1,
             request_sha256=watch_request_sha256(request),
             session_id=request.session_id,
             run_id=request.run_id,
             scenario=request.scenario,
+            request_path=request_path,
+            worker_command=watch_worker_command(request_path),
             controller_pid=41,
             controller_creation_time=1001,
         )
@@ -222,6 +227,37 @@ class WatchProtocolTests(unittest.TestCase):
                 claim,
                 launch,
             )
+
+    def test_claim_binds_canonical_request_path_and_exact_worker_command(self):
+        request = self.request()
+        claim = self.claim(request)
+        document = json.loads(controller_claim_to_bytes(claim, request))
+        request_path = request.evidence_root / REQUEST_NAME
+        expected_command = (
+            sys.executable,
+            "-B",
+            "-m",
+            "modlab.validation.windows_watch",
+            "--worker",
+            str(request_path),
+        )
+
+        self.assertEqual(str(request_path), document.get("requestPath"))
+        self.assertEqual(list(expected_command), document.get("workerCommand"))
+
+        path_replay = dict(document)
+        path_replay["requestPath"] = str(self.root / "replayed" / REQUEST_NAME)
+        with self.assertRaisesRegex(WatchProtocolError, "request path"):
+            controller_claim_from_bytes(_canonical(path_replay), request)
+
+        command_replay = dict(document)
+        command_replay["workerCommand"] = [
+            *expected_command[:-2],
+            "--replayed-worker",
+            expected_command[-1],
+        ]
+        with self.assertRaisesRegex(WatchProtocolError, "worker command"):
+            controller_claim_from_bytes(_canonical(command_replay), request)
 
     def test_record_schemas_reject_boolean_integer_and_extra_field(self):
         request = self.request()

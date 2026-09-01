@@ -381,9 +381,22 @@ class MutationWatchTests(unittest.TestCase):
         self.assertEqual(0, outcome.worker_exit_code)
         self.assertEqual((), outcome.reason_codes)
         self.assertEqual(receipt.watch_outcome_id, watch_outcome_id_for(outcome))
+        protected = _protected_state("1")
+        self.assertTrue(watch_proves_unchanged(receipt, protected, protected))
+        self.assertFalse(watch_proves_unchanged(receipt, "partial", "partial"))
+        self.assertFalse(
+            watch_proves_unchanged(
+                replace(receipt, request_bytes_sha256="not-a-request-hash"),
+                protected,
+                protected,
+            )
+        )
         self.assertTrue((self.evidence / "controller-claim.json").is_file())
         self.assertTrue((self.evidence / "worker-launch.json").is_file())
         self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_SESSIONS)
+
+    def test_mutable_evidence_completion_helper_is_removed(self):
+        self.assertFalse(hasattr(windows_watch, "_watch_receipt_from_files_impl"))
 
     def test_completed_outcome_reconstructs_without_evidence_reopen(self):
         request_path, worker_pid = self._start()
@@ -585,6 +598,43 @@ class MutationWatchTests(unittest.TestCase):
 
                 self.assertEqual(expected, receipt)
 
+    def test_start_publishes_command_bound_claim_before_exact_spawn(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        claim_path = self.evidence / "controller-claim.json"
+        self.active_requests.append(request_path)
+        real_popen = subprocess.Popen
+        observed_spawn = False
+
+        def inspect_spawn(command, **kwargs):
+            nonlocal observed_spawn
+            observed_spawn = True
+            self.assertTrue(claim_path.is_file(), "claim was not published before spawn")
+            claim = windows_watch.controller_claim_from_bytes(
+                claim_path.read_bytes(),
+                windows_watch._load_request_path(request_path),
+            )
+            self.assertEqual(
+                request_path.resolve(strict=True),
+                getattr(claim, "request_path", None),
+            )
+            self.assertEqual(tuple(command), getattr(claim, "worker_command", ()))
+            self.assertIs(kwargs.get("shell"), False)
+            return real_popen(command, **kwargs)
+
+        with mock.patch.object(
+            windows_watch.subprocess,
+            "Popen",
+            side_effect=inspect_spawn,
+        ):
+            worker_pid = start_watch(request)
+
+        self.assertTrue(observed_spawn)
+        self.assertEqual(
+            worker_pid,
+            windows_watch._LOCAL_SESSIONS[request_path.absolute()].worker_pid,
+        )
+
     def test_launch_publication_failure_uses_owned_incomplete_cleanup(self):
         request = self._request()
         request_path = self.evidence / "request.json"
@@ -721,7 +771,202 @@ class MutationWatchTests(unittest.TestCase):
             self.assertIsNone(
                 windows_watch._close_handle(process_handle, "transient-ready test worker")
             )
-        self.assertEqual(2, ready_reads)
+        self.assertGreaterEqual(ready_reads, 2)
+
+    def test_startup_retries_exact_ready_not_found_for_exact_live_worker(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        self.active_requests.append(request_path)
+        real_read = windows_watch._read_exact_regular_file
+        ready_reads = 0
+
+        def missing_once(path: Path, label: str, **kwargs: object) -> bytes:
+            nonlocal ready_reads
+            if Path(path).name == "ready.json":
+                ready_reads += 1
+                if ready_reads == 1:
+                    raise FileNotFoundError(
+                        2,
+                        "injected exact ready not found",
+                        str(path),
+                    )
+            return real_read(path, label, **kwargs)
+
+        with mock.patch.object(
+            windows_watch,
+            "_read_exact_regular_file",
+            side_effect=missing_once,
+        ):
+            worker_pid = start_watch(request)
+
+        self.assertEqual(
+            worker_pid,
+            windows_watch._LOCAL_SESSIONS[request_path.absolute()].worker_pid,
+        )
+        self.assertGreaterEqual(ready_reads, 2)
+
+    def test_startup_not_found_aborts_when_worker_wait_is_uncertain(self):
+        for index, wait_result in enumerate(
+            (windows_watch._WAIT_FAILED, 7),
+        ):
+            with self.subTest(wait_result=wait_result):
+                case_root = self.root / f"ready-not-found-wait-{index}"
+                watched = case_root / "watched"
+                evidence = case_root / "evidence"
+                watched.mkdir(parents=True)
+                evidence.mkdir()
+                physical = watch_root("SourceMods", watched)
+                request = WatchRequest(
+                    request_id="watch-request:" + f"{index + 1:x}" * 64,
+                    session_id="watch-session:" + f"{index + 3:x}" * 64,
+                    run_id="containment-run:" + f"{index + 5:x}" * 32,
+                    scenario=ContainmentScenario.MERGE_EXISTING,
+                    evidence_root=evidence,
+                    stop_token_path=evidence / "stop.token",
+                    roots=tuple(
+                        replace(physical, root_kind=kind)
+                        for kind in windows_watch.ROOT_KINDS
+                    ),
+                )
+                request_path = evidence / "request.json"
+                self.active_requests.append(request_path)
+                real_read = windows_watch._read_exact_regular_file
+                real_wait = windows_watch._kernel32.WaitForSingleObject
+                missing_injected = False
+                wait_injected = False
+
+                def missing_once(
+                    path: Path,
+                    label: str,
+                    **kwargs: object,
+                ) -> bytes:
+                    nonlocal missing_injected
+                    if Path(path).name == "ready.json" and not missing_injected:
+                        missing_injected = True
+                        raise FileNotFoundError(
+                            2,
+                            "injected exact ready not found",
+                            str(path),
+                        )
+                    return real_read(path, label, **kwargs)
+
+                def uncertain_once(handle: int, timeout: int) -> int:
+                    nonlocal wait_injected
+                    if timeout == 0 and not wait_injected:
+                        wait_injected = True
+                        return wait_result
+                    return real_wait(handle, timeout)
+
+                with (
+                    mock.patch.object(
+                        windows_watch,
+                        "_read_exact_regular_file",
+                        side_effect=missing_once,
+                    ),
+                    mock.patch.object(
+                        windows_watch._kernel32,
+                        "WaitForSingleObject",
+                        side_effect=uncertain_once,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        WatchProtocolError,
+                        "ready.*liveness wait failed",
+                    ):
+                        start_watch(request)
+
+                self.assertTrue(missing_injected)
+                self.assertTrue(wait_injected)
+                outcome = watch_outcome_from_bytes(
+                    (evidence / "outcome.json").read_bytes()
+                )
+                self.assertEqual(
+                    WatchEvidenceCompletion.INCOMPLETE,
+                    outcome.evidence_completion,
+                )
+
+    def test_startup_lock_retry_aborts_when_worker_wait_is_uncertain(self):
+        for index, (error_code, wait_result) in enumerate(
+            (
+                (windows_watch._ERROR_SHARING_VIOLATION, windows_watch._WAIT_FAILED),
+                (windows_watch._ERROR_LOCK_VIOLATION, 7),
+            )
+        ):
+            with self.subTest(error_code=error_code, wait_result=wait_result):
+                case_root = self.root / f"ready-lock-wait-{index}"
+                watched = case_root / "watched"
+                evidence = case_root / "evidence"
+                watched.mkdir(parents=True)
+                evidence.mkdir()
+                physical = watch_root("SourceMods", watched)
+                request = WatchRequest(
+                    request_id="watch-request:" + f"{index + 7:x}" * 64,
+                    session_id="watch-session:" + f"{index + 9:x}" * 64,
+                    run_id="containment-run:" + f"{index + 11:x}" * 32,
+                    scenario=ContainmentScenario.MERGE_EXISTING,
+                    evidence_root=evidence,
+                    stop_token_path=evidence / "stop.token",
+                    roots=tuple(
+                        replace(physical, root_kind=kind)
+                        for kind in windows_watch.ROOT_KINDS
+                    ),
+                )
+                request_path = evidence / "request.json"
+                self.active_requests.append(request_path)
+                real_read = windows_watch._read_exact_regular_file
+                real_wait = windows_watch._kernel32.WaitForSingleObject
+                lock_injected = False
+                wait_injected = False
+
+                def locked_once(
+                    path: Path,
+                    label: str,
+                    **kwargs: object,
+                ) -> bytes:
+                    nonlocal lock_injected
+                    if Path(path).name == "ready.json" and not lock_injected:
+                        lock_injected = True
+                        raise OSError(
+                            error_code,
+                            "injected exact ready lock",
+                            str(path),
+                        )
+                    return real_read(path, label, **kwargs)
+
+                def uncertain_once(handle: int, timeout: int) -> int:
+                    nonlocal wait_injected
+                    if timeout == 0 and not wait_injected:
+                        wait_injected = True
+                        return wait_result
+                    return real_wait(handle, timeout)
+
+                with (
+                    mock.patch.object(
+                        windows_watch,
+                        "_read_exact_regular_file",
+                        side_effect=locked_once,
+                    ),
+                    mock.patch.object(
+                        windows_watch._kernel32,
+                        "WaitForSingleObject",
+                        side_effect=uncertain_once,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        WatchProtocolError,
+                        "ready.*liveness wait failed",
+                    ):
+                        start_watch(request)
+
+                self.assertTrue(lock_injected)
+                self.assertTrue(wait_injected)
+                outcome = watch_outcome_from_bytes(
+                    (evidence / "outcome.json").read_bytes()
+                )
+                self.assertEqual(
+                    WatchEvidenceCompletion.INCOMPLETE,
+                    outcome.evidence_completion,
+                )
 
     def test_same_controller_requires_exact_zero_exit_before_completion(self):
         request_path, _ = self._start()
@@ -1092,6 +1337,164 @@ class MutationWatchTests(unittest.TestCase):
             )
         finally:
             self._finish_external_fixture(controller, worker_pid, worker_handle)
+
+    def test_bound_event_survives_exact_controller_death_as_incomplete(self):
+        controller, evidence, request_path, worker_pid, worker_handle = (
+            self._external_controller_fixture("dead-controller-bound-event")
+        )
+        watched = evidence.parent / "watched"
+        relative_path = "positive-before-controller-death.txt"
+        try:
+            (watched / relative_path).write_text("breach", encoding="utf-8")
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                try:
+                    if relative_path.encode("utf-8") in (
+                        evidence / "events.ndjson"
+                    ).read_bytes():
+                        break
+                except FileNotFoundError:
+                    pass
+                self.assertIsNone(
+                    controller.poll(),
+                    "controller exited before the positive event was journalled",
+                )
+                time.sleep(0.02)
+            else:
+                self.fail("positive event was not journalled before controller death")
+
+            controller.terminate()
+            controller.wait(timeout=10)
+            receipt = stop_watch(request_path)
+            outcome = watch_outcome_from_bytes((evidence / "outcome.json").read_bytes())
+
+            self.assertFalse(receipt.complete)
+            self.assertEqual(
+                WatchEvidenceCompletion.INCOMPLETE,
+                outcome.evidence_completion,
+            )
+            self.assertIn("controller-session-lost", outcome.reason_codes)
+            self.assertTrue(
+                any(
+                    event.root_kind == "SourceMods"
+                    and event.relative_path == relative_path
+                    for event in outcome.events
+                ),
+                "a fully bound positive event was discarded",
+            )
+            self.assertEqual(outcome.events, receipt.events)
+        finally:
+            self._finish_external_fixture(controller, worker_pid, worker_handle)
+
+    def test_bound_event_survives_unrelated_terminal_incompleteness(self):
+        request_path, _ = self._start_case("bound-event-unrelated-incomplete")
+        watched = request_path.parent.parent / "watched"
+        relative_path = "positive-before-unrelated-error.txt"
+        (watched / relative_path).write_text("breach", encoding="utf-8")
+        time.sleep(0.2)
+        real_read = windows_watch._read_exact_regular_file
+
+        def incomplete_terminal(
+            path: Path,
+            label: str,
+            **kwargs: object,
+        ) -> bytes:
+            data = real_read(path, label, **kwargs)
+            if Path(path).name == "terminal.json" and label == "terminal record":
+                terminal = json.loads(data)
+                terminal["complete"] = False
+                terminal["error"] = "injected unrelated completeness error"
+                return _canonical(terminal)
+            return data
+
+        with mock.patch.object(
+            windows_watch,
+            "_read_exact_regular_file",
+            side_effect=incomplete_terminal,
+        ):
+            receipt = stop_watch(request_path)
+
+        outcome = watch_outcome_from_bytes(
+            (request_path.parent / "outcome.json").read_bytes()
+        )
+        self.assertFalse(receipt.complete)
+        self.assertEqual(
+            WatchEvidenceCompletion.INCOMPLETE,
+            outcome.evidence_completion,
+        )
+        self.assertTrue(
+            any(
+                event.root_kind == "SourceMods"
+                and event.relative_path == relative_path
+                for event in outcome.events
+            ),
+            "an unrelated completion error discarded trustworthy event evidence",
+        )
+        self.assertEqual(outcome.events, receipt.events)
+
+    def test_untrusted_event_evidence_cannot_survive_incomplete_capture(self):
+        for fault in ("malformed", "hash", "sequence", "identity"):
+            with self.subTest(fault=fault):
+                request_path, _ = self._start_case(f"untrusted-event-{fault}")
+                watched = request_path.parent.parent / "watched"
+                (watched / f"{fault}.txt").write_text("breach", encoding="utf-8")
+                time.sleep(0.2)
+                real_read = windows_watch._read_exact_regular_file
+                real_journal = windows_watch._read_exact_journal
+
+                def corrupt_terminal(
+                    path: Path,
+                    label: str,
+                    **kwargs: object,
+                ) -> bytes:
+                    data = real_read(path, label, **kwargs)
+                    if Path(path).name != "terminal.json" or label != "terminal record":
+                        return data
+                    terminal = json.loads(data)
+                    if fault == "hash":
+                        terminal["eventBytesSha256"] = "0" * 64
+                    elif fault == "identity":
+                        terminal["journalFileId"] += 1
+                    return _canonical(terminal)
+
+                def corrupt_journal(path: Path):
+                    journal = real_journal(path)
+                    if fault == "malformed":
+                        return replace(journal, data=b'{"sequence":1\n')
+                    if fault == "sequence":
+                        return replace(
+                            journal,
+                            data=_canonical(
+                                {
+                                    "action": "Added",
+                                    "relativePath": "sequence.txt",
+                                    "rootKind": "SourceMods",
+                                    "sequence": 2,
+                                }
+                            ),
+                        )
+                    return journal
+
+                with (
+                    mock.patch.object(
+                        windows_watch,
+                        "_read_exact_regular_file",
+                        side_effect=corrupt_terminal,
+                    ),
+                    mock.patch.object(
+                        windows_watch,
+                        "_read_exact_journal",
+                        side_effect=corrupt_journal,
+                    ),
+                ):
+                    receipt = stop_watch(request_path)
+
+                outcome = watch_outcome_from_bytes(
+                    (request_path.parent / "outcome.json").read_bytes()
+                )
+                self.assertFalse(receipt.complete)
+                self.assertEqual((), outcome.events)
+                self.assertEqual((), receipt.events)
 
     def test_controller_death_after_terminal_before_outcome_cannot_promote(self):
         case_root = self.root / "controller-death-after-terminal"
@@ -2059,6 +2462,41 @@ class MutationWatchTests(unittest.TestCase):
         receipt = stop_watch(request_path)
 
         self.assertTrue(receipt.complete, receipt.error)
+
+    def test_worker_rejects_controller_claim_path_and_command_replay(self):
+        physical = watch_root("SourceMods", self.watched)
+        roots = tuple(
+            replace(physical, root_kind=kind)
+            for kind in windows_watch.ROOT_KINDS
+        )
+        for field in ("requestPath", "workerCommand"):
+            with self.subTest(field=field):
+                case_root = self.root / f"claim-replay-{field}"
+                case_root.mkdir()
+                _, request_path = self._direct_worker_request(case_root, roots)
+                claim_path = case_root / "controller-claim.json"
+                claim = json.loads(claim_path.read_bytes())
+                canonical_request_path = request_path.resolve(strict=True)
+                command = [
+                    sys.executable,
+                    "-B",
+                    "-m",
+                    "modlab.validation.windows_watch",
+                    "--worker",
+                    str(canonical_request_path),
+                ]
+                claim["requestPath"] = str(canonical_request_path)
+                claim["workerCommand"] = command
+                if field == "requestPath":
+                    claim[field] = str(case_root / "replayed-request.json")
+                else:
+                    claim[field] = [*command[:-2], "--replayed-worker", command[-1]]
+                claim_path.write_bytes(_canonical(claim))
+
+                self.assertEqual(2, run_watch_worker(request_path))
+                self.assertFalse((case_root / "ready.json").exists())
+                self.assertFalse((case_root / "events.ndjson").exists())
+                self.assertFalse((case_root / "terminal.json").exists())
 
     def test_guard_chain_detects_parent_replace_restore_before_descendant_open(self):
         outer = self.root / "arming-parent"
@@ -3051,6 +3489,8 @@ class MutationWatchTests(unittest.TestCase):
             session_id=request.session_id,
             run_id=request.run_id,
             scenario=request.scenario,
+            request_path=request_path,
+            worker_command=windows_watch.watch_worker_command(request_path),
             controller_pid=controller_pid,
             controller_creation_time=controller_creation_time,
         )
@@ -3287,7 +3727,7 @@ class MutationWatchTests(unittest.TestCase):
             )
 
     def test_events_and_manifests_are_independent_required_proofs(self):
-        clean = WatchReceipt(
+        receipt_arguments = dict(
             request_id="watch-request:" + "b" * 64,
             session_id="watch-session:" + "c" * 64,
             run_id="containment-run:0123456789abcdef0123456789abcdef",
@@ -3299,9 +3739,22 @@ class MutationWatchTests(unittest.TestCase):
             events=(),
             event_bytes_sha256=hashlib.sha256(b"").hexdigest(),
             worker_exit_code=0,
-            watch_outcome_id=None,
             error=None,
             request_bytes_sha256="4" * 64,
+        )
+        for invalid_outcome_id in (None, "watch-outcome-sha256:invalid"):
+            with self.subTest(watch_outcome_id=invalid_outcome_id):
+                with self.assertRaisesRegex(
+                    WatchProtocolError,
+                    "Completed receipt requires a valid watch outcome ID",
+                ):
+                    WatchReceipt(
+                        **receipt_arguments,
+                        watch_outcome_id=invalid_outcome_id,
+                    )
+        clean = WatchReceipt(
+            **receipt_arguments,
+            watch_outcome_id="watch-outcome-sha256:" + "5" * 64,
         )
         transient = replace(
             clean,
@@ -3361,6 +3814,8 @@ class MutationWatchTests(unittest.TestCase):
             session_id=request.session_id,
             run_id=request.run_id,
             scenario=request.scenario,
+            request_path=request_path,
+            worker_command=windows_watch.watch_worker_command(request_path),
             controller_pid=controller_pid,
             controller_creation_time=controller_creation_time,
         )
