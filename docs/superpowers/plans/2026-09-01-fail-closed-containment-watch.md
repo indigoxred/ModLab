@@ -922,9 +922,9 @@ Under the session's process-local lock:
 6. open no-follow evidence handles, verify and capture canonical ready/terminal/journal material and event snapshot;
 7. close every evidence-critical evidence/process handle successfully;
 8. construct a `WatchOutcome` with the exact captured request/session/run/scenario/controller/worker identities, `evidence_completion=WatchEvidenceCompletion.COMPLETED`, `worker_exit_code=0`, captured roots/events/journal/terminal hashes, and empty reason codes;
-9. publish outcome through `publish_new_verified()` and return a receipt derived from that outcome.
+9. write, flush, close, reopen through an exact no-follow handle, parse, and byte-verify a private outcome candidate; then use one no-replace `MoveFileExW(..., MOVEFILE_WRITE_THROUGH)` operation as the sole `outcome.json` commit point and return a receipt derived from the already verified outcome.
 
-Any exception before Step 8 constructs or later permits only Incomplete. If a Completed outcome publication fails, no later controller may reconstruct completion from terminal files.
+Any exception before the Step 9 commit constructs or later permits only Incomplete. No fallible verification occurs after the commit point: failure before the move leaves `Completed` unpublished, while a successful write-through move means every evidence and handle check already passed. No later controller may reconstruct completion from terminal files.
 
 - [ ] **Step 6: Implement non-owner policy without cross-process promotion**
 
