@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 import uuid
 import zipfile
 
@@ -320,6 +320,7 @@ def _copy_profile_bytes(source: Path, destination: Path) -> None:
 
 def _prepare_stage_environment(run_root: Path, layout: WorkspaceLayout) -> dict[str, str]:
     paths = {
+        "stage-root": layout.skyrim_mo2,
         "downloads": layout.skyrim_mo2_downloads,
         "profiles": layout.skyrim_mo2_profiles,
         "mods": layout.skyrim_mo2_mods,
@@ -338,6 +339,12 @@ def _prepare_stage_environment(run_root: Path, layout: WorkspaceLayout) -> dict[
         set_low_integrity_tree(path)
     environment = dict(os.environ)
     environment.update({name: str(path) for name, path in paths.items() if name.isupper()})
+    environment.update(
+        {
+            "MODLAB_MO2_CACHE_DIRECTORY": str(paths["cache"]),
+            "MODLAB_MO2_LOG_DIRECTORY": str(paths["logs"]),
+        }
+    )
     return environment
 
 
@@ -353,11 +360,15 @@ def _require_exact_version(report) -> None:
         raise ContainmentFixtureError("disposable MO2 executable version is not 2.5.2.0")
 
 
-def _external_low_watch_roots() -> tuple[tuple[str, Path], ...]:
+def _external_low_watch_roots(
+    *,
+    local_low_resolver: Callable[[], Path] | None = None,
+    low_temp_resolver: Callable[[], Path] | None = None,
+) -> tuple[tuple[str, Path], ...]:
     if os.name != "nt":
         return ()
-    local_low = _known_folder_local_app_data_low()
-    temporary = local_low / "Temp"
+    local_low = (local_low_resolver or _known_folder_local_app_data_low)()
+    temporary = (low_temp_resolver or _current_low_temp_directory)()
     unique: list[tuple[str, Path]] = []
     for name, path in (("ExternalLocalLow", local_low), ("ExternalTempLow", temporary)):
         resolved = path.resolve(strict=False)
@@ -372,6 +383,17 @@ def _same_path_identity(left: Path, right: Path) -> bool:
         return left.samefile(right)
     except OSError:
         return os.path.normcase(str(left)) == os.path.normcase(str(right))
+
+
+def _current_low_temp_directory() -> Path:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetTempPathW.argtypes = (wintypes.DWORD, wintypes.LPWSTR)
+    kernel32.GetTempPathW.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = kernel32.GetTempPathW(len(buffer), buffer)
+    if length == 0 or length >= len(buffer):
+        raise ContainmentFixtureError("could not resolve the current Low temporary directory")
+    return Path(buffer.value)
 
 
 def _known_folder_local_app_data_low() -> Path:

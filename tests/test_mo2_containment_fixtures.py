@@ -2,9 +2,12 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
+from modlab.validation import mo2_containment_fixtures as fixtures
 from modlab.validation.mo2_containment_fixtures import write_scenario_archives
 from modlab.validation.windows_junction import inspect_junction
+from modlab.workspace import initialize_workspace
 from tests.support.mo2_containment import prepare_fixture_with_fake_bootstrap
 
 
@@ -47,6 +50,51 @@ class ContainmentFixtureTests(unittest.TestCase):
             inspect_junction(fixture.stage_mods / "Protected Existing").target_path,
         )
         self.assertEqual(b"+Protected Existing\r\n", fixture.stage_lab_modlist.read_bytes())
+
+    def test_stage_root_is_labeled_low_before_any_projection_can_exist(self):
+        # Catches low labels being applied only to children, leaving the MO2 root Medium.
+        layout = initialize_workspace(self.root / "stage-workspace")
+        labels: list[Path] = []
+
+        with patch.object(
+            fixtures,
+            "set_low_integrity_tree",
+            side_effect=lambda path: labels.append(Path(path)),
+        ):
+            fixtures._prepare_stage_environment(self.root, layout)
+
+        self.assertIn(layout.skyrim_mo2, labels)
+
+    def test_fixture_routes_cache_and_logs_into_the_child_environment(self):
+        # Catches contained cache/log directories that a later MO2 child cannot consume.
+        fixture = prepare_fixture_with_fake_bootstrap(self.root)
+
+        self.assertEqual(
+            str(fixture.run_root / "stage-environment" / "cache"),
+            fixture.stage_environment["MODLAB_MO2_CACHE_DIRECTORY"],
+        )
+        self.assertEqual(
+            str(fixture.run_root / "stage-environment" / "logs"),
+            fixture.stage_environment["MODLAB_MO2_LOG_DIRECTORY"],
+        )
+
+    def test_external_low_temp_uses_the_independently_resolved_path(self):
+        # Catches replacing a redirected Low temp directory with LocalLow/Temp.
+        local_low = self.root / "LocalLow"
+        redirected_temp = self.root / "redirected-low-temp"
+
+        roots = fixtures._external_low_watch_roots(
+            local_low_resolver=lambda: local_low,
+            low_temp_resolver=lambda: redirected_temp,
+        )
+
+        self.assertEqual(
+            (
+                ("ExternalLocalLow", local_low.resolve(strict=False)),
+                ("ExternalTempLow", redirected_temp.resolve(strict=False)),
+            ),
+            roots,
+        )
 
 
 if __name__ == "__main__":
