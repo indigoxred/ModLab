@@ -10,7 +10,11 @@ from modlab.validation.mo2_containment_fixtures import write_scenario_archives
 from modlab.validation.windows_integrity import IntegrityLevel
 from modlab.validation.windows_junction import inspect_junction
 from modlab.workspace import initialize_workspace
-from tests.support.mo2_containment import prepare_fixture_with_fake_bootstrap
+from tests.support.mo2_containment import (
+    capture_production_path_snapshots,
+    measure_real_fixture_evidence,
+    prepare_fixture_with_fake_bootstrap,
+)
 
 
 def zip_names(path: Path) -> tuple[str, ...]:
@@ -52,6 +56,29 @@ class ContainmentFixtureTests(unittest.TestCase):
             inspect_junction(fixture.stage_mods / "Protected Existing").target_path,
         )
         self.assertEqual(b"+Protected Existing\r\n", fixture.stage_lab_modlist.read_bytes())
+
+    def test_real_fixture_evidence_derives_version_projection_and_steam_mutation(self):
+        # Catches evidence that is fabricated instead of read from the prepared fixture.
+        fixture = prepare_fixture_with_fake_bootstrap(self.root)
+        steam_root = self.root / "Steam"
+        before = capture_production_path_snapshots((steam_root,))
+        (steam_root / "unexpected-write.txt").write_bytes(b"must be reported")
+
+        def read_staged_version(path: Path) -> str:
+            self.assertEqual(
+                fixture.stage_layout.skyrim_mo2_app / "ModOrganizer.exe", path
+            )
+            return "9.8.7.6"
+
+        with patch(
+            "tests.support.mo2_containment.read_windows_file_version",
+            side_effect=read_staged_version,
+        ):
+            evidence = measure_real_fixture_evidence(fixture, before)
+
+        self.assertEqual("9.8.7.6", evidence.executable_version)
+        self.assertEqual(0, evidence.payload_bytes_copied_for_projection)
+        self.assertEqual((steam_root.resolve(),), evidence.production_paths_written)
 
     def test_fixture_parent_override_is_exact_and_confined_below_validation_root(self):
         from tests.support.mo2_containment import prepare_fixture_with_fake_bootstrap

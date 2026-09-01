@@ -3,16 +3,38 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 from unittest.mock import patch
 
 from modlab.adapters.mo2.bootstrap_model import BootstrapReceiptMode
+from modlab.adapters.skyrim.windows_version import read_windows_file_version
 from modlab.artifacts.vault import ArchiveVault
-from modlab.validation.mo2_containment_model import ContainmentScenario
+from modlab.validation.mo2_containment_fixtures import ContainmentFixture
+from modlab.validation.mo2_containment_model import ContainmentScenario, TreeIdentity
 from modlab.validation.windows_integrity import IntegrityLevel
+from modlab.validation.windows_junction import (
+    ContainmentSafetyError,
+    inspect_junction,
+    stable_tree_identity,
+)
 from modlab.workspace import initialize_workspace
+
+
+@dataclass(frozen=True)
+class ProductionPathSnapshot:
+    path: Path
+    identity: TreeIdentity
+
+
+@dataclass(frozen=True)
+class RealContainmentFixtureEvidence:
+    fixture: ContainmentFixture
+    executable_version: str | None
+    payload_bytes_copied_for_projection: int
+    production_paths_written: tuple[Path, ...]
 
 
 def prepare_fixture_with_fake_bootstrap(root: Path, *, fixture_parent: Path | None = None):
@@ -84,11 +106,69 @@ def prepare_fixture_with_fake_bootstrap(root: Path, *, fixture_parent: Path | No
         )
 
 
+def capture_production_path_snapshots(
+    paths: tuple[Path, ...],
+) -> tuple[ProductionPathSnapshot, ...]:
+    return tuple(
+        ProductionPathSnapshot(
+            path=Path(path).resolve(strict=True),
+            identity=stable_tree_identity(Path(path), required_equal_passes=2),
+        )
+        for path in paths
+    )
+
+
+def measure_real_fixture_evidence(
+    fixture: ContainmentFixture,
+    production_before: tuple[ProductionPathSnapshot, ...],
+) -> RealContainmentFixtureEvidence:
+    production_after = capture_production_path_snapshots(
+        tuple(snapshot.path for snapshot in production_before)
+    )
+    production_paths_written = tuple(
+        before.path
+        for before, after in zip(production_before, production_after, strict=True)
+        if before.identity != after.identity
+    )
+    return RealContainmentFixtureEvidence(
+        fixture=fixture,
+        executable_version=read_windows_file_version(
+            fixture.stage_layout.skyrim_mo2_app / "ModOrganizer.exe"
+        ),
+        payload_bytes_copied_for_projection=_projection_payload_bytes_copied(fixture),
+        production_paths_written=production_paths_written,
+    )
+
+
+def _projection_payload_bytes_copied(fixture: ContainmentFixture) -> int:
+    source_entries = tuple(
+        sorted(fixture.source_mods.iterdir(), key=lambda path: path.name.casefold())
+    )
+    stage_entries = tuple(
+        sorted(fixture.stage_mods.iterdir(), key=lambda path: path.name.casefold())
+    )
+    if tuple(path.name for path in stage_entries) != tuple(
+        path.name for path in source_entries
+    ):
+        raise RuntimeError("staged projection names do not match source mods")
+    copied_bytes = 0
+    for source, stage in zip(source_entries, stage_entries, strict=True):
+        try:
+            projection = inspect_junction(stage)
+        except (ContainmentSafetyError, OSError):
+            copied_bytes += stable_tree_identity(stage, required_equal_passes=2).total_size
+            continue
+        if projection.target_path != source.resolve(strict=True):
+            raise RuntimeError("staged projection target does not match source mod")
+    return copied_bytes
+
+
 @contextmanager
 def prepare_real_containment_fixture(archive_path: Path, steam_root: Path):
     """Yield a disposable real-archive fixture without touching a managed instance."""
     from modlab.validation.mo2_containment_fixtures import prepare_containment_fixture
 
+    production_before = capture_production_path_snapshots((Path(steam_root),))
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         workspace = root / "source-vault"
@@ -96,16 +176,19 @@ def prepare_real_containment_fixture(archive_path: Path, steam_root: Path):
         artifact = ArchiveVault(workspace).import_archive(
             Path(archive_path), source_note="opt-in real containment fixture"
         )
-        yield prepare_containment_fixture(
+        fixture = prepare_containment_fixture(
             workspace,
             artifact.artifact_id,
             Path(steam_root),
             layout.mo2_containment_validation,
             ContainmentScenario.NEW_FOLDER,
         )
+        yield measure_real_fixture_evidence(fixture, production_before)
 
 
 __all__ = [
     "prepare_fixture_with_fake_bootstrap",
     "prepare_real_containment_fixture",
+    "capture_production_path_snapshots",
+    "measure_real_fixture_evidence",
 ]
