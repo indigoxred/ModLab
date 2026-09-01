@@ -777,22 +777,29 @@ def _pin_tree(root: Path) -> _PinnedTree:
         expected_identity=root_identity,
         allow_reparse=False,
     )
-    return _pin_tree_from_root(root_pin)
+    try:
+        return _pin_tree_from_root(root_pin)
+    except _PinnedTreeRejected:
+        raise
+    except BaseException:
+        root_pin.close()
+        raise
 
 
 def _pin_tree_from_root(root_pin: _PinnedObject) -> _PinnedTree:
-    attributes, tag = _attribute_tag_for_handle(root_pin.handle, root_pin.path)
-    if _is_reparse(attributes, tag) or not attributes & _FILE_ATTRIBUTE_DIRECTORY:
-        root_pin.close()
-        raise ContainmentSafetyError(f"direct pinned tree root required: {root_pin.path}")
     tree = _PinnedTree(root=root_pin, entries=[], current_path=root_pin.path)
     try:
+        attributes, tag = _attribute_tag_for_handle(root_pin.handle, root_pin.path)
+        if _is_reparse(attributes, tag) or not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+            raise ContainmentSafetyError(
+                f"direct pinned tree root required: {root_pin.path}"
+            )
         _pin_descendants(tree)
         return tree
     except _PinnedTreeRejected:
         raise
     except BaseException:
-        tree.close()
+        tree.close_descendants()
         raise
 
 
@@ -1298,7 +1305,13 @@ def adopt_unique_staged_mod(
             final_is_reparse=final_is_reparse,
         )
     except BaseException as error:
-        if tree is not None and not quarantined:
+        if tree is None:
+            tree = _PinnedTree(
+                root=selection.candidate,
+                entries=[],
+                current_path=selection.candidate.path,
+            )
+        if not quarantined:
             try:
                 tree.close_descendants()
                 tree.current_path = tree.root.path

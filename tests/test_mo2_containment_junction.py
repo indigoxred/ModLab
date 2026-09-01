@@ -589,7 +589,7 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
         self.assertEqual(external_integrity, inspect_path_integrity(external))
         self.assertEqual(b"outside", (external / "outside.txt").read_bytes())
 
-    def test_late_unpinned_directory_is_rejected_without_junction_traversal(self):
+    def test_late_junction_during_pin_construction_quarantines_exact_candidate(self):
         stage, source, quarantine = self._adoption_roots()
         candidate = stage / "Expected"
         late = candidate / "late"
@@ -600,8 +600,6 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
         (external / "outside.txt").write_bytes(b"outside")
         set_low_integrity_tree(candidate)
         external_integrity = inspect_path_integrity(external)
-        real_pin_descendants = windows_junction._pin_descendants
-        real_attribute_tag = windows_junction._attribute_tag
         real_scandir = windows_junction.os.scandir
         race = {
             "inserted": False,
@@ -609,41 +607,28 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
             "external_traversed": False,
         }
 
-        def pin_then_insert(tree):
-            result = real_pin_descendants(tree)
-            if not race["inserted"]:
+        def scandir_with_late_swap(path):
+            entries = real_scandir(path)
+            if Path(path) == candidate and not race["inserted"]:
+                try:
+                    snapshot = tuple(entries)
+                finally:
+                    entries.close()
                 late.mkdir()
                 race["inserted"] = True
-            return result
-
-        def attribute_then_swap(path):
-            observed = real_attribute_tag(path)
-            if Path(path) == late and not race["swapped"]:
-                race["swapped"] = True
                 late.rmdir()
                 create_mod_projection(external, late)
-            return observed
-
-        def record_scandir(path):
+                race["swapped"] = True
+                return iter(snapshot)
             if Path(path) == late and race["swapped"]:
                 race["external_traversed"] = True
-            return real_scandir(path)
+            return entries
 
         with (
             mock.patch.object(
-                windows_junction,
-                "_pin_descendants",
-                side_effect=pin_then_insert,
-            ),
-            mock.patch.object(
-                windows_junction,
-                "_attribute_tag",
-                side_effect=attribute_then_swap,
-            ),
-            mock.patch.object(
                 windows_junction.os,
                 "scandir",
-                side_effect=record_scandir,
+                side_effect=scandir_with_late_swap,
             ),
             mock.patch.object(
                 windows_junction,
@@ -661,10 +646,90 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
                 )
 
         self.assertTrue(race["inserted"])
+        self.assertTrue(race["swapped"])
         self.assertFalse(race["external_traversed"])
         normalize.assert_not_called()
+        self.assertFalse(candidate.exists())
+        self.assertEqual(
+            b"inside",
+            (quarantine / "Expected" / "inside.txt").read_bytes(),
+        )
+        self.assertEqual(
+            external.resolve(strict=True),
+            inspect_junction(quarantine / "Expected" / "late").target_path,
+        )
         self.assertEqual(external_integrity, inspect_path_integrity(external))
         self.assertEqual(b"outside", (external / "outside.txt").read_bytes())
+
+    def test_initial_tree_classification_failure_quarantines_then_closes_root_pin(self):
+        stage, source, quarantine = self._adoption_roots()
+        candidate = stage / "Expected"
+        candidate.mkdir()
+        (candidate / "inside.txt").write_bytes(b"inside")
+        real_attribute_tag = windows_junction._attribute_tag_for_handle
+        real_close_handle = windows_junction._close_handle
+        real_rename = windows_junction._rename_pinned_object
+        observed = {
+            "candidate_classifications": 0,
+            "candidate_handle": None,
+            "quarantine_saw_live_handle": False,
+            "candidate_handle_closes": 0,
+        }
+
+        def fail_initial_tree_classification(handle, path):
+            if Path(path) == candidate:
+                observed["candidate_classifications"] += 1
+                if observed["candidate_classifications"] == 3:
+                    observed["candidate_handle"] = handle
+                    raise OSError("injected initial root classification failure")
+            return real_attribute_tag(handle, path)
+
+        def record_close(handle):
+            if handle == observed["candidate_handle"]:
+                observed["candidate_handle_closes"] += 1
+            return real_close_handle(handle)
+
+        def require_live_root_for_quarantine(pinned, destination, destination_parent):
+            if pinned.path == candidate:
+                self.assertEqual(observed["candidate_handle"], pinned.handle)
+                self.assertEqual(0, observed["candidate_handle_closes"])
+                observed["quarantine_saw_live_handle"] = True
+            return real_rename(pinned, destination, destination_parent)
+
+        with (
+            mock.patch.object(
+                windows_junction,
+                "_attribute_tag_for_handle",
+                side_effect=fail_initial_tree_classification,
+            ),
+            mock.patch.object(
+                windows_junction,
+                "_close_handle",
+                side_effect=record_close,
+            ),
+            mock.patch.object(
+                windows_junction,
+                "_rename_pinned_object",
+                side_effect=require_live_root_for_quarantine,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ContainmentSafetyError,
+                "initial root classification failure",
+            ):
+                adopt_unique_staged_mod(
+                    stage_mods=stage,
+                    source_mods=source,
+                    expected_name="Expected",
+                    before_names=(),
+                    quarantine_root=quarantine,
+                )
+
+        self.assertEqual(3, observed["candidate_classifications"])
+        self.assertTrue(observed["quarantine_saw_live_handle"])
+        self.assertEqual(1, observed["candidate_handle_closes"])
+        self.assertFalse(candidate.exists())
+        self.assertEqual(b"inside", (quarantine / "Expected" / "inside.txt").read_bytes())
 
     def test_pin_first_type_validation_uses_the_retained_handle_not_direntry_stat(self):
         stage, source, quarantine = self._adoption_roots()
