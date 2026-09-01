@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import stat
 from types import SimpleNamespace
 import tempfile
 from unittest.mock import patch
@@ -26,7 +28,19 @@ from modlab.workspace import initialize_workspace
 @dataclass(frozen=True)
 class ProductionPathSnapshot:
     path: Path
-    identity: TreeIdentity
+    entries: tuple["ProductionPathEntry", ...]
+
+
+@dataclass(frozen=True)
+class ProductionPathEntry:
+    relative_path: str
+    kind: str
+    size: int
+    modified_ns: int
+    changed_ns: int
+    device: int
+    inode: int
+    file_attributes: int
 
 
 @dataclass(frozen=True)
@@ -111,8 +125,8 @@ def capture_production_path_snapshots(
 ) -> tuple[ProductionPathSnapshot, ...]:
     return tuple(
         ProductionPathSnapshot(
-            path=Path(path).resolve(strict=True),
-            identity=stable_tree_identity(Path(path), required_equal_passes=2),
+            path=Path(path).expanduser().absolute(),
+            entries=_production_metadata_tree(Path(path).expanduser().absolute()),
         )
         for path in paths
     )
@@ -128,7 +142,7 @@ def measure_real_fixture_evidence(
     production_paths_written = tuple(
         before.path
         for before, after in zip(production_before, production_after, strict=True)
-        if before.identity != after.identity
+        if before.entries != after.entries
     )
     return RealContainmentFixtureEvidence(
         fixture=fixture,
@@ -161,6 +175,52 @@ def _projection_payload_bytes_copied(fixture: ContainmentFixture) -> int:
         if projection.target_path != source.resolve(strict=True):
             raise RuntimeError("staged projection target does not match source mod")
     return copied_bytes
+
+
+def _production_metadata_tree(root: Path) -> tuple[ProductionPathEntry, ...]:
+    entries: list[ProductionPathEntry] = []
+
+    def observe(path: Path, relative_path: str, metadata: os.stat_result) -> None:
+        attributes = int(getattr(metadata, "st_file_attributes", 0))
+        reparse = path.is_symlink() or bool(attributes & 0x400)
+        if reparse:
+            kind = "reparse-directory" if stat.S_ISDIR(metadata.st_mode) else "reparse"
+        elif stat.S_ISDIR(metadata.st_mode):
+            kind = "directory"
+        elif stat.S_ISREG(metadata.st_mode):
+            kind = "file"
+        else:
+            kind = "other"
+        entries.append(
+            ProductionPathEntry(
+                relative_path=relative_path,
+                kind=kind,
+                size=metadata.st_size,
+                modified_ns=metadata.st_mtime_ns,
+                changed_ns=metadata.st_ctime_ns,
+                device=metadata.st_dev,
+                inode=metadata.st_ino,
+                file_attributes=attributes,
+            )
+        )
+        if kind != "directory":
+            return
+        with os.scandir(path) as children:
+            ordered_children = sorted(
+                children, key=lambda entry: (entry.name.casefold(), entry.name)
+            )
+            for child in ordered_children:
+                child_path = Path(child.path)
+                child_relative = _normalized_relative_path(relative_path, child.name)
+                observe(child_path, child_relative, child.stat(follow_symlinks=False))
+
+    observe(root, ".", root.lstat())
+    return tuple(entries)
+
+
+def _normalized_relative_path(parent: str, name: str) -> str:
+    relative = name if parent == "." else f"{parent}/{name}"
+    return os.path.normcase(relative).replace("\\", "/")
 
 
 @contextmanager

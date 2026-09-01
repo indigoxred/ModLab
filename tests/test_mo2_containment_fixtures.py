@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 import zipfile
@@ -79,6 +80,38 @@ class ContainmentFixtureTests(unittest.TestCase):
         self.assertEqual("9.8.7.6", evidence.executable_version)
         self.assertEqual(0, evidence.payload_bytes_copied_for_projection)
         self.assertEqual((steam_root.resolve(),), evidence.production_paths_written)
+
+    def test_production_snapshot_records_reparse_without_following_it(self):
+        # Catches snapshot traversal into a Steam-root reparse target.
+        steam_root = self.root / "Steam"
+        steam_root.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "must-not-be-observed.txt").write_bytes(b"outside")
+        link = steam_root / "library-link"
+        try:
+            os.symlink(outside, link, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"directory symlink unavailable: {error}")
+
+        snapshot = capture_production_path_snapshots((steam_root,))[0]
+        entries = {entry.relative_path: entry for entry in snapshot.entries}
+
+        self.assertEqual("reparse", entries["library-link"].kind)
+        self.assertNotIn("library-link/must-not-be-observed.txt", entries)
+
+    def test_production_snapshot_records_file_metadata_without_payload_hashes(self):
+        # Catches a production snapshot that uses content hashes instead of metadata.
+        steam_root = self.root / "Steam"
+        steam_root.mkdir()
+        payload = steam_root / "library.vdf"
+        payload.write_bytes(b"metadata-only-observation")
+
+        snapshot = capture_production_path_snapshots((steam_root,))[0]
+        entries = {entry.relative_path: entry for entry in snapshot.entries}
+
+        self.assertEqual("file", entries["library.vdf"].kind)
+        self.assertEqual(len(b"metadata-only-observation"), entries["library.vdf"].size)
 
     def test_fixture_parent_override_is_exact_and_confined_below_validation_root(self):
         from tests.support.mo2_containment import prepare_fixture_with_fake_bootstrap
