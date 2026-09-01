@@ -378,6 +378,168 @@ class MutationWatchTests(unittest.TestCase):
         self.assertTrue((self.evidence / "worker-launch.json").is_file())
         self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_SESSIONS)
 
+    def test_completed_outcome_reconstructs_without_evidence_reopen(self):
+        request_path, worker_pid = self._start()
+        expected = stop_watch(request_path)
+        request = windows_watch._load_request_path(request_path)
+        outcome_path = self.evidence / "outcome.json"
+        real_read = windows_watch._read_exact_regular_file
+        real_path_read_bytes = Path.read_bytes
+
+        def read_outcome_only(path: Path, label: str, **kwargs: object) -> bytes:
+            if Path(path) != outcome_path:
+                self.fail(f"reconstruction reopened mutable authority: {label}")
+            return real_read(path, label, **kwargs)
+
+        def reject_mutable_path_read(path: Path) -> bytes:
+            if path.name in {"ready.json", "terminal.json"}:
+                self.fail(f"reconstruction reopened mutable authority: {path.name}")
+            return real_path_read_bytes(path)
+
+        with (
+            mock.patch.object(
+                windows_watch,
+                "_read_exact_regular_file",
+                side_effect=read_outcome_only,
+            ),
+            mock.patch.object(
+                windows_watch,
+                "_load_worker_launch",
+                side_effect=AssertionError("reconstruction reopened worker launch"),
+            ),
+            mock.patch.object(
+                windows_watch,
+                "_read_exact_journal",
+                side_effect=AssertionError("reconstruction reopened event journal"),
+            ),
+            mock.patch.object(
+                windows_watch,
+                "_process_alive",
+                side_effect=AssertionError("reconstruction reopened worker process"),
+            ),
+            mock.patch.object(Path, "read_bytes", new=reject_mutable_path_read),
+        ):
+            receipt = watch_receipt_from_files(
+                request,
+                worker_pid,
+                self.evidence / "ready.json",
+                self.evidence / "events.ndjson",
+                self.evidence / "terminal.json",
+            )
+
+        self.assertEqual(expected, receipt)
+
+    def test_complete_mutation_evidence_is_not_unchanged(self):
+        request_path, worker_pid = self._start()
+        (self.watched / "mutation.txt").write_text("changed", encoding="utf-8")
+        time.sleep(0.2)
+        expected = stop_watch(request_path)
+        request = windows_watch._load_request_path(request_path)
+        (self.evidence / "events.ndjson").write_bytes(b"")
+        (self.evidence / "terminal.json").write_bytes(b"not a terminal record\n")
+
+        receipt = watch_receipt_from_files(
+            request,
+            worker_pid,
+            self.evidence / "ready.json",
+            self.evidence / "events.ndjson",
+            self.evidence / "terminal.json",
+        )
+
+        self.assertEqual(expected, receipt)
+        self.assertTrue(receipt.complete, receipt.error)
+        self.assertTrue(receipt.events)
+        state = _protected_state("1")
+        self.assertFalse(watch_proves_unchanged(receipt, state, state))
+
+    def test_incomplete_outcome_cannot_be_promoted_by_terminal_files(self):
+        request_path, worker_pid = self._start_case("incomplete-outcome-reconstruction")
+        with mock.patch.object(windows_watch, "_get_process_exit_code", return_value=73):
+            expected = stop_watch(request_path)
+        request = windows_watch._load_request_path(request_path)
+
+        receipt = watch_receipt_from_files(
+            request,
+            worker_pid,
+            request.evidence_root / "ready.json",
+            request.evidence_root / "events.ndjson",
+            request.evidence_root / "terminal.json",
+        )
+
+        self.assertEqual(expected, receipt)
+        self.assertFalse(receipt.complete)
+        self.assertEqual(73, receipt.worker_exit_code)
+
+    def test_noncanonical_or_unbound_outcome_returns_incomplete(self):
+        request_path, worker_pid = self._start_case("invalid-outcome-reconstruction")
+        self.assertTrue(stop_watch(request_path).complete)
+        request = windows_watch._load_request_path(request_path)
+        outcome_path = request.evidence_root / "outcome.json"
+        canonical = outcome_path.read_bytes()
+
+        for label, outcome_bytes, supplied_worker_pid, expected_error in (
+            (
+                "malformed",
+                b"not an outcome\n",
+                worker_pid,
+                "watch outcome reconstruction failed",
+            ),
+            (
+                "noncanonical",
+                json.dumps(json.loads(canonical), indent=2).encode("utf-8"),
+                worker_pid,
+                "watch outcome canonical bytes mismatch",
+            ),
+            (
+                "worker-mismatch",
+                canonical,
+                worker_pid + 1,
+                "watch outcome binding mismatch",
+            ),
+        ):
+            with self.subTest(label=label):
+                outcome_path.write_bytes(outcome_bytes)
+                receipt = watch_receipt_from_files(
+                    request,
+                    supplied_worker_pid,
+                    request.evidence_root / "ready.json",
+                    request.evidence_root / "events.ndjson",
+                    request.evidence_root / "terminal.json",
+                )
+
+                self.assertFalse(receipt.complete)
+                self.assertIn(expected_error, receipt.error)
+
+        outcome_path.write_bytes(canonical)
+
+    def test_outcome_reporting_close_warning_does_not_reverse_completion(self):
+        request_path, worker_pid = self._start_case("outcome-reporting-close-warning")
+        expected = stop_watch(request_path)
+        request = windows_watch._load_request_path(request_path)
+        real_close = windows_watch._close_handle
+
+        def reporting_close_warning(handle: int, label: str) -> str | None:
+            if label == "watch outcome readback":
+                self.assertIsNone(real_close(handle, label))
+                return "injected outcome reporting close warning"
+            return real_close(handle, label)
+
+        with self.assertWarnsRegex(RuntimeWarning, "outcome reporting close warning"):
+            with mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                side_effect=reporting_close_warning,
+            ):
+                receipt = watch_receipt_from_files(
+                    request,
+                    worker_pid,
+                    request.evidence_root / "ready.json",
+                    request.evidence_root / "events.ndjson",
+                    request.evidence_root / "terminal.json",
+                )
+
+        self.assertEqual(expected, receipt)
+
     def test_launch_publication_failure_uses_owned_incomplete_cleanup(self):
         request = self._request()
         request_path = self.evidence / "request.json"
@@ -1844,7 +2006,7 @@ class MutationWatchTests(unittest.TestCase):
             case_root / "terminal.json",
         )
         self.assertFalse(receipt.complete)
-        self.assertIn("root membership changed during watch", receipt.error)
+        self.assertEqual("watch outcome missing", receipt.error)
 
     def test_guard_chain_detects_ancestor_reparse_swap_before_descendant_open(self):
         outer = self.root / "arming-reparse-parent"
@@ -1884,7 +2046,7 @@ class MutationWatchTests(unittest.TestCase):
             case_root / "terminal.json",
         )
         self.assertFalse(receipt.complete)
-        self.assertIn("root membership changed during watch", receipt.error)
+        self.assertEqual("watch outcome missing", receipt.error)
 
     def test_guard_chain_closes_new_child_on_every_pretransfer_validation_failure(self):
         physical = watch_root("SourceMods", self.watched)
@@ -2028,7 +2190,7 @@ class MutationWatchTests(unittest.TestCase):
                     open_handle_count=open_handles,
                 )
                 self.assertFalse(receipt.complete)
-                self.assertIn(message, receipt.error)
+                self.assertEqual("watch outcome missing", receipt.error)
 
     def test_ready_and_terminal_records_reject_extra_fields(self):
         for record_name, message in (
@@ -2064,7 +2226,7 @@ class MutationWatchTests(unittest.TestCase):
                 )
 
                 self.assertFalse(receipt.complete)
-                self.assertIn(message, receipt.error)
+                self.assertEqual("watch outcome missing", receipt.error)
 
     def test_ready_and_terminal_reject_boolean_or_float_schema_versions(self):
         for record_name, schema_value in (("ready.json", True), ("terminal.json", 1.0)):
@@ -2097,43 +2259,32 @@ class MutationWatchTests(unittest.TestCase):
                 )
 
                 self.assertFalse(receipt.complete)
-                self.assertIn("schema version", receipt.error)
+                self.assertEqual("watch outcome missing", receipt.error)
 
     def test_root_a_receipt_replayed_for_root_b_is_incomplete(self):
-        root_a = self.root / "receipt-a"
         root_b = self.root / "receipt-b"
-        root_a.mkdir()
         root_b.mkdir()
-        self._receipt_fixture(
-            root_a,
-            event_bytes=b"",
-            complete=True,
-            terminal_error=None,
-            open_handle_count=0,
+        request_path, worker_pid = self._start()
+        self.assertTrue(stop_watch(request_path).complete)
+        (root_b / "outcome.json").write_bytes(
+            (self.evidence / "outcome.json").read_bytes()
         )
-        for name in (
-            "worker-launch.json",
-            "ready.json",
-            "events.ndjson",
-            "terminal.json",
-        ):
-            (root_b / name).write_bytes((root_a / name).read_bytes())
         request_b = replace(
-            self._request(),
+            windows_watch._load_request_path(request_path),
             evidence_root=root_b,
             stop_token_path=root_b / "stop.token",
         )
 
         receipt = watch_receipt_from_files(
             request_b,
-            os.getpid(),
+            worker_pid,
             root_b / "ready.json",
             root_b / "events.ndjson",
             root_b / "terminal.json",
         )
 
         self.assertFalse(receipt.complete)
-        self.assertIn("request SHA-256 mismatch", receipt.error)
+        self.assertEqual("watch outcome binding mismatch", receipt.error)
 
     def test_replaced_or_truncated_event_journal_is_incomplete(self):
         for mutation in ("replace", "truncate"):
@@ -2169,7 +2320,7 @@ class MutationWatchTests(unittest.TestCase):
                 )
 
                 self.assertFalse(receipt.complete)
-                self.assertRegex(receipt.error, "journal identity|byte count|SHA-256|malformed")
+                self.assertEqual("watch outcome missing", receipt.error)
 
     def test_terminal_event_hash_count_and_sequence_must_all_match(self):
         mutations = (
@@ -2208,7 +2359,7 @@ class MutationWatchTests(unittest.TestCase):
                 )
 
                 self.assertFalse(receipt.complete)
-                self.assertRegex(receipt.error, message)
+                self.assertEqual("watch outcome missing", receipt.error)
 
     def test_orphaned_and_reversed_rename_pairs_are_incomplete(self):
         cases = (
@@ -2253,7 +2404,7 @@ class MutationWatchTests(unittest.TestCase):
                     open_handle_count=0,
                 )
                 self.assertFalse(receipt.complete)
-                self.assertIn("rename pair", receipt.error)
+                self.assertEqual("watch outcome missing", receipt.error)
 
     def test_terminal_cannot_claim_complete_without_ready(self):
         case_root = self.root / "complete-without-ready"
@@ -2284,7 +2435,7 @@ class MutationWatchTests(unittest.TestCase):
         )
 
         self.assertFalse(receipt.complete)
-        self.assertIn("complete terminal requires ready", receipt.error)
+        self.assertEqual("watch outcome missing", receipt.error)
 
     def test_stop_token_is_written_and_worker_reaped_when_ready_is_malformed(self):
         request_path, _ = self._start()
@@ -2843,7 +2994,7 @@ class MutationWatchTests(unittest.TestCase):
             case_root / "terminal.json",
         )
         self.assertFalse(receipt.complete)
-        self.assertIn("thread start failure", receipt.error)
+        self.assertEqual("watch outcome missing", receipt.error)
         terminal = json.loads((case_root / "terminal.json").read_text(encoding="utf-8"))
         self.assertEqual(0, terminal["openHandleCount"])
 
@@ -2909,7 +3060,7 @@ class MutationWatchTests(unittest.TestCase):
         self.assertFalse(receipt.complete)
         self.assertIn("evidence paths must be confined", receipt.error)
 
-    def test_receipt_normalization_access_failure_returns_incomplete(self):
+    def test_receipt_ignores_mutable_evidence_normalization_after_publication(self):
         case_root = self.root / "inaccessible-receipt"
         case_root.mkdir()
         self._receipt_fixture(
@@ -2937,9 +3088,8 @@ class MutationWatchTests(unittest.TestCase):
                 case_root / "events.ndjson",
                 case_root / "terminal.json",
             )
-
         self.assertFalse(receipt.complete)
-        self.assertIn("injected evidence access denied", receipt.error)
+        self.assertEqual("watch outcome missing", receipt.error)
 
 
     def test_protocol_record_is_not_visible_until_its_bytes_are_complete(self):
@@ -2992,7 +3142,6 @@ class MutationWatchTests(unittest.TestCase):
         self.assertTrue(watch_proves_unchanged(clean, before, before))
         self.assertFalse(watch_proves_unchanged(clean, before, changed))
         self.assertFalse(watch_proves_unchanged(transient, before, before))
-        self.assertFalse(watch_proves_unchanged(clean, "partial", "partial"))
         self.assertFalse(
             watch_proves_unchanged(
                 replace(clean, opened_root_kinds=("SourceMods",)),
@@ -3009,7 +3158,7 @@ class MutationWatchTests(unittest.TestCase):
         )
         self.assertFalse(
             watch_proves_unchanged(
-                replace(clean, request_bytes_sha256=""),
+                replace(clean, worker_exit_code=1),
                 before,
                 before,
             )

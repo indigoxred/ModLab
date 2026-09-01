@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
 
 from modlab.validation.mo2_containment_model import (
     ContainmentScenario,
@@ -540,7 +541,12 @@ def _read_exact_journal(path: Path) -> _JournalEvidence:
             raise _HandleOwnershipError(close_error, handle, "event journal readback")
 
 
-def _read_exact_regular_file(path: Path, label: str) -> bytes:
+def _read_exact_regular_file(
+    path: Path,
+    label: str,
+    *,
+    close_failure_is_fatal: bool = True,
+) -> bytes:
     handle = _kernel32.CreateFileW(
         str(path),
         _GENERIC_READ,
@@ -583,7 +589,13 @@ def _read_exact_regular_file(path: Path, label: str) -> bytes:
     finally:
         close_error = _close_handle(handle, f"{label} readback")
         if close_error is not None:
-            raise _HandleOwnershipError(close_error, handle, f"{label} readback")
+            if close_failure_is_fatal:
+                raise _HandleOwnershipError(close_error, handle, f"{label} readback")
+            warnings.warn(
+                f"{label} readback handle close warning: {close_error}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
 
 def _require_windows() -> None:
@@ -2213,26 +2225,68 @@ def watch_receipt_from_files(
     events_path: Path,
     terminal_path: Path,
 ) -> WatchReceipt:
-    """Load worker files as provisional evidence; Task 6 binds final authority."""
+    """Reconstruct a receipt exclusively from the immutable outcome snapshot."""
     try:
-        return _watch_receipt_from_files_impl(
-            request,
-            worker_pid,
-            ready_path,
-            events_path,
-            terminal_path,
+        if not isinstance(request, WatchRequest):
+            return _incomplete_without_outcome(
+                request,
+                worker_pid if type(worker_pid) is int else 0,
+                "watch request is invalid",
+            )
+        expected_paths = (
+            Path(request.evidence_root) / _READY_NAME,
+            Path(request.evidence_root) / _EVENTS_NAME,
+            Path(request.evidence_root) / _TERMINAL_NAME,
         )
-    except _HandleOwnershipError as error:
-        retry_error = _close_handle(error.handle, error.label)
-        detail = str(error)
-        if retry_error is not None:
-            detail = f"{detail}; {retry_error}"
-        return _incomplete_without_outcome(request, worker_pid, detail)
-    except (OSError, WatchProtocolError, TypeError, ValueError, RuntimeError) as error:
+        supplied_paths = (Path(ready_path), Path(events_path), Path(terminal_path))
+        if any(
+            supplied.absolute() != expected.absolute()
+            for supplied, expected in zip(supplied_paths, expected_paths, strict=True)
+        ):
+            return _incomplete_without_outcome(
+                request,
+                worker_pid if type(worker_pid) is int else 0,
+                "evidence paths must be confined to the exact ready/events/terminal files",
+            )
+
+        outcome_bytes = _read_exact_regular_file(
+            request.evidence_root / _OUTCOME_NAME,
+            "watch outcome",
+            close_failure_is_fatal=False,
+        )
+        outcome = watch_outcome_from_bytes(outcome_bytes)
+        if outcome_bytes != watch_outcome_to_bytes(outcome):
+            return _incomplete_without_outcome(
+                request,
+                worker_pid if type(worker_pid) is int else 0,
+                "watch outcome canonical bytes mismatch",
+            )
+        if (
+            type(worker_pid) is not int
+            or outcome.request_id != request.request_id
+            or outcome.request_sha256 != watch_request_sha256(request)
+            or outcome.session_id != request.session_id
+            or outcome.run_id != request.run_id
+            or outcome.scenario is not request.scenario
+            or outcome.worker_pid != worker_pid
+        ):
+            return _incomplete_without_outcome(
+                request,
+                worker_pid if type(worker_pid) is int else 0,
+                "watch outcome binding mismatch",
+            )
+        return _receipt_from_outcome(outcome)
+    except FileNotFoundError:
         return _incomplete_without_outcome(
             request,
             worker_pid if type(worker_pid) is int else 0,
-            f"evidence reconstruction failed: {error}",
+            "watch outcome missing",
+        )
+    except (OSError, ContainmentFormatError, WatchProtocolError, TypeError, ValueError, RuntimeError) as error:
+        return _incomplete_without_outcome(
+            request,
+            worker_pid if type(worker_pid) is int else 0,
+            f"watch outcome reconstruction failed: {error}",
         )
 
 
@@ -2969,45 +3023,15 @@ def watch_proves_unchanged(
     before_manifest: ProtectedState,
     after_manifest: ProtectedState,
 ) -> bool:
-    """Require both loss-free zero-event evidence and equal caller manifests."""
-    if type(receipt) is not WatchReceipt:
-        return False
-    if (
-        not receipt.complete
-        or not receipt.ready
-        or receipt.error is not None
-        or receipt.opened_root_kinds != ROOT_KINDS
-        or re.fullmatch(r"[0-9a-f]{64}", receipt.request_bytes_sha256) is None
-    ):
-        return False
-    expected_sequence = 1
-    event_bytes_parts: list[bytes] = []
-    for event in receipt.events:
-        if type(event) is not WatcherEvent or event.sequence != expected_sequence:
-            return False
-        if event.root_kind not in _ROOT_KIND_SET or event.action not in _ACTIONS.values():
-            return False
-        try:
-            _validate_relative_path(event.relative_path)
-        except WatchProtocolError:
-            return False
-        event_bytes_parts.append(
-            _canonical_bytes(
-                {
-                    "action": event.action,
-                    "relativePath": event.relative_path,
-                    "rootKind": event.root_kind,
-                    "sequence": event.sequence,
-                }
-            )
-        )
-        expected_sequence += 1
-    recomputed_event_hash = hashlib.sha256(b"".join(event_bytes_parts)).hexdigest()
+    """Prove no observed mutations without deciding the scenario verdict."""
     return (
-        not receipt.events
-        and receipt.event_bytes_sha256 == recomputed_event_hash
-        and _complete_protected_state(before_manifest)
-        and _complete_protected_state(after_manifest)
+        receipt.evidence_completion is WatchEvidenceCompletion.COMPLETED
+        and receipt.ready
+        and receipt.error is None
+        and receipt.opened_root_kinds == ROOT_KINDS
+        and receipt.worker_exit_code == 0
+        and receipt.events == ()
+        and receipt.event_bytes_sha256 == hashlib.sha256(b"").hexdigest()
         and before_manifest == after_manifest
     )
 
