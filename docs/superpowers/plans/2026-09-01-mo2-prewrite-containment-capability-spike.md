@@ -499,9 +499,9 @@ git commit -m "feat: add isolated mod projection and adoption proof"
 
 **Interfaces:**
 - Consumes: direct Medium-or-higher source directories and a contained evidence directory.
-- Produces: `WatchRequest`, `WatchReceipt`, `start_watch(request: WatchRequest) -> int`, `run_watch_worker(request_path: Path) -> int`, `stop_watch(request_path: Path) -> WatchReceipt`, and `watch_receipt_from_files(request: WatchRequest, worker_pid: int, ready_path: Path, events_path: Path, terminal_path: Path) -> WatchReceipt`.
+- Produces: `WatchRequest`, `WatchReceipt`, an immutable `WatchOutcome`, `start_watch(request: WatchRequest) -> int`, `run_watch_worker(request_path: Path) -> int`, `stop_watch(request_path: Path) -> WatchReceipt`, and `watch_receipt_from_files(request: WatchRequest, worker_pid: int, ready_path: Path, events_path: Path, terminal_path: Path) -> WatchReceipt`.
 
-Watcher-controller ownership recovery is evidence-only and never restores a scenario to success. The former recoverable-owner-state path is replaced by the fail-closed [`Task 6` contract](#task-6-crash-safe-scenario-orchestration-and-adjudication) and the [approved containment spec](../specs/2026-08-31-guided-mo2-lab-installation-design.md): interruption remains incomplete unless Task 6 captures independent positive breach evidence, and cleanup cannot promote a prior run.
+Watcher-controller ownership recovery is evidence-only and never restores a scenario to success. The former recoverable-owner-state path is replaced by [docs/superpowers/plans/2026-09-01-fail-closed-containment-watch.md](2026-09-01-fail-closed-containment-watch.md) and [docs/superpowers/specs/2026-09-01-fail-closed-containment-watch-design.md](../specs/2026-09-01-fail-closed-containment-watch-design.md): interruption remains incomplete unless Task 6 captures independent positive breach evidence, and cleanup cannot promote a prior run.
 
 Use these exact worker-boundary values:
 
@@ -523,14 +523,26 @@ class WatchRequest:
 @dataclass(frozen=True)
 class WatchReceipt:
     request_id: str
+    session_id: str
+    run_id: str
+    scenario: ContainmentScenario
     worker_pid: int
-    complete: bool
+    evidence_completion: WatchEvidenceCompletion
     ready: bool
     opened_root_kinds: tuple[str, ...]
     events: tuple[WatcherEvent, ...]
     event_bytes_sha256: str
+    worker_exit_code: int | None
+    watch_outcome_id: str | None
+    request_bytes_sha256: str
     error: str | None
+
+    @property
+    def complete(self) -> bool:
+        return self.evidence_completion is WatchEvidenceCompletion.COMPLETED
 ```
+
+`WatchReceipt.complete` is a derived compatibility property, never a serialized or copied success authority. The authoritative result is the exact immutable `WatchOutcome` whose content ID equals `watch_outcome_id`; a receipt must carry the outcome's request/session/run/scenario bindings and `evidence_completion`. A receipt with no valid outcome ID is incomplete, never successful.
 
 Allow exactly these `root_kind` values: `SourceMods`, `LabProfile`, `PlayProfile`, `Downloads`, `Overwrite`, `BoundedGame`, `ExternalLocalLow`, and `ExternalTempLow`. Each event copies the originating root kind into `WatcherEvent.root_kind`. The final two watchers cover the current account's native LocalLow and Low temporary roots after path-identity de-duplication; any event there makes the scenario non-passing because child-generated state must stay inside ModLab.
 
@@ -541,6 +553,9 @@ Allow exactly these `root_kind` values: `SourceMods`, `LabProfile`, `PlayProfile
 class MutationWatchTests(unittest.TestCase):
     def test_recursive_create_write_rename_and_delete_are_ordered(self):
         receipt = run_watch_mutation_fixture()
+        outcome = load_exact_watch_outcome(receipt.watch_outcome_id)
+        self.assertEqual(receipt.watch_outcome_id, watch_outcome_id_for(outcome))
+        self.assertEqual(WatchEvidenceCompletion.COMPLETED, receipt.evidence_completion)
         self.assertTrue(receipt.complete)
         self.assertEqual(
             ("Added", "Modified", "RenamedOld", "RenamedNew", "Removed"),
@@ -551,8 +566,22 @@ class MutationWatchTests(unittest.TestCase):
         for fixture, message in incomplete_watch_cases():
             with self.subTest(message=message):
                 receipt = fixture()
+                self.assertEqual(
+                    WatchEvidenceCompletion.INCOMPLETE,
+                    receipt.evidence_completion,
+                )
                 self.assertFalse(receipt.complete)
                 self.assertIn(message, receipt.error)
+
+    def test_receipt_completion_is_derived_from_bound_outcome(self):
+        receipt = run_watch_completion_fixture()
+        outcome = load_exact_watch_outcome(receipt.watch_outcome_id)
+        self.assertEqual(receipt.watch_outcome_id, watch_outcome_id_for(outcome))
+        self.assertEqual(outcome.evidence_completion, receipt.evidence_completion)
+        self.assertEqual(
+            WatchEvidenceCompletion.COMPLETED is receipt.evidence_completion,
+            receipt.complete,
+        )
 ```
 
 - [ ] **Step 2: Run and verify failure**
@@ -578,11 +607,11 @@ command = (
 
 The strict request lists source `mods`, raw Play profile, downloads, Overwrite, and bounded game evidence roots. The worker opens each root with `FILE_LIST_DIRECTORY`, `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`, `FILE_FLAG_BACKUP_SEMANTICS`, and one blocking `ReadDirectoryChangesW` thread per root. Watch recursively for file name, directory name, size, last write, creation, attributes, and security changes. Events are sequence-numbered and atomically appended as canonical NDJSON beneath the evidence directory.
 
-Write a ready record only after every handle is open. Write a terminal receipt only after the stop token is observed, all threads return, buffers parse completely, handles close, and event bytes reload. `ERROR_NOTIFY_ENUM_DIR`, malformed records, a sequence gap, worker death, root identity change, or an unclosed handle sets `complete=False`.
+Write a ready record only after every handle is open. Write a terminal record only after the stop token is observed, all threads return, buffers parse completely, handles close, and event bytes reload. The same-controller `stop_watch()` publishes the immutable `WatchOutcome` and returns its content-ID reference in `WatchReceipt`; `WatchReceipt.complete` is derived solely from that outcome's `evidence_completion`. `ERROR_NOTIFY_ENUM_DIR`, malformed records, a sequence gap, worker death, root identity change, or an unclosed handle sets `WatchOutcome.evidence_completion=Incomplete`; no copied boolean may report success.
 
 - [ ] **Step 4: Add before/after manifests as a second proof**
 
-The caller computes complete SHA-256 tree identities for the small synthetic protected folder and exact bytes for Play, downloads, and Overwrite before and after. A zero-event receipt cannot pass if any manifest differs, and identical final hashes cannot pass if the watcher recorded a transient mutation.
+The caller computes complete SHA-256 tree identities for the small synthetic protected folder and exact bytes for Play, downloads, and Overwrite before and after. A scenario cannot pass from a zero-event, bound `WatchOutcome` if any manifest differs, and identical final hashes cannot pass if that outcome records a transient mutation.
 
 - [ ] **Step 5: Run focused tests**
 
@@ -816,13 +845,13 @@ runtime/validation/mo2-containment/<run-hex>/
   decision.json
 ```
 
-Use a named Windows mutex per run, atomic create/no-replace for immutable documents, atomic replacement only for legal journal transitions, exact readback, and the transition graph `Prepared -> Armed -> ScenarioStarted -> Launched -> Captured`, with any nonterminal state able to enter `RecoveryRequired`. `ScenarioStarted` is the durable boundary: recovery never returns a journal or transitions a recovery state back to a success path. It returns `ScenarioRecovery`, records `Succeeded` or `Refused` cleanup, and makes a fresh run permissible only for one same-command retry before `ScenarioStarted`, after successful cleanup and proved absence of the exact MO2 and watcher processes. Recovery refuses fresh launch after cleanup refusal, access denial, identity uncertainty, live MO2, or unverified watcher liveness. Recovery never kills MO2, restores/normalizes only stage integrity, never changes source integrity, quarantines only exact staging content, and re-verifies source evidence.
+Use a named Windows mutex per run, atomic create/no-replace for immutable documents, atomic replacement only for legal journal transitions, exact readback, and the transition graph `Prepared -> Armed -> ScenarioStarted -> Launched -> Captured`, with any nonterminal state able to enter `RecoveryRequired`. `ScenarioStarted` is the durable boundary: recovery never returns a journal or transitions a recovery state back to a success path. It returns `ScenarioRecovery`, records `Succeeded` or `Refused` cleanup, and makes a fresh run permissible only for one same-command retry before `ScenarioStarted`, after successful cleanup and proof that the prior exact controller, watcher, and MO2 processes are all absent. Recovery and every fresh launch refuse after cleanup refusal, access denial, identity uncertainty, a live prior controller/watcher/MO2 process, or unverified watcher liveness. Recovery never kills MO2, restores/normalizes only stage integrity, never changes source integrity, quarantines only exact staging content, and re-verifies source evidence.
 
 - [ ] **Step 5: Implement scenario policies**
 
-`prepare_run()` creates four independent fixtures. `arm_scenario()` captures the pre-existing source/Play/download/Overwrite/game evidence, verifies Medium-or-higher source and Low stage, starts watchers, and stops at watcher-ready while writing `Armed`. Immediately before `CreateProcess` launches MO2, `launch_scenario()` must durably transition to `ScenarioStarted`; it then launches exact stage `ModOrganizer.exe --profile "ModLab - Lab"` with the low token and contained environment, verifies its PID/path/integrity, and writes `Launched`. No retry after this boundary can reuse the prior run.
+`prepare_run()` creates four independent fixtures. `arm_scenario()` captures the pre-existing source/Play/download/Overwrite/game evidence, verifies Medium-or-higher source and Low stage, starts watchers, and stops at watcher-ready while writing `Armed`. Immediately before `CreateProcess` launches MO2, `launch_scenario()` must durably transition to `ScenarioStarted`; it then launches exact stage `ModOrganizer.exe --profile "ModLab - Lab"` with the low token and contained environment, verifies its PID/path/integrity, and writes `Launched`. A permitted fresh launch must re-prove the absence of the prior exact controller, watcher, and MO2 processes. No retry after this boundary can reuse the prior run.
 
-`capture_scenario()` requires MO2 closed, loads the exact `WatchOutcome` by its content ID, verifies its request/session/run/scenario bindings, stops and verifies watchers, captures the stable post-MO2 state, and inspects all stage projection entries. For new-folder and FOMOD, it then performs the isolated adoption/quarantine proof and captures a second stable final protected state; `ScenarioResult.protected_after` is this final state and must equal the pre-MO2 state. Outcome precedence is `Failed`, then `Incomplete`, then `Passed`. A `Failed` result with `Incomplete` watcher evidence is allowed only when the bound watcher outcome records a positive event or the protected state changed; otherwise watcher damage, malformed events, or liveness uncertainty remain `Incomplete` and are never retry-eligible after `ScenarioStarted`. It applies these exact policies:
+`capture_scenario()` requires MO2 closed. Its same-controller `stop_watch()` first publishes and returns the immutable watch-outcome content-ID reference; capture then reloads that exact `WatchOutcome` by content ID, verifies its request/session/run/scenario bindings, and only then derives the scenario verdict, captures the stable post-MO2 state, and inspects all stage projection entries. For new-folder and FOMOD, it then performs the isolated adoption/quarantine proof and captures a second stable final protected state; `ScenarioResult.protected_after` is this final state and must equal the pre-MO2 state. Outcome precedence is `Failed`, then `Incomplete`, then `Passed`. A `Failed` result with `Incomplete` watcher evidence is allowed only when the bound watcher outcome records a positive event or the protected state changed; otherwise watcher damage, malformed events, or liveness uncertainty remain `Incomplete` and are never retry-eligible after `ScenarioStarted`. It applies these exact policies:
 
 - `NewFolder`: all pre-existing source evidence unchanged through the MO2 phase; one exact `ModLab Spike New` direct folder; after watchers stop, adopt the collision-free sibling, verify it, move it to quarantine, and prove the source root returned to its original identity; no extra folder.
 - `MergeExisting`: source unchanged with zero events; `Protected Existing` source junction still exact; no production backup; nothing adopted.
