@@ -214,3 +214,41 @@ An Observed baseline is not an assembled, tested, promotable, or restorable buil
 ## Build sequence
 
 The proven current slice is explicit Skyrim registration, immutable Observed baseline capture, recovery selection, read-only drift reporting, verified MO2 2.5.2 package linkage, contained Create, zero-existing-manager-write Adopt, and exact-job recovery. Live computer-control validation is the final proof for this slice. Mod installation, conflict analysis, runtime smoke testing, Lab-to-Play promotion, and repair/upgrades come next. Morrowind/OpenMW, Oblivion Classic, and Oblivion Remastered remain separate later adapter lanes rather than being forced through Skyrim assumptions.
+
+## Developer MO2 containment validation
+
+This is a developer-validation workflow only. It prepares disposable source and staging MO2 instances beneath `workspace/runtime/validation/mo2-containment/`; it does not operate the normal production MO2 instance, write the game, or install a mod into the production shared store.
+
+Use the bundled Python runtime to prepare one run and retain the returned run ID:
+
+```powershell
+$pythonPath = 'C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+$workspacePath = 'C:\Path\To\ModLab\workspace'
+$artifactId = 'archive-sha256:<64 lowercase hex characters>'
+$prepare = & $pythonPath -B -m modlab.validation.mo2_containment_cli prepare `
+    --source-workspace $workspacePath `
+    --artifact $artifactId `
+    --steam-root 'C:\Path\To\Steam' `
+    --workspace $workspacePath `
+    --format json
+$runId = ($prepare | ConvertFrom-Json).runId
+```
+
+Run each visible scenario as one foreground controller. Computer control is required only while foreground `validate` is displaying its printed procedure; follow it exactly, close the disposable MO2 normally, then type `continue` in that same process. The CLI never clicks through an installer, infers success, closes MO2, or kills a process.
+
+```powershell
+& $pythonPath -B -m modlab.validation.mo2_containment_cli validate $runId NewFolder --workspace $workspacePath
+& $pythonPath -B -m modlab.validation.mo2_containment_cli validate $runId MergeExisting --workspace $workspacePath
+& $pythonPath -B -m modlab.validation.mo2_containment_cli validate $runId ReplaceExisting --workspace $workspacePath
+& $pythonPath -B -m modlab.validation.mo2_containment_cli validate $runId FomodDependency --workspace $workspacePath
+& $pythonPath -B -m modlab.validation.mo2_containment_cli adjudicate $runId --workspace $workspacePath
+& $pythonPath -B -m modlab.validation.mo2_containment_cli show $runId --workspace $workspacePath
+```
+
+If a foreground controller is interrupted or refuses capture, preserve the attempt and perform cleanup only for that exact scenario:
+
+```powershell
+& $pythonPath -B -m modlab.validation.mo2_containment_cli recover $runId MergeExisting --workspace $workspacePath
+```
+
+`show` is read-only. `recover` never upgrades an incomplete attempt, and `adjudicate` writes a separate immutable `decision.json` without replacing a scenario `result.json`. A `Supported` decision is evidence for the containment spike only: it does not enable production installation. Production use remains prohibited until the next reviewed implementation plan explicitly consumes that receipt.
