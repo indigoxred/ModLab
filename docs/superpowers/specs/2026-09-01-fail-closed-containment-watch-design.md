@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-01
 
-**Status:** Architecturally approved; externally reviewed amendments awaiting user confirmation
+**Status:** Approved for implementation planning
 
 **Scope:** Task 4's Windows mutation watcher and Task 6's interrupted-scenario recovery contract
 
