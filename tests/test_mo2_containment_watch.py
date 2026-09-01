@@ -111,6 +111,9 @@ class MutationWatchTests(unittest.TestCase):
 
     def test_intentional_cancel_completes_without_an_overflow(self):
         request_path, worker_pid = self._start()
+        local_process = windows_watch._LOCAL_WORKERS[request_path.absolute()].process
+        self.assertIsNotNone(local_process)
+        self.assertFalse(local_process._handle.closed)
 
         receipt = stop_watch(request_path)
 
@@ -123,6 +126,7 @@ class MutationWatchTests(unittest.TestCase):
             hashlib.sha256(request_path.read_bytes()).hexdigest(),
             receipt.request_bytes_sha256,
         )
+        self.assertTrue(local_process._handle.closed)
 
     def test_live_event_journal_cannot_be_reopened_for_write_or_delete(self):
         request_path, _ = self._start()
@@ -379,6 +383,69 @@ class MutationWatchTests(unittest.TestCase):
         self.assertEqual("LaunchFailed", owner["state"])
         self.assertIn("injected identity failure", terminal["error"])
         self.assertNotIn((self.evidence / "request.json").absolute(), windows_watch._LOCAL_WORKERS)
+
+    def test_identity_unwind_close_failure_retains_exact_spawned_handle(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        process = mock.Mock(pid=4242)
+        process.wait.return_value = 17
+        original_close = windows_watch._close_handle
+
+        def fail_fake_identity_close(handle: int, label: str) -> str | None:
+            if handle == 9876:
+                return "unclosed handle: injected identity unwind"
+            return original_close(handle, label)
+
+        try:
+            with mock.patch.object(
+                windows_watch.subprocess,
+                "Popen",
+                return_value=process,
+            ), mock.patch.object(
+                windows_watch,
+                "_open_process_identity",
+                side_effect=windows_watch._HandleOwnershipError(
+                    "injected identity unwind",
+                    9876,
+                ),
+            ), mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                side_effect=fail_fake_identity_close,
+            ):
+                with self.assertRaisesRegex(WatchProtocolError, "identity unwind"):
+                    start_watch(request)
+
+            owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+            self.assertEqual("RecoveryRequired", owner["state"])
+            self.assertEqual(4242, owner["workerPid"])
+            self.assertEqual(0, owner["workerCreationTime"])
+            retained = windows_watch._LOCAL_WORKERS[request_path.absolute()]
+            self.assertIs(process, retained.process)
+            self.assertEqual(9876, retained.process_handle)
+        finally:
+            with windows_watch._LOCAL_WORKERS_LOCK:
+                windows_watch._LOCAL_WORKERS.pop(request_path.absolute(), None)
+
+    def test_spawn_cleanup_explicitly_closes_identity_and_popen_handles(self):
+        process = subprocess.Popen(
+            [windows_watch.sys.executable, "-B", "-c", "pass"],
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        identity_handle, _ = windows_watch._open_process_identity(process.pid)
+
+        cleanup_complete, errors, retained_identity, retained_popen = (
+            windows_watch._cleanup_spawned_worker(process, identity_handle)
+        )
+
+        self.assertTrue(cleanup_complete, errors)
+        self.assertEqual((), errors)
+        self.assertEqual(0, retained_identity)
+        self.assertEqual(0, retained_popen)
+        self.assertTrue(process._handle.closed)
 
     def test_terminate_failure_with_proved_exit_is_durable_launch_failure(self):
         request = self._request()
@@ -824,10 +891,18 @@ class MutationWatchTests(unittest.TestCase):
 
                 self.assertEqual(1, result)
                 self.assertNotEqual(0, opened_child)
-                self.assertEqual(1, len(observed_child_closes), observed_child_closes)
+                self.assertEqual(
+                    2 if expected_open_count == 1 else 1,
+                    len(observed_child_closes),
+                    observed_child_closes,
+                )
                 self.assertEqual(
                     expected_open_count == 1,
                     observed_child_closes[0][2] is not None,
+                )
+                self.assertEqual(
+                    expected_open_count == 1,
+                    observed_child_closes[-1][2] is not None,
                 )
                 terminal = json.loads((case_root / "terminal.json").read_text(encoding="utf-8"))
                 self.assertEqual(expected_open_count, terminal["openHandleCount"])
@@ -846,6 +921,11 @@ class MutationWatchTests(unittest.TestCase):
         self.assertFalse(receipt.complete)
         self.assertTrue((self.evidence / "stop.token").is_file())
         self.assertIn("request record unavailable during stop", receipt.error)
+
+        recovered = stop_watch(request_path)
+        self.assertTrue(recovered.complete, recovered.error)
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        self.assertEqual("Completed", owner["state"])
 
     def test_malformed_event_gap_overflow_and_unclosed_handle_are_incomplete(self):
         cases = (
@@ -1188,6 +1268,7 @@ class MutationWatchTests(unittest.TestCase):
         )
         owner_path = case_root / "owner.json"
         owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        owner["state"] = "Running"
         owner["workerCreationTime"] += 1
         owner_path.write_bytes(_canonical(owner))
 
@@ -1228,6 +1309,37 @@ class MutationWatchTests(unittest.TestCase):
         self.assertFalse(receipt.complete)
         self.assertIn("injected retained controller ownership", receipt.error)
 
+    def test_running_owner_cannot_reconstruct_complete_receipt(self):
+        case_root = self.root / "running-owner"
+        case_root.mkdir()
+        self._receipt_fixture(
+            case_root,
+            event_bytes=b"",
+            complete=True,
+            terminal_error=None,
+            open_handle_count=0,
+        )
+        owner_path = case_root / "owner.json"
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        owner["state"] = "Running"
+        owner_path.write_bytes(_canonical(owner))
+        request = replace(
+            self._request(),
+            evidence_root=case_root,
+            stop_token_path=case_root / "stop.token",
+        )
+
+        receipt = watch_receipt_from_files(
+            request,
+            os.getpid(),
+            case_root / "ready.json",
+            case_root / "events.ndjson",
+            case_root / "terminal.json",
+        )
+
+        self.assertFalse(receipt.complete)
+        self.assertIn("owner state is not completed: Running", receipt.error)
+
     def test_terminal_record_does_not_substitute_for_process_exit(self):
         case_root = self.root / "terminal-before-exit"
         case_root.mkdir()
@@ -1238,6 +1350,10 @@ class MutationWatchTests(unittest.TestCase):
             terminal_error=None,
             open_handle_count=0,
         )
+        owner_path = case_root / "owner.json"
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        owner["state"] = "Running"
+        owner_path.write_bytes(_canonical(owner))
 
         with mock.patch.object(windows_watch, "_wait_process_handle", return_value=False):
             receipt = stop_watch(case_root / "request.json")
@@ -1268,10 +1384,188 @@ class MutationWatchTests(unittest.TestCase):
         self.assertFalse(receipt.complete)
         self.assertIn("injected controller process handle", receipt.error)
         self.assertIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        self.assertEqual("RecoveryRequired", owner["state"])
+        self.assertEqual(worker_pid, owner["workerPid"])
+
+        request = windows_watch._load_request_path(request_path)
+        reconstructed = watch_receipt_from_files(
+            request,
+            worker_pid,
+            self.evidence / "ready.json",
+            self.evidence / "events.ndjson",
+            self.evidence / "terminal.json",
+        )
+        self.assertFalse(reconstructed.complete)
+        self.assertIn("injected controller process handle", reconstructed.error)
 
         recovered = stop_watch(request_path)
         self.assertTrue(recovered.complete, recovered.error)
         self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        self.assertEqual("Completed", owner["state"])
+
+    def test_local_popen_handle_close_failure_is_durable_and_retryable(self):
+        request_path, worker_pid = self._start()
+        original_close = windows_watch._close_handle
+        retained_popen_handle = 0
+
+        def fail_popen_close_once(handle: int, label: str) -> str | None:
+            nonlocal retained_popen_handle
+            if label == f"local Popen process {worker_pid}" and not retained_popen_handle:
+                retained_popen_handle = handle
+                return "unclosed handle: injected local Popen process"
+            return original_close(handle, label)
+
+        with mock.patch.object(
+            windows_watch,
+            "_close_handle",
+            side_effect=fail_popen_close_once,
+        ):
+            receipt = stop_watch(request_path)
+
+        self.assertFalse(receipt.complete)
+        self.assertIn("injected local Popen process", receipt.error)
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        self.assertEqual("RecoveryRequired", owner["state"])
+        retained = windows_watch._LOCAL_WORKERS[request_path.absolute()]
+        self.assertEqual(0, retained.process_handle)
+        self.assertEqual(retained_popen_handle, retained.popen_handle)
+
+        recovered = stop_watch(request_path)
+        self.assertTrue(recovered.complete, recovered.error)
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        self.assertEqual("Completed", owner["state"])
+        self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+
+    def test_concurrent_stop_calls_never_close_one_native_handle_twice(self):
+        request_path, _ = self._start()
+        original_close = windows_watch._close_handle
+        original_create_mutex = windows_watch._kernel32.CreateMutexW
+        observed_process_handles: list[int] = []
+        observed_mutex_names: list[str] = []
+        observed_lock = threading.Lock()
+        barrier = threading.Barrier(3)
+        receipts: list[WatchReceipt] = []
+
+        def track_process_close(handle: int, label: str) -> str | None:
+            if label.startswith(("worker process ", "local Popen process ")):
+                with observed_lock:
+                    self.assertNotIn(handle, observed_process_handles)
+                    observed_process_handles.append(handle)
+            return original_close(handle, label)
+
+        def stop_concurrently() -> None:
+            barrier.wait()
+            receipts.append(stop_watch(request_path))
+
+        def track_mutex(security, initial_owner, name):
+            with observed_lock:
+                observed_mutex_names.append(name)
+            return original_create_mutex(security, initial_owner, name)
+
+        threads = [threading.Thread(target=stop_concurrently) for _ in range(2)]
+        with mock.patch.object(
+            windows_watch,
+            "_close_handle",
+            side_effect=track_process_close,
+        ), mock.patch.object(
+            windows_watch._kernel32,
+            "CreateMutexW",
+            side_effect=track_mutex,
+        ):
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(2, len(receipts))
+        self.assertTrue(all(receipt.complete for receipt in receipts), receipts)
+        self.assertEqual(2, len(observed_process_handles))
+        request_sha256 = hashlib.sha256(request_path.read_bytes()).hexdigest()
+        self.assertEqual(
+            [f"Local\\ModLab-Watch-Stop-{request_sha256}"] * 2,
+            observed_mutex_names,
+        )
+
+    def test_completed_publication_failure_retries_from_cleanup_complete(self):
+        request_path, _ = self._start()
+        original_replace = windows_watch._replace_owner_state
+        injected = False
+
+        def fail_completed_once(*args, **kwargs):
+            nonlocal injected
+            if kwargs.get("state") == "Completed" and not injected:
+                injected = True
+                raise OSError("injected completed publication failure")
+            return original_replace(*args, **kwargs)
+
+        with mock.patch.object(
+            windows_watch,
+            "_replace_owner_state",
+            side_effect=fail_completed_once,
+        ):
+            failed = stop_watch(request_path)
+
+        self.assertFalse(failed.complete)
+        self.assertIn("completed publication failure", failed.error)
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        self.assertEqual("CleanupComplete", owner["state"])
+        self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+
+        recovered = stop_watch(request_path)
+        self.assertTrue(recovered.complete, recovered.error)
+
+    def test_stop_retains_failed_journal_readback_close_for_retry(self):
+        request_path, _ = self._start()
+        original_close = windows_watch._close_handle
+        injected = False
+
+        def fail_readback_once(handle: int, label: str) -> str | None:
+            nonlocal injected
+            if label == "event journal readback" and not injected:
+                injected = True
+                return "unclosed handle: injected stop journal readback"
+            return original_close(handle, label)
+
+        with mock.patch.object(
+            windows_watch,
+            "_close_handle",
+            side_effect=fail_readback_once,
+        ):
+            failed = stop_watch(request_path)
+
+        self.assertFalse(failed.complete)
+        self.assertIn("retained an unclosed handle", failed.error)
+        self.assertIn(self.evidence.absolute(), windows_watch._RETAINED_AUXILIARY_HANDLES)
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        self.assertEqual("RecoveryRequired", owner["state"])
+        retained = windows_watch._LOCAL_WORKERS[request_path.absolute()]
+        self.assertTrue(retained.cleanup_complete)
+
+        recovered = stop_watch(request_path)
+        self.assertTrue(recovered.complete, recovered.error)
+        self.assertNotIn(self.evidence.absolute(), windows_watch._RETAINED_AUXILIARY_HANDLES)
+
+    def test_retained_handle_establishes_previously_unknown_creation_time(self):
+        request_path, worker_pid = self._start()
+        retained = windows_watch._LOCAL_WORKERS[request_path.absolute()]
+        retained.process_creation_time = 0
+        owner_path = self.evidence / "owner.json"
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        owner["state"] = "RecoveryRequired"
+        owner["workerCreationTime"] = 0
+        owner["error"] = "injected unknown creation time"
+        owner_path.write_bytes(_canonical(owner))
+
+        receipt = stop_watch(request_path)
+
+        self.assertTrue(receipt.complete, receipt.error)
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        self.assertEqual("Completed", owner["state"])
+        self.assertEqual(worker_pid, owner["workerPid"])
+        self.assertGreater(owner["workerCreationTime"], 0)
 
     def test_reopened_process_handle_close_failure_is_retained_and_incomplete(self):
         case_root = self.root / "reopened-handle-close"
@@ -1283,6 +1577,10 @@ class MutationWatchTests(unittest.TestCase):
             terminal_error=None,
             open_handle_count=0,
         )
+        owner_path = case_root / "owner.json"
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        owner["state"] = "Running"
+        owner_path.write_bytes(_canonical(owner))
         request_path = case_root / "request.json"
         worker_pid = os.getpid()
         original_close = windows_watch._close_handle
@@ -1312,11 +1610,329 @@ class MutationWatchTests(unittest.TestCase):
             retained = windows_watch._LOCAL_WORKERS[request_path.absolute()]
             self.assertIsNone(retained.process)
             self.assertEqual(retained_handle, retained.process_handle)
+
+            owner = json.loads((case_root / "owner.json").read_text(encoding="utf-8"))
+            self.assertEqual("RecoveryRequired", owner["state"])
+            reconstructed = watch_receipt_from_files(
+                retained.request,
+                worker_pid,
+                case_root / "ready.json",
+                case_root / "events.ndjson",
+                case_root / "terminal.json",
+            )
+            self.assertFalse(reconstructed.complete)
+
+            with mock.patch.object(
+                windows_watch,
+                "_wait_process_handle",
+                return_value=True,
+            ):
+                recovered = stop_watch(request_path)
+            self.assertTrue(recovered.complete, recovered.error)
+            owner = json.loads((case_root / "owner.json").read_text(encoding="utf-8"))
+            self.assertEqual("Completed", owner["state"])
+            retained_handle = 0
         finally:
             if retained_handle:
                 original_close(retained_handle, "test reopened process cleanup")
             with windows_watch._LOCAL_WORKERS_LOCK:
                 windows_watch._LOCAL_WORKERS.pop(request_path.absolute(), None)
+
+    def test_process_identity_error_retains_handle_when_unwind_close_fails(self):
+        original_close = windows_watch._close_handle
+        retained_handle = 0
+        try:
+            with mock.patch.object(
+                windows_watch,
+                "_process_handle_creation_time",
+                side_effect=WatchProtocolError("injected identity inspection failure"),
+            ), mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                return_value="unclosed handle: injected identity handle",
+            ):
+                with self.assertRaises(windows_watch._HandleOwnershipError) as raised:
+                    windows_watch._open_process_identity(os.getpid())
+            retained_handle = raised.exception.handle
+            self.assertNotEqual(0, retained_handle)
+            self.assertIn("injected identity handle", str(raised.exception))
+        finally:
+            if retained_handle:
+                original_close(retained_handle, "test identity ownership cleanup")
+
+    def test_verified_process_mismatch_retains_handle_when_close_fails(self):
+        original_close = windows_watch._close_handle
+        retained_handle, creation_time = windows_watch._open_process_identity(os.getpid())
+        try:
+            with mock.patch.object(
+                windows_watch,
+                "_open_process_identity",
+                return_value=(retained_handle, creation_time + 1),
+            ), mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                return_value="unclosed handle: injected mismatch handle",
+            ):
+                with self.assertRaises(windows_watch._HandleOwnershipError) as raised:
+                    windows_watch._verified_process_handle(os.getpid(), creation_time)
+            self.assertEqual(retained_handle, raised.exception.handle)
+        finally:
+            original_close(retained_handle, "test mismatch ownership cleanup")
+
+    def test_process_liveness_probe_retains_handle_when_close_fails(self):
+        original_close = windows_watch._close_handle
+        retained_handle = 0
+
+        def fail_close(handle: int, label: str) -> str:
+            nonlocal retained_handle
+            retained_handle = handle
+            return "unclosed handle: injected liveness handle"
+
+        try:
+            with mock.patch.object(windows_watch, "_close_handle", side_effect=fail_close):
+                with self.assertRaises(windows_watch._HandleOwnershipError) as raised:
+                    windows_watch._process_alive(os.getpid())
+            self.assertEqual(retained_handle, raised.exception.handle)
+        finally:
+            if retained_handle:
+                original_close(retained_handle, "test liveness ownership cleanup")
+
+    def test_event_journal_init_retains_handle_when_unwind_close_fails(self):
+        original_close = windows_watch._close_handle
+        journal_path = self.root / "journal-init-close-failure.ndjson"
+        retained_handle = 0
+        try:
+            with mock.patch.object(
+                windows_watch,
+                "_handle_identity",
+                side_effect=WatchProtocolError("injected journal identity failure"),
+            ), mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                return_value="unclosed handle: injected journal init handle",
+            ):
+                with self.assertRaises(windows_watch._HandleOwnershipError) as raised:
+                    windows_watch._EventJournal(journal_path)
+            retained_handle = raised.exception.handle
+            self.assertNotEqual(0, retained_handle)
+        finally:
+            if retained_handle:
+                original_close(retained_handle, "test journal init ownership cleanup")
+
+    def test_event_journal_close_failure_keeps_handle_for_retry(self):
+        journal = windows_watch._EventJournal(self.root / "journal-close-retry.ndjson")
+        retained_handle = journal._handle
+        original_close = windows_watch._close_handle
+
+        with mock.patch.object(
+            windows_watch,
+            "_close_handle",
+            return_value="unclosed handle: injected journal close",
+        ):
+            close_error = journal.close()
+
+        self.assertIn("injected journal close", close_error)
+        self.assertEqual(retained_handle, journal._handle)
+        self.assertIsNone(journal.close())
+        self.assertEqual(0, journal._handle)
+
+    def test_event_journal_readback_close_failure_preserves_handle_reference(self):
+        journal_path = self.root / "journal-readback-close.ndjson"
+        journal_path.write_bytes(b"")
+        original_close = windows_watch._close_handle
+        retained_handle = 0
+        try:
+            with mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                return_value="unclosed handle: injected journal readback",
+            ):
+                with self.assertRaises(windows_watch._HandleOwnershipError) as raised:
+                    windows_watch._read_exact_journal(journal_path)
+            retained_handle = raised.exception.handle
+            self.assertNotEqual(0, retained_handle)
+        finally:
+            if retained_handle:
+                original_close(retained_handle, "test journal readback cleanup")
+
+    def test_receipt_retries_a_retained_journal_readback_handle(self):
+        case_root = self.root / "receipt-readback-retry"
+        case_root.mkdir()
+        self._receipt_fixture(
+            case_root,
+            event_bytes=b"",
+            complete=True,
+            terminal_error=None,
+            open_handle_count=0,
+        )
+        request = replace(
+            self._request(),
+            evidence_root=case_root,
+            stop_token_path=case_root / "stop.token",
+        )
+        worker_pid = os.getpid()
+        original_close = windows_watch._close_handle
+        injected = False
+
+        def fail_readback_close_once(handle: int, label: str) -> str | None:
+            nonlocal injected
+            if label == "event journal readback" and not injected:
+                injected = True
+                return "unclosed handle: injected receipt readback"
+            return original_close(handle, label)
+
+        with mock.patch.object(
+            windows_watch,
+            "_close_handle",
+            side_effect=fail_readback_close_once,
+        ):
+            failed = watch_receipt_from_files(
+                request,
+                worker_pid,
+                case_root / "ready.json",
+                case_root / "events.ndjson",
+                case_root / "terminal.json",
+            )
+
+        self.assertFalse(failed.complete)
+        self.assertIn("retained an unclosed handle", failed.error)
+        self.assertIn(case_root.absolute(), windows_watch._RETAINED_AUXILIARY_HANDLES)
+
+        recovered = watch_receipt_from_files(
+            request,
+            worker_pid,
+            case_root / "ready.json",
+            case_root / "events.ndjson",
+            case_root / "terminal.json",
+        )
+        self.assertTrue(recovered.complete, recovered.error)
+        self.assertNotIn(case_root.absolute(), windows_watch._RETAINED_AUXILIARY_HANDLES)
+
+    def test_watch_root_close_failure_preserves_identity_handle_reference(self):
+        watched_path = self._request().roots[0].path
+        original_close = windows_watch._close_handle
+        retained_handle = 0
+        try:
+            with mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                return_value="unclosed handle: injected root identity",
+            ):
+                with self.assertRaises(windows_watch._HandleOwnershipError) as raised:
+                    watch_root("SourceMods", watched_path)
+            retained_handle = raised.exception.handle
+            self.assertNotEqual(0, retained_handle)
+        finally:
+            if retained_handle:
+                original_close(retained_handle, "test root identity cleanup")
+
+    def test_completion_event_setup_close_failure_preserves_handle_reference(self):
+        root = self._request().roots[0]
+        directory_handle = windows_watch._open_directory(root.path, overlapped=True)
+        original_close = windows_watch._close_handle
+        retained_event = 0
+        try:
+            with mock.patch.object(
+                windows_watch,
+                "_WatchState",
+                side_effect=MemoryError("injected state allocation failure"),
+            ), mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                return_value="unclosed handle: injected completion event",
+            ):
+                with self.assertRaises(windows_watch._HandleOwnershipError) as raised:
+                    windows_watch._arm_directory_state(
+                        root=root,
+                        logical_root_kinds=(root.root_kind,),
+                        directory_path=root.path,
+                        directory_handle=directory_handle,
+                        expected_volume_serial=root.volume_serial,
+                        expected_file_id=root.file_id,
+                        label="injected-state",
+                        recursive=True,
+                        notify_filter=windows_watch._NOTIFY_FILTER,
+                        membership_name=None,
+                        journal=mock.Mock(),
+                        stopping=threading.Event(),
+                        errors=[],
+                        errors_lock=threading.Lock(),
+                        states=[],
+                    )
+            retained_event = raised.exception.handle
+            self.assertNotEqual(0, retained_event)
+        finally:
+            if retained_event:
+                original_close(retained_event, "test completion event cleanup")
+            original_close(directory_handle, "test completion directory cleanup")
+
+    def test_worker_self_handle_close_uncertainty_is_counted_in_terminal(self):
+        case_root = self.root / "worker-self-close"
+        case_root.mkdir()
+        _, request_path = self._direct_worker_request(case_root, self._request().roots)
+        original_close = windows_watch._close_handle
+        retained_handles: list[int] = []
+
+        def fail_worker_self_close(handle: int, label: str) -> str | None:
+            if label == f"worker self process {os.getpid()}":
+                retained_handles.append(handle)
+                return "unclosed handle: injected worker self process"
+            return original_close(handle, label)
+
+        try:
+            with mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                side_effect=fail_worker_self_close,
+            ):
+                result = run_watch_worker(request_path)
+
+            self.assertEqual(1, result)
+            terminal = json.loads(
+                (case_root / "terminal.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(terminal["complete"])
+            self.assertEqual(1, terminal["openHandleCount"])
+            self.assertIn("injected worker self process", terminal["error"])
+        finally:
+            for handle in set(retained_handles):
+                original_close(handle, "test worker self ownership cleanup")
+
+    def test_worker_identity_unwind_close_uncertainty_writes_terminal(self):
+        case_root = self.root / "worker-identity-unwind"
+        case_root.mkdir()
+        _, request_path = self._direct_worker_request(case_root, self._request().roots)
+        original_close = windows_watch._close_handle
+        retained_handles: list[int] = []
+
+        def fail_identity_close(handle: int, label: str) -> str | None:
+            if label == f"worker process {os.getpid()}":
+                retained_handles.append(handle)
+                return "unclosed handle: injected worker identity unwind"
+            return original_close(handle, label)
+
+        try:
+            with mock.patch.object(
+                windows_watch,
+                "_process_handle_creation_time",
+                side_effect=WatchProtocolError("injected worker identity inspection"),
+            ), mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                side_effect=fail_identity_close,
+            ):
+                result = run_watch_worker(request_path)
+
+            self.assertEqual(1, result)
+            terminal = json.loads(
+                (case_root / "terminal.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(terminal["complete"])
+            self.assertEqual(1, terminal["openHandleCount"])
+            self.assertIn("injected worker identity unwind", terminal["error"])
+        finally:
+            for handle in set(retained_handles):
+                original_close(handle, "test worker identity unwind cleanup")
 
     def test_worker_death_without_terminal_record_is_incomplete(self):
         request_path, worker_pid = self._start()
@@ -1680,7 +2296,7 @@ class MutationWatchTests(unittest.TestCase):
                     "requestBytesSha256": request_sha256,
                     "requestId": request.request_id,
                     "schemaVersion": 1,
-                    "state": "Running",
+                    "state": "Completed",
                     "workerCreationTime": worker_creation_time,
                     "workerPid": worker_pid,
                 }
