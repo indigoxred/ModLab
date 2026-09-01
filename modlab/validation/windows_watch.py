@@ -132,7 +132,8 @@ class WatchReceipt:
 
 @dataclass
 class _LocalWorker:
-    process: subprocess.Popen[bytes]
+    process: subprocess.Popen[bytes] | None
+    worker_pid: int
     request: WatchRequest
     request_bytes_sha256: str
     process_handle: int
@@ -867,7 +868,7 @@ def _parse_owner(
     if re.fullmatch(r"[0-9a-f]{64}", token) is None:
         raise WatchProtocolError("owner token must be lowercase 256-bit hex")
     state = _required_text(value["state"], "owner state")
-    if state not in {"Launching", "Running", "LaunchFailed"}:
+    if state not in {"Launching", "Running", "LaunchFailed", "RecoveryRequired"}:
         raise WatchProtocolError("owner state is invalid")
     pid = _required_int(value["workerPid"], "owner worker PID")
     creation_time = _required_int(
@@ -880,6 +881,9 @@ def _parse_owner(
     if state == "Running":
         if pid == 0 or creation_time == 0 or error is not None:
             raise WatchProtocolError("running owner record is incomplete")
+    elif state == "RecoveryRequired":
+        if pid == 0 or error is None:
+            raise WatchProtocolError("recovery-required owner record is inconsistent")
     elif state == "LaunchFailed":
         if pid != 0 or creation_time != 0 or error is None:
             raise WatchProtocolError("launch-failed owner record is inconsistent")
@@ -958,6 +962,192 @@ def _parse_ready(
     return opened
 
 
+def _publish_launch_failure(
+    request: WatchRequest,
+    request_sha256: str,
+    owner_token: str,
+    events_path: Path,
+    terminal_path: Path,
+    owner_path: Path,
+    message: str,
+) -> str:
+    journal_evidence = _JournalEvidence(0, 0, b"", 0, 0)
+    try:
+        journal = _EventJournal(events_path)
+        try:
+            journal_evidence = journal.evidence()
+        finally:
+            journal_close_error = journal.close()
+        if journal_close_error is not None:
+            message = f"{message}; {journal_close_error}"
+    except (OSError, WatchProtocolError) as journal_error:
+        message = f"{message}; launch-failure journal publication failed: {journal_error}"
+    _replace_record(
+        owner_path,
+        _canonical_bytes(
+            _owner_document(
+                request,
+                request_sha256,
+                owner_token,
+                state="LaunchFailed",
+                worker_pid=0,
+                worker_creation_time=0,
+                error=message,
+            )
+        ),
+    )
+    terminal = _terminal_document(
+        request,
+        worker_pid=0,
+        worker_creation_time=0,
+        request_sha256=request_sha256,
+        complete=False,
+        ready=False,
+        event_digest=journal_evidence.sha256,
+        errors=[message],
+        open_handle_count=0,
+        root_identities_unchanged=False,
+        opened_root_kinds=(),
+        journal_evidence=journal_evidence,
+    )
+    _write_new(terminal_path, _canonical_bytes(terminal))
+    return message
+
+
+def _cleanup_spawned_worker(
+    process: subprocess.Popen[bytes],
+    process_handle: int,
+) -> tuple[bool, tuple[str, ...]]:
+    errors: list[str] = []
+    try:
+        process.terminate()
+    except OSError as error:
+        errors.append(f"worker termination failed: {error}")
+    exited = False
+    try:
+        process.wait(timeout=15)
+        exited = True
+    except subprocess.TimeoutExpired:
+        errors.append("worker exit wait timed out after termination")
+        try:
+            process.kill()
+        except OSError as error:
+            errors.append(f"worker kill failed: {error}")
+        try:
+            process.wait(timeout=15)
+            exited = True
+        except subprocess.TimeoutExpired:
+            errors.append("worker exit wait timed out after kill")
+        except OSError as error:
+            errors.append(f"worker exit wait failed after kill: {error}")
+    except OSError as error:
+        errors.append(f"worker exit wait failed after termination: {error}")
+    if not exited:
+        return False, tuple(errors)
+    if process_handle:
+        close_error = _close_handle(process_handle, f"worker process {process.pid}")
+        if close_error is not None:
+            errors.append(close_error)
+            return False, tuple(errors)
+    return True, tuple(errors)
+
+
+def _record_spawned_failure(
+    request: WatchRequest,
+    request_path: Path,
+    request_sha256: str,
+    owner_token: str,
+    events_path: Path,
+    terminal_path: Path,
+    owner_path: Path,
+    process: subprocess.Popen[bytes],
+    process_handle: int,
+    process_creation_time: int,
+    message: str,
+) -> str:
+    cleanup_complete, cleanup_errors = _cleanup_spawned_worker(process, process_handle)
+    if cleanup_errors:
+        message = f"{message}; {'; '.join(cleanup_errors)}"
+    if cleanup_complete:
+        return _publish_launch_failure(
+            request,
+            request_sha256,
+            owner_token,
+            events_path,
+            terminal_path,
+            owner_path,
+            message,
+        )
+    request_key = request_path.absolute()
+    with _LOCAL_WORKERS_LOCK:
+        _LOCAL_WORKERS[request_key] = _LocalWorker(
+            process,
+            process.pid,
+            request,
+            request_sha256,
+            process_handle,
+            process_creation_time,
+        )
+    _replace_record(
+        owner_path,
+        _canonical_bytes(
+            _owner_document(
+                request,
+                request_sha256,
+                owner_token,
+                state="RecoveryRequired",
+                worker_pid=process.pid,
+                worker_creation_time=process_creation_time,
+                error=message,
+            )
+        ),
+    )
+    return message
+
+
+def _release_started_worker(
+    request: WatchRequest,
+    request_path: Path,
+    request_sha256: str,
+    owner_token: str,
+    owner_path: Path,
+    process: subprocess.Popen[bytes],
+    process_handle: int,
+    process_creation_time: int,
+    *,
+    timeout: int,
+    failure_message: str,
+) -> str | None:
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        message = f"{failure_message}: {error}"
+    except OSError as error:
+        message = f"{failure_message}: worker exit wait failed: {error}"
+    else:
+        close_error = _close_handle(process_handle, f"worker process {process.pid}")
+        if close_error is None:
+            with _LOCAL_WORKERS_LOCK:
+                _LOCAL_WORKERS.pop(request_path.absolute(), None)
+            return None
+        message = f"{failure_message}: {close_error}"
+    _replace_record(
+        owner_path,
+        _canonical_bytes(
+            _owner_document(
+                request,
+                request_sha256,
+                owner_token,
+                state="RecoveryRequired",
+                worker_pid=process.pid,
+                worker_creation_time=process_creation_time,
+                error=message,
+            )
+        ),
+    )
+    return message
+
+
 def start_watch(request: WatchRequest) -> int:
     """Persist a confined request, launch its worker, and return only after ready."""
     _require_windows()
@@ -997,14 +1187,27 @@ def start_watch(request: WatchRequest) -> int:
         )
     except FileExistsError as error:
         raise WatchProtocolError("atomic owner claim already exists") from error
-    _write_new(request_path, request_bytes)
+    try:
+        _write_new(request_path, request_bytes)
+        resolved_request_path = request_path.resolve(strict=True)
+    except (OSError, WatchProtocolError) as error:
+        message = _publish_launch_failure(
+            normalized,
+            request_sha256,
+            owner_token,
+            events_path,
+            terminal_path,
+            owner_path,
+            f"watch request publication failed: {error}",
+        )
+        raise WatchProtocolError(message) from error
     command = (
         sys.executable,
         "-B",
         "-m",
         "modlab.validation.windows_watch",
         "--worker",
-        str(request_path.resolve(strict=True)),
+        str(resolved_request_path),
     )
     try:
         process = subprocess.Popen(
@@ -1015,87 +1218,33 @@ def start_watch(request: WatchRequest) -> int:
             stderr=subprocess.DEVNULL,
         )
     except OSError as error:
-        message = f"watch worker launch failed: {error}"
-        journal = _EventJournal(events_path)
-        try:
-            journal_evidence = journal.evidence()
-        finally:
-            journal_close_error = journal.close()
-        if journal_close_error is not None:
-            message = f"{message}; {journal_close_error}"
-        _replace_record(
-            owner_path,
-            _canonical_bytes(
-                _owner_document(
-                    normalized,
-                    request_sha256,
-                    owner_token,
-                    state="LaunchFailed",
-                    worker_pid=0,
-                    worker_creation_time=0,
-                    error=message,
-                )
-            ),
-        )
-        terminal = _terminal_document(
+        message = _publish_launch_failure(
             normalized,
-            worker_pid=0,
-            worker_creation_time=0,
-            request_sha256=request_sha256,
-            complete=False,
-            ready=False,
-            event_digest=hashlib.sha256(b"").hexdigest(),
-            errors=[message],
-            open_handle_count=0,
-            root_identities_unchanged=False,
-            opened_root_kinds=(),
-            journal_evidence=journal_evidence,
+            request_sha256,
+            owner_token,
+            events_path,
+            terminal_path,
+            owner_path,
+            f"watch worker launch failed: {error}",
         )
-        _write_new(terminal_path, _canonical_bytes(terminal))
         raise WatchProtocolError(message) from error
     process_handle = 0
     try:
         process_handle, process_creation_time = _open_process_identity(process.pid)
     except (OSError, WatchProtocolError) as error:
-        process.terminate()
-        process.wait(timeout=15)
-        message = f"watch worker identity acquisition failed: {error}"
-        _replace_record(
-            owner_path,
-            _canonical_bytes(
-                _owner_document(
-                    normalized,
-                    request_sha256,
-                    owner_token,
-                    state="LaunchFailed",
-                    worker_pid=0,
-                    worker_creation_time=0,
-                    error=message,
-                )
-            ),
-        )
-        journal = _EventJournal(events_path)
-        try:
-            journal_evidence = journal.evidence()
-        finally:
-            journal_close_error = journal.close()
-        if journal_close_error is not None:
-            message = f"{message}; {journal_close_error}"
-        terminal = _terminal_document(
+        message = _record_spawned_failure(
             normalized,
-            worker_pid=0,
-            worker_creation_time=0,
-            request_sha256=request_sha256,
-            complete=False,
-            ready=False,
-            event_digest=journal_evidence.sha256,
-            errors=[message],
-            open_handle_count=0,
-            root_identities_unchanged=False,
-            opened_root_kinds=(),
-            journal_evidence=journal_evidence,
+            request_path,
+            request_sha256,
+            owner_token,
+            events_path,
+            terminal_path,
+            owner_path,
+            process,
+            0,
+            0,
+            f"watch worker identity acquisition failed: {error}",
         )
-        _write_new(terminal_path, _canonical_bytes(terminal))
         raise WatchProtocolError(message) from error
     try:
         _replace_record(
@@ -1113,66 +1262,25 @@ def start_watch(request: WatchRequest) -> int:
             ),
         )
     except (OSError, WatchProtocolError) as error:
-        message = f"watch owner promotion failed: {error}"
-        cleanup_errors: list[str] = []
-        try:
-            process.terminate()
-        except OSError as terminate_error:
-            cleanup_errors.append(f"worker termination failed: {terminate_error}")
-        try:
-            process.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            try:
-                process.kill()
-                process.wait(timeout=15)
-            except (OSError, subprocess.TimeoutExpired) as kill_error:
-                cleanup_errors.append(f"worker kill failed: {kill_error}")
-        close_error = _close_handle(process_handle, f"worker process {process.pid}")
-        if close_error is not None:
-            cleanup_errors.append(close_error)
-        if cleanup_errors:
-            message = f"{message}; {'; '.join(cleanup_errors)}"
-        _replace_record(
-            owner_path,
-            _canonical_bytes(
-                _owner_document(
-                    normalized,
-                    request_sha256,
-                    owner_token,
-                    state="LaunchFailed",
-                    worker_pid=0,
-                    worker_creation_time=0,
-                    error=message,
-                )
-            ),
-        )
-        journal = _EventJournal(events_path)
-        try:
-            journal_evidence = journal.evidence()
-        finally:
-            journal_close_error = journal.close()
-        if journal_close_error is not None:
-            message = f"{message}; {journal_close_error}"
-        terminal = _terminal_document(
+        message = _record_spawned_failure(
             normalized,
-            worker_pid=0,
-            worker_creation_time=0,
-            request_sha256=request_sha256,
-            complete=False,
-            ready=False,
-            event_digest=journal_evidence.sha256,
-            errors=[message],
-            open_handle_count=0,
-            root_identities_unchanged=False,
-            opened_root_kinds=(),
-            journal_evidence=journal_evidence,
+            request_path,
+            request_sha256,
+            owner_token,
+            events_path,
+            terminal_path,
+            owner_path,
+            process,
+            process_handle,
+            process_creation_time,
+            f"watch owner promotion failed: {error}",
         )
-        _write_new(terminal_path, _canonical_bytes(terminal))
         raise WatchProtocolError(message) from error
     request_key = request_path.absolute()
     with _LOCAL_WORKERS_LOCK:
         _LOCAL_WORKERS[request_key] = _LocalWorker(
             process,
+            process.pid,
             normalized,
             request_sha256,
             process_handle,
@@ -1194,22 +1302,37 @@ def start_watch(request: WatchRequest) -> int:
                     _write_new(normalized.stop_token_path, b"stop\n")
                 except FileExistsError:
                     pass
-                try:
-                    process.wait(timeout=15)
-                except subprocess.TimeoutExpired as timeout_error:
-                    raise WatchProtocolError(
-                        "malformed ready record and worker did not stop"
-                    ) from timeout_error
-                with _LOCAL_WORKERS_LOCK:
-                    _LOCAL_WORKERS.pop(request_key, None)
-                _close_handle(process_handle, f"worker process {process.pid}")
+                cleanup_error = _release_started_worker(
+                    normalized,
+                    request_path,
+                    request_sha256,
+                    owner_token,
+                    owner_path,
+                    process,
+                    process_handle,
+                    process_creation_time,
+                    timeout=15,
+                    failure_message="malformed ready record and worker did not stop cleanly",
+                )
+                if cleanup_error is not None:
+                    raise WatchProtocolError(cleanup_error) from error
                 raise
             return process.pid
         if terminal_path.exists() or process.poll() is not None:
-            process.wait(timeout=5)
-            with _LOCAL_WORKERS_LOCK:
-                _LOCAL_WORKERS.pop(request_key, None)
-            _close_handle(process_handle, f"worker process {process.pid}")
+            cleanup_error = _release_started_worker(
+                normalized,
+                request_path,
+                request_sha256,
+                owner_token,
+                owner_path,
+                process,
+                process_handle,
+                process_creation_time,
+                timeout=5,
+                failure_message="worker exited before ready but cleanup remained incomplete",
+            )
+            if cleanup_error is not None:
+                raise WatchProtocolError(cleanup_error)
             receipt = watch_receipt_from_files(
                 normalized,
                 process.pid,
@@ -1223,13 +1346,20 @@ def start_watch(request: WatchRequest) -> int:
         _write_new(normalized.stop_token_path, b"stop\n")
     except FileExistsError:
         pass
-    try:
-        process.wait(timeout=15)
-    except subprocess.TimeoutExpired as error:
-        raise WatchProtocolError("watch worker did not become ready or stop") from error
-    with _LOCAL_WORKERS_LOCK:
-        _LOCAL_WORKERS.pop(request_key, None)
-    _close_handle(process_handle, f"worker process {process.pid}")
+    cleanup_error = _release_started_worker(
+        normalized,
+        request_path,
+        request_sha256,
+        owner_token,
+        owner_path,
+        process,
+        process_handle,
+        process_creation_time,
+        timeout=15,
+        failure_message="watch worker did not become ready or stop",
+    )
+    if cleanup_error is not None:
+        raise WatchProtocolError(cleanup_error)
     raise WatchProtocolError("watch worker did not become ready")
 
 
@@ -1565,21 +1695,31 @@ def run_watch_worker(request_path: Path) -> int:
                     current_owned = False
                     child_path = current_path / component
                     child_handle = _open_directory(child_path, overlapped=True)
-                    current_owned = True
-                    child_volume, child_file_id, child_attributes = _handle_identity(
-                        child_handle,
-                        child_path,
-                    )
-                    if not child_attributes & _FILE_ATTRIBUTE_DIRECTORY:
-                        raise WatchProtocolError(
-                            f"watched path component is not a directory: {child_path}"
+                    try:
+                        child_volume, child_file_id, child_attributes = _handle_identity(
+                            child_handle,
+                            child_path,
                         )
-                    if child_attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-                        raise WatchProtocolError(
-                            f"watched path component became reparse: {child_path}"
+                        if not child_attributes & _FILE_ATTRIBUTE_DIRECTORY:
+                            raise WatchProtocolError(
+                                f"watched path component is not a directory: {child_path}"
+                            )
+                        if child_attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+                            raise WatchProtocolError(
+                                f"watched path component became reparse: {child_path}"
+                            )
+                    except BaseException:
+                        close_error = _close_handle(
+                            child_handle,
+                            f"unvalidated directory {child_path}",
                         )
+                        if close_error:
+                            errors.append(close_error)
+                            failed_closes += 1
+                        raise
                     current_path = child_path
                     current_handle = child_handle
+                    current_owned = True
                     current_volume = child_volume
                     current_file_id = child_file_id
                 if (current_volume, current_file_id) != (
@@ -1902,7 +2042,7 @@ def _process_alive(pid: int) -> bool:
         _kernel32.CloseHandle(handle)
 
 
-def watch_receipt_from_files(
+def _watch_receipt_from_files_impl(
     request: WatchRequest,
     worker_pid: int,
     ready_path: Path,
@@ -1970,6 +2110,12 @@ def watch_receipt_from_files(
         )
         if owner_pid != worker_pid:
             errors.append("owner worker PID does not match supplied worker")
+        if owner["state"] != "Running":
+            errors.append(
+                str(owner["error"])
+                if owner["error"] is not None
+                else f"owner state is not running: {owner['state']}"
+            )
     except FileNotFoundError:
         errors.append("owner record missing")
     except (OSError, WatchProtocolError) as error:
@@ -2054,6 +2200,47 @@ def watch_receipt_from_files(
         error=None if complete else "; ".join(dict.fromkeys(errors)),
         request_bytes_sha256=request_sha256,
     )
+
+
+def watch_receipt_from_files(
+    request: WatchRequest,
+    worker_pid: int,
+    ready_path: Path,
+    events_path: Path,
+    terminal_path: Path,
+) -> WatchReceipt:
+    """Load evidence without allowing reconstruction uncertainty to escape."""
+    try:
+        return _watch_receipt_from_files_impl(
+            request,
+            worker_pid,
+            ready_path,
+            events_path,
+            terminal_path,
+        )
+    except (OSError, WatchProtocolError, TypeError, ValueError, RuntimeError) as error:
+        request_id = (
+            request.request_id
+            if isinstance(request, WatchRequest) and type(request.request_id) is str
+            else "watch-request:" + "0" * 64
+        )
+        request_sha256 = ""
+        if isinstance(request, WatchRequest):
+            try:
+                _, request_sha256 = _request_bytes_and_sha256(request)
+            except (AttributeError, TypeError, ValueError):
+                pass
+        return WatchReceipt(
+            request_id=request_id,
+            worker_pid=worker_pid if type(worker_pid) is int else 0,
+            complete=False,
+            ready=False,
+            opened_root_kinds=(),
+            events=(),
+            event_bytes_sha256=hashlib.sha256(b"").hexdigest(),
+            error=f"evidence reconstruction failed: {error}",
+            request_bytes_sha256=request_sha256,
+        )
 
 
 def _verified_process_handle(pid: int, creation_time: int) -> int:
@@ -2168,11 +2355,11 @@ def stop_watch(request_path: Path) -> WatchReceipt:
             )
         owner_error = f"owner record unavailable during stop: {error}"
         owner_state = "Running"
-        worker_pid = local_worker.process.pid
+        worker_pid = local_worker.worker_pid
         worker_creation_time = local_worker.process_creation_time
     if local_worker is not None:
         if (
-            worker_pid != local_worker.process.pid
+            worker_pid != local_worker.worker_pid
             or worker_creation_time != local_worker.process_creation_time
         ):
             owner_error = "owner worker PID or creation time mismatches local ownership"
@@ -2197,29 +2384,76 @@ def stop_watch(request_path: Path) -> WatchReceipt:
                 f"exact worker process could not be verified: {error}",
             )
         owns_temporary_handle = True
+
+    def release_temporary_handle() -> str | None:
+        if not owns_temporary_handle:
+            return None
+        close_error = _close_handle(process_handle, f"worker process {worker_pid}")
+        if close_error is not None:
+            with _LOCAL_WORKERS_LOCK:
+                _LOCAL_WORKERS[request_key] = _LocalWorker(
+                    None,
+                    worker_pid,
+                    request,
+                    request_sha256,
+                    process_handle,
+                    worker_creation_time,
+                )
+        return close_error
+
     try:
         exited = _wait_process_handle(process_handle, 30_000)
     except WatchProtocolError as error:
-        if owns_temporary_handle:
-            _close_handle(process_handle, f"worker process {worker_pid}")
-        return _incomplete_receipt(request, worker_pid, str(error))
+        close_error = release_temporary_handle()
+        message = str(error)
+        if close_error is not None:
+            message = f"{message}; {close_error}"
+        return _incomplete_receipt(request, worker_pid, message)
     if not exited:
-        if owns_temporary_handle:
-            _close_handle(process_handle, f"worker process {worker_pid}")
+        close_error = release_temporary_handle()
+        message = "watch worker did not stop after CancelIoEx request"
+        if close_error is not None:
+            message = f"{message}; {close_error}"
         return _incomplete_receipt(
             request,
             worker_pid,
-            "watch worker did not stop after CancelIoEx request",
+            message,
             ready=True,
             opened=ROOT_KINDS,
         )
     if local_worker is not None:
-        local_worker.process.wait(timeout=1)
+        if local_worker.process is not None:
+            try:
+                local_worker.process.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                return _incomplete_receipt(
+                    request,
+                    worker_pid,
+                    f"exact local worker reap failed: {error}",
+                )
+        close_error = _close_handle(process_handle, f"worker process {worker_pid}")
+        if close_error is not None:
+            receipt = watch_receipt_from_files(
+                request,
+                worker_pid,
+                ready_path,
+                events_path,
+                terminal_path,
+            )
+            return _force_incomplete(receipt, close_error)
         with _LOCAL_WORKERS_LOCK:
             _LOCAL_WORKERS.pop(request_key, None)
-        _close_handle(process_handle, f"worker process {worker_pid}")
     elif owns_temporary_handle:
-        _close_handle(process_handle, f"worker process {worker_pid}")
+        close_error = release_temporary_handle()
+        if close_error is not None:
+            receipt = watch_receipt_from_files(
+                request,
+                worker_pid,
+                ready_path,
+                events_path,
+                terminal_path,
+            )
+            return _force_incomplete(receipt, close_error)
     receipt = watch_receipt_from_files(
         request,
         worker_pid,

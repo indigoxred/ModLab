@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -308,6 +310,55 @@ class MutationWatchTests(unittest.TestCase):
         self.assertIn("injected launch failure", terminal["error"])
         self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
 
+    def test_request_publication_failure_is_durable_before_spawn(self):
+        request = self._request()
+        original_write = windows_watch._write_new
+
+        def fail_request_publication(path: Path, data: bytes) -> None:
+            if Path(path).name == "request.json":
+                raise OSError("injected request publication failure")
+            original_write(path, data)
+
+        with mock.patch.object(
+            windows_watch,
+            "_write_new",
+            side_effect=fail_request_publication,
+        ), mock.patch.object(windows_watch.subprocess, "Popen") as launch:
+            with self.assertRaisesRegex(WatchProtocolError, "request publication failure"):
+                start_watch(request)
+
+        launch.assert_not_called()
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        terminal = json.loads((self.evidence / "terminal.json").read_text(encoding="utf-8"))
+        self.assertEqual("LaunchFailed", owner["state"])
+        self.assertEqual(0, owner["workerPid"])
+        self.assertIn("injected request publication failure", terminal["error"])
+        self.assertNotIn((self.evidence / "request.json").absolute(), windows_watch._LOCAL_WORKERS)
+
+    def test_request_resolution_failure_is_durable_before_spawn(self):
+        request = self._request()
+        original_write = windows_watch._write_new
+
+        def remove_published_request(path: Path, data: bytes) -> None:
+            original_write(path, data)
+            if Path(path).name == "request.json":
+                Path(path).unlink()
+
+        with mock.patch.object(
+            windows_watch,
+            "_write_new",
+            side_effect=remove_published_request,
+        ), mock.patch.object(windows_watch.subprocess, "Popen") as launch:
+            with self.assertRaisesRegex(WatchProtocolError, "request publication failed"):
+                start_watch(request)
+
+        launch.assert_not_called()
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        terminal = json.loads((self.evidence / "terminal.json").read_text(encoding="utf-8"))
+        self.assertEqual("LaunchFailed", owner["state"])
+        self.assertEqual(0, owner["workerPid"])
+        self.assertIn("cannot find the file", terminal["error"].lower())
+
     def test_post_create_identity_failure_terminates_worker_and_is_durable(self):
         request = self._request()
         process = mock.Mock(pid=4242)
@@ -327,6 +378,27 @@ class MutationWatchTests(unittest.TestCase):
         terminal = json.loads((self.evidence / "terminal.json").read_text(encoding="utf-8"))
         self.assertEqual("LaunchFailed", owner["state"])
         self.assertIn("injected identity failure", terminal["error"])
+        self.assertNotIn((self.evidence / "request.json").absolute(), windows_watch._LOCAL_WORKERS)
+
+    def test_terminate_failure_with_proved_exit_is_durable_launch_failure(self):
+        request = self._request()
+        process = mock.Mock(pid=4242)
+        process.terminate.side_effect = OSError("injected terminate failure")
+        process.wait.return_value = 17
+
+        with mock.patch.object(windows_watch.subprocess, "Popen", return_value=process), mock.patch.object(
+            windows_watch,
+            "_open_process_identity",
+            side_effect=OSError("injected identity failure"),
+        ):
+            with self.assertRaisesRegex(WatchProtocolError, "terminate failure"):
+                start_watch(request)
+
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        terminal = json.loads((self.evidence / "terminal.json").read_text(encoding="utf-8"))
+        self.assertEqual("LaunchFailed", owner["state"])
+        self.assertEqual(0, owner["workerPid"])
+        self.assertIn("injected terminate failure", terminal["error"])
         self.assertNotIn((self.evidence / "request.json").absolute(), windows_watch._LOCAL_WORKERS)
 
     def test_running_owner_promotion_failure_terminates_worker_and_is_durable(self):
@@ -374,6 +446,132 @@ class MutationWatchTests(unittest.TestCase):
         self.assertEqual("LaunchFailed", owner["state"])
         self.assertIn("injected owner promotion failure", terminal["error"])
         self.assertNotIn((self.evidence / "request.json").absolute(), windows_watch._LOCAL_WORKERS)
+
+    def test_wait_timeout_and_kill_failure_preserve_exact_recovery_ownership(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        process = mock.Mock(pid=4242)
+        process.wait.side_effect = subprocess.TimeoutExpired("watch-worker", 15)
+        process.kill.side_effect = OSError("injected kill failure")
+        original_replace = windows_watch._replace_record
+        original_close = windows_watch._close_handle
+        rejected_running = False
+
+        def fail_running_owner(path: Path, data: bytes) -> None:
+            nonlocal rejected_running
+            document = json.loads(data)
+            if document.get("state") == "Running" and not rejected_running:
+                rejected_running = True
+                raise OSError("injected owner promotion failure")
+            original_replace(path, data)
+
+        def protect_fake_process_handle(handle: int, label: str) -> str | None:
+            if handle == 9876:
+                self.fail("uncertain cleanup must retain the exact process handle")
+            return original_close(handle, label)
+
+        try:
+            with mock.patch.object(windows_watch.subprocess, "Popen", return_value=process), mock.patch.object(
+                windows_watch,
+                "_open_process_identity",
+                return_value=(9876, 123456789),
+            ), mock.patch.object(
+                windows_watch,
+                "_replace_record",
+                side_effect=fail_running_owner,
+            ), mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                side_effect=protect_fake_process_handle,
+            ):
+                with self.assertRaisesRegex(WatchProtocolError, "kill failure"):
+                    start_watch(request)
+
+            owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+            self.assertEqual("RecoveryRequired", owner["state"])
+            self.assertEqual(4242, owner["workerPid"])
+            self.assertEqual(123456789, owner["workerCreationTime"])
+            self.assertIn("injected kill failure", owner["error"])
+            retained = windows_watch._LOCAL_WORKERS[request_path.absolute()]
+            self.assertIs(process, retained.process)
+            self.assertEqual(9876, retained.process_handle)
+        finally:
+            with windows_watch._LOCAL_WORKERS_LOCK:
+                windows_watch._LOCAL_WORKERS.pop(request_path.absolute(), None)
+
+    def test_early_worker_exit_close_failure_preserves_running_ownership(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        process = mock.Mock(pid=4242)
+        process.poll.return_value = 19
+        process.wait.return_value = 19
+        original_close = windows_watch._close_handle
+
+        def fail_fake_process_close(handle: int, label: str) -> str | None:
+            if handle == 9876:
+                return "unclosed handle: injected startup process handle"
+            return original_close(handle, label)
+
+        try:
+            with mock.patch.object(windows_watch.subprocess, "Popen", return_value=process), mock.patch.object(
+                windows_watch,
+                "_open_process_identity",
+                return_value=(9876, 123456789),
+            ), mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                side_effect=fail_fake_process_close,
+            ):
+                with self.assertRaisesRegex(WatchProtocolError, "startup process handle"):
+                    start_watch(request)
+
+            owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+            self.assertEqual("RecoveryRequired", owner["state"])
+            self.assertEqual(4242, owner["workerPid"])
+            retained = windows_watch._LOCAL_WORKERS[request_path.absolute()]
+            self.assertIs(process, retained.process)
+            self.assertEqual(9876, retained.process_handle)
+        finally:
+            with windows_watch._LOCAL_WORKERS_LOCK:
+                windows_watch._LOCAL_WORKERS.pop(request_path.absolute(), None)
+
+    def test_ready_timeout_preserves_recovery_owner_when_exit_is_uncertain(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        process = mock.Mock(pid=4242)
+        process.wait.side_effect = subprocess.TimeoutExpired("watch-worker", 15)
+        original_close = windows_watch._close_handle
+
+        def protect_fake_process_handle(handle: int, label: str) -> str | None:
+            if handle == 9876:
+                self.fail("readiness timeout must retain the exact process handle")
+            return original_close(handle, label)
+
+        try:
+            with mock.patch.object(windows_watch.subprocess, "Popen", return_value=process), mock.patch.object(
+                windows_watch,
+                "_open_process_identity",
+                return_value=(9876, 123456789),
+            ), mock.patch.object(
+                windows_watch.time,
+                "monotonic",
+                side_effect=(0.0, 16.0),
+            ), mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                side_effect=protect_fake_process_handle,
+            ):
+                with self.assertRaisesRegex(WatchProtocolError, "did not become ready or stop"):
+                    start_watch(request)
+
+            owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+            self.assertEqual("RecoveryRequired", owner["state"])
+            self.assertEqual(4242, owner["workerPid"])
+            self.assertEqual(123456789, owner["workerCreationTime"])
+            self.assertIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+        finally:
+            with windows_watch._LOCAL_WORKERS_LOCK:
+                windows_watch._LOCAL_WORKERS.pop(request_path.absolute(), None)
 
     def test_concurrent_starts_have_one_atomic_owner_and_one_launch_attempt(self):
         request = self._request()
@@ -552,6 +750,88 @@ class MutationWatchTests(unittest.TestCase):
         )
         self.assertFalse(receipt.complete)
         self.assertIn("root membership changed during watch", receipt.error)
+
+    def test_guard_chain_closes_new_child_on_every_pretransfer_validation_failure(self):
+        physical = watch_root("SourceMods", self.watched)
+        roots = tuple(replace(physical, root_kind=kind) for kind in windows_watch.ROOT_KINDS)
+        child_path = Path(self.watched.anchor) / self.watched.parts[1]
+        original_open = windows_watch._open_directory
+        original_identity = windows_watch._handle_identity
+        original_close = windows_watch._close_handle
+
+        for mode, expected_error, expected_open_count in (
+            ("identity", "injected child identity failure", 0),
+            ("type", "path component is not a directory", 0),
+            ("reparse", "path component became reparse", 0),
+            ("close", "injected child handle close failure", 1),
+        ):
+            with self.subTest(mode=mode):
+                case_root = self.root / f"child-validation-{mode}"
+                case_root.mkdir()
+                request, request_path = self._direct_worker_request(case_root, roots)
+                opened_child = 0
+                child_closes: list[tuple[int, str, str | None]] = []
+
+                def track_open(path: Path, *, overlapped: bool) -> int:
+                    nonlocal opened_child
+                    handle = original_open(path, overlapped=overlapped)
+                    if Path(path) == child_path:
+                        opened_child = handle
+                    return handle
+
+                def fail_child_validation(handle: int, path: Path):
+                    volume, file_id, attributes = original_identity(handle, path)
+                    if Path(path) != child_path:
+                        return volume, file_id, attributes
+                    if mode in {"identity", "close"}:
+                        raise OSError("injected child identity failure")
+                    if mode == "type":
+                        attributes &= ~windows_watch._FILE_ATTRIBUTE_DIRECTORY
+                    else:
+                        attributes |= windows_watch._FILE_ATTRIBUTE_REPARSE_POINT
+                    return volume, file_id, attributes
+
+                def track_close(handle: int, label: str) -> str | None:
+                    if handle == opened_child and mode == "close":
+                        result = "unclosed handle: injected child handle close failure"
+                    else:
+                        result = original_close(handle, label)
+                    if handle == opened_child:
+                        child_closes.append((handle, label, result))
+                    return result
+
+                try:
+                    with mock.patch.object(
+                        windows_watch,
+                        "_open_directory",
+                        side_effect=track_open,
+                    ), mock.patch.object(
+                        windows_watch,
+                        "_handle_identity",
+                        side_effect=fail_child_validation,
+                    ), mock.patch.object(
+                        windows_watch,
+                        "_close_handle",
+                        side_effect=track_close,
+                    ):
+                        result = run_watch_worker(request_path)
+                finally:
+                    observed_child_closes = tuple(child_closes)
+                    if opened_child and (
+                        not child_closes or child_closes[-1][2] is not None
+                    ):
+                        original_close(opened_child, "test leaked child cleanup")
+
+                self.assertEqual(1, result)
+                self.assertNotEqual(0, opened_child)
+                self.assertEqual(1, len(observed_child_closes), observed_child_closes)
+                self.assertEqual(
+                    expected_open_count == 1,
+                    observed_child_closes[0][2] is not None,
+                )
+                terminal = json.loads((case_root / "terminal.json").read_text(encoding="utf-8"))
+                self.assertEqual(expected_open_count, terminal["openHandleCount"])
+                self.assertIn(expected_error, terminal["error"])
 
     def test_missing_request_record_still_stops_exact_registered_worker(self):
         request_path, worker_pid = self._start()
@@ -916,6 +1196,38 @@ class MutationWatchTests(unittest.TestCase):
         self.assertFalse(receipt.complete)
         self.assertIn("creation-time identity mismatch", receipt.error)
 
+    def test_recovery_required_owner_cannot_reconstruct_complete_receipt(self):
+        case_root = self.root / "recovery-required-owner"
+        case_root.mkdir()
+        self._receipt_fixture(
+            case_root,
+            event_bytes=b"",
+            complete=True,
+            terminal_error=None,
+            open_handle_count=0,
+        )
+        owner_path = case_root / "owner.json"
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        owner["state"] = "RecoveryRequired"
+        owner["error"] = "injected retained controller ownership"
+        owner_path.write_bytes(_canonical(owner))
+        request = replace(
+            self._request(),
+            evidence_root=case_root,
+            stop_token_path=case_root / "stop.token",
+        )
+
+        receipt = watch_receipt_from_files(
+            request,
+            os.getpid(),
+            case_root / "ready.json",
+            case_root / "events.ndjson",
+            case_root / "terminal.json",
+        )
+
+        self.assertFalse(receipt.complete)
+        self.assertIn("injected retained controller ownership", receipt.error)
+
     def test_terminal_record_does_not_substitute_for_process_exit(self):
         case_root = self.root / "terminal-before-exit"
         case_root.mkdir()
@@ -932,6 +1244,79 @@ class MutationWatchTests(unittest.TestCase):
 
         self.assertFalse(receipt.complete)
         self.assertIn("did not stop", receipt.error)
+
+    def test_controller_process_handle_close_failure_retains_ownership_and_is_incomplete(self):
+        request_path, worker_pid = self._start()
+        original_close = windows_watch._close_handle
+        injected = False
+
+        def fail_controller_process_close(handle: int, label: str) -> str | None:
+            nonlocal injected
+            if label == f"worker process {worker_pid}" and not injected:
+                injected = True
+                return "unclosed handle: injected controller process handle"
+            return original_close(handle, label)
+
+        with mock.patch.object(
+            windows_watch,
+            "_close_handle",
+            side_effect=fail_controller_process_close,
+        ):
+            receipt = stop_watch(request_path)
+
+        self.assertTrue(injected)
+        self.assertFalse(receipt.complete)
+        self.assertIn("injected controller process handle", receipt.error)
+        self.assertIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+
+        recovered = stop_watch(request_path)
+        self.assertTrue(recovered.complete, recovered.error)
+        self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+
+    def test_reopened_process_handle_close_failure_is_retained_and_incomplete(self):
+        case_root = self.root / "reopened-handle-close"
+        case_root.mkdir()
+        self._receipt_fixture(
+            case_root,
+            event_bytes=b"",
+            complete=True,
+            terminal_error=None,
+            open_handle_count=0,
+        )
+        request_path = case_root / "request.json"
+        worker_pid = os.getpid()
+        original_close = windows_watch._close_handle
+        retained_handle = 0
+
+        def fail_reopened_process_close(handle: int, label: str) -> str | None:
+            nonlocal retained_handle
+            if label == f"worker process {worker_pid}":
+                retained_handle = handle
+                return "unclosed handle: injected reopened process handle"
+            return original_close(handle, label)
+
+        try:
+            with mock.patch.object(
+                windows_watch,
+                "_wait_process_handle",
+                return_value=True,
+            ), mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                side_effect=fail_reopened_process_close,
+            ):
+                receipt = stop_watch(request_path)
+
+            self.assertFalse(receipt.complete)
+            self.assertIn("injected reopened process handle", receipt.error)
+            retained = windows_watch._LOCAL_WORKERS[request_path.absolute()]
+            self.assertIsNone(retained.process)
+            self.assertEqual(retained_handle, retained.process_handle)
+        finally:
+            if retained_handle:
+                original_close(retained_handle, "test reopened process cleanup")
+            with windows_watch._LOCAL_WORKERS_LOCK:
+                windows_watch._LOCAL_WORKERS.pop(request_path.absolute(), None)
 
     def test_worker_death_without_terminal_record_is_incomplete(self):
         request_path, worker_pid = self._start()
@@ -1089,6 +1474,63 @@ class MutationWatchTests(unittest.TestCase):
 
         self.assertFalse(receipt.complete)
         self.assertIn("evidence paths must be confined", receipt.error)
+
+    def test_receipt_normalization_access_failure_returns_incomplete(self):
+        case_root = self.root / "inaccessible-receipt"
+        case_root.mkdir()
+        self._receipt_fixture(
+            case_root,
+            event_bytes=b"",
+            complete=True,
+            terminal_error=None,
+            open_handle_count=0,
+        )
+        request = replace(
+            self._request(),
+            evidence_root=case_root,
+            stop_token_path=case_root / "stop.token",
+        )
+
+        with mock.patch.object(
+            windows_watch,
+            "_normalize_request",
+            side_effect=PermissionError("injected evidence access denied"),
+        ):
+            receipt = watch_receipt_from_files(
+                request,
+                os.getpid(),
+                case_root / "ready.json",
+                case_root / "events.ndjson",
+                case_root / "terminal.json",
+            )
+
+        self.assertFalse(receipt.complete)
+        self.assertIn("injected evidence access denied", receipt.error)
+
+    def test_stop_returns_incomplete_when_evidence_root_vanishes_after_process_cleanup(self):
+        request_path, worker_pid = self._start()
+        original_close = windows_watch._close_handle
+        removed = False
+
+        def close_then_remove_evidence(handle: int, label: str) -> str | None:
+            nonlocal removed
+            result = original_close(handle, label)
+            if label == f"worker process {worker_pid}" and result is None and not removed:
+                shutil.rmtree(self.evidence)
+                removed = True
+            return result
+
+        with mock.patch.object(
+            windows_watch,
+            "_close_handle",
+            side_effect=close_then_remove_evidence,
+        ):
+            receipt = stop_watch(request_path)
+
+        self.assertTrue(removed)
+        self.assertFalse(receipt.complete)
+        self.assertIn("evidence", receipt.error)
+        self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
 
     def test_protocol_record_is_not_visible_until_its_bytes_are_complete(self):
         target = self.root / "atomic-ready.json"
