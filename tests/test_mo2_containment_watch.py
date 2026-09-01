@@ -61,7 +61,8 @@ class MutationWatchTests(unittest.TestCase):
 
     def _request(self, *roots: WatchRoot) -> WatchRequest:
         if not roots:
-            roots = (watch_root("SourceMods", self.watched),)
+            physical = watch_root("SourceMods", self.watched)
+            roots = tuple(replace(physical, root_kind=kind) for kind in windows_watch.ROOT_KINDS)
         return WatchRequest(
             request_id="watch-request:" + "a" * 64,
             evidence_root=self.evidence,
@@ -96,7 +97,8 @@ class MutationWatchTests(unittest.TestCase):
         selected = tuple(
             event.action
             for event in receipt.events
-            if event.relative_path in {"nested/probe.txt", "nested/renamed.txt"}
+            if event.root_kind == "SourceMods"
+            and event.relative_path in {"nested/probe.txt", "nested/renamed.txt"}
         )
         self.assertEqual(
             ("Added", "Modified", "RenamedOld", "RenamedNew", "Removed"),
@@ -115,6 +117,22 @@ class MutationWatchTests(unittest.TestCase):
         self.assertTrue(receipt.complete, receipt.error)
         self.assertEqual((), receipt.events)
         self.assertIsNone(receipt.error)
+        self.assertEqual(
+            hashlib.sha256(request_path.read_bytes()).hexdigest(),
+            receipt.request_bytes_sha256,
+        )
+
+    def test_live_event_journal_cannot_be_reopened_for_write_or_delete(self):
+        request_path, _ = self._start()
+        events_path = self.evidence / "events.ndjson"
+
+        with self.assertRaises(PermissionError):
+            events_path.write_bytes(b"truncate")
+        with self.assertRaises(PermissionError):
+            events_path.unlink()
+        receipt = stop_watch(request_path)
+
+        self.assertTrue(receipt.complete, receipt.error)
 
     def test_every_exact_root_kind_is_armed_cancelled_and_attributed(self):
         kinds = (
@@ -147,20 +165,51 @@ class MutationWatchTests(unittest.TestCase):
         state = _protected_state("3")
         self.assertFalse(watch_proves_unchanged(receipt, state, state))
 
-    def test_equal_root_identities_are_serialized_once_and_keep_first_kind(self):
+    def test_equal_root_identities_preserve_all_logical_kinds_and_fan_out_events(self):
         first = watch_root("SourceMods", self.watched)
-        duplicate = replace(first, root_kind="ExternalTempLow")
-        request_path, _ = self._start(first, duplicate)
+        aliases = tuple(replace(first, root_kind=kind) for kind in windows_watch.ROOT_KINDS)
+        request_path, _ = self._start(*aliases)
+        (self.watched / "aliased.txt").write_bytes(b"alias fan-out")
+        time.sleep(0.1)
 
         receipt = stop_watch(request_path)
         request_document = json.loads(request_path.read_text(encoding="utf-8"))
 
         self.assertTrue(receipt.complete, receipt.error)
-        self.assertEqual(("SourceMods",), receipt.opened_root_kinds)
-        self.assertEqual(1, len(request_document["roots"]))
-        self.assertEqual("SourceMods", request_document["roots"][0]["rootKind"])
+        self.assertEqual(windows_watch.ROOT_KINDS, receipt.opened_root_kinds)
+        self.assertEqual(8, len(request_document["roots"]))
+        observed = {
+            event.root_kind
+            for event in receipt.events
+            if event.relative_path == "aliased.txt" and event.action == "Added"
+        }
+        self.assertEqual(set(windows_watch.ROOT_KINDS), observed)
 
-    def test_serialized_request_rejects_duplicate_root_identities(self):
+    def test_interleaved_alias_groups_keep_canonical_logical_coverage(self):
+        second_path = self.root / "watched-second"
+        second_path.mkdir()
+        first = watch_root("SourceMods", self.watched)
+        second = watch_root("SourceMods", second_path)
+        roots = tuple(
+            replace(first if index % 2 == 0 else second, root_kind=kind)
+            for index, kind in enumerate(windows_watch.ROOT_KINDS)
+        )
+        request_path, _ = self._start(*roots)
+        (self.watched / "mixed-alias.txt").write_bytes(b"mixed")
+        time.sleep(0.1)
+
+        receipt = stop_watch(request_path)
+
+        self.assertTrue(receipt.complete, receipt.error)
+        self.assertEqual(windows_watch.ROOT_KINDS, receipt.opened_root_kinds)
+        observed = {
+            event.root_kind
+            for event in receipt.events
+            if event.relative_path == "mixed-alias.txt" and event.action == "Added"
+        }
+        self.assertEqual(set(windows_watch.ROOT_KINDS[::2]), observed)
+
+    def test_serialized_request_preserves_duplicate_physical_identities(self):
         root = watch_root("SourceMods", self.watched)
         document = {
             "evidenceRoot": str(self.evidence),
@@ -172,14 +221,197 @@ class MutationWatchTests(unittest.TestCase):
                     "rootKind": kind,
                     "volumeSerial": root.volume_serial,
                 }
-                for kind in ("SourceMods", "ExternalTempLow")
+                for kind in windows_watch.ROOT_KINDS
             ],
             "schemaVersion": 1,
             "stopTokenPath": str(self.evidence / "stop.token"),
         }
 
-        with self.assertRaisesRegex(WatchProtocolError, "serialized roots.*unique identities"):
+        parsed = windows_watch._request_from_bytes(_canonical(document))
+
+        self.assertEqual(windows_watch.ROOT_KINDS, tuple(root.root_kind for root in parsed.roots))
+        self.assertEqual(1, len({(root.volume_serial, root.file_id) for root in parsed.roots}))
+
+    def test_request_schema_rejects_boolean_and_float_integer_values(self):
+        request = self._request()
+        base = {
+            "evidenceRoot": str(request.evidence_root),
+            "requestId": request.request_id,
+            "roots": [
+                {
+                    "fileId": root.file_id,
+                    "path": str(root.path),
+                    "rootKind": root.root_kind,
+                    "volumeSerial": root.volume_serial,
+                }
+                for root in request.roots
+            ],
+            "schemaVersion": 1,
+            "stopTokenPath": str(request.stop_token_path),
+        }
+        mutations = (
+            ("boolean schema version", {**base, "schemaVersion": True}),
+            ("float schema version", {**base, "schemaVersion": 1.0}),
+            (
+                "boolean file ID",
+                {
+                    **base,
+                    "roots": [{**base["roots"][0], "fileId": True}, *base["roots"][1:]],
+                },
+            ),
+        )
+
+        for label, document in mutations:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(WatchProtocolError, "integer|schema version"):
+                    windows_watch._request_from_bytes(_canonical(document))
+
+    def test_request_rejects_noncanonical_persisted_path_spelling(self):
+        request = self._request()
+        document = json.loads(windows_watch._request_bytes_and_sha256(request)[0])
+        document["evidenceRoot"] = str(request.evidence_root) + "\\."
+
+        with self.assertRaisesRegex(WatchProtocolError, "canonical"):
             windows_watch._request_from_bytes(_canonical(document))
+
+    def test_launch_failure_is_durable_and_does_not_leave_registry_ownership(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+
+        with mock.patch.object(
+            windows_watch.subprocess,
+            "Popen",
+            side_effect=OSError("injected launch failure"),
+        ) as launch:
+            with self.assertRaisesRegex(WatchProtocolError, "injected launch failure"):
+                start_watch(request)
+
+        request_path = request_path.resolve(strict=True)
+        self.assertEqual(
+            (
+                windows_watch.sys.executable,
+                "-B",
+                "-m",
+                "modlab.validation.windows_watch",
+                "--worker",
+                str(request_path),
+            ),
+            launch.call_args.args[0],
+        )
+        self.assertIs(launch.call_args.kwargs["shell"], False)
+        self.assertTrue((self.evidence / "owner.json").is_file())
+        self.assertTrue(request_path.is_file())
+        self.assertTrue((self.evidence / "events.ndjson").is_file())
+        terminal = json.loads((self.evidence / "terminal.json").read_text(encoding="utf-8"))
+        request_sha256 = hashlib.sha256(request_path.read_bytes()).hexdigest()
+        self.assertEqual(request_sha256, terminal["requestBytesSha256"])
+        self.assertIn("injected launch failure", terminal["error"])
+        self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+
+    def test_post_create_identity_failure_terminates_worker_and_is_durable(self):
+        request = self._request()
+        process = mock.Mock(pid=4242)
+        process.wait.return_value = 17
+
+        with mock.patch.object(windows_watch.subprocess, "Popen", return_value=process), mock.patch.object(
+            windows_watch,
+            "_open_process_identity",
+            side_effect=OSError("injected identity failure"),
+        ):
+            with self.assertRaisesRegex(WatchProtocolError, "identity failure"):
+                start_watch(request)
+
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=15)
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        terminal = json.loads((self.evidence / "terminal.json").read_text(encoding="utf-8"))
+        self.assertEqual("LaunchFailed", owner["state"])
+        self.assertIn("injected identity failure", terminal["error"])
+        self.assertNotIn((self.evidence / "request.json").absolute(), windows_watch._LOCAL_WORKERS)
+
+    def test_running_owner_promotion_failure_terminates_worker_and_is_durable(self):
+        request = self._request()
+        process = mock.Mock(pid=4242)
+        process.wait.return_value = 17
+        original_replace = windows_watch._replace_record
+        original_close = windows_watch._close_handle
+        rejected_running = False
+
+        def fail_running_owner(path: Path, data: bytes) -> None:
+            nonlocal rejected_running
+            document = json.loads(data)
+            if document.get("state") == "Running" and not rejected_running:
+                rejected_running = True
+                raise OSError("injected owner promotion failure")
+            original_replace(path, data)
+
+        def close_except_fake_process(handle: int, label: str) -> str | None:
+            if handle == 9876:
+                return None
+            return original_close(handle, label)
+
+        with mock.patch.object(windows_watch.subprocess, "Popen", return_value=process), mock.patch.object(
+            windows_watch,
+            "_open_process_identity",
+            return_value=(9876, 123456789),
+        ), mock.patch.object(
+            windows_watch,
+            "_replace_record",
+            side_effect=fail_running_owner,
+        ), mock.patch.object(
+            windows_watch,
+            "_close_handle",
+            side_effect=close_except_fake_process,
+        ) as close_handle:
+            with self.assertRaisesRegex(WatchProtocolError, "owner promotion failure"):
+                start_watch(request)
+
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=15)
+        self.assertIn(mock.call(9876, "worker process 4242"), close_handle.call_args_list)
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        terminal = json.loads((self.evidence / "terminal.json").read_text(encoding="utf-8"))
+        self.assertEqual("LaunchFailed", owner["state"])
+        self.assertIn("injected owner promotion failure", terminal["error"])
+        self.assertNotIn((self.evidence / "request.json").absolute(), windows_watch._LOCAL_WORKERS)
+
+    def test_concurrent_starts_have_one_atomic_owner_and_one_launch_attempt(self):
+        request = self._request()
+        errors: list[BaseException] = []
+        entered = threading.Event()
+        release = threading.Event()
+
+        def failing_launch(*args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(5.0))
+            raise OSError("injected launch failure")
+
+        def invoke_start() -> None:
+            try:
+                start_watch(request)
+            except BaseException as error:
+                errors.append(error)
+
+        with mock.patch.object(windows_watch.subprocess, "Popen", side_effect=failing_launch) as launch:
+            first = threading.Thread(target=invoke_start)
+            first.start()
+            self.assertTrue(entered.wait(5.0))
+            second = threading.Thread(target=invoke_start)
+            second.start()
+            second.join(5.0)
+            release.set()
+            first.join(5.0)
+
+        self.assertEqual(1, launch.call_count)
+        self.assertEqual(2, len(errors))
+        self.assertTrue(any("owner claim" in str(error) for error in errors), errors)
+        self.assertTrue(any("injected launch failure" in str(error) for error in errors), errors)
+
+    def test_partial_logical_root_coverage_is_rejected_before_launch(self):
+        partial = watch_root("SourceMods", self.watched)
+
+        with self.assertRaisesRegex(WatchProtocolError, "all eight logical root kinds"):
+            start_watch(self._request(partial))
 
     def test_root_path_replacement_after_ready_is_incomplete(self):
         request_path, _ = self._start()
@@ -190,7 +422,7 @@ class MutationWatchTests(unittest.TestCase):
         receipt = stop_watch(request_path)
 
         self.assertFalse(receipt.complete)
-        self.assertIn("root identity changed", receipt.error)
+        self.assertRegex(receipt.error, "root membership changed|root identity changed")
 
     def test_transient_root_replacement_and_restoration_is_incomplete(self):
         request_path, _ = self._start()
@@ -207,6 +439,117 @@ class MutationWatchTests(unittest.TestCase):
         time.sleep(0.1)
         receipt = stop_watch(request_path)
 
+        self.assertFalse(receipt.complete)
+        self.assertIn("root membership changed during watch", receipt.error)
+
+    def test_retained_chain_blocks_parent_rename_after_ready(self):
+        outer = self.root / "ancestor-outer"
+        inner = outer / "inner"
+        watched = inner / "watched"
+        watched.mkdir(parents=True)
+        physical = watch_root("SourceMods", watched)
+        aliases = tuple(replace(physical, root_kind=kind) for kind in windows_watch.ROOT_KINDS)
+        request_path, _ = self._start(*aliases)
+        moved = self.root / "ancestor-outer-original"
+
+        with self.assertRaises(PermissionError):
+            outer.rename(moved)
+        receipt = stop_watch(request_path)
+
+        self.assertTrue(receipt.complete, receipt.error)
+
+    def test_retained_chain_blocks_ancestor_reparse_swap_after_ready(self):
+        outer = self.root / "reparse-outer"
+        watched = outer / "inner" / "watched"
+        watched.mkdir(parents=True)
+        physical = watch_root("SourceMods", watched)
+        aliases = tuple(replace(physical, root_kind=kind) for kind in windows_watch.ROOT_KINDS)
+        request_path, _ = self._start(*aliases)
+        moved = self.root / "reparse-outer-original"
+        outside = self.root / "reparse-outside"
+        (outside / "inner" / "watched").mkdir(parents=True)
+
+        with self.assertRaises(PermissionError):
+            outer.rename(moved)
+        receipt = stop_watch(request_path)
+
+        self.assertTrue(receipt.complete, receipt.error)
+
+    def test_guard_chain_detects_parent_replace_restore_before_descendant_open(self):
+        outer = self.root / "arming-parent"
+        watched = outer / "inner" / "watched"
+        watched.mkdir(parents=True)
+        physical = watch_root("SourceMods", watched)
+        roots = tuple(replace(physical, root_kind=kind) for kind in windows_watch.ROOT_KINDS)
+        case_root = self.root / "arming-evidence"
+        case_root.mkdir()
+        request, request_path = self._direct_worker_request(case_root, roots)
+        moved = self.root / "arming-parent-original"
+        real_open = windows_watch._open_directory
+        raced = False
+
+        def replace_during_open(path: Path, *, overlapped: bool):
+            nonlocal raced
+            if Path(path) == outer and not raced:
+                raced = True
+                outer.rename(moved)
+                outer.mkdir()
+                outer.rmdir()
+                moved.rename(outer)
+            return real_open(path, overlapped=overlapped)
+
+        with mock.patch.object(windows_watch, "_open_directory", side_effect=replace_during_open):
+            result = run_watch_worker(request_path)
+
+        self.assertTrue(raced)
+        self.assertEqual(1, result)
+        receipt = watch_receipt_from_files(
+            request,
+            os.getpid(),
+            case_root / "ready.json",
+            case_root / "events.ndjson",
+            case_root / "terminal.json",
+        )
+        self.assertFalse(receipt.complete)
+        self.assertIn("root membership changed during watch", receipt.error)
+
+    def test_guard_chain_detects_ancestor_reparse_swap_before_descendant_open(self):
+        outer = self.root / "arming-reparse-parent"
+        watched = outer / "inner" / "watched"
+        watched.mkdir(parents=True)
+        outside = self.root / "arming-reparse-outside"
+        outside.mkdir()
+        physical = watch_root("SourceMods", watched)
+        roots = tuple(replace(physical, root_kind=kind) for kind in windows_watch.ROOT_KINDS)
+        case_root = self.root / "arming-reparse-evidence"
+        case_root.mkdir()
+        request, request_path = self._direct_worker_request(case_root, roots)
+        moved = self.root / "arming-reparse-parent-original"
+        real_open = windows_watch._open_directory
+        raced = False
+
+        def swap_during_open(path: Path, *, overlapped: bool):
+            nonlocal raced
+            if Path(path) == outer and not raced:
+                raced = True
+                outer.rename(moved)
+                create_mod_projection(outside, outer)
+                outer.rmdir()
+                moved.rename(outer)
+            return real_open(path, overlapped=overlapped)
+
+        with mock.patch.object(windows_watch, "_open_directory", side_effect=swap_during_open):
+            result = run_watch_worker(request_path)
+
+        self.assertTrue(raced)
+        self.assertEqual(1, result)
+        receipt = watch_receipt_from_files(
+            request,
+            os.getpid(),
+            case_root / "ready.json",
+            case_root / "events.ndjson",
+            case_root / "terminal.json",
+        )
         self.assertFalse(receipt.complete)
         self.assertIn("root membership changed during watch", receipt.error)
 
@@ -313,6 +656,190 @@ class MutationWatchTests(unittest.TestCase):
                 self.assertFalse(receipt.complete)
                 self.assertIn(message, receipt.error)
 
+    def test_ready_and_terminal_reject_boolean_or_float_schema_versions(self):
+        for record_name, schema_value in (("ready.json", True), ("terminal.json", 1.0)):
+            with self.subTest(record=record_name):
+                case_root = self.root / ("typed-" + record_name.removesuffix(".json"))
+                case_root.mkdir()
+                self._receipt_fixture(
+                    case_root,
+                    event_bytes=b"",
+                    complete=True,
+                    terminal_error=None,
+                    open_handle_count=0,
+                )
+                record_path = case_root / record_name
+                value = json.loads(record_path.read_text(encoding="utf-8"))
+                value["schemaVersion"] = schema_value
+                record_path.write_bytes(_canonical(value))
+                request = replace(
+                    self._request(),
+                    evidence_root=case_root,
+                    stop_token_path=case_root / "stop.token",
+                )
+
+                receipt = watch_receipt_from_files(
+                    request,
+                    os.getpid(),
+                    case_root / "ready.json",
+                    case_root / "events.ndjson",
+                    case_root / "terminal.json",
+                )
+
+                self.assertFalse(receipt.complete)
+                self.assertIn("schema version", receipt.error)
+
+    def test_root_a_receipt_replayed_for_root_b_is_incomplete(self):
+        root_a = self.root / "receipt-a"
+        root_b = self.root / "receipt-b"
+        root_a.mkdir()
+        root_b.mkdir()
+        self._receipt_fixture(
+            root_a,
+            event_bytes=b"",
+            complete=True,
+            terminal_error=None,
+            open_handle_count=0,
+        )
+        for name in ("owner.json", "ready.json", "events.ndjson", "terminal.json"):
+            (root_b / name).write_bytes((root_a / name).read_bytes())
+        request_b = replace(
+            self._request(),
+            evidence_root=root_b,
+            stop_token_path=root_b / "stop.token",
+        )
+
+        receipt = watch_receipt_from_files(
+            request_b,
+            os.getpid(),
+            root_b / "ready.json",
+            root_b / "events.ndjson",
+            root_b / "terminal.json",
+        )
+
+        self.assertFalse(receipt.complete)
+        self.assertIn("request SHA-256 mismatch", receipt.error)
+
+    def test_replaced_or_truncated_event_journal_is_incomplete(self):
+        for mutation in ("replace", "truncate"):
+            with self.subTest(mutation=mutation):
+                case_root = self.root / f"journal-{mutation}"
+                case_root.mkdir()
+                self._receipt_fixture(
+                    case_root,
+                    event_bytes=b"",
+                    complete=True,
+                    terminal_error=None,
+                    open_handle_count=0,
+                )
+                events_path = case_root / "events.ndjson"
+                if mutation == "replace":
+                    retained = case_root / "retained-events.ndjson"
+                    events_path.rename(retained)
+                    events_path.write_bytes(retained.read_bytes())
+                else:
+                    events_path.write_bytes(b"tampered\n")
+                request = replace(
+                    self._request(),
+                    evidence_root=case_root,
+                    stop_token_path=case_root / "stop.token",
+                )
+
+                receipt = watch_receipt_from_files(
+                    request,
+                    os.getpid(),
+                    case_root / "ready.json",
+                    events_path,
+                    case_root / "terminal.json",
+                )
+
+                self.assertFalse(receipt.complete)
+                self.assertRegex(receipt.error, "journal identity|byte count|SHA-256|malformed")
+
+    def test_terminal_event_hash_count_and_sequence_must_all_match(self):
+        mutations = (
+            ("eventBytesSha256", "0" * 64, "SHA-256 mismatch"),
+            ("eventByteCount", 1, "byte count mismatch"),
+            ("eventCount", 1, "event count|final sequence"),
+            ("finalSequence", 1, "final sequence|event count"),
+        )
+        for index, (field, value, message) in enumerate(mutations):
+            with self.subTest(field=field):
+                case_root = self.root / f"terminal-event-binding-{index}"
+                case_root.mkdir()
+                self._receipt_fixture(
+                    case_root,
+                    event_bytes=b"",
+                    complete=True,
+                    terminal_error=None,
+                    open_handle_count=0,
+                )
+                terminal_path = case_root / "terminal.json"
+                terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
+                terminal[field] = value
+                terminal_path.write_bytes(_canonical(terminal))
+                request = replace(
+                    self._request(),
+                    evidence_root=case_root,
+                    stop_token_path=case_root / "stop.token",
+                )
+
+                receipt = watch_receipt_from_files(
+                    request,
+                    os.getpid(),
+                    case_root / "ready.json",
+                    case_root / "events.ndjson",
+                    terminal_path,
+                )
+
+                self.assertFalse(receipt.complete)
+                self.assertRegex(receipt.error, message)
+
+    def test_orphaned_and_reversed_rename_pairs_are_incomplete(self):
+        cases = (
+            (
+                b"".join(
+                    _canonical(
+                        {
+                            "action": "RenamedOld",
+                            "relativePath": "old.txt",
+                            "rootKind": kind,
+                            "sequence": sequence,
+                        }
+                    )
+                    for sequence, kind in enumerate(windows_watch.ROOT_KINDS, start=1)
+                ),
+                "orphaned",
+            ),
+            (
+                b"".join(
+                    _canonical(
+                        {
+                            "action": "RenamedNew",
+                            "relativePath": "new.txt",
+                            "rootKind": kind,
+                            "sequence": sequence,
+                        }
+                    )
+                    for sequence, kind in enumerate(windows_watch.ROOT_KINDS, start=1)
+                ),
+                "reversed",
+            ),
+        )
+        for index, (event_bytes, label) in enumerate(cases):
+            with self.subTest(label=label):
+                case_root = self.root / f"rename-{index}"
+                case_root.mkdir()
+                receipt = self._receipt_fixture(
+                    case_root,
+                    event_bytes=event_bytes,
+                    complete=True,
+                    terminal_error=None,
+                    open_handle_count=0,
+                )
+                self.assertFalse(receipt.complete)
+                self.assertIn("rename pair", receipt.error)
+
     def test_terminal_cannot_claim_complete_without_ready(self):
         case_root = self.root / "complete-without-ready"
         case_root.mkdir()
@@ -358,6 +885,54 @@ class MutationWatchTests(unittest.TestCase):
         self.assertTrue((self.evidence / "stop.token").is_file())
         self.assertIn("malformed ready", receipt.error)
 
+    def test_malformed_owner_still_reaps_exact_registered_worker(self):
+        request_path, worker_pid = self._start()
+        (self.evidence / "owner.json").write_bytes(b"not-json\n")
+
+        receipt = stop_watch(request_path)
+
+        self.assertEqual(worker_pid, receipt.worker_pid)
+        self.assertFalse(receipt.complete)
+        self.assertIn("owner record unavailable", receipt.error)
+        self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+
+    def test_pid_creation_time_mismatch_is_incomplete(self):
+        case_root = self.root / "pid-mismatch"
+        case_root.mkdir()
+        self._receipt_fixture(
+            case_root,
+            event_bytes=b"",
+            complete=True,
+            terminal_error=None,
+            open_handle_count=0,
+        )
+        owner_path = case_root / "owner.json"
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        owner["workerCreationTime"] += 1
+        owner_path.write_bytes(_canonical(owner))
+
+        receipt = stop_watch(case_root / "request.json")
+
+        self.assertFalse(receipt.complete)
+        self.assertIn("creation-time identity mismatch", receipt.error)
+
+    def test_terminal_record_does_not_substitute_for_process_exit(self):
+        case_root = self.root / "terminal-before-exit"
+        case_root.mkdir()
+        self._receipt_fixture(
+            case_root,
+            event_bytes=b"",
+            complete=True,
+            terminal_error=None,
+            open_handle_count=0,
+        )
+
+        with mock.patch.object(windows_watch, "_wait_process_handle", return_value=False):
+            receipt = stop_watch(case_root / "request.json")
+
+        self.assertFalse(receipt.complete)
+        self.assertIn("did not stop", receipt.error)
+
     def test_worker_death_without_terminal_record_is_incomplete(self):
         request_path, worker_pid = self._start()
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -394,7 +969,7 @@ class MutationWatchTests(unittest.TestCase):
             request_id="watch-request:" + "c" * 64,
             evidence_root=case_root,
             stop_token_path=case_root / "stop.token",
-            roots=(root,),
+            roots=tuple(replace(root, root_kind=kind) for kind in windows_watch.ROOT_KINDS),
         )
         request_path = case_root / "request.json"
         request_path.write_bytes(
@@ -406,17 +981,33 @@ class MutationWatchTests(unittest.TestCase):
                         {
                             "fileId": root.file_id,
                             "path": str(root.path),
-                            "rootKind": root.root_kind,
+                            "rootKind": kind,
                             "volumeSerial": root.volume_serial,
                         }
+                        for kind in windows_watch.ROOT_KINDS
                     ],
                     "schemaVersion": 1,
                     "stopTokenPath": str(case_root / "stop.token"),
                 }
             )
         )
-        (case_root / "events.ndjson").write_bytes(b"")
-
+        process_handle, worker_creation_time = windows_watch._open_process_identity(os.getpid())
+        self.assertIsNone(windows_watch._close_handle(process_handle, "test worker process"))
+        request_sha256 = hashlib.sha256(request_path.read_bytes()).hexdigest()
+        (case_root / "owner.json").write_bytes(
+            _canonical(
+                {
+                    "error": None,
+                    "ownerToken": "2" * 64,
+                    "requestBytesSha256": request_sha256,
+                    "requestId": request.request_id,
+                    "schemaVersion": 1,
+                    "state": "Running",
+                    "workerCreationTime": worker_creation_time,
+                    "workerPid": os.getpid(),
+                }
+            )
+        )
         with mock.patch.object(
             windows_watch.threading.Thread,
             "start",
@@ -452,6 +1043,12 @@ class MutationWatchTests(unittest.TestCase):
         outside_stop = self.root / "outside.stop"
         with self.assertRaisesRegex(WatchProtocolError, "stop token"):
             start_watch(replace(self._request(valid), stop_token_path=outside_stop))
+
+        with self.assertRaisesRegex(WatchProtocolError, "Path values"):
+            start_watch(replace(self._request(), evidence_root=str(self.evidence)))
+        string_root = replace(self._request().roots[0], path=str(self.watched))
+        with self.assertRaisesRegex(WatchProtocolError, "Path values"):
+            start_watch(replace(self._request(), roots=(string_root, *self._request().roots[1:])))
 
     def test_watch_root_rejects_a_junction_before_resolving_its_target(self):
         outside = self.root / "outside"
@@ -522,10 +1119,11 @@ class MutationWatchTests(unittest.TestCase):
             worker_pid=os.getpid(),
             complete=True,
             ready=True,
-            opened_root_kinds=("SourceMods",),
+            opened_root_kinds=windows_watch.ROOT_KINDS,
             events=(),
             event_bytes_sha256=hashlib.sha256(b"").hexdigest(),
             error=None,
+            request_bytes_sha256="4" * 64,
         )
         transient = replace(
             clean,
@@ -538,6 +1136,59 @@ class MutationWatchTests(unittest.TestCase):
         self.assertFalse(watch_proves_unchanged(clean, before, changed))
         self.assertFalse(watch_proves_unchanged(transient, before, before))
         self.assertFalse(watch_proves_unchanged(clean, "partial", "partial"))
+        self.assertFalse(
+            watch_proves_unchanged(
+                replace(clean, opened_root_kinds=("SourceMods",)),
+                before,
+                before,
+            )
+        )
+        self.assertFalse(
+            watch_proves_unchanged(
+                replace(clean, event_bytes_sha256="0" * 64),
+                before,
+                before,
+            )
+        )
+        self.assertFalse(
+            watch_proves_unchanged(
+                replace(clean, request_bytes_sha256=""),
+                before,
+                before,
+            )
+        )
+
+    def _direct_worker_request(
+        self,
+        case_root: Path,
+        roots: tuple[WatchRoot, ...],
+    ) -> tuple[WatchRequest, Path]:
+        request = WatchRequest(
+            request_id="watch-request:" + "e" * 64,
+            evidence_root=case_root,
+            stop_token_path=case_root / "stop.token",
+            roots=roots,
+        )
+        request_bytes, request_sha256 = windows_watch._request_bytes_and_sha256(request)
+        request_path = case_root / "request.json"
+        request_path.write_bytes(request_bytes)
+        process_handle, creation_time = windows_watch._open_process_identity(os.getpid())
+        self.assertIsNone(windows_watch._close_handle(process_handle, "direct worker process"))
+        (case_root / "owner.json").write_bytes(
+            _canonical(
+                {
+                    "error": None,
+                    "ownerToken": "3" * 64,
+                    "requestBytesSha256": request_sha256,
+                    "requestId": request.request_id,
+                    "schemaVersion": 1,
+                    "state": "Running",
+                    "workerCreationTime": creation_time,
+                    "workerPid": os.getpid(),
+                }
+            )
+        )
+        return request, request_path
 
     def _receipt_fixture(
         self,
@@ -557,29 +1208,76 @@ class MutationWatchTests(unittest.TestCase):
         events_path = case_root / "events.ndjson"
         terminal_path = case_root / "terminal.json"
         worker_pid = os.getpid()
+        process_handle, worker_creation_time = windows_watch._open_process_identity(worker_pid)
+        close_error = windows_watch._close_handle(process_handle, "test process identity")
+        self.assertIsNone(close_error)
+        request_bytes = _canonical(
+            {
+                "evidenceRoot": str(request.evidence_root),
+                "requestId": request.request_id,
+                "roots": [
+                    {
+                        "fileId": root.file_id,
+                        "path": str(root.path),
+                        "rootKind": root.root_kind,
+                        "volumeSerial": root.volume_serial,
+                    }
+                    for root in request.roots
+                ],
+                "schemaVersion": 1,
+                "stopTokenPath": str(request.stop_token_path),
+            }
+        )
+        request_sha256 = hashlib.sha256(request_bytes).hexdigest()
+        (case_root / "request.json").write_bytes(request_bytes)
+        (case_root / "owner.json").write_bytes(
+            _canonical(
+                {
+                    "error": None,
+                    "ownerToken": "1" * 64,
+                    "requestBytesSha256": request_sha256,
+                    "requestId": request.request_id,
+                    "schemaVersion": 1,
+                    "state": "Running",
+                    "workerCreationTime": worker_creation_time,
+                    "workerPid": worker_pid,
+                }
+            )
+        )
         ready_path.write_bytes(
             _canonical(
                 {
-                    "openedRootKinds": ["SourceMods"],
+                    "openedRootKinds": list(windows_watch.ROOT_KINDS),
+                    "requestBytesSha256": request_sha256,
                     "requestId": request.request_id,
                     "schemaVersion": 1,
+                    "workerCreationTime": worker_creation_time,
                     "workerPid": worker_pid,
                 }
             )
         )
         events_path.write_bytes(event_bytes)
+        journal_evidence = windows_watch._read_exact_journal(events_path)
+        event_count = len(event_bytes.splitlines())
         terminal_path.write_bytes(
             _canonical(
                 {
                     "complete": complete,
                     "error": terminal_error,
+                    "eventByteCount": len(event_bytes),
                     "eventBytesSha256": hashlib.sha256(event_bytes).hexdigest(),
+                    "eventCount": event_count,
+                    "finalSequence": event_count,
+                    "journalFileId": journal_evidence.file_id,
+                    "journalVolumeSerial": journal_evidence.volume_serial,
                     "openHandleCount": open_handle_count,
-                    "openedRootKinds": ["SourceMods"],
+                    "openedRootKinds": list(windows_watch.ROOT_KINDS),
                     "ready": True,
+                    "requestBytesSha256": request_sha256,
                     "requestId": request.request_id,
                     "rootIdentitiesUnchanged": True,
                     "schemaVersion": 1,
+                    "workerCreationTime": worker_creation_time,
                     "workerPid": worker_pid,
                 }
             )

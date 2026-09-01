@@ -26,6 +26,7 @@ _READY_NAME = "ready.json"
 _EVENTS_NAME = "events.ndjson"
 _TERMINAL_NAME = "terminal.json"
 _STOP_NAME = "stop.token"
+_OWNER_NAME = "owner.json"
 _REQUEST_ID = re.compile(r"watch-request:[0-9a-f]{64}\Z")
 
 ROOT_KINDS = (
@@ -53,10 +54,13 @@ _RESERVED_NAMES = frozenset(
 )
 
 _FILE_LIST_DIRECTORY = 0x0001
+_GENERIC_READ = 0x80000000
+_GENERIC_WRITE = 0x40000000
 _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
 _FILE_SHARE_DELETE = 0x00000004
 _OPEN_EXISTING = 3
+_CREATE_NEW = 1
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
@@ -86,6 +90,7 @@ _ERROR_NOTIFY_ENUM_DIR = 1022
 _WAIT_OBJECT_0 = 0
 _WAIT_TIMEOUT = 258
 _INFINITE = 0xFFFFFFFF
+_FILE_BEGIN = 0
 _SYNCHRONIZE = 0x00100000
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _BUFFER_SIZE = 64 * 1024
@@ -122,12 +127,16 @@ class WatchReceipt:
     events: tuple[WatcherEvent, ...]
     event_bytes_sha256: str
     error: str | None
+    request_bytes_sha256: str = ""
 
 
 @dataclass
 class _LocalWorker:
     process: subprocess.Popen[bytes]
     request: WatchRequest
+    request_bytes_sha256: str
+    process_handle: int
+    process_creation_time: int
 
 
 _LOCAL_WORKERS: dict[Path, _LocalWorker] = {}
@@ -177,6 +186,33 @@ if os.name == "nt":
         ctypes.POINTER(_BY_HANDLE_FILE_INFORMATION),
     ]
     _kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    _kernel32.GetFileSizeEx.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_longlong)]
+    _kernel32.GetFileSizeEx.restype = wintypes.BOOL
+    _kernel32.SetFilePointerEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_longlong,
+        ctypes.POINTER(ctypes.c_longlong),
+        wintypes.DWORD,
+    ]
+    _kernel32.SetFilePointerEx.restype = wintypes.BOOL
+    _kernel32.ReadFile.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.c_void_p,
+    ]
+    _kernel32.ReadFile.restype = wintypes.BOOL
+    _kernel32.WriteFile.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.c_void_p,
+    ]
+    _kernel32.WriteFile.restype = wintypes.BOOL
+    _kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+    _kernel32.FlushFileBuffers.restype = wintypes.BOOL
     _kernel32.CreateEventW.argtypes = [
         ctypes.c_void_p,
         wintypes.BOOL,
@@ -210,6 +246,16 @@ if os.name == "nt":
     _kernel32.WaitForSingleObject.restype = wintypes.DWORD
     _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.GetProcessId.argtypes = [wintypes.HANDLE]
+    _kernel32.GetProcessId.restype = wintypes.DWORD
+    _kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    _kernel32.GetProcessTimes.restype = wintypes.BOOL
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _kernel32.CloseHandle.restype = wintypes.BOOL
 
@@ -217,9 +263,12 @@ if os.name == "nt":
 @dataclass
 class _WatchState:
     root: WatchRoot
+    logical_root_kinds: tuple[str, ...]
     directory_path: Path
     label: str
     directory_handle: int
+    expected_volume_serial: int
+    expected_file_id: int
     event_handle: int
     recursive: bool
     notify_filter: int
@@ -242,42 +291,174 @@ class _WatchState:
         self.stopping.set()
 
 
+@dataclass(frozen=True)
+class _JournalEvidence:
+    volume_serial: int
+    file_id: int
+    data: bytes
+    event_count: int
+    final_sequence: int
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.data).hexdigest()
+
+
 class _EventJournal:
     def __init__(self, path: Path) -> None:
-        flags = os.O_WRONLY | os.O_APPEND
-        if hasattr(os, "O_BINARY"):
-            flags |= os.O_BINARY
-        self._descriptor = os.open(path, flags)
+        handle = _kernel32.CreateFileW(
+            str(path),
+            _GENERIC_READ | _GENERIC_WRITE,
+            _FILE_SHARE_READ,
+            None,
+            _CREATE_NEW,
+            _FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if handle == _INVALID_HANDLE_VALUE:
+            raise _winerror(f"could not create exact event journal {path}")
+        self._handle = handle
+        try:
+            volume_serial, file_id, attributes = _handle_identity(handle, path)
+            if attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT):
+                raise WatchProtocolError("event journal must be a direct regular file")
+            self._volume_serial = volume_serial
+            self._file_id = file_id
+        except BaseException:
+            _close_handle(handle, f"event journal {path}")
+            self._handle = 0
+            raise
         self._lock = threading.Lock()
         self._sequence = 0
+        self._event_count = 0
 
-    def append(self, root_kind: str, records: tuple[tuple[str, str], ...]) -> None:
+    def append(
+        self,
+        root_kinds: tuple[str, ...],
+        records: tuple[tuple[str, str], ...],
+    ) -> None:
         with self._lock:
             for action, relative_path in records:
-                self._sequence += 1
-                data = _canonical_bytes(
-                    {
-                        "action": action,
-                        "relativePath": relative_path,
-                        "rootKind": root_kind,
-                        "sequence": self._sequence,
-                    }
-                )
-                written = os.write(self._descriptor, data)
-                if written != len(data):
-                    raise OSError("atomic event append was incomplete")
-            os.fsync(self._descriptor)
+                for root_kind in root_kinds:
+                    self._sequence += 1
+                    data = _canonical_bytes(
+                        {
+                            "action": action,
+                            "relativePath": relative_path,
+                            "rootKind": root_kind,
+                            "sequence": self._sequence,
+                        }
+                    )
+                    written = wintypes.DWORD()
+                    buffer = ctypes.create_string_buffer(data)
+                    if not _kernel32.WriteFile(
+                        self._handle,
+                        buffer,
+                        len(data),
+                        ctypes.byref(written),
+                        None,
+                    ):
+                        raise _winerror("event journal append failed")
+                    if written.value != len(data):
+                        raise OSError("atomic event append was incomplete")
+                    self._event_count += 1
+            if not _kernel32.FlushFileBuffers(self._handle):
+                raise _winerror("event journal flush failed")
+
+    def evidence(self) -> _JournalEvidence:
+        with self._lock:
+            if not _kernel32.FlushFileBuffers(self._handle):
+                raise _winerror("event journal final flush failed")
+            size = ctypes.c_longlong()
+            if not _kernel32.GetFileSizeEx(self._handle, ctypes.byref(size)):
+                raise _winerror("event journal size inspection failed")
+            if size.value < 0:
+                raise WatchProtocolError("event journal size is negative")
+            if not _kernel32.SetFilePointerEx(
+                self._handle,
+                ctypes.c_longlong(0),
+                None,
+                _FILE_BEGIN,
+            ):
+                raise _winerror("event journal rewind failed")
+            chunks: list[bytes] = []
+            remaining = size.value
+            while remaining:
+                amount = min(remaining, 64 * 1024)
+                buffer = ctypes.create_string_buffer(amount)
+                transferred = wintypes.DWORD()
+                if not _kernel32.ReadFile(
+                    self._handle,
+                    buffer,
+                    amount,
+                    ctypes.byref(transferred),
+                    None,
+                ):
+                    raise _winerror("event journal exact-handle read failed")
+                if transferred.value == 0:
+                    raise WatchProtocolError("event journal exact-handle read was short")
+                chunks.append(bytes(buffer[: transferred.value]))
+                remaining -= transferred.value
+            data = b"".join(chunks)
+            return _JournalEvidence(
+                self._volume_serial,
+                self._file_id,
+                data,
+                self._event_count,
+                self._sequence,
+            )
 
     def close(self) -> str | None:
-        if self._descriptor < 0:
+        if not self._handle:
             return None
-        descriptor = self._descriptor
-        self._descriptor = -1
-        try:
-            os.close(descriptor)
-        except OSError as error:
-            return f"unclosed handle: event journal ({error})"
-        return None
+        handle = self._handle
+        self._handle = 0
+        return _close_handle(handle, "event journal")
+
+
+def _read_exact_journal(path: Path) -> _JournalEvidence:
+    handle = _kernel32.CreateFileW(
+        str(path),
+        _GENERIC_READ,
+        _FILE_SHARE_READ,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle == _INVALID_HANDLE_VALUE:
+        raise _winerror(f"could not open exact event journal {path}")
+    try:
+        volume_serial, file_id, attributes = _handle_identity(handle, path)
+        if attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT):
+            raise WatchProtocolError("event journal must be a direct regular file")
+        size = ctypes.c_longlong()
+        if not _kernel32.GetFileSizeEx(handle, ctypes.byref(size)):
+            raise _winerror("event journal size inspection failed")
+        data_parts: list[bytes] = []
+        remaining = size.value
+        while remaining:
+            amount = min(remaining, 64 * 1024)
+            buffer = ctypes.create_string_buffer(amount)
+            transferred = wintypes.DWORD()
+            if not _kernel32.ReadFile(
+                handle,
+                buffer,
+                amount,
+                ctypes.byref(transferred),
+                None,
+            ):
+                raise _winerror("event journal exact-handle read failed")
+            if transferred.value == 0:
+                raise WatchProtocolError("event journal exact-handle read was short")
+            data_parts.append(bytes(buffer[: transferred.value]))
+            remaining -= transferred.value
+        data = b"".join(data_parts)
+        return _JournalEvidence(volume_serial, file_id, data, 0, 0)
+    finally:
+        close_error = _close_handle(handle, "event journal readback")
+        if close_error is not None:
+            raise WatchProtocolError(close_error)
 
 
 def _require_windows() -> None:
@@ -372,8 +553,13 @@ def watch_root(root_kind: str, path: Path) -> WatchRoot:
 def _normalize_request(request: WatchRequest, *, inspect_roots: bool) -> WatchRequest:
     if not isinstance(request, WatchRequest):
         raise WatchProtocolError("request must be WatchRequest")
-    if not isinstance(request.request_id, str) or not _REQUEST_ID.fullmatch(request.request_id):
+    if type(request.request_id) is not str or not _REQUEST_ID.fullmatch(request.request_id):
         raise WatchProtocolError("request ID must be watch-request plus lowercase SHA-256")
+    if not isinstance(request.evidence_root, Path) or not isinstance(
+        request.stop_token_path,
+        Path,
+    ):
+        raise WatchProtocolError("evidence and stop token paths must be Path values")
     supplied_evidence_root = _reject_reparse_components(
         Path(request.evidence_root),
         "evidence root",
@@ -392,13 +578,14 @@ def _normalize_request(request: WatchRequest, *, inspect_roots: bool) -> WatchRe
     if type(request.roots) is not tuple or not request.roots:
         raise WatchProtocolError("roots must be a nonempty tuple")
     normalized: list[WatchRoot] = []
-    identities: set[tuple[int, int]] = set()
     root_kinds: set[str] = set()
     for root in request.roots:
         if not isinstance(root, WatchRoot):
             raise WatchProtocolError("roots must contain WatchRoot values")
-        if root.root_kind not in _ROOT_KIND_SET:
+        if type(root.root_kind) is not str or root.root_kind not in _ROOT_KIND_SET:
             raise WatchProtocolError(f"invalid root kind: {root.root_kind!r}")
+        if not isinstance(root.path, Path):
+            raise WatchProtocolError("watched root paths must be Path values")
         if type(root.volume_serial) is not int or not 0 <= root.volume_serial <= 0xFFFFFFFF:
             raise WatchProtocolError("volume serial must be an unsigned 32-bit integer")
         if type(root.file_id) is not int or not 0 <= root.file_id <= 0xFFFFFFFFFFFFFFFF:
@@ -416,16 +603,12 @@ def _normalize_request(request: WatchRequest, *, inspect_roots: bool) -> WatchRe
                 raise WatchProtocolError(f"watched root path is unavailable: {path}") from error
             if path != direct_path:
                 raise WatchProtocolError("watched root path must be canonical and absolute")
-        identity = (root.volume_serial, root.file_id)
-        if identity in identities:
-            if inspect_roots:
-                continue
-            raise WatchProtocolError("serialized roots must have unique identities")
         if root.root_kind in root_kinds:
             raise WatchProtocolError(f"duplicate root kind: {root.root_kind}")
         root_kinds.add(root.root_kind)
-        identities.add(identity)
         normalized.append(WatchRoot(root.root_kind, path, root.volume_serial, root.file_id))
+    if tuple(root.root_kind for root in normalized) != ROOT_KINDS:
+        raise WatchProtocolError("request must contain all eight logical root kinds in canonical order")
     return WatchRequest(request.request_id, evidence_root, expected_stop, tuple(normalized))
 
 
@@ -445,6 +628,11 @@ def _request_document(request: WatchRequest) -> dict[str, object]:
         "schemaVersion": _SCHEMA_VERSION,
         "stopTokenPath": str(request.stop_token_path),
     }
+
+
+def _request_bytes_and_sha256(request: WatchRequest) -> tuple[bytes, str]:
+    request_bytes = _canonical_bytes(_request_document(request))
+    return request_bytes, hashlib.sha256(request_bytes).hexdigest()
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -493,6 +681,16 @@ def _required_int(value: object, label: str, *, minimum: int = 0) -> int:
     return value
 
 
+def _required_canonical_path(value: object, label: str) -> Path:
+    text = _required_text(value, label)
+    if "/" in text or not os.path.isabs(text) or os.path.normpath(text) != text:
+        raise WatchProtocolError(f"{label} must use one canonical absolute path spelling")
+    path = Path(text)
+    if str(path) != text:
+        raise WatchProtocolError(f"{label} must use one canonical absolute path spelling")
+    return path
+
+
 def _request_from_bytes(data: bytes) -> WatchRequest:
     value = _object_from_bytes(data, "request")
     _exact_fields(
@@ -500,7 +698,7 @@ def _request_from_bytes(data: bytes) -> WatchRequest:
         {"evidenceRoot", "requestId", "roots", "schemaVersion", "stopTokenPath"},
         "request",
     )
-    if value["schemaVersion"] != _SCHEMA_VERSION:
+    if _required_int(value["schemaVersion"], "request schema version") != _SCHEMA_VERSION:
         raise WatchProtocolError("unsupported request schema version")
     roots_value = value["roots"]
     if type(roots_value) is not list:
@@ -513,15 +711,15 @@ def _request_from_bytes(data: bytes) -> WatchRequest:
         roots.append(
             WatchRoot(
                 _required_text(item["rootKind"], "root kind"),
-                Path(_required_text(item["path"], "root path")),
+                _required_canonical_path(item["path"], "root path"),
                 _required_int(item["volumeSerial"], "volume serial"),
                 _required_int(item["fileId"], "file ID"),
             )
         )
     request = WatchRequest(
         _required_text(value["requestId"], "request ID"),
-        Path(_required_text(value["evidenceRoot"], "evidence root")),
-        Path(_required_text(value["stopTokenPath"], "stop token")),
+        _required_canonical_path(value["evidenceRoot"], "evidence root"),
+        _required_canonical_path(value["stopTokenPath"], "stop token"),
         tuple(roots),
     )
     return _normalize_request(request, inspect_roots=False)
@@ -554,6 +752,142 @@ def _write_new(path: Path, data: bytes) -> None:
                 pass
 
 
+def _replace_record(path: Path, data: bytes) -> None:
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(8)}.tmp"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    descriptor = os.open(temporary, flags, 0o600)
+    promoted = False
+    try:
+        written = os.write(descriptor, data)
+        if written != len(data):
+            raise OSError(f"incomplete write for {path}")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, path)
+        promoted = True
+    finally:
+        if not promoted:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _filetime_integer(value: wintypes.FILETIME) -> int:
+    return (int(value.dwHighDateTime) << 32) | int(value.dwLowDateTime)
+
+
+def _open_process_identity(pid: int) -> tuple[int, int]:
+    if type(pid) is not int or pid <= 0:
+        raise WatchProtocolError("worker PID must be a positive integer")
+    handle = _kernel32.OpenProcess(
+        _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION,
+        False,
+        pid,
+    )
+    if not handle:
+        raise _winerror(f"could not open watch worker process {pid}")
+    try:
+        if int(_kernel32.GetProcessId(handle)) != pid:
+            raise WatchProtocolError("opened worker process PID does not match")
+        creation = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        if not _kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        ):
+            raise _winerror(f"could not inspect watch worker process {pid}")
+        return handle, _filetime_integer(creation)
+    except BaseException:
+        _close_handle(handle, f"worker process {pid}")
+        raise
+
+
+def _owner_document(
+    request: WatchRequest,
+    request_sha256: str,
+    owner_token: str,
+    *,
+    state: str,
+    worker_pid: int,
+    worker_creation_time: int,
+    error: str | None,
+) -> dict[str, object]:
+    return {
+        "error": error,
+        "ownerToken": owner_token,
+        "requestBytesSha256": request_sha256,
+        "requestId": request.request_id,
+        "schemaVersion": _SCHEMA_VERSION,
+        "state": state,
+        "workerCreationTime": worker_creation_time,
+        "workerPid": worker_pid,
+    }
+
+
+def _parse_owner(
+    data: bytes,
+    request: WatchRequest,
+    request_sha256: str,
+) -> dict[str, object]:
+    value = _object_from_bytes(data, "owner record")
+    _exact_fields(
+        value,
+        {
+            "error",
+            "ownerToken",
+            "requestBytesSha256",
+            "requestId",
+            "schemaVersion",
+            "state",
+            "workerCreationTime",
+            "workerPid",
+        },
+        "owner record",
+    )
+    if _required_int(value["schemaVersion"], "owner schema version") != _SCHEMA_VERSION:
+        raise WatchProtocolError("unsupported owner schema version")
+    if value["requestId"] != request.request_id:
+        raise WatchProtocolError("owner record request ID mismatch")
+    digest = _required_text(value["requestBytesSha256"], "owner request SHA-256")
+    if digest != request_sha256:
+        raise WatchProtocolError("owner record request SHA-256 mismatch")
+    token = _required_text(value["ownerToken"], "owner token")
+    if re.fullmatch(r"[0-9a-f]{64}", token) is None:
+        raise WatchProtocolError("owner token must be lowercase 256-bit hex")
+    state = _required_text(value["state"], "owner state")
+    if state not in {"Launching", "Running", "LaunchFailed"}:
+        raise WatchProtocolError("owner state is invalid")
+    pid = _required_int(value["workerPid"], "owner worker PID")
+    creation_time = _required_int(
+        value["workerCreationTime"],
+        "owner worker creation time",
+    )
+    error = value["error"]
+    if error is not None:
+        _required_text(error, "owner error")
+    if state == "Running":
+        if pid == 0 or creation_time == 0 or error is not None:
+            raise WatchProtocolError("running owner record is incomplete")
+    elif state == "LaunchFailed":
+        if pid != 0 or creation_time != 0 or error is None:
+            raise WatchProtocolError("launch-failed owner record is inconsistent")
+    elif pid != 0 or creation_time != 0 or error is not None:
+        raise WatchProtocolError("launching owner record is inconsistent")
+    return value
+
+
 def _load_request_path(request_path: Path) -> WatchRequest:
     supplied = _reject_reparse_components(Path(request_path), "request path")
     resolved = supplied.resolve(strict=True)
@@ -563,22 +897,57 @@ def _load_request_path(request_path: Path) -> WatchRequest:
     return request
 
 
-def _ready_document(request: WatchRequest, worker_pid: int) -> dict[str, object]:
+def _ready_document(
+    request: WatchRequest,
+    worker_pid: int,
+    request_sha256: str,
+    worker_creation_time: int,
+) -> dict[str, object]:
     return {
         "openedRootKinds": [root.root_kind for root in request.roots],
+        "requestBytesSha256": request_sha256,
         "requestId": request.request_id,
         "schemaVersion": _SCHEMA_VERSION,
+        "workerCreationTime": worker_creation_time,
         "workerPid": worker_pid,
     }
 
 
-def _parse_ready(data: bytes, request: WatchRequest, worker_pid: int) -> tuple[str, ...]:
+def _parse_ready(
+    data: bytes,
+    request: WatchRequest,
+    worker_pid: int,
+    request_sha256: str,
+    worker_creation_time: int,
+) -> tuple[str, ...]:
     value = _object_from_bytes(data, "ready record")
-    _exact_fields(value, {"openedRootKinds", "requestId", "schemaVersion", "workerPid"}, "ready record")
-    if value["schemaVersion"] != _SCHEMA_VERSION:
+    _exact_fields(
+        value,
+        {
+            "openedRootKinds",
+            "requestBytesSha256",
+            "requestId",
+            "schemaVersion",
+            "workerCreationTime",
+            "workerPid",
+        },
+        "ready record",
+    )
+    if _required_int(value["schemaVersion"], "ready schema version") != _SCHEMA_VERSION:
         raise WatchProtocolError("unsupported ready schema version")
-    if value["requestId"] != request.request_id or value["workerPid"] != worker_pid:
-        raise WatchProtocolError("ready record does not match request and worker")
+    if (
+        value["requestId"] != request.request_id
+        or _required_text(value["requestBytesSha256"], "ready request SHA-256")
+        != request_sha256
+        or _required_int(value["workerPid"], "ready worker PID", minimum=1) != worker_pid
+        or _required_int(
+            value["workerCreationTime"],
+            "ready worker creation time",
+            minimum=1,
+        )
+        != worker_creation_time
+    ):
+        raise WatchProtocolError("ready record does not match exact request and worker")
     kinds = value["openedRootKinds"]
     if type(kinds) is not list or not all(type(kind) is str for kind in kinds):
         raise WatchProtocolError("ready root kinds must be an array of strings")
@@ -597,11 +966,38 @@ def start_watch(request: WatchRequest) -> int:
     ready_path = normalized.evidence_root / _READY_NAME
     events_path = normalized.evidence_root / _EVENTS_NAME
     terminal_path = normalized.evidence_root / _TERMINAL_NAME
-    for path in (request_path, ready_path, events_path, terminal_path, normalized.stop_token_path):
+    owner_path = normalized.evidence_root / _OWNER_NAME
+    if owner_path.exists():
+        raise WatchProtocolError("atomic owner claim already exists")
+    for path in (
+        request_path,
+        ready_path,
+        events_path,
+        terminal_path,
+        normalized.stop_token_path,
+    ):
         if path.exists():
             raise WatchProtocolError(f"watch protocol path already exists: {path.name}")
-    _write_new(request_path, _canonical_bytes(_request_document(normalized)))
-    _write_new(events_path, b"")
+    request_bytes, request_sha256 = _request_bytes_and_sha256(normalized)
+    owner_token = secrets.token_hex(32)
+    try:
+        _write_new(
+            owner_path,
+            _canonical_bytes(
+                _owner_document(
+                    normalized,
+                    request_sha256,
+                    owner_token,
+                    state="Launching",
+                    worker_pid=0,
+                    worker_creation_time=0,
+                    error=None,
+                )
+            ),
+        )
+    except FileExistsError as error:
+        raise WatchProtocolError("atomic owner claim already exists") from error
+    _write_new(request_path, request_bytes)
     command = (
         sys.executable,
         "-B",
@@ -610,21 +1006,189 @@ def start_watch(request: WatchRequest) -> int:
         "--worker",
         str(request_path.resolve(strict=True)),
     )
-    process = subprocess.Popen(
-        command,
-        shell=False,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        message = f"watch worker launch failed: {error}"
+        journal = _EventJournal(events_path)
+        try:
+            journal_evidence = journal.evidence()
+        finally:
+            journal_close_error = journal.close()
+        if journal_close_error is not None:
+            message = f"{message}; {journal_close_error}"
+        _replace_record(
+            owner_path,
+            _canonical_bytes(
+                _owner_document(
+                    normalized,
+                    request_sha256,
+                    owner_token,
+                    state="LaunchFailed",
+                    worker_pid=0,
+                    worker_creation_time=0,
+                    error=message,
+                )
+            ),
+        )
+        terminal = _terminal_document(
+            normalized,
+            worker_pid=0,
+            worker_creation_time=0,
+            request_sha256=request_sha256,
+            complete=False,
+            ready=False,
+            event_digest=hashlib.sha256(b"").hexdigest(),
+            errors=[message],
+            open_handle_count=0,
+            root_identities_unchanged=False,
+            opened_root_kinds=(),
+            journal_evidence=journal_evidence,
+        )
+        _write_new(terminal_path, _canonical_bytes(terminal))
+        raise WatchProtocolError(message) from error
+    process_handle = 0
+    try:
+        process_handle, process_creation_time = _open_process_identity(process.pid)
+    except (OSError, WatchProtocolError) as error:
+        process.terminate()
+        process.wait(timeout=15)
+        message = f"watch worker identity acquisition failed: {error}"
+        _replace_record(
+            owner_path,
+            _canonical_bytes(
+                _owner_document(
+                    normalized,
+                    request_sha256,
+                    owner_token,
+                    state="LaunchFailed",
+                    worker_pid=0,
+                    worker_creation_time=0,
+                    error=message,
+                )
+            ),
+        )
+        journal = _EventJournal(events_path)
+        try:
+            journal_evidence = journal.evidence()
+        finally:
+            journal_close_error = journal.close()
+        if journal_close_error is not None:
+            message = f"{message}; {journal_close_error}"
+        terminal = _terminal_document(
+            normalized,
+            worker_pid=0,
+            worker_creation_time=0,
+            request_sha256=request_sha256,
+            complete=False,
+            ready=False,
+            event_digest=journal_evidence.sha256,
+            errors=[message],
+            open_handle_count=0,
+            root_identities_unchanged=False,
+            opened_root_kinds=(),
+            journal_evidence=journal_evidence,
+        )
+        _write_new(terminal_path, _canonical_bytes(terminal))
+        raise WatchProtocolError(message) from error
+    try:
+        _replace_record(
+            owner_path,
+            _canonical_bytes(
+                _owner_document(
+                    normalized,
+                    request_sha256,
+                    owner_token,
+                    state="Running",
+                    worker_pid=process.pid,
+                    worker_creation_time=process_creation_time,
+                    error=None,
+                )
+            ),
+        )
+    except (OSError, WatchProtocolError) as error:
+        message = f"watch owner promotion failed: {error}"
+        cleanup_errors: list[str] = []
+        try:
+            process.terminate()
+        except OSError as terminate_error:
+            cleanup_errors.append(f"worker termination failed: {terminate_error}")
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=15)
+            except (OSError, subprocess.TimeoutExpired) as kill_error:
+                cleanup_errors.append(f"worker kill failed: {kill_error}")
+        close_error = _close_handle(process_handle, f"worker process {process.pid}")
+        if close_error is not None:
+            cleanup_errors.append(close_error)
+        if cleanup_errors:
+            message = f"{message}; {'; '.join(cleanup_errors)}"
+        _replace_record(
+            owner_path,
+            _canonical_bytes(
+                _owner_document(
+                    normalized,
+                    request_sha256,
+                    owner_token,
+                    state="LaunchFailed",
+                    worker_pid=0,
+                    worker_creation_time=0,
+                    error=message,
+                )
+            ),
+        )
+        journal = _EventJournal(events_path)
+        try:
+            journal_evidence = journal.evidence()
+        finally:
+            journal_close_error = journal.close()
+        if journal_close_error is not None:
+            message = f"{message}; {journal_close_error}"
+        terminal = _terminal_document(
+            normalized,
+            worker_pid=0,
+            worker_creation_time=0,
+            request_sha256=request_sha256,
+            complete=False,
+            ready=False,
+            event_digest=journal_evidence.sha256,
+            errors=[message],
+            open_handle_count=0,
+            root_identities_unchanged=False,
+            opened_root_kinds=(),
+            journal_evidence=journal_evidence,
+        )
+        _write_new(terminal_path, _canonical_bytes(terminal))
+        raise WatchProtocolError(message) from error
     request_key = request_path.absolute()
     with _LOCAL_WORKERS_LOCK:
-        _LOCAL_WORKERS[request_key] = _LocalWorker(process, normalized)
+        _LOCAL_WORKERS[request_key] = _LocalWorker(
+            process,
+            normalized,
+            request_sha256,
+            process_handle,
+            process_creation_time,
+        )
     deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
         if ready_path.exists():
             try:
-                _parse_ready(ready_path.read_bytes(), normalized, process.pid)
+                _parse_ready(
+                    ready_path.read_bytes(),
+                    normalized,
+                    process.pid,
+                    request_sha256,
+                    process_creation_time,
+                )
             except (OSError, WatchProtocolError) as error:
                 try:
                     _write_new(normalized.stop_token_path, b"stop\n")
@@ -638,12 +1202,14 @@ def start_watch(request: WatchRequest) -> int:
                     ) from timeout_error
                 with _LOCAL_WORKERS_LOCK:
                     _LOCAL_WORKERS.pop(request_key, None)
+                _close_handle(process_handle, f"worker process {process.pid}")
                 raise
             return process.pid
         if terminal_path.exists() or process.poll() is not None:
             process.wait(timeout=5)
             with _LOCAL_WORKERS_LOCK:
                 _LOCAL_WORKERS.pop(request_key, None)
+            _close_handle(process_handle, f"worker process {process.pid}")
             receipt = watch_receipt_from_files(
                 normalized,
                 process.pid,
@@ -663,6 +1229,7 @@ def start_watch(request: WatchRequest) -> int:
         raise WatchProtocolError("watch worker did not become ready or stop") from error
     with _LOCAL_WORKERS_LOCK:
         _LOCAL_WORKERS.pop(request_key, None)
+    _close_handle(process_handle, f"worker process {process.pid}")
     raise WatchProtocolError("watch worker did not become ready")
 
 
@@ -786,7 +1353,7 @@ def _watch_thread(state: _WatchState) -> None:
                     )
                     return
             else:
-                state.journal.append(state.root.root_kind, records)
+                state.journal.append(state.logical_root_kinds, records)
         except (OSError, WatchProtocolError) as error:
             state.fail(f"malformed watch completion for {state.root.root_kind}: {error}")
             return
@@ -798,29 +1365,12 @@ def _completion_error(root_kind: str, code: int) -> str:
     return f"watch completion failed for {root_kind}: WinError {code} ({ctypes.FormatError(code)})"
 
 
-def _verify_root_identity(root: WatchRoot) -> tuple[bool, str | None, int]:
-    handle = 0
-    try:
-        attributes = _kernel32.GetFileAttributesW(str(root.path))
-        if attributes == 0xFFFFFFFF or attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-            return False, None, 0
-        handle = _open_directory(root.path, overlapped=False)
-        volume_serial, file_id, handle_attributes = _handle_identity(handle, root.path)
-        unchanged = (
-            bool(handle_attributes & _FILE_ATTRIBUTE_DIRECTORY)
-            and not bool(handle_attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
-            and (volume_serial, file_id) == (root.volume_serial, root.file_id)
-        )
-    except (OSError, WatchProtocolError):
-        unchanged = False
-    close_error = _close_handle(handle, f"identity verification {root.root_kind}")
-    return unchanged, close_error, int(close_error is not None)
-
-
 def _terminal_document(
     request: WatchRequest,
     *,
     worker_pid: int,
+    worker_creation_time: int,
+    request_sha256: str,
     complete: bool,
     ready: bool,
     event_digest: str,
@@ -828,29 +1378,129 @@ def _terminal_document(
     open_handle_count: int,
     root_identities_unchanged: bool,
     opened_root_kinds: tuple[str, ...],
+    journal_evidence: _JournalEvidence,
 ) -> dict[str, object]:
     return {
         "complete": complete,
         "error": None if not errors else "; ".join(errors),
+        "eventByteCount": len(journal_evidence.data),
         "eventBytesSha256": event_digest,
+        "eventCount": journal_evidence.event_count,
+        "finalSequence": journal_evidence.final_sequence,
+        "journalFileId": journal_evidence.file_id,
+        "journalVolumeSerial": journal_evidence.volume_serial,
         "openHandleCount": open_handle_count,
         "openedRootKinds": list(opened_root_kinds),
         "ready": ready,
+        "requestBytesSha256": request_sha256,
         "requestId": request.request_id,
         "rootIdentitiesUnchanged": root_identities_unchanged,
         "schemaVersion": _SCHEMA_VERSION,
+        "workerCreationTime": worker_creation_time,
         "workerPid": worker_pid,
     }
+
+
+def _arm_directory_state(
+    *,
+    root: WatchRoot,
+    logical_root_kinds: tuple[str, ...],
+    directory_path: Path,
+    directory_handle: int,
+    expected_volume_serial: int,
+    expected_file_id: int,
+    label: str,
+    recursive: bool,
+    notify_filter: int,
+    membership_name: str | None,
+    journal: _EventJournal,
+    stopping: threading.Event,
+    errors: list[str],
+    errors_lock: threading.Lock,
+    states: list[_WatchState],
+) -> _WatchState:
+    if stopping.is_set():
+        with errors_lock:
+            detail = errors[-1] if errors else f"watch failed before arming: {label}"
+        raise WatchProtocolError(detail)
+    event_handle = _kernel32.CreateEventW(None, True, False, None)
+    if not event_handle:
+        raise _winerror(f"could not create completion event for {label}")
+    overlapped = _OVERLAPPED()
+    overlapped.hEvent = event_handle
+    state = _WatchState(
+        root=root,
+        logical_root_kinds=logical_root_kinds,
+        directory_path=directory_path,
+        label=label,
+        directory_handle=directory_handle,
+        expected_volume_serial=expected_volume_serial,
+        expected_file_id=expected_file_id,
+        event_handle=event_handle,
+        recursive=recursive,
+        notify_filter=notify_filter,
+        membership_name=membership_name,
+        journal=journal,
+        stopping=stopping,
+        errors=errors,
+        errors_lock=errors_lock,
+        buffer=ctypes.create_string_buffer(_BUFFER_SIZE),
+        overlapped=overlapped,
+        armed=threading.Event(),
+        pending_lock=threading.Lock(),
+    )
+    states.append(state)
+    state.thread = threading.Thread(
+        target=_watch_thread,
+        args=(state,),
+        name=f"watch-{state.label}",
+    )
+    try:
+        state.thread.start()
+        state.started = True
+    except RuntimeError as error:
+        stopping.set()
+        raise WatchProtocolError(f"thread start failure for {state.label}: {error}") from error
+    if not state.armed.wait(10.0):
+        stopping.set()
+        raise WatchProtocolError(f"watch request did not arm: {state.label}")
+    if stopping.is_set():
+        with errors_lock:
+            detail = errors[-1] if errors else f"watch failed while arming: {state.label}"
+        raise WatchProtocolError(detail)
+    return state
 
 
 def run_watch_worker(request_path: Path) -> int:
     """Run the confined worker protocol for one persisted request."""
     _require_windows()
     request = _load_request_path(request_path)
+    _, request_sha256 = _request_bytes_and_sha256(request)
     ready_path = request.evidence_root / _READY_NAME
     events_path = request.evidence_root / _EVENTS_NAME
     terminal_path = request.evidence_root / _TERMINAL_NAME
     worker_pid = os.getpid()
+    worker_handle, worker_creation_time = _open_process_identity(worker_pid)
+    worker_close_error = _close_handle(worker_handle, f"worker self process {worker_pid}")
+    if worker_close_error is not None:
+        raise WatchProtocolError(worker_close_error)
+    owner_deadline = time.monotonic() + 10.0
+    while True:
+        owner = _parse_owner(
+            (request.evidence_root / _OWNER_NAME).read_bytes(),
+            request,
+            request_sha256,
+        )
+        if owner["state"] == "Running":
+            if (
+                owner["workerPid"] != worker_pid
+                or owner["workerCreationTime"] != worker_creation_time
+            ):
+                raise WatchProtocolError("owner claim does not bind this exact worker")
+            break
+        if owner["state"] != "Launching" or time.monotonic() >= owner_deadline:
+            raise WatchProtocolError("owner claim never bound the running worker")
+        time.sleep(0.01)
     errors: list[str] = []
     errors_lock = threading.Lock()
     stopping = threading.Event()
@@ -860,38 +1510,93 @@ def run_watch_worker(request_path: Path) -> int:
     ready = False
     root_identities_unchanged = False
     failed_closes = 0
+    journal_evidence = _JournalEvidence(0, 0, b"", 0, 0)
     try:
-        if not events_path.is_file() or events_path.stat().st_size != 0:
-            raise WatchProtocolError("events journal must exist and be empty before worker start")
+        if events_path.exists():
+            raise WatchProtocolError("events journal must not exist before worker start")
         journal = _EventJournal(events_path)
+        physical_roots: list[tuple[WatchRoot, tuple[str, ...]]] = []
+        by_identity: dict[tuple[int, int], list[WatchRoot]] = {}
         for root in request.roots:
-            handle = _open_directory(root.path, overlapped=True)
+            by_identity.setdefault((root.volume_serial, root.file_id), []).append(root)
+        for aliases in by_identity.values():
+            representative = aliases[0]
+            if any(alias.path != representative.path for alias in aliases[1:]):
+                raise WatchProtocolError("aliased logical roots must use one canonical path")
+            physical_roots.append(
+                (representative, tuple(alias.root_kind for alias in aliases))
+            )
+        for root, logical_root_kinds in physical_roots:
+            volume_path = Path(root.path.anchor)
+            if root.path == volume_path:
+                raise WatchProtocolError(f"watched root cannot be a volume root: {root.root_kind}")
+            current_path = volume_path
+            current_handle = _open_directory(current_path, overlapped=True)
+            current_owned = True
             try:
-                volume_serial, file_id, attributes = _handle_identity(handle, root.path)
-                if not attributes & _FILE_ATTRIBUTE_DIRECTORY:
-                    raise WatchProtocolError(f"watched root is not a directory: {root.root_kind}")
-                if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-                    raise WatchProtocolError(f"watched root became reparse: {root.root_kind}")
-                if (volume_serial, file_id) != (root.volume_serial, root.file_id):
-                    raise WatchProtocolError(f"root identity changed before ready: {root.root_kind}")
-                event_handle = _kernel32.CreateEventW(None, True, False, None)
-                if not event_handle:
-                    raise _winerror(f"could not create completion event for {root.root_kind}")
-            except BaseException:
-                close_error = _close_handle(handle, f"directory {root.root_kind}")
-                if close_error:
-                    errors.append(close_error)
-                    failed_closes += 1
-                raise
-            overlapped = _OVERLAPPED()
-            overlapped.hEvent = event_handle
-            states.append(
-                _WatchState(
+                current_volume, current_file_id, current_attributes = _handle_identity(
+                    current_handle,
+                    current_path,
+                )
+                if not current_attributes & _FILE_ATTRIBUTE_DIRECTORY:
+                    raise WatchProtocolError(f"volume root is not a directory: {current_path}")
+                if current_attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise WatchProtocolError(f"volume root became reparse: {current_path}")
+                components = root.path.parts[1:]
+                for component_index, component in enumerate(components):
+                    _arm_directory_state(
+                        root=root,
+                        logical_root_kinds=logical_root_kinds,
+                        directory_path=current_path,
+                        directory_handle=current_handle,
+                        expected_volume_serial=current_volume,
+                        expected_file_id=current_file_id,
+                        label=f"membership-{root.root_kind}-{component_index}",
+                        recursive=False,
+                        notify_filter=_FILE_NOTIFY_CHANGE_FILE_NAME
+                        | _FILE_NOTIFY_CHANGE_DIR_NAME,
+                        membership_name=component,
+                        journal=journal,
+                        stopping=stopping,
+                        errors=errors,
+                        errors_lock=errors_lock,
+                        states=states,
+                    )
+                    current_owned = False
+                    child_path = current_path / component
+                    child_handle = _open_directory(child_path, overlapped=True)
+                    current_owned = True
+                    child_volume, child_file_id, child_attributes = _handle_identity(
+                        child_handle,
+                        child_path,
+                    )
+                    if not child_attributes & _FILE_ATTRIBUTE_DIRECTORY:
+                        raise WatchProtocolError(
+                            f"watched path component is not a directory: {child_path}"
+                        )
+                    if child_attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+                        raise WatchProtocolError(
+                            f"watched path component became reparse: {child_path}"
+                        )
+                    current_path = child_path
+                    current_handle = child_handle
+                    current_volume = child_volume
+                    current_file_id = child_file_id
+                if (current_volume, current_file_id) != (
+                    root.volume_serial,
+                    root.file_id,
+                ):
+                    raise WatchProtocolError(
+                        f"root identity changed before ready: {root.root_kind}"
+                    )
+                _arm_directory_state(
                     root=root,
-                    directory_path=root.path,
+                    logical_root_kinds=logical_root_kinds,
+                    directory_path=current_path,
+                    directory_handle=current_handle,
+                    expected_volume_serial=current_volume,
+                    expected_file_id=current_file_id,
                     label=root.root_kind,
-                    directory_handle=handle,
-                    event_handle=event_handle,
                     recursive=True,
                     notify_filter=_NOTIFY_FILTER,
                     membership_name=None,
@@ -899,85 +1604,33 @@ def run_watch_worker(request_path: Path) -> int:
                     stopping=stopping,
                     errors=errors,
                     errors_lock=errors_lock,
-                    buffer=ctypes.create_string_buffer(_BUFFER_SIZE),
-                    overlapped=overlapped,
-                    armed=threading.Event(),
-                    pending_lock=threading.Lock(),
+                    states=states,
                 )
-            )
-            parent = _reject_reparse_components(root.path.parent, "watched root parent")
-            if parent == root.path:
-                raise WatchProtocolError(f"watched root cannot be a volume root: {root.root_kind}")
-            parent_handle = _open_directory(parent, overlapped=True)
-            try:
-                _, _, parent_attributes = _handle_identity(parent_handle, parent)
-                if not parent_attributes & _FILE_ATTRIBUTE_DIRECTORY:
-                    raise WatchProtocolError(
-                        f"watched root parent is not a directory: {root.root_kind}"
+                current_owned = False
+            finally:
+                if current_owned and not any(
+                    state.directory_handle == current_handle for state in states
+                ):
+                    close_error = _close_handle(
+                        current_handle,
+                        f"unarmed directory {current_path}",
                     )
-                if parent_attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-                    raise WatchProtocolError(
-                        f"watched root parent became reparse: {root.root_kind}"
-                    )
-                parent_event_handle = _kernel32.CreateEventW(None, True, False, None)
-                if not parent_event_handle:
-                    raise _winerror(
-                        f"could not create membership event for {root.root_kind}"
-                    )
-            except BaseException:
-                close_error = _close_handle(
-                    parent_handle,
-                    f"membership directory {root.root_kind}",
-                )
-                if close_error:
-                    errors.append(close_error)
-                    failed_closes += 1
-                raise
-            parent_overlapped = _OVERLAPPED()
-            parent_overlapped.hEvent = parent_event_handle
-            states.append(
-                _WatchState(
-                    root=root,
-                    directory_path=parent,
-                    label=f"membership-{root.root_kind}",
-                    directory_handle=parent_handle,
-                    event_handle=parent_event_handle,
-                    recursive=False,
-                    notify_filter=_FILE_NOTIFY_CHANGE_FILE_NAME
-                    | _FILE_NOTIFY_CHANGE_DIR_NAME,
-                    membership_name=root.path.name,
-                    journal=journal,
-                    stopping=stopping,
-                    errors=errors,
-                    errors_lock=errors_lock,
-                    buffer=ctypes.create_string_buffer(_BUFFER_SIZE),
-                    overlapped=parent_overlapped,
-                    armed=threading.Event(),
-                    pending_lock=threading.Lock(),
-                )
-            )
-            opened_kinds.append(root.root_kind)
-        for state in states:
-            state.thread = threading.Thread(
-                target=_watch_thread,
-                args=(state,),
-                name=f"watch-{state.label}",
-            )
-            try:
-                state.thread.start()
-                state.started = True
-            except RuntimeError as error:
-                errors.append(f"thread start failure for {state.label}: {error}")
-                stopping.set()
-                break
+                    if close_error:
+                        errors.append(close_error)
+                        failed_closes += 1
+        opened_kinds.extend(root.root_kind for root in request.roots)
         if not errors:
-            for state in states:
-                if not state.armed.wait(10.0):
-                    errors.append(f"watch request did not arm: {state.label}")
-                    stopping.set()
-                    break
-        if not errors:
-            _write_new(ready_path, _canonical_bytes(_ready_document(request, worker_pid)))
+            _write_new(
+                ready_path,
+                _canonical_bytes(
+                    _ready_document(
+                        request,
+                        worker_pid,
+                        request_sha256,
+                        worker_creation_time,
+                    )
+                ),
+            )
             ready = True
         while not stopping.is_set():
             if request.stop_token_path.exists():
@@ -1004,14 +1657,24 @@ def run_watch_worker(request_path: Path) -> int:
             if state.thread is not None and state.started:
                 state.thread.join()
         if ready:
-            root_results = tuple(_verify_root_identity(root) for root in request.roots)
-            root_identities_unchanged = all(result[0] for result in root_results)
-            for _, close_error, close_count in root_results:
-                if close_error:
-                    errors.append(close_error)
-                failed_closes += close_count
+            exact_handles_unchanged = []
+            for state in states:
+                try:
+                    volume_serial, file_id, attributes = _handle_identity(
+                        state.directory_handle,
+                        state.directory_path,
+                    )
+                    exact_handles_unchanged.append(
+                        bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
+                        and not bool(attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
+                        and (volume_serial, file_id)
+                        == (state.expected_volume_serial, state.expected_file_id)
+                    )
+                except OSError:
+                    exact_handles_unchanged.append(False)
+            root_identities_unchanged = all(exact_handles_unchanged)
             if not root_identities_unchanged:
-                errors.append("root identity changed after ready")
+                errors.append("retained component or root identity changed after ready")
         for state in reversed(states):
             for handle, label in (
                 (state.event_handle, f"completion event {state.label}"),
@@ -1022,20 +1685,21 @@ def run_watch_worker(request_path: Path) -> int:
                     errors.append(close_error)
                     failed_closes += 1
         if journal is not None:
+            try:
+                journal_evidence = journal.evidence()
+            except (OSError, WatchProtocolError) as error:
+                errors.append(f"could not reload exact event bytes: {error}")
             close_error = journal.close()
             if close_error:
                 errors.append(close_error)
                 failed_closes += 1
-        try:
-            event_bytes = events_path.read_bytes()
-        except OSError as error:
-            event_bytes = b""
-            errors.append(f"could not reload event bytes: {error}")
-        event_digest = hashlib.sha256(event_bytes).hexdigest()
+        event_digest = journal_evidence.sha256
         complete = ready and not errors and failed_closes == 0 and root_identities_unchanged
         terminal = _terminal_document(
             request,
             worker_pid=worker_pid,
+            worker_creation_time=worker_creation_time,
+            request_sha256=request_sha256,
             complete=complete,
             ready=ready,
             event_digest=event_digest,
@@ -1043,6 +1707,7 @@ def run_watch_worker(request_path: Path) -> int:
             open_handle_count=failed_closes,
             root_identities_unchanged=root_identities_unchanged,
             opened_root_kinds=tuple(opened_kinds),
+            journal_evidence=journal_evidence,
         )
         try:
             _write_new(terminal_path, _canonical_bytes(terminal))
@@ -1078,35 +1743,116 @@ def _parse_events(data: bytes, request: WatchRequest) -> tuple[WatcherEvent, ...
         _validate_relative_path(relative_path)
         events.append(WatcherEvent(sequence, root_kind, action, relative_path))
         expected_sequence += 1
-    return tuple(events)
+    result = tuple(events)
+    _validate_physical_event_groups(result, request)
+    return result
 
 
-def _parse_terminal(data: bytes, request: WatchRequest, worker_pid: int) -> dict[str, object]:
+def _validate_physical_event_groups(
+    events: tuple[WatcherEvent, ...],
+    request: WatchRequest,
+) -> None:
+    aliases_by_identity: dict[tuple[int, int], tuple[str, ...]] = {}
+    identity_by_kind: dict[str, tuple[int, int]] = {}
+    grouped: dict[tuple[int, int], list[str]] = {}
+    for root in request.roots:
+        identity = (root.volume_serial, root.file_id)
+        identity_by_kind[root.root_kind] = identity
+        grouped.setdefault(identity, []).append(root.root_kind)
+    aliases_by_identity = {
+        identity: tuple(kinds) for identity, kinds in grouped.items()
+    }
+    physical_events: list[tuple[tuple[int, int], str, str]] = []
+    index = 0
+    while index < len(events):
+        event = events[index]
+        identity = identity_by_kind[event.root_kind]
+        aliases = aliases_by_identity[identity]
+        group = events[index : index + len(aliases)]
+        if (
+            len(group) != len(aliases)
+            or tuple(item.root_kind for item in group) != aliases
+            or any(
+                item.action != event.action or item.relative_path != event.relative_path
+                for item in group
+            )
+        ):
+            raise WatchProtocolError("event alias fan-out is incomplete")
+        physical_events.append((identity, event.action, event.relative_path))
+        index += len(aliases)
+    pending: dict[tuple[int, int], str] = {}
+    for identity, action, relative_path in physical_events:
+        if action == "RenamedOld":
+            if identity in pending:
+                raise WatchProtocolError("rename pair has consecutive old names")
+            pending[identity] = relative_path
+        elif action == "RenamedNew":
+            if identity not in pending:
+                raise WatchProtocolError("rename pair is reversed or orphaned")
+            del pending[identity]
+        elif identity in pending:
+            raise WatchProtocolError("rename pair is not ordered per physical root")
+    if pending:
+        raise WatchProtocolError("rename pair is orphaned")
+
+
+def _parse_terminal(
+    data: bytes,
+    request: WatchRequest,
+    worker_pid: int,
+    request_sha256: str,
+    worker_creation_time: int,
+) -> dict[str, object]:
     value = _object_from_bytes(data, "terminal record")
     _exact_fields(
         value,
         {
             "complete",
             "error",
+            "eventByteCount",
             "eventBytesSha256",
+            "eventCount",
+            "finalSequence",
+            "journalFileId",
+            "journalVolumeSerial",
             "openHandleCount",
             "openedRootKinds",
             "ready",
+            "requestBytesSha256",
             "requestId",
             "rootIdentitiesUnchanged",
             "schemaVersion",
+            "workerCreationTime",
             "workerPid",
         },
         "terminal record",
     )
-    if value["schemaVersion"] != _SCHEMA_VERSION:
+    if _required_int(value["schemaVersion"], "terminal schema version") != _SCHEMA_VERSION:
         raise WatchProtocolError("unsupported terminal schema version")
-    if value["requestId"] != request.request_id or value["workerPid"] != worker_pid:
-        raise WatchProtocolError("terminal record does not match request and worker")
+    if (
+        value["requestId"] != request.request_id
+        or _required_text(value["requestBytesSha256"], "terminal request SHA-256")
+        != request_sha256
+        or _required_int(value["workerPid"], "terminal worker PID") != worker_pid
+        or _required_int(
+            value["workerCreationTime"],
+            "terminal worker creation time",
+        )
+        != worker_creation_time
+    ):
+        raise WatchProtocolError("terminal record does not match exact request and worker")
     for field in ("complete", "ready", "rootIdentitiesUnchanged"):
         if type(value[field]) is not bool:
             raise WatchProtocolError(f"terminal {field} must be boolean")
     _required_int(value["openHandleCount"], "open handle count")
+    for field, label in (
+        ("eventByteCount", "event byte count"),
+        ("eventCount", "event count"),
+        ("finalSequence", "final sequence"),
+        ("journalFileId", "journal file ID"),
+        ("journalVolumeSerial", "journal volume serial"),
+    ):
+        _required_int(value[field], label)
     digest = _required_text(value["eventBytesSha256"], "event bytes SHA-256")
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise WatchProtocolError("event bytes SHA-256 must be lowercase SHA-256")
@@ -1121,6 +1867,12 @@ def _parse_terminal(data: bytes, request: WatchRequest, worker_pid: int) -> dict
         raise WatchProtocolError("complete terminal requires unchanged root identities")
     if value["complete"] and value["openHandleCount"] != 0:
         raise WatchProtocolError("complete terminal has an unclosed handle count")
+    if value["eventCount"] != value["finalSequence"]:
+        raise WatchProtocolError("terminal event count and final sequence disagree")
+    if value["complete"] and (
+        value["journalFileId"] == 0 or value["journalVolumeSerial"] == 0
+    ):
+        raise WatchProtocolError("complete terminal requires exact journal identity")
     kinds = value["openedRootKinds"]
     if type(kinds) is not list or not all(type(kind) is str for kind in kinds):
         raise WatchProtocolError("terminal root kinds must be an array of strings")
@@ -1194,22 +1946,50 @@ def watch_receipt_from_files(
     ready = False
     opened: tuple[str, ...] = ()
     event_bytes = b""
+    journal_evidence = _JournalEvidence(0, 0, b"", 0, 0)
     events: tuple[WatcherEvent, ...] = ()
     terminal: dict[str, object] | None = None
+    request_sha256 = ""
+    worker_creation_time = 0
     try:
         normalized = _normalize_request(request, inspect_roots=False)
+        _, request_sha256 = _request_bytes_and_sha256(normalized)
     except WatchProtocolError as error:
         normalized = request
         errors.append(str(error))
     try:
-        opened = _parse_ready(Path(ready_path).read_bytes(), normalized, worker_pid)
+        owner = _parse_owner(
+            (Path(request.evidence_root) / _OWNER_NAME).read_bytes(),
+            normalized,
+            request_sha256,
+        )
+        owner_pid = _required_int(owner["workerPid"], "owner worker PID")
+        worker_creation_time = _required_int(
+            owner["workerCreationTime"],
+            "owner worker creation time",
+        )
+        if owner_pid != worker_pid:
+            errors.append("owner worker PID does not match supplied worker")
+    except FileNotFoundError:
+        errors.append("owner record missing")
+    except (OSError, WatchProtocolError) as error:
+        errors.append(str(error))
+    try:
+        opened = _parse_ready(
+            Path(ready_path).read_bytes(),
+            normalized,
+            worker_pid,
+            request_sha256,
+            worker_creation_time,
+        )
         ready = True
     except FileNotFoundError:
         errors.append("ready record missing")
     except (OSError, WatchProtocolError) as error:
         errors.append(str(error))
     try:
-        event_bytes = Path(events_path).read_bytes()
+        journal_evidence = _read_exact_journal(Path(events_path))
+        event_bytes = journal_evidence.data
         events = _parse_events(event_bytes, normalized)
     except FileNotFoundError:
         errors.append("events journal missing")
@@ -1217,7 +1997,13 @@ def watch_receipt_from_files(
         errors.append(str(error))
     event_digest = hashlib.sha256(event_bytes).hexdigest()
     try:
-        terminal = _parse_terminal(Path(terminal_path).read_bytes(), normalized, worker_pid)
+        terminal = _parse_terminal(
+            Path(terminal_path).read_bytes(),
+            normalized,
+            worker_pid,
+            request_sha256,
+            worker_creation_time,
+        )
     except FileNotFoundError:
         errors.append(
             "worker death before terminal record"
@@ -1238,6 +2024,18 @@ def watch_receipt_from_files(
             opened = terminal_opened
         if terminal["eventBytesSha256"] != event_digest:
             errors.append("event bytes SHA-256 mismatch")
+        if terminal["eventByteCount"] != len(event_bytes):
+            errors.append("event byte count mismatch")
+        if terminal["eventCount"] != len(events):
+            errors.append("event count mismatch")
+        final_sequence = 0 if not events else events[-1].sequence
+        if terminal["finalSequence"] != final_sequence:
+            errors.append("final sequence mismatch")
+        if (
+            terminal["journalVolumeSerial"] != journal_evidence.volume_serial
+            or terminal["journalFileId"] != journal_evidence.file_id
+        ):
+            errors.append("event journal identity mismatch")
         if terminal["openHandleCount"] != 0:
             errors.append(f"unclosed handle count: {terminal['openHandleCount']}")
         if terminal["ready"] and not terminal["rootIdentitiesUnchanged"]:
@@ -1254,21 +2052,55 @@ def watch_receipt_from_files(
         events=events,
         event_bytes_sha256=event_digest,
         error=None if complete else "; ".join(dict.fromkeys(errors)),
+        request_bytes_sha256=request_sha256,
     )
 
 
-def _wait_for_process(pid: int, timeout_ms: int) -> bool:
-    handle = _kernel32.OpenProcess(
-        _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION,
-        False,
-        pid,
-    )
-    if not handle:
-        return ctypes.get_last_error() == _ERROR_INVALID_PARAMETER
+def _verified_process_handle(pid: int, creation_time: int) -> int:
+    handle, observed_creation_time = _open_process_identity(pid)
+    if observed_creation_time != creation_time:
+        _close_handle(handle, f"mismatched worker process {pid}")
+        raise WatchProtocolError("worker PID creation-time identity mismatch")
+    return handle
+
+
+def _wait_process_handle(handle: int, timeout_ms: int) -> bool:
+    result = _kernel32.WaitForSingleObject(handle, timeout_ms)
+    if result == _WAIT_OBJECT_0:
+        return True
+    if result == _WAIT_TIMEOUT:
+        return False
+    raise WatchProtocolError(f"worker process wait failed: {result}")
+
+
+def _incomplete_receipt(
+    request: WatchRequest,
+    worker_pid: int,
+    error: str,
+    *,
+    ready: bool = False,
+    opened: tuple[str, ...] = (),
+) -> WatchReceipt:
+    events_path = request.evidence_root / _EVENTS_NAME
     try:
-        return _kernel32.WaitForSingleObject(handle, timeout_ms) == _WAIT_OBJECT_0
-    finally:
-        _kernel32.CloseHandle(handle)
+        journal = _read_exact_journal(events_path)
+        event_bytes = journal.data
+        events = _parse_events(event_bytes, request)
+    except (OSError, WatchProtocolError):
+        event_bytes = b""
+        events = ()
+    _, request_sha256 = _request_bytes_and_sha256(request)
+    return WatchReceipt(
+        request.request_id,
+        worker_pid,
+        False,
+        ready,
+        opened,
+        events,
+        hashlib.sha256(event_bytes).hexdigest(),
+        error,
+        request_sha256,
+    )
 
 
 def stop_watch(request_path: Path) -> WatchReceipt:
@@ -1277,12 +2109,33 @@ def stop_watch(request_path: Path) -> WatchReceipt:
     request_key = Path(request_path).absolute()
     with _LOCAL_WORKERS_LOCK:
         local_worker = _LOCAL_WORKERS.get(request_key)
+    evidence_root = request_key.parent
     request_error: str | None = None
     try:
         request = _load_request_path(request_key)
     except (OSError, WatchProtocolError) as error:
         if local_worker is None:
-            raise WatchProtocolError(f"request record unavailable during stop: {error}") from error
+            fallback = WatchRequest(
+                "watch-request:" + "0" * 64,
+                evidence_root,
+                evidence_root / _STOP_NAME,
+                (),
+            )
+            try:
+                _write_new(fallback.stop_token_path, b"stop\n")
+            except (FileExistsError, OSError):
+                pass
+            return WatchReceipt(
+                fallback.request_id,
+                0,
+                False,
+                False,
+                (),
+                (),
+                hashlib.sha256(b"").hexdigest(),
+                f"request record unavailable during stop: {error}",
+                "",
+            )
         request = local_worker.request
         request_error = f"request record unavailable during stop: {error}"
     ready_path = request.evidence_root / _READY_NAME
@@ -1292,129 +2145,93 @@ def stop_watch(request_path: Path) -> WatchReceipt:
         _write_new(request.stop_token_path, b"stop\n")
     except FileExistsError:
         pass
-    local_process = None if local_worker is None else local_worker.process
-    if request_error is not None:
-        worker_pid = local_process.pid
-        try:
-            local_process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            return WatchReceipt(
-                request.request_id,
-                worker_pid,
-                False,
-                False,
-                (),
-                (),
-                hashlib.sha256(
-                    events_path.read_bytes() if events_path.exists() else b""
-                ).hexdigest(),
-                f"{request_error}; worker did not stop after CancelIoEx request",
-            )
-        with _LOCAL_WORKERS_LOCK:
-            _LOCAL_WORKERS.pop(request_key, None)
-        return _force_incomplete(
-            watch_receipt_from_files(
-                request,
-                worker_pid,
-                ready_path,
-                events_path,
-                terminal_path,
-            ),
-            request_error,
-        )
+    _, request_sha256 = _request_bytes_and_sha256(request)
+    owner_error: str | None = None
     try:
-        ready_bytes = ready_path.read_bytes()
-        ready_value = _object_from_bytes(ready_bytes, "ready record")
-        worker_pid = _required_int(ready_value.get("workerPid"), "worker PID", minimum=1)
-        _parse_ready(ready_bytes, request, worker_pid)
+        owner = _parse_owner(
+            (request.evidence_root / _OWNER_NAME).read_bytes(),
+            request,
+            request_sha256,
+        )
+        owner_state = str(owner["state"])
+        worker_pid = _required_int(owner["workerPid"], "owner worker PID")
+        worker_creation_time = _required_int(
+            owner["workerCreationTime"],
+            "owner worker creation time",
+        )
     except (FileNotFoundError, OSError, WatchProtocolError) as error:
-        if local_process is not None:
-            worker_pid = local_process.pid
-            try:
-                local_process.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                return WatchReceipt(
-                    request.request_id,
-                    worker_pid,
-                    False,
-                    False,
-                    (),
-                    (),
-                    hashlib.sha256(events_path.read_bytes() if events_path.exists() else b"").hexdigest(),
-                    f"malformed ready record and worker did not stop: {error}",
-                )
-            with _LOCAL_WORKERS_LOCK:
-                _LOCAL_WORKERS.pop(request_key, None)
-            return watch_receipt_from_files(
+        if local_worker is None:
+            return _incomplete_receipt(
+                request,
+                0,
+                f"owner record unavailable during stop: {error}",
+            )
+        owner_error = f"owner record unavailable during stop: {error}"
+        owner_state = "Running"
+        worker_pid = local_worker.process.pid
+        worker_creation_time = local_worker.process_creation_time
+    if local_worker is not None:
+        if (
+            worker_pid != local_worker.process.pid
+            or worker_creation_time != local_worker.process_creation_time
+        ):
+            owner_error = "owner worker PID or creation time mismatches local ownership"
+        process_handle = local_worker.process_handle
+        owns_temporary_handle = False
+    elif owner_state == "LaunchFailed":
+        receipt = watch_receipt_from_files(
+            request,
+            0,
+            ready_path,
+            events_path,
+            terminal_path,
+        )
+        return _force_incomplete(receipt, str(owner["error"]))
+    else:
+        try:
+            process_handle = _verified_process_handle(worker_pid, worker_creation_time)
+        except (OSError, WatchProtocolError) as error:
+            return _incomplete_receipt(
                 request,
                 worker_pid,
-                ready_path,
-                events_path,
-                terminal_path,
+                f"exact worker process could not be verified: {error}",
             )
-        deadline = time.monotonic() + 30.0
-        while time.monotonic() < deadline and not terminal_path.exists():
-            time.sleep(0.02)
-        if terminal_path.exists():
-            try:
-                terminal_value = _object_from_bytes(terminal_path.read_bytes(), "terminal record")
-                worker_pid = _required_int(
-                    terminal_value.get("workerPid"),
-                    "terminal worker PID",
-                    minimum=1,
-                )
-                return watch_receipt_from_files(
-                    request,
-                    worker_pid,
-                    ready_path,
-                    events_path,
-                    terminal_path,
-                )
-            except (OSError, WatchProtocolError):
-                pass
-        return WatchReceipt(
-            request.request_id,
-            0,
-            False,
-            False,
-            (),
-            (),
-            hashlib.sha256(events_path.read_bytes() if events_path.exists() else b"").hexdigest(),
-            f"ready record unavailable during stop: {error}",
-        )
-    if terminal_path.exists():
-        exited = True
-    elif local_process is not None:
-        try:
-            local_process.wait(timeout=30)
-            exited = True
-        except subprocess.TimeoutExpired:
-            exited = False
-    else:
-        exited = _wait_for_process(worker_pid, 30_000)
+        owns_temporary_handle = True
+    try:
+        exited = _wait_process_handle(process_handle, 30_000)
+    except WatchProtocolError as error:
+        if owns_temporary_handle:
+            _close_handle(process_handle, f"worker process {worker_pid}")
+        return _incomplete_receipt(request, worker_pid, str(error))
     if not exited:
-        return WatchReceipt(
-            request.request_id,
+        if owns_temporary_handle:
+            _close_handle(process_handle, f"worker process {worker_pid}")
+        return _incomplete_receipt(
+            request,
             worker_pid,
-            False,
-            True,
-            tuple(root.root_kind for root in request.roots),
-            (),
-            hashlib.sha256(events_path.read_bytes() if events_path.exists() else b"").hexdigest(),
             "watch worker did not stop after CancelIoEx request",
+            ready=True,
+            opened=ROOT_KINDS,
         )
-    if local_process is not None:
-        if local_process.poll() is None:
-            local_process.wait(timeout=1)
+    if local_worker is not None:
+        local_worker.process.wait(timeout=1)
         with _LOCAL_WORKERS_LOCK:
             _LOCAL_WORKERS.pop(request_key, None)
-    return watch_receipt_from_files(
+        _close_handle(process_handle, f"worker process {worker_pid}")
+    elif owns_temporary_handle:
+        _close_handle(process_handle, f"worker process {worker_pid}")
+    receipt = watch_receipt_from_files(
         request,
         worker_pid,
         ready_path,
         events_path,
         terminal_path,
     )
+    if request_error is not None:
+        receipt = _force_incomplete(receipt, request_error)
+    if owner_error is not None:
+        receipt = _force_incomplete(receipt, owner_error)
+    return receipt
 
 
 def _force_incomplete(receipt: WatchReceipt, error: str) -> WatchReceipt:
@@ -1428,6 +2245,7 @@ def _force_incomplete(receipt: WatchReceipt, error: str) -> WatchReceipt:
         events=receipt.events,
         event_bytes_sha256=receipt.event_bytes_sha256,
         error=combined,
+        request_bytes_sha256=receipt.request_bytes_sha256,
     )
 
 
@@ -1437,10 +2255,42 @@ def watch_proves_unchanged(
     after_manifest: ProtectedState,
 ) -> bool:
     """Require both loss-free zero-event evidence and equal caller manifests."""
+    if type(receipt) is not WatchReceipt:
+        return False
+    if (
+        not receipt.complete
+        or not receipt.ready
+        or receipt.error is not None
+        or receipt.opened_root_kinds != ROOT_KINDS
+        or re.fullmatch(r"[0-9a-f]{64}", receipt.request_bytes_sha256) is None
+    ):
+        return False
+    expected_sequence = 1
+    event_bytes_parts: list[bytes] = []
+    for event in receipt.events:
+        if type(event) is not WatcherEvent or event.sequence != expected_sequence:
+            return False
+        if event.root_kind not in _ROOT_KIND_SET or event.action not in _ACTIONS.values():
+            return False
+        try:
+            _validate_relative_path(event.relative_path)
+        except WatchProtocolError:
+            return False
+        event_bytes_parts.append(
+            _canonical_bytes(
+                {
+                    "action": event.action,
+                    "relativePath": event.relative_path,
+                    "rootKind": event.root_kind,
+                    "sequence": event.sequence,
+                }
+            )
+        )
+        expected_sequence += 1
+    recomputed_event_hash = hashlib.sha256(b"".join(event_bytes_parts)).hexdigest()
     return (
-        receipt.complete
-        and receipt.ready
-        and not receipt.events
+        not receipt.events
+        and receipt.event_bytes_sha256 == recomputed_event_hash
         and _complete_protected_state(before_manifest)
         and _complete_protected_state(after_manifest)
         and before_manifest == after_manifest
