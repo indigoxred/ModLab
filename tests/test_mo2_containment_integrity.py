@@ -497,6 +497,7 @@ class WindowsIntegrityTests(unittest.TestCase):
             set_low_integrity_tree(stage)
             real_resume = windows_integrity._resume_verified_child
             observed_barrier = []
+            launch = None
 
             def inspect_barrier(process, thread, pid):
                 self.assertFalse(marker.exists())
@@ -505,21 +506,25 @@ class WindowsIntegrityTests(unittest.TestCase):
                 return real_resume(process, thread, pid)
 
             code = "from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b'ran')"
-            with mock.patch.object(
-                windows_integrity,
-                "_resume_verified_child",
-                side_effect=inspect_barrier,
-            ):
-                launch = launch_low_integrity_process(
-                    PYTHON,
-                    ("-B", "-c", code, str(marker)),
-                    root,
-                    dict(os.environ),
-                )
+            try:
+                with mock.patch.object(
+                    windows_integrity,
+                    "_resume_verified_child",
+                    side_effect=inspect_barrier,
+                ):
+                    launch = launch_low_integrity_process(
+                        PYTHON,
+                        ("-B", "-c", code, str(marker)),
+                        root,
+                        dict(os.environ),
+                    )
 
-            self._wait_for_file(marker)
-            self.assertEqual([launch.pid], observed_barrier)
-            self.assertEqual(b"ran", marker.read_bytes())
+                self._wait_for_file(marker)
+                self.assertEqual([launch.pid], observed_barrier)
+                self.assertEqual(b"ran", marker.read_bytes())
+            finally:
+                if launch is not None:
+                    self._wait_for_process_exit(launch.pid)
 
     def test_pre_resume_failure_terminates_exact_child_without_running_marker(self):
         with tempfile.TemporaryDirectory(prefix="modlab-integrity-failure-") as temporary:
