@@ -4,8 +4,10 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+from modlab.adapters.mo2.ini import decode_qsettings_path, parse_ini_bytes
 from modlab.validation import mo2_containment_fixtures as fixtures
 from modlab.validation.mo2_containment_fixtures import write_scenario_archives
+from modlab.validation.windows_integrity import IntegrityLevel
 from modlab.validation.windows_junction import inspect_junction
 from modlab.workspace import initialize_workspace
 from tests.support.mo2_containment import prepare_fixture_with_fake_bootstrap
@@ -65,36 +67,80 @@ class ContainmentFixtureTests(unittest.TestCase):
 
         self.assertIn(layout.skyrim_mo2, labels)
 
-    def test_fixture_routes_cache_and_logs_into_the_child_environment(self):
-        # Catches contained cache/log directories that a later MO2 child cannot consume.
+    def test_fixture_exposes_portable_cache_and_logs_under_the_stage_base_directory(self):
+        # Catches fixture cache/log paths which MO2 portable mode cannot consume.
         fixture = prepare_fixture_with_fake_bootstrap(self.root)
-
-        self.assertEqual(
-            str(fixture.run_root / "stage-environment" / "cache"),
-            fixture.stage_environment["MODLAB_MO2_CACHE_DIRECTORY"],
-        )
-        self.assertEqual(
-            str(fixture.run_root / "stage-environment" / "logs"),
-            fixture.stage_environment["MODLAB_MO2_LOG_DIRECTORY"],
+        configuration = parse_ini_bytes(
+            (fixture.stage_layout.skyrim_mo2_app / "ModOrganizer.ini").read_bytes()
         )
 
-    def test_external_low_temp_uses_the_independently_resolved_path(self):
-        # Catches replacing a redirected Low temp directory with LocalLow/Temp.
+        self.assertEqual(
+            fixture.stage_layout.skyrim_mo2 / "webcache", fixture.stage_cache
+        )
+        self.assertEqual(fixture.stage_layout.skyrim_mo2 / "logs", fixture.stage_logs)
+        self.assertTrue(fixture.stage_cache.is_dir())
+        self.assertTrue(fixture.stage_logs.is_dir())
+        self.assertEqual(
+            str(fixture.stage_layout.skyrim_mo2),
+            decode_qsettings_path(configuration.get("Settings", "base_directory")),
+        )
+        self.assertNotIn("MODLAB_MO2_CACHE_DIRECTORY", fixture.stage_environment)
+        self.assertNotIn("MODLAB_MO2_LOG_DIRECTORY", fixture.stage_environment)
+
+    def test_external_low_temp_uses_the_exact_low_child_of_the_current_temp_base(self):
+        # Catches replacing the actual current-temp Low child with a derived LocalLow path.
         local_low = self.root / "LocalLow"
-        redirected_temp = self.root / "redirected-low-temp"
+        current_temp = self.root / "nondefault-temp-base"
+        low_temp = current_temp / "Low"
+        local_low.mkdir()
+        low_temp.mkdir(parents=True)
 
         roots = fixtures._external_low_watch_roots(
             local_low_resolver=lambda: local_low,
-            low_temp_resolver=lambda: redirected_temp,
+            current_temp_base_resolver=lambda: current_temp,
+            integrity_reader=lambda _: IntegrityLevel.LOW,
         )
 
         self.assertEqual(
             (
                 ("ExternalLocalLow", local_low.resolve(strict=False)),
-                ("ExternalTempLow", redirected_temp.resolve(strict=False)),
+                ("ExternalTempLow", low_temp.resolve(strict=False)),
             ),
             roots,
         )
+
+    def test_low_temp_refuses_missing_non_low_and_redirected_candidates(self):
+        # Catches an external Low temp root that cannot be proven direct and Low.
+        base = self.root / "temp-base"
+        base.mkdir()
+        with self.assertRaisesRegex(fixtures.ContainmentFixtureError, "unavailable"):
+            fixtures._current_low_temp_directory(
+                temp_base_resolver=lambda: base,
+                integrity_reader=lambda _: IntegrityLevel.LOW,
+            )
+
+        low = base / "Low"
+        low.mkdir()
+        with self.assertRaisesRegex(fixtures.ContainmentFixtureError, "not Low"):
+            fixtures._current_low_temp_directory(
+                temp_base_resolver=lambda: base,
+                integrity_reader=lambda _: IntegrityLevel.MEDIUM,
+            )
+
+        real_is_symlink = Path.is_symlink
+        with (
+            patch.object(
+                Path,
+                "is_symlink",
+                autospec=True,
+                side_effect=lambda path: Path(path) == low or real_is_symlink(path),
+            ),
+            self.assertRaisesRegex(fixtures.ContainmentFixtureError, "must be direct"),
+        ):
+            fixtures._current_low_temp_directory(
+                temp_base_resolver=lambda: base,
+                integrity_reader=lambda _: IntegrityLevel.LOW,
+            )
 
 
 if __name__ == "__main__":

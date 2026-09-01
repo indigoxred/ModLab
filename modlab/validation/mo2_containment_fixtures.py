@@ -89,6 +89,8 @@ class ContainmentFixture:
     source_play_modlist: Path
     stage_lab_modlist: Path
     stage_play_modlist: Path
+    stage_cache: Path
+    stage_logs: Path
     archives: ScenarioArchives
     source_receipt_id: str
     stage_receipt_id: str
@@ -234,6 +236,8 @@ def prepare_containment_fixture(
         source_play_modlist=source_layout.skyrim_mo2_profiles / "ModLab - Play" / "modlist.txt",
         stage_lab_modlist=stage_layout.skyrim_mo2_profiles / "ModLab - Lab" / "modlist.txt",
         stage_play_modlist=stage_layout.skyrim_mo2_profiles / "ModLab - Play" / "modlist.txt",
+        stage_cache=stage_layout.skyrim_mo2 / "webcache",
+        stage_logs=stage_layout.skyrim_mo2 / "logs",
         archives=write_scenario_archives(run_root),
         source_receipt_id=source_applied.receipt.receipt_id,
         stage_receipt_id=stage_applied.receipt.receipt_id,
@@ -325,8 +329,8 @@ def _prepare_stage_environment(run_root: Path, layout: WorkspaceLayout) -> dict[
         "profiles": layout.skyrim_mo2_profiles,
         "mods": layout.skyrim_mo2_mods,
         "overwrite": layout.skyrim_mo2_overwrite,
-        "cache": run_root / "stage-environment" / "cache",
-        "logs": run_root / "stage-environment" / "logs",
+        "cache": layout.skyrim_mo2 / "webcache",
+        "logs": layout.skyrim_mo2 / "logs",
         "TEMP": run_root / "stage-environment" / "TEMP",
         "TMP": run_root / "stage-environment" / "TMP",
         "APPDATA": run_root / "stage-environment" / "APPDATA",
@@ -339,12 +343,6 @@ def _prepare_stage_environment(run_root: Path, layout: WorkspaceLayout) -> dict[
         set_low_integrity_tree(path)
     environment = dict(os.environ)
     environment.update({name: str(path) for name, path in paths.items() if name.isupper()})
-    environment.update(
-        {
-            "MODLAB_MO2_CACHE_DIRECTORY": str(paths["cache"]),
-            "MODLAB_MO2_LOG_DIRECTORY": str(paths["logs"]),
-        }
-    )
     return environment
 
 
@@ -363,12 +361,16 @@ def _require_exact_version(report) -> None:
 def _external_low_watch_roots(
     *,
     local_low_resolver: Callable[[], Path] | None = None,
-    low_temp_resolver: Callable[[], Path] | None = None,
+    current_temp_base_resolver: Callable[[], Path] | None = None,
+    integrity_reader: Callable[[Path], IntegrityLevel] = inspect_path_integrity,
 ) -> tuple[tuple[str, Path], ...]:
     if os.name != "nt":
         return ()
     local_low = (local_low_resolver or _known_folder_local_app_data_low)()
-    temporary = (low_temp_resolver or _current_low_temp_directory)()
+    temporary = _current_low_temp_directory(
+        temp_base_resolver=current_temp_base_resolver,
+        integrity_reader=integrity_reader,
+    )
     unique: list[tuple[str, Path]] = []
     for name, path in (("ExternalLocalLow", local_low), ("ExternalTempLow", temporary)):
         resolved = path.resolve(strict=False)
@@ -385,7 +387,21 @@ def _same_path_identity(left: Path, right: Path) -> bool:
         return os.path.normcase(str(left)) == os.path.normcase(str(right))
 
 
-def _current_low_temp_directory() -> Path:
+def _current_low_temp_directory(
+    *,
+    temp_base_resolver: Callable[[], Path] | None = None,
+    integrity_reader: Callable[[Path], IntegrityLevel] = inspect_path_integrity,
+) -> Path:
+    base = _require_direct_directory(
+        Path((temp_base_resolver or _current_temp_base_directory)()), create=False
+    )
+    low = _require_direct_directory(base / "Low", create=False)
+    if integrity_reader(low) is not IntegrityLevel.LOW:
+        raise ContainmentFixtureError("current Low temporary directory is not Low")
+    return low
+
+
+def _current_temp_base_directory() -> Path:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.GetTempPathW.argtypes = (wintypes.DWORD, wintypes.LPWSTR)
     kernel32.GetTempPathW.restype = wintypes.DWORD

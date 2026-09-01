@@ -44,7 +44,9 @@ def prepare_fixture_with_fake_bootstrap(root: Path):
     def fake_apply(_plan_id: str, workspace_root: Path, **_kwargs):
         layout = initialize_workspace(workspace_root)
         (layout.skyrim_mo2_app / "ModOrganizer.exe").write_bytes(b"fixture mo2")
-        (layout.skyrim_mo2_app / "ModOrganizer.ini").write_bytes(b"[General]\n")
+        (layout.skyrim_mo2_app / "ModOrganizer.ini").write_text(
+            f"[Settings]\nbase_directory={layout.skyrim_mo2}\n", encoding="utf-8"
+        )
         for profile in ("ModLab - Lab", "ModLab - Play"):
             directory = layout.skyrim_mo2_profiles / profile
             directory.mkdir()
