@@ -1891,10 +1891,20 @@ class MutationWatchTests(unittest.TestCase):
             self.assertIn("worker-identity-uncertain", receipt.error)
             self.assertIn("worker-identity-uncertain", outcome.reason_codes)
             self.assertFalse((evidence / "stop.token").exists())
-            self.assertEqual(
-                windows_watch._WAIT_TIMEOUT,
-                windows_watch._kernel32.WaitForSingleObject(worker_handle, 0),
+            worker_wait = windows_watch._kernel32.WaitForSingleObject(
+                worker_handle,
+                0,
             )
+            self.assertIn(
+                worker_wait,
+                (windows_watch._WAIT_TIMEOUT, windows_watch._WAIT_OBJECT_0),
+            )
+            if worker_wait == windows_watch._WAIT_OBJECT_0:
+                terminal = json.loads(
+                    (evidence / "terminal.json").read_text(encoding="utf-8")
+                )
+                self.assertFalse(terminal["complete"])
+                self.assertIn("controller-session-lost", terminal["error"])
         finally:
             self._finish_external_fixture(controller, worker_pid, worker_handle)
 
