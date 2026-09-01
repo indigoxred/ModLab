@@ -488,6 +488,33 @@ class WindowsIntegrityTests(unittest.TestCase):
 
             self.assertFalse(marker.exists())
 
+    def test_ordering_test_preserves_primary_assertion_when_cleanup_fails(self):
+        primary_error = AssertionError("injected primary marker failure")
+        cleanup_error = OSError("injected cleanup wait failure")
+        launch = mock.Mock(pid=424242)
+        caught = None
+
+        with (
+            mock.patch(f"{__name__}.set_low_integrity_tree"),
+            mock.patch(
+                f"{__name__}.launch_low_integrity_process", return_value=launch
+            ),
+            mock.patch.object(self, "_wait_for_file", side_effect=primary_error),
+            mock.patch.object(
+                self, "_wait_for_process_exit", side_effect=cleanup_error
+            ),
+        ):
+            try:
+                self.test_child_is_low_before_its_first_instruction_runs()
+            except BaseException as observed:
+                caught = observed
+            else:
+                self.fail("ordering test unexpectedly returned without its primary error")
+
+        self.assertIs(primary_error, caught)
+        notes = getattr(caught, "__notes__", ())
+        self.assertTrue(any("cleanup wait failure" in note for note in notes))
+
     def test_child_is_low_before_its_first_instruction_runs(self):
         with tempfile.TemporaryDirectory(prefix="modlab-integrity-order-") as temporary:
             root = Path(temporary)
@@ -498,6 +525,7 @@ class WindowsIntegrityTests(unittest.TestCase):
             real_resume = windows_integrity._resume_verified_child
             observed_barrier = []
             launch = None
+            primary_error = None
 
             def inspect_barrier(process, thread, pid):
                 self.assertFalse(marker.exists())
@@ -522,9 +550,20 @@ class WindowsIntegrityTests(unittest.TestCase):
                 self._wait_for_file(marker)
                 self.assertEqual([launch.pid], observed_barrier)
                 self.assertEqual(b"ran", marker.read_bytes())
+            except BaseException as error:
+                primary_error = error
+                raise
             finally:
                 if launch is not None:
-                    self._wait_for_process_exit(launch.pid)
+                    try:
+                        self._wait_for_process_exit(launch.pid)
+                    except BaseException as cleanup_error:
+                        if primary_error is None:
+                            raise
+                        primary_error.add_note(
+                            f"cleanup wait for child pid {launch.pid} also failed: "
+                            f"{cleanup_error!r}"
+                        )
 
     def test_pre_resume_failure_terminates_exact_child_without_running_marker(self):
         with tempfile.TemporaryDirectory(prefix="modlab-integrity-failure-") as temporary:
@@ -647,6 +686,52 @@ class WindowsIntegrityTests(unittest.TestCase):
         self.assertTrue(kernel32.GetProcessHandleCount(process, ctypes.byref(after)))
         self.assertLessEqual(after.value, before.value + 2)
 
+    def test_process_exit_wait_rejects_open_process_access_error(self):
+        import ctypes
+
+        kernel32 = mock.Mock()
+        kernel32.OpenProcess.return_value = 0
+        with (
+            mock.patch.object(ctypes, "WinDLL", return_value=kernel32),
+            mock.patch.object(ctypes, "get_last_error", return_value=5),
+        ):
+            with self.assertRaises(OSError) as captured:
+                self._wait_for_process_exit(0x7FFFFFFE)
+
+        self.assertEqual(5, captured.exception.winerror)
+
+    def test_process_exit_wait_rejects_wait_failure_and_timeout(self):
+        import ctypes
+
+        cases = (
+            (0xFFFFFFFF, 6, OSError),
+            (0x00000102, 0, TimeoutError),
+        )
+        for wait_result, last_error, error_type in cases:
+            with self.subTest(wait_result=wait_result):
+                kernel32 = mock.Mock()
+                kernel32.OpenProcess.return_value = 123
+                kernel32.WaitForSingleObject.return_value = wait_result
+                with (
+                    mock.patch.object(ctypes, "WinDLL", return_value=kernel32),
+                    mock.patch.object(
+                        ctypes, "get_last_error", return_value=last_error
+                    ),
+                ):
+                    with self.assertRaises(error_type):
+                        self._wait_for_process_exit(0x7FFFFFFE)
+
+    def test_process_exit_wait_accepts_only_documented_missing_pid_open_error(self):
+        import ctypes
+
+        kernel32 = mock.Mock()
+        kernel32.OpenProcess.return_value = 0
+        with (
+            mock.patch.object(ctypes, "WinDLL", return_value=kernel32),
+            mock.patch.object(ctypes, "get_last_error", return_value=87),
+        ):
+            self._wait_for_process_exit(0x7FFFFFFE)
+
     def _wait_for_file(self, path: Path) -> None:
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
@@ -656,14 +741,45 @@ class WindowsIntegrityTests(unittest.TestCase):
         self.fail(f"low-integrity child did not create completion file: {path}")
 
     def _wait_for_process_exit(self, pid: int) -> None:
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            try:
-                inspect_process_integrity(pid)
-            except OSError:
+        import ctypes
+        from ctypes import wintypes
+
+        synchronize = 0x00100000
+        error_invalid_parameter = 87
+        wait_object_0 = 0x00000000
+        wait_timeout = 0x00000102
+        wait_failed = 0xFFFFFFFF
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.OpenProcess(synchronize, False, pid)
+        if not handle:
+            error = ctypes.get_last_error()
+            if error == error_invalid_parameter:
                 return
-            time.sleep(0.02)
-        self.fail(f"suspended child was not terminated: {pid}")
+            raise ctypes.WinError(error)
+        try:
+            wait_result = kernel32.WaitForSingleObject(handle, 10_000)
+            if wait_result == wait_object_0:
+                return
+            if wait_result == wait_failed:
+                raise ctypes.WinError(ctypes.get_last_error())
+            if wait_result == wait_timeout:
+                raise TimeoutError(f"process {pid} did not exit within 10 seconds")
+            raise OSError(
+                f"WaitForSingleObject returned 0x{wait_result:08x} for pid {pid}"
+            )
+        finally:
+            kernel32.CloseHandle(handle)
 
     def _handle_count(self) -> int:
         import ctypes
