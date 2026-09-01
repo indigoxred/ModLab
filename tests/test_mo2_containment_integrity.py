@@ -11,12 +11,14 @@ from unittest import mock
 from modlab.validation.mo2_containment_model import IntegrityObservation
 from modlab.validation import windows_integrity
 from modlab.validation.windows_integrity import (
+    IntegrityLabelBatchError,
     IntegrityLabelError,
     IntegrityLevel,
     inspect_path_integrity,
     inspect_process_integrity,
     launch_low_integrity_process,
     set_low_integrity_tree,
+    set_medium_integrity_entries,
     set_medium_integrity_tree,
     source_integrity_allowed,
     stage_integrity_allowed,
@@ -99,6 +101,37 @@ def _create_disposable_junction(link: Path, target: Path) -> None:
         kernel32.CloseHandle(handle)
 
 
+def _open_delete_denying_directory(path: Path):
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateFileW(
+        str(path),
+        0x00010000 | 0x00000080,
+        0x00000001,
+        None,
+        3,
+        0x00200000 | 0x02000000,
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return kernel32, handle
+
+
 class IntegrityPolicyTests(unittest.TestCase):
     def test_source_must_be_medium_or_higher_and_stage_must_be_low(self):
         self.assertFalse(source_integrity_allowed(IntegrityLevel.UNTRUSTED))
@@ -135,6 +168,106 @@ class IntegrityPolicyTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Windows integrity APIs are unavailable")
 class WindowsIntegrityTests(unittest.TestCase):
+    def test_medium_entries_rejects_invalid_or_reparse_inputs_before_mutation(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-integrity-entries-invalid-") as temporary:
+            root = Path(temporary)
+            direct_file = root / "Entry.bin"
+            missing = root / "missing.bin"
+            outside = root / "outside"
+            junction = root / "redirect"
+            direct_file.write_bytes(b"entry")
+            outside.mkdir()
+            _create_disposable_junction(junction, outside)
+            try:
+                cases = (
+                    [direct_file],
+                    (),
+                    (Path("relative.bin"),),
+                    (direct_file, direct_file.with_name("ENTRY.BIN")),
+                    (missing,),
+                    (junction,),
+                )
+                for paths in cases:
+                    with self.subTest(paths=paths), self.assertRaises((TypeError, ValueError)):
+                        set_medium_integrity_entries(paths)
+            finally:
+                junction.rmdir()
+
+            self.assertEqual(IntegrityLevel.MEDIUM, inspect_path_integrity(direct_file))
+
+    def test_medium_entries_labels_every_pinned_nested_object_without_recursive_walk(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-integrity-entries-pinned-") as temporary:
+            root = Path(temporary) / "root"
+            child = root / "child"
+            payload = child / "payload.bin"
+            child.mkdir(parents=True)
+            payload.write_bytes(b"payload")
+            set_low_integrity_tree(root)
+            kernel32, pin = _open_delete_denying_directory(child)
+            try:
+                with self.assertRaises(IntegrityLabelError) as recursive:
+                    set_medium_integrity_tree(root)
+                self.assertEqual(0, recursive.exception.receipt.exit_code)
+                self.assertEqual(IntegrityLevel.LOW, inspect_path_integrity(payload))
+
+                receipts = set_medium_integrity_entries((root, child, payload))
+                self.assertEqual(3, len(receipts))
+                self.assertEqual(
+                    (str(root), "/setintegritylevel", "(OI)(CI)M", "/Q"),
+                    receipts[0].arguments,
+                )
+                self.assertEqual(
+                    (str(child), "/setintegritylevel", "(OI)(CI)M", "/Q"),
+                    receipts[1].arguments,
+                )
+                self.assertEqual(
+                    (str(payload), "/setintegritylevel", "M", "/Q"),
+                    receipts[2].arguments,
+                )
+                for receipt in receipts:
+                    self.assertEqual(0, receipt.exit_code)
+                    self.assertNotIn("/T", receipt.arguments)
+                    self.assertNotIn("/C", receipt.arguments)
+            finally:
+                kernel32.CloseHandle(pin)
+
+            for entry in (root, child, payload):
+                with self.subTest(entry=entry):
+                    self.assertEqual(IntegrityLevel.MEDIUM, inspect_path_integrity(entry))
+
+    def test_medium_entries_partial_verification_failure_preserves_all_command_receipts(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-integrity-entries-receipts-") as temporary:
+            root = Path(temporary)
+            first = root / "first.bin"
+            second = root / "second.bin"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            set_low_integrity_tree(root)
+            real_inspect = windows_integrity.inspect_path_integrity
+            verification_error = OSError("injected second-object inspection failure")
+
+            def inspect_or_fail(path):
+                if Path(path) == second:
+                    raise verification_error
+                return real_inspect(path)
+
+            with mock.patch.object(
+                windows_integrity,
+                "inspect_path_integrity",
+                side_effect=inspect_or_fail,
+            ):
+                with self.assertRaises(IntegrityLabelBatchError) as captured:
+                    set_medium_integrity_entries((first, second))
+
+            error = captured.exception
+            self.assertIs(verification_error, error.__cause__)
+            self.assertEqual(2, len(error.evidence.receipts))
+            self.assertEqual(str(first), error.evidence.receipts[0].arguments[0])
+            self.assertEqual(str(second), error.evidence.receipts[1].arguments[0])
+            self.assertEqual((0, 0), tuple(r.exit_code for r in error.evidence.receipts))
+            self.assertEqual(IntegrityLevel.MEDIUM, real_inspect(first))
+            self.assertEqual(IntegrityLevel.MEDIUM, real_inspect(second))
+
     def test_post_icacls_verification_error_preserves_receipt_and_cause(self):
         with tempfile.TemporaryDirectory(prefix="modlab-integrity-receipt-") as temporary:
             root = Path(temporary)

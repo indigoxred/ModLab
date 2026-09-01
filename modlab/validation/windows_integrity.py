@@ -49,6 +49,18 @@ class IntegrityLabelError(RuntimeError):
         self.receipt = receipt
 
 
+@dataclass(frozen=True)
+class IntegrityLabelBatchEvidence:
+    receipts: tuple[IntegrityLabelApplication, ...]
+    failed_path: str
+
+
+class IntegrityLabelBatchError(RuntimeError):
+    def __init__(self, message: str, evidence: IntegrityLabelBatchEvidence) -> None:
+        super().__init__(message)
+        self.evidence = evidence
+
+
 def source_integrity_allowed(level: IntegrityLevel) -> bool:
     return isinstance(level, IntegrityLevel) and level in {
         IntegrityLevel.MEDIUM,
@@ -474,6 +486,109 @@ def set_low_integrity_tree(path: Path) -> IntegrityLabelApplication:
 
 def set_medium_integrity_tree(path: Path) -> IntegrityLabelApplication:
     return _set_integrity_tree(path, IntegrityLevel.MEDIUM)
+
+
+def _validate_medium_integrity_entries(
+    paths: tuple[Path, ...],
+) -> tuple[tuple[Path, bool], ...]:
+    if not isinstance(paths, tuple):
+        raise TypeError("integrity entries must be a tuple")
+    if not paths:
+        raise ValueError("integrity entries must not be empty")
+
+    seen: set[str] = set()
+    entries: list[tuple[Path, bool]] = []
+    for value in paths:
+        if not isinstance(value, Path):
+            raise TypeError("integrity entries must contain Path values")
+        if not value.is_absolute():
+            raise ValueError(f"integrity entry must be absolute: {value}")
+        identity = os.path.normcase(os.path.normpath(str(value)))
+        if identity in seen:
+            raise ValueError(f"duplicate case-insensitive integrity entry: {value}")
+        seen.add(identity)
+        try:
+            metadata = value.lstat()
+        except OSError as exc:
+            raise ValueError(f"integrity entry does not exist: {value}") from exc
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if attributes & reparse_attribute or stat.S_ISLNK(metadata.st_mode):
+            raise ValueError(f"integrity entry must not be a reparse point: {value}")
+        is_directory = stat.S_ISDIR(metadata.st_mode)
+        if not is_directory and not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"integrity entry must be a regular file or directory: {value}")
+        entries.append((value, is_directory))
+    return tuple(entries)
+
+
+def set_medium_integrity_entries(
+    paths: tuple[Path, ...],
+) -> tuple[IntegrityLabelApplication, ...]:
+    _require_windows()
+    entries = _validate_medium_integrity_entries(paths)
+    executable = r"C:\Windows\System32\icacls.exe"
+    receipts: list[IntegrityLabelApplication] = []
+
+    for path, was_directory in entries:
+        arguments = (
+            str(path),
+            "/setintegritylevel",
+            "(OI)(CI)M" if was_directory else "M",
+            "/Q",
+        )
+        try:
+            completed = subprocess.run(
+                (executable, *arguments),
+                shell=False,
+                check=False,
+                capture_output=True,
+            )
+        except Exception as exc:
+            evidence = IntegrityLabelBatchEvidence(tuple(receipts), str(path))
+            raise IntegrityLabelBatchError(
+                f"icacls invocation failed for integrity entry {path}: {exc}", evidence
+            ) from exc
+
+        receipt = IntegrityLabelApplication(
+            executable=executable,
+            arguments=arguments,
+            exit_code=completed.returncode,
+            stdout_sha256=hashlib.sha256(completed.stdout).hexdigest(),
+            stderr_sha256=hashlib.sha256(completed.stderr).hexdigest(),
+            integrity=IntegrityLevel.MEDIUM,
+        )
+        receipts.append(receipt)
+        if completed.returncode != 0:
+            cause = OSError(
+                f"icacls failed with exit code {completed.returncode} for {path}"
+            )
+            evidence = IntegrityLabelBatchEvidence(tuple(receipts), str(path))
+            raise IntegrityLabelBatchError(str(cause), evidence) from cause
+
+        try:
+            metadata = path.lstat()
+            attributes = getattr(metadata, "st_file_attributes", 0)
+            reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            if attributes & reparse_attribute or stat.S_ISLNK(metadata.st_mode):
+                raise ValueError(f"integrity entry became a reparse point: {path}")
+            is_directory = stat.S_ISDIR(metadata.st_mode)
+            is_regular = stat.S_ISREG(metadata.st_mode)
+            if is_directory is not was_directory or not (is_directory or is_regular):
+                raise ValueError(f"integrity entry type changed: {path}")
+            observed = inspect_path_integrity(path)
+            if observed is not IntegrityLevel.MEDIUM:
+                raise OSError(
+                    f"icacls did not apply MEDIUM integrity to {path}: {observed.name}"
+                )
+        except Exception as exc:
+            evidence = IntegrityLabelBatchEvidence(tuple(receipts), str(path))
+            raise IntegrityLabelBatchError(
+                f"post-icacls verification failed for integrity entry {path}: {exc}",
+                evidence,
+            ) from exc
+
+    return tuple(receipts)
 
 
 def _allocate_integrity_sid(level: IntegrityLevel) -> int:
