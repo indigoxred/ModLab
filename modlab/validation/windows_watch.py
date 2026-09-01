@@ -17,28 +17,33 @@ import sys
 import threading
 import time
 
-from modlab.validation.mo2_containment_model import ProtectedState, TreeIdentity, WatcherEvent
+from modlab.validation.mo2_containment_model import (
+    ContainmentScenario,
+    ProtectedState,
+    TreeIdentity,
+    WatchEvidenceCompletion,
+    WatcherEvent,
+)
+from modlab.validation.windows_watch_protocol import (
+    EVENTS_NAME as _EVENTS_NAME,
+    READY_NAME as _READY_NAME,
+    REQUEST_NAME as _REQUEST_NAME,
+    ROOT_KINDS,
+    STOP_NAME as _STOP_NAME,
+    TERMINAL_NAME as _TERMINAL_NAME,
+    WatchProtocolError,
+    WatchReceipt,
+    WatchRequest,
+    WatchRoot,
+    watch_request_from_bytes,
+    watch_request_sha256,
+    watch_request_to_bytes,
+)
 
 
 _SCHEMA_VERSION = 1
-_REQUEST_NAME = "request.json"
-_READY_NAME = "ready.json"
-_EVENTS_NAME = "events.ndjson"
-_TERMINAL_NAME = "terminal.json"
-_STOP_NAME = "stop.token"
 _OWNER_NAME = "owner.json"
-_REQUEST_ID = re.compile(r"watch-request:[0-9a-f]{64}\Z")
 
-ROOT_KINDS = (
-    "SourceMods",
-    "LabProfile",
-    "PlayProfile",
-    "Downloads",
-    "Overwrite",
-    "BoundedGame",
-    "ExternalLocalLow",
-    "ExternalTempLow",
-)
 _ROOT_KIND_SET = frozenset(ROOT_KINDS)
 _ACTIONS = {
     1: "Added",
@@ -98,10 +103,6 @@ _BUFFER_SIZE = 64 * 1024
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 
-class WatchProtocolError(RuntimeError):
-    """The watch request or retained evidence is unsafe or noncanonical."""
-
-
 class _HandleOwnershipError(WatchProtocolError):
     """A native handle could not be closed and remains owned by the caller."""
 
@@ -109,35 +110,6 @@ class _HandleOwnershipError(WatchProtocolError):
         super().__init__(message)
         self.handle = handle
         self.label = label
-
-
-@dataclass(frozen=True)
-class WatchRoot:
-    root_kind: str
-    path: Path
-    volume_serial: int
-    file_id: int
-
-
-@dataclass(frozen=True)
-class WatchRequest:
-    request_id: str
-    evidence_root: Path
-    stop_token_path: Path
-    roots: tuple[WatchRoot, ...]
-
-
-@dataclass(frozen=True)
-class WatchReceipt:
-    request_id: str
-    worker_pid: int
-    complete: bool
-    ready: bool
-    opened_root_kinds: tuple[str, ...]
-    events: tuple[WatcherEvent, ...]
-    event_bytes_sha256: str
-    error: str | None
-    request_bytes_sha256: str = ""
 
 
 @dataclass
@@ -161,6 +133,50 @@ _RETAINED_SYNCHRONIZATION_HANDLES: list[int] = []
 _RETAINED_OWNED_MUTEX_HANDLES: list[tuple[int, int]] = []
 _RETAINED_SYNCHRONIZATION_HANDLES_LOCK = threading.Lock()
 _SYNCHRONIZATION_CLEANUP_WARNINGS: list[str] = []
+
+
+def _make_watch_receipt(
+    request: WatchRequest | object,
+    worker_pid: int,
+    *,
+    complete: bool,
+    ready: bool,
+    opened_root_kinds: tuple[str, ...],
+    events: tuple[WatcherEvent, ...],
+    event_bytes_sha256: str,
+    error: str | None,
+    request_bytes_sha256: str = "",
+) -> WatchReceipt:
+    if isinstance(request, WatchRequest):
+        request_id = request.request_id
+        session_id = request.session_id
+        run_id = request.run_id
+        scenario = request.scenario
+    else:
+        request_id = "watch-request:" + "0" * 64
+        session_id = "watch-session:" + "0" * 64
+        run_id = "containment-run:" + "0" * 32
+        scenario = ContainmentScenario.MERGE_EXISTING
+    return WatchReceipt(
+        request_id=request_id,
+        session_id=session_id,
+        run_id=run_id,
+        scenario=scenario,
+        worker_pid=worker_pid,
+        evidence_completion=(
+            WatchEvidenceCompletion.COMPLETED
+            if complete
+            else WatchEvidenceCompletion.INCOMPLETE
+        ),
+        ready=ready,
+        opened_root_kinds=opened_root_kinds,
+        events=events,
+        event_bytes_sha256=event_bytes_sha256,
+        worker_exit_code=0 if complete else None,
+        watch_outcome_id=None,
+        request_bytes_sha256=request_bytes_sha256,
+        error=error,
+    )
 
 
 if os.name == "nt":
@@ -585,15 +601,7 @@ def watch_root(root_kind: str, path: Path) -> WatchRoot:
 
 
 def _normalize_request(request: WatchRequest, *, inspect_roots: bool) -> WatchRequest:
-    if not isinstance(request, WatchRequest):
-        raise WatchProtocolError("request must be WatchRequest")
-    if type(request.request_id) is not str or not _REQUEST_ID.fullmatch(request.request_id):
-        raise WatchProtocolError("request ID must be watch-request plus lowercase SHA-256")
-    if not isinstance(request.evidence_root, Path) or not isinstance(
-        request.stop_token_path,
-        Path,
-    ):
-        raise WatchProtocolError("evidence and stop token paths must be Path values")
+    request = watch_request_from_bytes(watch_request_to_bytes(request))
     supplied_evidence_root = _reject_reparse_components(
         Path(request.evidence_root),
         "evidence root",
@@ -643,30 +651,24 @@ def _normalize_request(request: WatchRequest, *, inspect_roots: bool) -> WatchRe
         normalized.append(WatchRoot(root.root_kind, path, root.volume_serial, root.file_id))
     if tuple(root.root_kind for root in normalized) != ROOT_KINDS:
         raise WatchProtocolError("request must contain all eight logical root kinds in canonical order")
-    return WatchRequest(request.request_id, evidence_root, expected_stop, tuple(normalized))
+    return WatchRequest(
+        request.request_id,
+        request.session_id,
+        request.run_id,
+        request.scenario,
+        evidence_root,
+        expected_stop,
+        tuple(normalized),
+    )
 
 
 def _request_document(request: WatchRequest) -> dict[str, object]:
-    return {
-        "evidenceRoot": str(request.evidence_root),
-        "requestId": request.request_id,
-        "roots": [
-            {
-                "fileId": root.file_id,
-                "path": str(root.path),
-                "rootKind": root.root_kind,
-                "volumeSerial": root.volume_serial,
-            }
-            for root in request.roots
-        ],
-        "schemaVersion": _SCHEMA_VERSION,
-        "stopTokenPath": str(request.stop_token_path),
-    }
+    return json.loads(watch_request_to_bytes(request))
 
 
 def _request_bytes_and_sha256(request: WatchRequest) -> tuple[bytes, str]:
-    request_bytes = _canonical_bytes(_request_document(request))
-    return request_bytes, hashlib.sha256(request_bytes).hexdigest()
+    request_bytes = watch_request_to_bytes(request)
+    return request_bytes, watch_request_sha256(request)
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -715,48 +717,8 @@ def _required_int(value: object, label: str, *, minimum: int = 0) -> int:
     return value
 
 
-def _required_canonical_path(value: object, label: str) -> Path:
-    text = _required_text(value, label)
-    if "/" in text or not os.path.isabs(text) or os.path.normpath(text) != text:
-        raise WatchProtocolError(f"{label} must use one canonical absolute path spelling")
-    path = Path(text)
-    if str(path) != text:
-        raise WatchProtocolError(f"{label} must use one canonical absolute path spelling")
-    return path
-
-
 def _request_from_bytes(data: bytes) -> WatchRequest:
-    value = _object_from_bytes(data, "request")
-    _exact_fields(
-        value,
-        {"evidenceRoot", "requestId", "roots", "schemaVersion", "stopTokenPath"},
-        "request",
-    )
-    if _required_int(value["schemaVersion"], "request schema version") != _SCHEMA_VERSION:
-        raise WatchProtocolError("unsupported request schema version")
-    roots_value = value["roots"]
-    if type(roots_value) is not list:
-        raise WatchProtocolError("request roots must be an array")
-    roots: list[WatchRoot] = []
-    for item in roots_value:
-        if type(item) is not dict:
-            raise WatchProtocolError("request root must be an object")
-        _exact_fields(item, {"fileId", "path", "rootKind", "volumeSerial"}, "request root")
-        roots.append(
-            WatchRoot(
-                _required_text(item["rootKind"], "root kind"),
-                _required_canonical_path(item["path"], "root path"),
-                _required_int(item["volumeSerial"], "volume serial"),
-                _required_int(item["fileId"], "file ID"),
-            )
-        )
-    request = WatchRequest(
-        _required_text(value["requestId"], "request ID"),
-        _required_canonical_path(value["evidenceRoot"], "evidence root"),
-        _required_canonical_path(value["stopTokenPath"], "stop token"),
-        tuple(roots),
-    )
-    return _normalize_request(request, inspect_roots=False)
+    return _normalize_request(watch_request_from_bytes(data), inspect_roots=False)
 
 
 def _write_new(path: Path, data: bytes) -> None:
@@ -934,16 +896,16 @@ def _completed_receipt_from_document(
     digest = _required_text(value["eventBytesSha256"], "completed event SHA-256")
     if digest != hashlib.sha256(event_bytes).hexdigest():
         raise WatchProtocolError("completed owner event SHA-256 mismatch")
-    return WatchReceipt(
-        request.request_id,
+    return _make_watch_receipt(
+        request,
         worker_pid,
-        True,
-        True,
-        opened,
-        events,
-        digest,
-        None,
-        request_sha256,
+        complete=True,
+        ready=True,
+        opened_root_kinds=opened,
+        events=events,
+        event_bytes_sha256=digest,
+        error=None,
+        request_bytes_sha256=request_sha256,
     )
 
 
@@ -2595,28 +2557,28 @@ def _watch_receipt_from_files_impl(
     supplied_paths = (Path(ready_path), Path(events_path), Path(terminal_path))
     for supplied, expected in zip(supplied_paths, expected_paths, strict=True):
         if supplied.absolute() != expected.absolute():
-            return WatchReceipt(
-                request.request_id,
+            return _make_watch_receipt(
+                request,
                 worker_pid,
-                False,
-                False,
-                (),
-                (),
-                hashlib.sha256(b"").hexdigest(),
-                "evidence paths must be confined to the exact ready/events/terminal files",
+                complete=False,
+                ready=False,
+                opened_root_kinds=(),
+                events=(),
+                event_bytes_sha256=hashlib.sha256(b"").hexdigest(),
+                error="evidence paths must be confined to the exact ready/events/terminal files",
             )
         if supplied.exists():
             attributes = _kernel32.GetFileAttributesW(str(supplied))
             if attributes == 0xFFFFFFFF or attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-                return WatchReceipt(
-                    request.request_id,
+                return _make_watch_receipt(
+                    request,
                     worker_pid,
-                    False,
-                    False,
-                    (),
-                    (),
-                    hashlib.sha256(b"").hexdigest(),
-                    "evidence paths must be confined direct files",
+                    complete=False,
+                    ready=False,
+                    opened_root_kinds=(),
+                    events=(),
+                    event_bytes_sha256=hashlib.sha256(b"").hexdigest(),
+                    error="evidence paths must be confined direct files",
                 )
     errors: list[str] = []
     ready = False
@@ -2727,9 +2689,9 @@ def _watch_receipt_from_files_impl(
         if not terminal["complete"]:
             errors.append(str(terminal["error"]))
     complete = terminal is not None and bool(terminal["complete"]) and not errors
-    return WatchReceipt(
-        request_id=request.request_id,
-        worker_pid=worker_pid,
+    return _make_watch_receipt(
+        request,
+        worker_pid,
         complete=complete,
         ready=ready,
         opened_root_kinds=opened,
@@ -2776,9 +2738,9 @@ def watch_receipt_from_files(
                 _, request_sha256 = _request_bytes_and_sha256(request)
             except (AttributeError, TypeError, ValueError, WatchProtocolError):
                 pass
-        return WatchReceipt(
-            request_id=request.request_id,
-            worker_pid=worker_pid if type(worker_pid) is int else 0,
+        return _make_watch_receipt(
+            request,
+            worker_pid if type(worker_pid) is int else 0,
             complete=False,
             ready=False,
             opened_root_kinds=(),
@@ -2811,9 +2773,9 @@ def watch_receipt_from_files(
                 _, request_sha256 = _request_bytes_and_sha256(request)
             except (AttributeError, TypeError, ValueError, WatchProtocolError):
                 pass
-        return WatchReceipt(
-            request_id=request_id,
-            worker_pid=worker_pid if type(worker_pid) is int else 0,
+        return _make_watch_receipt(
+            request,
+            worker_pid if type(worker_pid) is int else 0,
             complete=False,
             ready=False,
             opened_root_kinds=(),
@@ -2834,9 +2796,9 @@ def watch_receipt_from_files(
                 _, request_sha256 = _request_bytes_and_sha256(request)
             except (AttributeError, TypeError, ValueError):
                 pass
-        return WatchReceipt(
-            request_id=request_id,
-            worker_pid=worker_pid if type(worker_pid) is int else 0,
+        return _make_watch_receipt(
+            request,
+            worker_pid if type(worker_pid) is int else 0,
             complete=False,
             ready=False,
             opened_root_kinds=(),
@@ -2929,16 +2891,16 @@ def _incomplete_receipt(
         event_bytes = b""
         events = ()
     _, request_sha256 = _request_bytes_and_sha256(request)
-    return WatchReceipt(
-        request.request_id,
+    return _make_watch_receipt(
+        request,
         worker_pid,
-        False,
-        ready,
-        opened,
-        events,
-        hashlib.sha256(event_bytes).hexdigest(),
-        error,
-        request_sha256,
+        complete=False,
+        ready=ready,
+        opened_root_kinds=opened,
+        events=events,
+        event_bytes_sha256=hashlib.sha256(event_bytes).hexdigest(),
+        error=error,
+        request_bytes_sha256=request_sha256,
     )
 
 
@@ -3236,6 +3198,9 @@ def _stop_watch_locked(request_path: Path) -> WatchReceipt:
             except (OSError, WatchProtocolError) as owner_error:
                 fallback = WatchRequest(
                     "watch-request:" + "0" * 64,
+                    "watch-session:" + "0" * 64,
+                    "containment-run:" + "0" * 32,
+                    ContainmentScenario.MERGE_EXISTING,
                     evidence_root,
                     evidence_root / _STOP_NAME,
                     (),
@@ -3244,16 +3209,15 @@ def _stop_watch_locked(request_path: Path) -> WatchReceipt:
                     _write_new(fallback.stop_token_path, b"stop\n")
                 except (FileExistsError, OSError):
                     pass
-                return WatchReceipt(
-                    fallback.request_id,
+                return _make_watch_receipt(
+                    fallback,
                     0,
-                    False,
-                    False,
-                    (),
-                    (),
-                    hashlib.sha256(b"").hexdigest(),
-                    f"request and owner records unavailable during stop: {error}; {owner_error}",
-                    "",
+                    complete=False,
+                    ready=False,
+                    opened_root_kinds=(),
+                    events=(),
+                    event_bytes_sha256=hashlib.sha256(b"").hexdigest(),
+                    error=f"request and owner records unavailable during stop: {error}; {owner_error}",
                 )
         else:
             request = local_worker.request
@@ -3861,12 +3825,17 @@ def _force_incomplete(receipt: WatchReceipt, error: str) -> WatchReceipt:
     combined = error if receipt.error is None else f"{error}; {receipt.error}"
     return WatchReceipt(
         request_id=receipt.request_id,
+        session_id=receipt.session_id,
+        run_id=receipt.run_id,
+        scenario=receipt.scenario,
         worker_pid=receipt.worker_pid,
-        complete=False,
+        evidence_completion=WatchEvidenceCompletion.INCOMPLETE,
         ready=receipt.ready,
         opened_root_kinds=receipt.opened_root_kinds,
         events=receipt.events,
         event_bytes_sha256=receipt.event_bytes_sha256,
+        worker_exit_code=receipt.worker_exit_code,
+        watch_outcome_id=receipt.watch_outcome_id,
         error=combined,
         request_bytes_sha256=receipt.request_bytes_sha256,
     )

@@ -14,7 +14,13 @@ import unittest
 from unittest import mock
 
 from modlab.validation import windows_watch
-from modlab.validation.mo2_containment_model import ProtectedState, TreeIdentity, WatcherEvent
+from modlab.validation.mo2_containment_model import (
+    ContainmentScenario,
+    ProtectedState,
+    TreeIdentity,
+    WatchEvidenceCompletion,
+    WatcherEvent,
+)
 from modlab.validation.windows_junction import create_mod_projection
 from modlab.validation.windows_watch import (
     WatchProtocolError,
@@ -67,6 +73,9 @@ class MutationWatchTests(unittest.TestCase):
             roots = tuple(replace(physical, root_kind=kind) for kind in windows_watch.ROOT_KINDS)
         return WatchRequest(
             request_id="watch-request:" + "a" * 64,
+            session_id="watch-session:" + "b" * 64,
+            run_id="containment-run:0123456789abcdef0123456789abcdef",
+            scenario=ContainmentScenario.MERGE_EXISTING,
             evidence_root=self.evidence,
             stop_token_path=self.evidence / "stop.token",
             roots=tuple(roots),
@@ -308,6 +317,9 @@ class MutationWatchTests(unittest.TestCase):
         document = {
             "evidenceRoot": str(self.evidence),
             "requestId": "watch-request:" + "d" * 64,
+            "runId": "containment-run:0123456789abcdef0123456789abcdef",
+            "scenario": ContainmentScenario.MERGE_EXISTING.value,
+            "sessionId": "watch-session:" + "e" * 64,
             "roots": [
                 {
                     "fileId": root.file_id,
@@ -331,6 +343,9 @@ class MutationWatchTests(unittest.TestCase):
         base = {
             "evidenceRoot": str(request.evidence_root),
             "requestId": request.request_id,
+            "runId": request.run_id,
+            "scenario": request.scenario.value,
+            "sessionId": request.session_id,
             "roots": [
                 {
                     "fileId": root.file_id,
@@ -2667,6 +2682,9 @@ class MutationWatchTests(unittest.TestCase):
         root = watch_root("SourceMods", self.watched)
         request = WatchRequest(
             request_id="watch-request:" + "c" * 64,
+            session_id="watch-session:" + "d" * 64,
+            run_id="containment-run:0123456789abcdef0123456789abcdef",
+            scenario=ContainmentScenario.MERGE_EXISTING,
             evidence_root=case_root,
             stop_token_path=case_root / "stop.token",
             roots=tuple(replace(root, root_kind=kind) for kind in windows_watch.ROOT_KINDS),
@@ -2677,6 +2695,9 @@ class MutationWatchTests(unittest.TestCase):
                 {
                     "evidenceRoot": str(case_root),
                     "requestId": request.request_id,
+                    "runId": request.run_id,
+                    "scenario": request.scenario.value,
+                    "sessionId": request.session_id,
                     "roots": [
                         {
                             "fileId": root.file_id,
@@ -2882,12 +2903,17 @@ class MutationWatchTests(unittest.TestCase):
     def test_events_and_manifests_are_independent_required_proofs(self):
         clean = WatchReceipt(
             request_id="watch-request:" + "b" * 64,
+            session_id="watch-session:" + "c" * 64,
+            run_id="containment-run:0123456789abcdef0123456789abcdef",
+            scenario=ContainmentScenario.MERGE_EXISTING,
             worker_pid=os.getpid(),
-            complete=True,
+            evidence_completion=WatchEvidenceCompletion.COMPLETED,
             ready=True,
             opened_root_kinds=windows_watch.ROOT_KINDS,
             events=(),
             event_bytes_sha256=hashlib.sha256(b"").hexdigest(),
+            worker_exit_code=0,
+            watch_outcome_id=None,
             error=None,
             request_bytes_sha256="4" * 64,
         )
@@ -2931,6 +2957,9 @@ class MutationWatchTests(unittest.TestCase):
     ) -> tuple[WatchRequest, Path]:
         request = WatchRequest(
             request_id="watch-request:" + "e" * 64,
+            session_id="watch-session:" + "f" * 64,
+            run_id="containment-run:0123456789abcdef0123456789abcdef",
+            scenario=ContainmentScenario.MERGE_EXISTING,
             evidence_root=case_root,
             stop_token_path=case_root / "stop.token",
             roots=roots,
@@ -2983,24 +3012,7 @@ class MutationWatchTests(unittest.TestCase):
         process_handle, worker_creation_time = windows_watch._open_process_identity(worker_pid)
         close_error = windows_watch._close_handle(process_handle, "test process identity")
         self.assertIsNone(close_error)
-        request_bytes = _canonical(
-            {
-                "evidenceRoot": str(request.evidence_root),
-                "requestId": request.request_id,
-                "roots": [
-                    {
-                        "fileId": root.file_id,
-                        "path": str(root.path),
-                        "rootKind": root.root_kind,
-                        "volumeSerial": root.volume_serial,
-                    }
-                    for root in request.roots
-                ],
-                "schemaVersion": 1,
-                "stopTokenPath": str(request.stop_token_path),
-            }
-        )
-        request_sha256 = hashlib.sha256(request_bytes).hexdigest()
+        request_bytes, request_sha256 = windows_watch._request_bytes_and_sha256(request)
         observer_handle, observer_creation_time = windows_watch._open_process_identity(os.getpid())
         self.assertIsNone(windows_watch._close_handle(observer_handle, "test observer process"))
         (case_root / "request.json").write_bytes(request_bytes)
