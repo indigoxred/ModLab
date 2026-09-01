@@ -1,6 +1,7 @@
 import hashlib
 import json
 import tempfile
+import threading
 import unittest
 from unittest import mock
 from dataclasses import replace
@@ -116,8 +117,12 @@ def valid_scenario_result(
         watcher_events=(),
         projection_count=1,
         projection_targets_verified=True,
+        projection_observation_complete=True,
         projection_payload_bytes_copied=0,
         production_backup_names=(),
+        production_observation_complete=True,
+        staging_observation_complete=True,
+        output_observation_complete=True,
         source_restored_after_quarantine=True,
         reasons=(),
     )
@@ -357,6 +362,59 @@ class ContainmentStoreTests(unittest.TestCase):
                 fingerprint,
                 "containment-run:" + "e" * 32,
             )
+
+    def test_run_intent_is_immutable_canonical_and_precedes_request(self):
+        store = ContainmentStore(self.root)
+        fingerprint = "containment-command-sha256:" + "c" * 64
+        document = {
+            "schemaVersion": 1,
+            "runId": RUN_ID,
+            "mechanism": "isolated-low-integrity-junction-projection-v1",
+            "sourceWorkspace": str((self.root / "source").absolute()),
+            "mo2ArtifactId": "artifact:abc",
+            "steamRoot": str((self.root / "steam").absolute()),
+            "commandFingerprint": fingerprint,
+            "predecessorRunIds": [],
+            "retryOf": None,
+        }
+
+        first = store.write_intent(RUN_ID, document)
+        second = store.write_intent(RUN_ID, document)
+
+        self.assertFalse(first.existed)
+        self.assertTrue(second.existed)
+        self.assertEqual(document, store.load_intent(RUN_ID))
+        self.assertTrue(first.path.is_relative_to(store.run_path(RUN_ID)))
+        self.assertFalse(store.request_path(RUN_ID).exists())
+        with self.assertRaisesRegex(ContainmentStoreError, "different bytes"):
+            store.write_intent(
+                RUN_ID,
+                {**document, "mo2ArtifactId": "artifact:different"},
+            )
+
+    def test_command_lock_serializes_same_root_and_fingerprint(self):
+        first = ContainmentStore(self.root)
+        second = ContainmentStore(self.root)
+        fingerprint = "containment-command-sha256:" + "d" * 64
+        acquired = threading.Event()
+        errors = []
+
+        def contend() -> None:
+            try:
+                with second.command_lock(fingerprint):
+                    acquired.set()
+            except BaseException as error:
+                errors.append(error)
+
+        with first.command_lock(fingerprint):
+            thread = threading.Thread(target=contend)
+            thread.start()
+            self.assertFalse(acquired.wait(0.1))
+        thread.join(2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual([], errors)
+        self.assertTrue(acquired.is_set())
 
 
 if __name__ == "__main__":

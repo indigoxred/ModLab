@@ -150,10 +150,14 @@ class ScenarioResult:
     watcher_events: tuple[WatcherEvent, ...]
     projection_count: int
     projection_targets_verified: bool
+    projection_observation_complete: bool
     projection_payload_bytes_copied: int
     production_backup_names: tuple[str, ...]
+    production_observation_complete: bool
     staging_new_names: tuple[str, ...]
+    staging_observation_complete: bool
     staging_output_names: tuple[str, ...]
+    output_observation_complete: bool
     adopted_name: str | None
     adopted_tree: TreeIdentity | None
     adopted_integrity: IntegrityObservation | None

@@ -60,10 +60,14 @@ _RESULT = {
     "watcherEvents",
     "projectionCount",
     "projectionTargetsVerified",
+    "projectionObservationComplete",
     "projectionPayloadBytesCopied",
     "productionBackupNames",
+    "productionObservationComplete",
     "stagingNewNames",
+    "stagingObservationComplete",
     "stagingOutputNames",
+    "outputObservationComplete",
     "adoptedName",
     "adoptedTree",
     "adoptedIntegrity",
@@ -480,6 +484,10 @@ def scenario_result_from_dict(
             data["projectionTargetsVerified"],
             "projectionTargetsVerified",
         ),
+        projection_observation_complete=_bool(
+            data["projectionObservationComplete"],
+            "projectionObservationComplete",
+        ),
         projection_payload_bytes_copied=_nn(
             data["projectionPayloadBytesCopied"],
             "projectionPayloadBytesCopied",
@@ -488,13 +496,25 @@ def scenario_result_from_dict(
             data["productionBackupNames"],
             "productionBackupNames",
         ),
+        production_observation_complete=_bool(
+            data["productionObservationComplete"],
+            "productionObservationComplete",
+        ),
         staging_new_names=_sorted_rel(
             data["stagingNewNames"],
             "stagingNewNames",
         ),
+        staging_observation_complete=_bool(
+            data["stagingObservationComplete"],
+            "stagingObservationComplete",
+        ),
         staging_output_names=_sorted_rel(
             data["stagingOutputNames"],
             "stagingOutputNames",
+        ),
+        output_observation_complete=_bool(
+            data["outputObservationComplete"],
+            "outputObservationComplete",
         ),
         adopted_name=(
             None
@@ -709,13 +729,14 @@ def deterministic_policy_violations(result: ScenarioResult) -> tuple[str, ...]:
         IntegrityObservation.LOW,
     }:
         violations.add("stage-integrity-invalid")
-    if result.projection_count != 1:
-        violations.add("projection-count-invalid")
-    if not result.projection_targets_verified:
-        violations.add("projection-target-changed")
+    if result.projection_observation_complete:
+        if result.projection_count <= 0:
+            violations.add("projection-count-invalid")
+        if not result.projection_targets_verified:
+            violations.add("projection-target-changed")
     if result.projection_payload_bytes_copied != 0:
         violations.add("projection-payload-copied")
-    if result.production_backup_names:
+    if result.production_observation_complete and result.production_backup_names:
         violations.add("production-backup-created")
     if not result.source_restored_after_quarantine:
         violations.add("source-not-restored-after-quarantine")
@@ -723,19 +744,29 @@ def deterministic_policy_violations(result: ScenarioResult) -> tuple[str, ...]:
     adoption = (result.adopted_name, result.adopted_tree, result.adopted_integrity)
     if result.scenario in _ADOPTION:
         name, staging_new, staging_output = _ADOPTION[result.scenario]
-        if result.staging_new_names != staging_new:
+        if (
+            result.staging_observation_complete
+            and result.staging_new_names != staging_new
+        ):
             violations.add("staging-new-folder-set-invalid")
-        if result.staging_output_names != staging_output:
+        if (
+            result.output_observation_complete
+            and result.staging_output_names != staging_output
+        ):
             violations.add("staging-output-set-invalid")
-        if any(item is not None for item in adoption) and (
+        if result.output_observation_complete and any(
+            item is not None for item in adoption
+        ) and (
             result.adopted_name != name
             or result.adopted_tree is None
             or result.adopted_integrity
             not in {IntegrityObservation.UNKNOWN, IntegrityObservation.MEDIUM}
         ):
             violations.add("adoption-proof-invalid")
-    elif result.staging_new_names or result.staging_output_names or any(
-        item is not None for item in adoption
+    elif (
+        (result.staging_observation_complete and result.staging_new_names)
+        or (result.output_observation_complete and result.staging_output_names)
+        or any(item is not None for item in adoption)
     ):
         violations.add("unexpected-staging-output")
     return tuple(sorted(violations))
@@ -778,13 +809,20 @@ def _check_passed_result(
         raise ContainmentFormatError(
             "Passed result requires Medium-or-higher source integrity"
         )
-    if result.projection_count <= 0 or not result.projection_targets_verified:
+    if (
+        not result.projection_observation_complete
+        or result.projection_count <= 0
+        or not result.projection_targets_verified
+    ):
         raise ContainmentFormatError("Passed result requires verified projections")
     if result.projection_payload_bytes_copied:
         raise ContainmentFormatError(
             "Passed result requires zero copied projection payload bytes"
         )
-    if result.production_backup_names:
+    if (
+        not result.production_observation_complete
+        or result.production_backup_names
+    ):
         raise ContainmentFormatError(
             "Passed result cannot record production backups"
         )
@@ -796,6 +834,13 @@ def _check_passed_result(
         raise ContainmentFormatError("Passed result cannot record reasons")
 
     if result.scenario in _ADOPTION:
+        if (
+            not result.staging_observation_complete
+            or not result.output_observation_complete
+        ):
+            raise ContainmentFormatError(
+                "Passed adoption result requires complete staging/output observations"
+            )
         name, staging_new, staging_output = _ADOPTION[result.scenario]
         if (
             result.adopted_name,
@@ -813,7 +858,9 @@ def _check_passed_result(
                 f"Passed {result.scenario.value} result requires Medium adopted tree evidence"
             )
     elif (
-        any(item is not None for item in adoption)
+        not result.staging_observation_complete
+        or not result.output_observation_complete
+        or any(item is not None for item in adoption)
         or result.staging_new_names
         or result.staging_output_names
     ):
@@ -1003,10 +1050,14 @@ def _result_dict(value: ScenarioResult) -> dict[str, Any]:
         "watcherEvents": [_event_dict(event) for event in value.watcher_events],
         "projectionCount": value.projection_count,
         "projectionTargetsVerified": value.projection_targets_verified,
+        "projectionObservationComplete": value.projection_observation_complete,
         "projectionPayloadBytesCopied": value.projection_payload_bytes_copied,
         "productionBackupNames": list(value.production_backup_names),
+        "productionObservationComplete": value.production_observation_complete,
         "stagingNewNames": list(value.staging_new_names),
+        "stagingObservationComplete": value.staging_observation_complete,
         "stagingOutputNames": list(value.staging_output_names),
+        "outputObservationComplete": value.output_observation_complete,
         "adoptedName": value.adopted_name,
         "adoptedTree": (
             None if value.adopted_tree is None else _tree_dict(value.adopted_tree)

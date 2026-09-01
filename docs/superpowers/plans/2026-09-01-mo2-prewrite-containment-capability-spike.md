@@ -249,10 +249,14 @@ class ScenarioResult:
     watcher_events: tuple[WatcherEvent, ...]
     projection_count: int
     projection_targets_verified: bool
+    projection_observation_complete: bool
     projection_payload_bytes_copied: int
     production_backup_names: tuple[str, ...]
+    production_observation_complete: bool
     staging_new_names: tuple[str, ...]
+    staging_observation_complete: bool
     staging_output_names: tuple[str, ...]
+    output_observation_complete: bool
     adopted_name: str | None
     adopted_tree: TreeIdentity | None
     adopted_integrity: IntegrityObservation | None
@@ -280,7 +284,7 @@ class CapabilityDecision:
     reasons: tuple[str, ...]
 ```
 
-Use `mechanism="isolated-low-integrity-junction-projection-v1"`. Strictly require all four scenarios in enum order for `Supported`. Every passing result requires an exact content-addressed `WatchOutcome` bound to the same request, session, run, and scenario; identical `protected_before`/`protected_after`; `Completed` watcher evidence with no event; `scenario_started=True`; `fresh_retry_eligible=False`; exact MO2 version `2.5.2.0`; a Low MO2 process and Low stage; Medium-or-higher source; verified projections with zero copied payload bytes; no production backup; and a restored source root after any adoption/quarantine. New-folder and FOMOD results additionally require the exact adopted name, a non-null tree, Medium adopted integrity, and exact expected staging outputs. A `Failed` result requires durable `ScenarioStarted` plus positive proof consisting of a bound watcher event, a protected-state delta, or `Completed` watcher evidence together with a deterministic typed policy violation recomputed from the result fields; `Incomplete` watcher evidence permits `Failed` only for the event/delta cases. A result without one of those proofs, including missing/malformed/incomplete watcher evidence, unknown process state, arbitrary reason text, or unresolved cleanup/adoption evidence, is `Incomplete`; later cleanup alone never promotes it to `Passed` or `Failed`.
+Use `mechanism="isolated-low-integrity-junction-projection-v1"`. Strictly require all four scenarios in enum order for `Supported`. Every passing result requires an exact content-addressed `WatchOutcome` bound to the same request, session, run, and scenario; identical `protected_before`/`protected_after`; `Completed` watcher evidence with no event; `scenario_started=True`; `fresh_retry_eligible=False`; exact MO2 version `2.5.2.0`; a Low MO2 process and Low stage; Medium-or-higher source; verified projections with zero copied payload bytes; no production backup; and a restored source root after any adoption/quarantine. New-folder and FOMOD results additionally require the exact adopted name, a non-null tree, Medium adopted integrity, and exact expected staging outputs. The four observation-completeness fields distinguish a producer that definitely inspected projection, production, staging, or output state from one whose access/identity proof failed; only a complete category may turn its typed values into deterministic failure proof, and `Passed` requires every applicable category complete. A `Failed` result requires durable `ScenarioStarted` plus positive proof consisting of a bound watcher event, a protected-state delta, or `Completed` watcher evidence together with a deterministic typed policy violation recomputed from the result fields; `Incomplete` watcher evidence permits `Failed` only for the event/delta cases. A result without one of those proofs, including missing/malformed/incomplete watcher evidence, unknown process state, arbitrary reason text, or unresolved cleanup/adoption evidence, is `Incomplete`; later cleanup alone never promotes it to `Passed` or `Failed`.
 
 - [ ] **Step 4: Implement strict canonical JSON**
 

@@ -1,12 +1,14 @@
 import hashlib
 import json
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from modlab.adapters.mo2.bootstrap_model import ProcessObservation
 from modlab.validation.mo2_containment_model import (
     CapabilityVerdict,
     ContainmentScenario,
@@ -34,6 +36,19 @@ from modlab.validation.mo2_containment_service import (
 )
 from modlab.validation.mo2_containment_store import ContainmentStore
 from modlab.validation import mo2_containment_service as service
+from modlab.validation.windows_watch_protocol import (
+    CLAIM_NAME,
+    LAUNCH_NAME,
+    ControllerClaim,
+    WatchRequest,
+    WatchRoot,
+    WorkerLaunch,
+    controller_claim_to_bytes,
+    watch_request_sha256,
+    watch_request_to_bytes,
+    watch_worker_command,
+    worker_launch_to_bytes,
+)
 from modlab.workspace import initialize_workspace
 
 
@@ -126,6 +141,226 @@ def watch_outcome(
     )
 
 
+def fixture_record(root: Path, scenario: ContainmentScenario) -> service.FixtureRecord:
+    fixture = root / "fixture"
+    return service.FixtureRecord(
+        scenario,
+        fixture,
+        fixture / "source",
+        fixture / "stage",
+        fixture / "archive.zip",
+        fixture / "source" / "mods",
+        fixture / "stage" / "mods",
+        fixture / "source" / "profiles" / "lab.txt",
+        fixture / "source" / "profiles" / "play.txt",
+        fixture / "source" / "downloads",
+        fixture / "source" / "overwrite",
+        fixture / "game",
+        fixture / "stage" / "app",
+        fixture / "stage" / "downloads",
+        fixture / "stage" / "profiles",
+        fixture / "stage" / "overwrite",
+        fixture / "stage" / "cache",
+        fixture / "stage" / "logs",
+        {},
+        (
+            ("ExternalLocalLow", fixture / "external-local-low"),
+            ("ExternalTempLow", fixture / "external-temp-low"),
+        ),
+        ("Protected Existing",),
+    )
+
+
+def prepared_record(
+    parent: Path,
+    scenario: ContainmentScenario,
+    steam_root: Path,
+) -> service.FixtureRecord:
+    return service.FixtureRecord(
+        scenario,
+        parent,
+        parent / "source",
+        parent / "stage",
+        parent / "archive.zip",
+        parent / "source" / "mods",
+        parent / "stage" / "mods",
+        parent / "source" / "lab.txt",
+        parent / "source" / "play.txt",
+        parent / "source" / "downloads",
+        parent / "source" / "overwrite",
+        steam_root / "game",
+        parent / "stage" / "app",
+        parent / "stage" / "downloads",
+        parent / "stage" / "profiles",
+        parent / "stage" / "overwrite",
+        parent / "stage" / "cache",
+        parent / "stage" / "logs",
+        {
+            name: str(parent / "env")
+            for name in (
+                "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME"
+            )
+        },
+        (
+            ("ExternalLocalLow", parent / "local-low"),
+            ("ExternalTempLow", parent / "temp-low"),
+        ),
+        ("Protected Existing",),
+    )
+
+
+def write_cohort_run(
+    store: ContainmentStore,
+    run_id: str,
+    source: Path,
+    steam: Path,
+    artifact: str,
+    *,
+    predecessors: tuple[str, ...] = (),
+    failed_scenario: ContainmentScenario | None = None,
+    retry_binding: dict[str, object] | None = None,
+) -> tuple[str, ...]:
+    write_run_identity(
+        store,
+        run_id,
+        source,
+        steam,
+        artifact,
+        predecessors=predecessors,
+        retry_binding=retry_binding,
+    )
+    identifiers = []
+    for scenario in ContainmentScenario:
+        observed = replace(
+            watch_outcome(
+                scenario,
+                events=(event(),) if scenario is failed_scenario else (),
+            ),
+            run_id=run_id,
+        )
+        result = evaluate_scenario(
+            replace(
+                evidence(scenario),
+                run_id=run_id,
+                watch_outcome=observed,
+            )
+        )
+        store.write_watch_outcome(observed)
+        identifiers.append(store.write_result(result).content_id)
+    return tuple(identifiers)
+
+
+def write_run_identity(
+    store: ContainmentStore,
+    run_id: str,
+    source: Path,
+    steam: Path,
+    artifact: str,
+    *,
+    predecessors: tuple[str, ...] = (),
+    retry_binding: dict[str, object] | None = None,
+) -> tuple[service.FixtureRecord, ...]:
+    fingerprint = service._command_fingerprint(source, artifact, steam)
+    intent = {
+        "schemaVersion": 1,
+        "runId": run_id,
+        "mechanism": "isolated-low-integrity-junction-projection-v1",
+        "sourceWorkspace": str(source.absolute()),
+        "mo2ArtifactId": artifact,
+        "steamRoot": str(steam.absolute()),
+        "commandFingerprint": fingerprint,
+        "predecessorRunIds": list(predecessors),
+        "retryOf": retry_binding,
+    }
+    intent_write = store.write_intent(run_id, intent)
+    records = tuple(
+        prepared_record(
+            store.run_path(run_id) / "fixtures" / scenario.value,
+            scenario,
+            steam,
+        )
+        for scenario in ContainmentScenario
+    )
+    store.write_request(
+        run_id,
+        {
+            **intent,
+            "intentId": intent_write.content_id,
+            "scenarios": [service._record_document(record) for record in records],
+        },
+    )
+    return records
+
+
+def write_bound_watch_evidence(
+    store: ContainmentStore,
+    journal: ScenarioJournal,
+    *,
+    events: tuple[WatcherEvent, ...] = (),
+    completion: WatchEvidenceCompletion = WatchEvidenceCompletion.COMPLETED,
+) -> WatchOutcome:
+    evidence_root = store.watch_path(journal.run_id, journal.scenario)
+    watched = evidence_root.parent
+    request = WatchRequest(
+        "watch-request:" + "6" * 64,
+        "watch-session:" + "7" * 64,
+        journal.run_id,
+        journal.scenario,
+        evidence_root,
+        evidence_root / "stop.token",
+        tuple(
+            WatchRoot(kind, watched, 71, 72)
+            for kind in WATCH_ROOT_KINDS
+        ),
+    )
+    request_path = evidence_root / "request.json"
+    request_path.write_bytes(watch_request_to_bytes(request))
+    claim = ControllerClaim(
+        1,
+        watch_request_sha256(request),
+        request.session_id,
+        request.run_id,
+        request.scenario,
+        request_path,
+        watch_worker_command(request_path),
+        41,
+        1001,
+    )
+    (evidence_root / CLAIM_NAME).write_bytes(
+        controller_claim_to_bytes(claim, request)
+    )
+    launch = WorkerLaunch(
+        1,
+        watch_request_sha256(request),
+        request.session_id,
+        request.run_id,
+        request.scenario,
+        journal.monitor_pid or 42,
+        1002,
+    )
+    (evidence_root / LAUNCH_NAME).write_bytes(
+        worker_launch_to_bytes(launch, request)
+    )
+    observed = replace(
+        watch_outcome(
+            journal.scenario,
+            events=events,
+            completion=completion,
+        ),
+        request_id=request.request_id,
+        request_sha256=watch_request_sha256(request),
+        session_id=request.session_id,
+        run_id=request.run_id,
+        scenario=request.scenario,
+        controller_pid=claim.controller_pid,
+        controller_creation_time=claim.controller_creation_time,
+        worker_pid=launch.worker_pid,
+        worker_creation_time=launch.worker_creation_time,
+    )
+    store.write_watch_outcome(observed)
+    return observed
+
+
 def process(*, integrity: IntegrityObservation = IntegrityObservation.LOW) -> ProcessEvidence:
     return ProcessEvidence(
         51,
@@ -168,10 +403,14 @@ def evidence(
         fresh_retry_eligible=False,
         projection_count=1,
         projection_targets_verified=True,
+        projection_observation_complete=True,
         projection_payload_bytes_copied=0,
         production_backup_names=(),
+        production_observation_complete=True,
         staging_new_names=(expected_name,) if adopted else (),
+        staging_observation_complete=True,
         staging_output_names=expected_outputs if adopted else (),
+        output_observation_complete=True,
         adopted_name=expected_name if adopted else None,
         adopted_tree=tree("b") if adopted else None,
         adopted_integrity=IntegrityObservation.MEDIUM if adopted else None,
@@ -221,7 +460,6 @@ class ContainmentServiceTests(unittest.TestCase):
             (stage / "Protected Existing").mkdir()
             (stage / "ModLab Spike New").mkdir()
             destination = source / "ModLab Spike New"
-            destination.mkdir()
             record = service.FixtureRecord(
                 ContainmentScenario.NEW_FOLDER,
                 root, root, root, root / "archive.zip", source, stage,
@@ -237,9 +475,12 @@ class ContainmentServiceTests(unittest.TestCase):
                 after_tree=tree("b"),
                 final_integrity=service.IntegrityLevel.MEDIUM,
             )
+            def adopt_for_test(**_kwargs):
+                destination.mkdir()
+                return adoption
             with (
-                patch.object(service, "_projection_state", return_value=(1, True)),
-                patch.object(service, "adopt_unique_staged_mod", return_value=adoption),
+                patch.object(service, "_projection_state", return_value=(1, True, True)),
+                patch.object(service, "adopt_unique_staged_mod", side_effect=adopt_for_test),
                 patch.object(service, "_relative_files", side_effect=OSError("inspect failed")),
                 patch.object(service, "_capture_protected", return_value=protected()),
             ):
@@ -254,6 +495,165 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertFalse(destination.exists())
             self.assertTrue(quarantined.is_dir())
             self.assertIn("adoption-proof-unavailable:OSError", result.incomplete_reasons)
+            self.assertFalse(result.output_observation_complete)
+            evaluated = evaluate_scenario(
+                evidence(
+                    record.scenario,
+                    projection_count=result.projection_count,
+                    projection_targets_verified=result.projection_targets_verified,
+                    projection_observation_complete=result.projection_observation_complete,
+                    production_backup_names=result.production_backup_names,
+                    staging_new_names=result.staging_new_names,
+                    staging_observation_complete=result.staging_observation_complete,
+                    staging_output_names=result.staging_output_names,
+                    output_observation_complete=result.output_observation_complete,
+                    adopted_name=result.adopted_name,
+                    adopted_tree=result.adopted_tree,
+                    adopted_integrity=result.adopted_integrity,
+                    source_restored_after_quarantine=result.source_restored_after_quarantine,
+                    safety_reasons=result.safety_reasons,
+                    incomplete_reasons=result.incomplete_reasons,
+                )
+            )
+            self.assertEqual(ScenarioOutcome.INCOMPLETE, evaluated.outcome)
+
+    def test_projection_producer_distinguishes_wrong_from_unobservable(self):
+        cases = (
+            ("wrong", SimpleNamespace(target_path=Path("C:/wrong")), ScenarioOutcome.FAILED),
+            ("unobservable", OSError("access denied"), ScenarioOutcome.INCOMPLETE),
+        )
+        for label, inspection, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory(
+                prefix=f"modlab-projection-{label}-"
+            ) as directory:
+                root = Path(directory)
+                source = root / "source"
+                stage = root / "stage"
+                source.mkdir()
+                stage.mkdir()
+                (source / "Protected Existing").mkdir()
+                (stage / "Protected Existing").mkdir()
+                record = service.FixtureRecord(
+                    ContainmentScenario.MERGE_EXISTING,
+                    root,
+                    root,
+                    root,
+                    root / "archive.zip",
+                    source,
+                    stage,
+                    root / "lab.txt",
+                    root / "play.txt",
+                    root,
+                    root,
+                    root,
+                    root,
+                    root,
+                    root,
+                    root,
+                    root,
+                    root,
+                    {},
+                    (),
+                    ("Protected Existing",),
+                )
+                store = ContainmentStore(root / "validation")
+                store.prepare_run_root(RUN_ID)
+                effect = inspection if isinstance(inspection, BaseException) else None
+                with (
+                    patch.object(
+                        service,
+                        "inspect_junction",
+                        side_effect=effect,
+                        return_value=None if effect else inspection,
+                    ),
+                    patch.object(service, "_capture_protected", return_value=protected()),
+                ):
+                    projection = service._finalize_projection(
+                        store,
+                        RUN_ID,
+                        record,
+                        protected(),
+                        protected(),
+                    )
+                evaluated = evaluate_scenario(
+                    evidence(
+                        record.scenario,
+                        projection_count=projection.projection_count,
+                        projection_targets_verified=projection.projection_targets_verified,
+                        projection_observation_complete=projection.projection_observation_complete,
+                        production_backup_names=projection.production_backup_names,
+                        staging_new_names=projection.staging_new_names,
+                        staging_observation_complete=projection.staging_observation_complete,
+                        staging_output_names=projection.staging_output_names,
+                        output_observation_complete=projection.output_observation_complete,
+                        adopted_name=projection.adopted_name,
+                        adopted_tree=projection.adopted_tree,
+                        adopted_integrity=projection.adopted_integrity,
+                        source_restored_after_quarantine=projection.source_restored_after_quarantine,
+                        safety_reasons=projection.safety_reasons,
+                        incomplete_reasons=projection.incomplete_reasons,
+                    )
+                )
+                self.assertEqual(expected, evaluated.outcome)
+                self.assertEqual(
+                    label == "wrong",
+                    projection.projection_observation_complete,
+                )
+
+    def test_projection_reobservation_access_failure_is_incomplete(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-projection-reobserve-"
+        ) as directory:
+            root = Path(directory)
+            source = root / "source"
+            stage = root / "stage"
+            source.mkdir()
+            stage.mkdir()
+            (source / "Protected Existing").mkdir()
+            (stage / "Protected Existing").mkdir()
+            record = service.FixtureRecord(
+                ContainmentScenario.MERGE_EXISTING,
+                root, root, root, root / "archive.zip", source, stage,
+                root / "lab.txt", root / "play.txt", root, root, root,
+                root, root, root, root, root, root, {}, (),
+                ("Protected Existing",),
+            )
+            store = ContainmentStore(root / "validation")
+            store.prepare_run_root(RUN_ID)
+            with (
+                patch.object(
+                    service,
+                    "_direct_names",
+                    side_effect=(
+                        ("Protected Existing",),
+                        ("Protected Existing",),
+                        ("Protected Existing",),
+                        OSError("access denied"),
+                    ),
+                ),
+                patch.object(
+                    service,
+                    "inspect_junction",
+                    return_value=SimpleNamespace(
+                        target_path=source / "Protected Existing"
+                    ),
+                ),
+                patch.object(service, "_capture_protected", return_value=protected()),
+            ):
+                projection = service._finalize_projection(
+                    store, RUN_ID, record, protected(), protected()
+                )
+            evaluated = evaluate_scenario(
+                evidence(
+                    record.scenario,
+                    staging_observation_complete=(
+                        projection.staging_observation_complete
+                    ),
+                    incomplete_reasons=projection.incomplete_reasons,
+                )
+            )
+            self.assertFalse(projection.staging_observation_complete)
+            self.assertEqual(ScenarioOutcome.INCOMPLETE, evaluated.outcome)
 
     def test_protected_delta_before_adoption_never_moves_staging_into_source(self):
         with tempfile.TemporaryDirectory(prefix="modlab-pre-adoption-delta-") as directory:
@@ -275,7 +675,7 @@ class ContainmentServiceTests(unittest.TestCase):
             store = ContainmentStore(root / "validation")
             store.write_request(RUN_ID, {"runId": RUN_ID})
             with (
-                patch.object(service, "_projection_state", return_value=(1, True)),
+                patch.object(service, "_projection_state", return_value=(1, True, True)),
                 patch.object(
                     service,
                     "adopt_unique_staged_mod",
@@ -334,7 +734,10 @@ class ContainmentServiceTests(unittest.TestCase):
                     target_path=source / "Protected Existing"
                 ),
             ):
-                self.assertEqual((1, True), service._projection_state(record, allow_new=True))
+                self.assertEqual(
+                    (1, True, True),
+                    service._projection_state(record, allow_new=True),
+                )
 
     def test_merge_and_replace_pass_only_with_zero_source_events_and_hash_match(self):
         for scenario in (
@@ -417,6 +820,15 @@ class ContainmentServiceTests(unittest.TestCase):
             ).outcome,
         )
 
+    def test_multiple_positive_retained_projections_are_not_a_count_violation(self):
+        result = evaluate_scenario(
+            evidence(
+                ContainmentScenario.MERGE_EXISTING,
+                projection_count=2,
+            )
+        )
+        self.assertEqual(ScenarioOutcome.PASSED, result.outcome)
+
     def test_prepare_run_generates_identity_before_confined_fixture_creation(self):
         with tempfile.TemporaryDirectory(prefix="modlab-prepare-run-") as directory:
             source = Path(directory) / "source"
@@ -424,10 +836,16 @@ class ContainmentServiceTests(unittest.TestCase):
             validation = layout.mo2_containment_validation
             steam = Path(directory) / "steam"
             calls = []
+            observed_intents = []
 
             def fake_prepare(_source, _artifact, _steam, _validation, scenario, *, fixture_parent=None):
-                calls.append((scenario, Path(fixture_parent)))
-                return SimpleNamespace(scenario=scenario, fixture_parent=Path(fixture_parent))
+                parent = Path(fixture_parent)
+                calls.append((scenario, parent))
+                run_id = "containment-run:" + parent.parents[1].name
+                observed_intents.append(
+                    ContainmentStore(validation).load_intent(run_id)
+                )
+                return SimpleNamespace(scenario=scenario, fixture_parent=parent)
 
             def fake_record(fixture, _steam):
                 parent = fixture.fixture_parent
@@ -459,9 +877,22 @@ class ContainmentServiceTests(unittest.TestCase):
                 tuple(parent for _, parent in calls),
             )
             request = ContainmentStore(validation).load_request(run_id)
+            intent_write = ContainmentStore(validation).load_intent(run_id)
+            self.assertEqual(4, len(observed_intents))
+            self.assertTrue(all(item == intent_write for item in observed_intents))
             self.assertRegex(request["commandFingerprint"], r"^containment-command-sha256:[0-9a-f]{64}$")
+            self.assertRegex(request["intentId"], r"^containment-intent-sha256:[0-9a-f]{64}$")
             self.assertEqual([], request["predecessorRunIds"])
             self.assertIsNone(request["retryOf"])
+            self.assertEqual(
+                tuple(ContainmentScenario),
+                tuple(
+                    service._load_fixture_record(
+                        ContainmentStore(validation), run_id, scenario
+                    ).scenario
+                    for scenario in ContainmentScenario
+                ),
+            )
 
     def test_arm_scenario_public_workflow_persists_before_watcher_ready(self):
         with tempfile.TemporaryDirectory(prefix="modlab-arm-workflow-") as directory:
@@ -485,7 +916,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 patch.object(service, "_load_fixture_record", return_value=record),
                 patch.object(service, "_capture_protected", return_value=protected()),
                 patch.object(service, "inspect_path_integrity", side_effect=(service.IntegrityLevel.MEDIUM, service.IntegrityLevel.LOW)),
-                patch.object(service, "_projection_state", return_value=(1, True)),
+                patch.object(service, "_projection_state", return_value=(1, True, True)),
                 patch.object(service, "_watch_roots", return_value=()),
                 patch.object(service, "start_watch", side_effect=fake_start),
             ):
@@ -565,7 +996,22 @@ class ContainmentServiceTests(unittest.TestCase):
                 request_bytes_sha256=outcome.request_sha256,
             )
             projection = service._ProjectionEvidence(
-                protected(), 1, True, (), (), (), None, None, None, True, (), (),
+                protected_after=protected(),
+                projection_count=1,
+                projection_targets_verified=True,
+                projection_observation_complete=True,
+                production_backup_names=(),
+                production_observation_complete=True,
+                staging_new_names=(),
+                staging_observation_complete=True,
+                staging_output_names=(),
+                output_observation_complete=True,
+                adopted_name=None,
+                adopted_tree=None,
+                adopted_integrity=None,
+                source_restored_after_quarantine=True,
+                safety_reasons=(),
+                incomplete_reasons=(),
             )
             with (
                 patch.object(service, "_load_fixture_record", return_value=record),
@@ -593,6 +1039,20 @@ class ContainmentServiceTests(unittest.TestCase):
             )
             written = store.write_recovery(recovery)
             fingerprint = service._command_fingerprint(source, "artifact:abc", steam)
+            store.write_intent(
+                RUN_ID,
+                {
+                    "schemaVersion": 1,
+                    "runId": RUN_ID,
+                    "mechanism": "isolated-low-integrity-junction-projection-v1",
+                    "sourceWorkspace": str(source.absolute()),
+                    "mo2ArtifactId": "artifact:abc",
+                    "steamRoot": str(steam.absolute()),
+                    "commandFingerprint": fingerprint,
+                    "predecessorRunIds": [],
+                    "retryOf": None,
+                },
+            )
             store.write_retry_authority(recovery, written.content_id, fingerprint)
 
             with patch.object(
@@ -609,11 +1069,332 @@ class ContainmentServiceTests(unittest.TestCase):
                 self.assertTrue(
                     store.run_path(consumed["consumedByRunId"]).is_dir()
                 )
-                with self.assertRaisesRegex(service.ContainmentServiceError, "consumed"):
+                with self.assertRaisesRegex(
+                    service.ContainmentServiceError, "consumed|unresolved"
+                ):
                     service.prepare_run(
                         source, "artifact:abc", steam, store.root, retry_of=recovery
                     )
+                with self.assertRaisesRegex(
+                    service.ContainmentServiceError, "nonterminal|unresolved"
+                ):
+                    service.prepare_run(
+                        source, "artifact:abc", steam, store.root
+                    )
                 self.assertEqual(1, fixture.call_count)
+
+    def test_prepare_run_cannot_bypass_available_retry_by_omitting_ticket(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-retry-bypass-") as directory:
+            source = Path(directory) / "source"
+            layout = initialize_workspace(source)
+            steam = Path(directory) / "steam"
+            store = ContainmentStore(layout.mo2_containment_validation)
+            fingerprint = service._command_fingerprint(source, "artifact:abc", steam)
+            intent = {
+                "schemaVersion": 1,
+                "runId": RUN_ID,
+                "mechanism": "isolated-low-integrity-junction-projection-v1",
+                "sourceWorkspace": str(source.absolute()),
+                "mo2ArtifactId": "artifact:abc",
+                "steamRoot": str(steam.absolute()),
+                "commandFingerprint": fingerprint,
+                "predecessorRunIds": [],
+                "retryOf": None,
+            }
+            intent_write = store.write_intent(RUN_ID, intent)
+            store.write_request(
+                RUN_ID,
+                {
+                    "schemaVersion": 1,
+                    "runId": RUN_ID,
+                    "sourceWorkspace": str(source.absolute()),
+                    "mo2ArtifactId": "artifact:abc",
+                    "steamRoot": str(steam.absolute()),
+                    "commandFingerprint": fingerprint,
+                    "predecessorRunIds": [],
+                    "retryOf": None,
+                    "intentId": intent_write.content_id,
+                    "scenarios": [],
+                },
+            )
+            recovery = ScenarioRecovery(
+                1,
+                RUN_ID,
+                ContainmentScenario.MERGE_EXISTING,
+                "containment-journal-sha256:" + "a" * 64,
+                "containment-result-sha256:" + "b" * 64,
+                ScenarioCleanupStatus.SUCCEEDED,
+                True,
+                (),
+            )
+            recovery_write = store.write_recovery(recovery)
+            store.write_retry_authority(
+                recovery,
+                recovery_write.content_id,
+                fingerprint,
+            )
+            fixture_calls = []
+
+            with (
+                patch.object(
+                    service,
+                    "prepare_containment_fixture",
+                    side_effect=lambda *_args, **kwargs: fixture_calls.append(
+                        kwargs["fixture_parent"]
+                    )
+                    or SimpleNamespace(
+                        scenario=_args[-1], fixture_parent=kwargs["fixture_parent"]
+                    ),
+                ),
+                patch.object(
+                    service,
+                    "_fixture_record",
+                    side_effect=lambda fixture, _steam: prepared_record(
+                        Path(fixture.fixture_parent), fixture.scenario, steam
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    service.ContainmentServiceError,
+                    "retry|nonterminal|unresolved",
+                ):
+                    service.prepare_run(
+                        source,
+                        "artifact:abc",
+                        steam,
+                        store.root,
+                    )
+
+            self.assertEqual([], fixture_calls)
+
+    def test_terminal_incomplete_run_still_requires_its_available_retry_ticket(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-terminal-retry-") as directory:
+            source = Path(directory) / "source"
+            layout = initialize_workspace(source)
+            steam = Path(directory) / "steam"
+            store = ContainmentStore(layout.mo2_containment_validation)
+            scenario = ContainmentScenario.MERGE_EXISTING
+            artifact = "artifact:terminal-retry"
+            records = write_run_identity(
+                store,
+                RUN_ID,
+                source,
+                steam,
+                artifact,
+            )
+            record = records[list(ContainmentScenario).index(scenario)]
+            journal = store.create(
+                ScenarioJournal(
+                    1,
+                    RUN_ID,
+                    scenario,
+                    ScenarioState.ARMED,
+                    str(record.source_root),
+                    str(record.stage_root),
+                    str(record.archive_path),
+                    "Protected Existing",
+                    "Protected Existing",
+                    protected(),
+                    42,
+                    None,
+                    None,
+                )
+            )
+            observed = write_bound_watch_evidence(
+                store,
+                journal,
+                completion=WatchEvidenceCompletion.INCOMPLETE,
+            )
+            result_write = store.write_result(
+                evaluate_scenario(
+                    replace(
+                        evidence(scenario),
+                        run_id=RUN_ID,
+                        watch_outcome=observed,
+                        scenario_started=False,
+                        fresh_retry_eligible=True,
+                    )
+                )
+            )
+            recovery = ScenarioRecovery(
+                1,
+                RUN_ID,
+                scenario,
+                store.journal_id_for(journal),
+                result_write.content_id,
+                ScenarioCleanupStatus.SUCCEEDED,
+                True,
+                (),
+            )
+            recovery_write = store.write_recovery(recovery)
+            store.write_retry_authority(
+                recovery,
+                recovery_write.content_id,
+                service._command_fingerprint(source, artifact, steam),
+            )
+            self.assertEqual(
+                CapabilityVerdict.INCOMPLETE,
+                service.adjudicate_run(store.root, RUN_ID).verdict,
+            )
+            fixture_calls = []
+            with (
+                patch.object(
+                    service,
+                    "prepare_containment_fixture",
+                    side_effect=lambda *_args, **kwargs: fixture_calls.append(
+                        kwargs["fixture_parent"]
+                    )
+                    or SimpleNamespace(
+                        scenario=_args[-1], fixture_parent=kwargs["fixture_parent"]
+                    ),
+                ),
+                patch.object(
+                    service,
+                    "_fixture_record",
+                    side_effect=lambda fixture, _steam: prepared_record(
+                        Path(fixture.fixture_parent), fixture.scenario, steam
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    service.ContainmentServiceError,
+                    "retry|authority",
+                ):
+                    service.prepare_run(
+                        source,
+                        artifact,
+                        steam,
+                        store.root,
+                    )
+                new_run = service.prepare_run(
+                    source,
+                    artifact,
+                    steam,
+                    store.root,
+                    retry_of=recovery,
+                )
+
+            self.assertEqual(4, len(fixture_calls))
+            self.assertEqual(RUN_ID, store.load_request(new_run)["retryOf"]["runId"])
+
+    def test_terminal_run_permits_explicit_manual_same_command_run(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-terminal-manual-") as directory:
+            source = Path(directory) / "source"
+            layout = initialize_workspace(source)
+            steam = Path(directory) / "steam"
+            store = ContainmentStore(layout.mo2_containment_validation)
+            artifact = "artifact:terminal-manual"
+            write_cohort_run(store, RUN_ID, source, steam, artifact)
+            self.assertEqual(
+                CapabilityVerdict.SUPPORTED,
+                service.adjudicate_run(store.root, RUN_ID).verdict,
+            )
+            with (
+                patch.object(
+                    service,
+                    "prepare_containment_fixture",
+                    side_effect=lambda *_args, **kwargs: SimpleNamespace(
+                        scenario=_args[-1], fixture_parent=kwargs["fixture_parent"]
+                    ),
+                ),
+                patch.object(
+                    service,
+                    "_fixture_record",
+                    side_effect=lambda fixture, _steam: prepared_record(
+                        Path(fixture.fixture_parent), fixture.scenario, steam
+                    ),
+                ),
+            ):
+                new_run = service.prepare_run(
+                    source,
+                    artifact,
+                    steam,
+                    store.root,
+                )
+
+            request = store.load_request(new_run)
+            self.assertEqual([RUN_ID], request["predecessorRunIds"])
+            self.assertIsNone(request["retryOf"])
+
+    def test_same_command_prepare_calls_are_serialized_before_snapshot(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-prepare-order-") as directory:
+            source = Path(directory) / "source"
+            layout = initialize_workspace(source)
+            steam = Path(directory) / "steam"
+            entered_first = threading.Event()
+            release_first = threading.Event()
+            entered_second_fixture = threading.Event()
+            results = []
+            errors = []
+
+            def fake_prepare(
+                _source,
+                _artifact,
+                _steam,
+                _validation,
+                scenario,
+                *,
+                fixture_parent=None,
+            ):
+                if threading.current_thread().name == "first-prepare":
+                    if not entered_first.is_set():
+                        entered_first.set()
+                        if not release_first.wait(2):
+                            raise AssertionError("first prepare was not released")
+                else:
+                    entered_second_fixture.set()
+                return SimpleNamespace(
+                    scenario=scenario,
+                    fixture_parent=Path(fixture_parent),
+                )
+
+            def run_prepare() -> None:
+                try:
+                    results.append(
+                        service.prepare_run(
+                            source,
+                            "artifact:abc",
+                            steam,
+                            layout.mo2_containment_validation,
+                        )
+                    )
+                except BaseException as error:
+                    errors.append(error)
+
+            with (
+                patch.object(
+                    service,
+                    "prepare_containment_fixture",
+                    side_effect=fake_prepare,
+                ),
+                patch.object(
+                    service,
+                    "_fixture_record",
+                    side_effect=lambda fixture, _steam: prepared_record(
+                        Path(fixture.fixture_parent), fixture.scenario, steam
+                    ),
+                ),
+            ):
+                first = threading.Thread(target=run_prepare, name="first-prepare")
+                second = threading.Thread(target=run_prepare, name="second-prepare")
+                first.start()
+                self.assertTrue(entered_first.wait(1))
+                second.start()
+                second_reached_fixture_while_first_unresolved = (
+                    entered_second_fixture.wait(0.15)
+                )
+                release_first.set()
+                first.join(3)
+                second.join(3)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertFalse(second_reached_fixture_while_first_unresolved)
+            self.assertFalse(entered_second_fixture.is_set())
+            self.assertEqual(1, len(results))
+            self.assertEqual(1, len(errors))
+            self.assertIsInstance(errors[0], service.ContainmentServiceError)
+            self.assertRegex(str(errors[0]), "nonterminal|unresolved")
 
     def test_prepare_run_binds_the_single_consumed_retry_to_its_new_request(self):
         with tempfile.TemporaryDirectory(prefix="modlab-retry-request-") as directory:
@@ -629,6 +1410,20 @@ class ContainmentServiceTests(unittest.TestCase):
             )
             recovery_write = store.write_recovery(recovery)
             fingerprint = service._command_fingerprint(source, "artifact:abc", steam)
+            store.write_intent(
+                RUN_ID,
+                {
+                    "schemaVersion": 1,
+                    "runId": RUN_ID,
+                    "mechanism": "isolated-low-integrity-junction-projection-v1",
+                    "sourceWorkspace": str(source.absolute()),
+                    "mo2ArtifactId": "artifact:abc",
+                    "steamRoot": str(steam.absolute()),
+                    "commandFingerprint": fingerprint,
+                    "predecessorRunIds": [],
+                    "retryOf": None,
+                },
+            )
             authority = store.write_retry_authority(
                 recovery, recovery_write.content_id, fingerprint
             )
@@ -667,41 +1462,30 @@ class ContainmentServiceTests(unittest.TestCase):
             source = store.root / "source"
             steam = store.root / "steam"
 
-            def write_run(run_id, artifact, failed, predecessors=()):
-                fingerprint = service._command_fingerprint(source, artifact, steam)
-                store.write_request(
-                    run_id,
-                    {
-                        "runId": run_id,
-                        "sourceWorkspace": str(source.absolute()),
-                        "mo2ArtifactId": artifact,
-                        "steamRoot": str(steam.absolute()),
-                        "commandFingerprint": fingerprint,
-                        "predecessorRunIds": list(predecessors),
-                        "retryOf": None,
-                    },
-                )
-                identifiers = []
-                for scenario in ContainmentScenario:
-                    observed = replace(
-                        watch_outcome(
-                            scenario,
-                            events=(event(),) if failed and scenario is ContainmentScenario.MERGE_EXISTING else (),
-                        ),
-                        run_id=run_id,
-                    )
-                    result = evaluate_scenario(
-                        replace(evidence(scenario), run_id=run_id, watch_outcome=observed)
-                    )
-                    store.write_watch_outcome(observed)
-                    identifiers.append(store.write_result(result).content_id)
-                return tuple(identifiers)
-
-            historical_ids = write_run(failed_run, "artifact:same", True)
-            current_ids = write_run(
-                current_run, "artifact:same", False, (failed_run,)
+            historical_ids = write_cohort_run(
+                store,
+                failed_run,
+                source,
+                steam,
+                "artifact:same",
+                failed_scenario=ContainmentScenario.MERGE_EXISTING,
             )
-            write_run(unrelated_run, "artifact:other", True)
+            current_ids = write_cohort_run(
+                store,
+                current_run,
+                source,
+                steam,
+                "artifact:same",
+                predecessors=(failed_run,),
+            )
+            write_cohort_run(
+                store,
+                unrelated_run,
+                source,
+                steam,
+                "artifact:other",
+                failed_scenario=ContainmentScenario.MERGE_EXISTING,
+            )
             decision = service.adjudicate_run(store.root, current_run)
             self.assertEqual(CapabilityVerdict.REJECTED, decision.verdict)
             self.assertEqual(current_ids, decision.scenario_result_ids)
@@ -744,6 +1528,174 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertEqual(CapabilityVerdict.INCOMPLETE, decision.verdict)
             self.assertTrue(any("ReplaceExisting" in reason for reason in decision.reasons))
 
+    def test_adjudicate_run_requires_intact_current_intent_request_binding(self):
+        for damage in ("intent", "request"):
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory(
+                prefix=f"modlab-current-{damage}-damage-"
+            ) as directory:
+                store = ContainmentStore(Path(directory))
+                run_id = "containment-run:" + "6" * 32
+                source = store.root / "source"
+                steam = store.root / "steam"
+                write_cohort_run(store, run_id, source, steam, "artifact:current")
+                target = (
+                    store.intent_path(run_id)
+                    if damage == "intent"
+                    else store.request_path(run_id)
+                )
+                target.write_bytes(b"damaged\n")
+
+                decision = service.adjudicate_run(store.root, run_id)
+
+                self.assertEqual(CapabilityVerdict.INCOMPLETE, decision.verdict)
+                self.assertTrue(
+                    any("current-cohort" in reason for reason in decision.reasons)
+                )
+
+    def test_adjudicate_run_requires_every_listed_predecessor_evidence(self):
+        damage_cases = ("intent", "request", "result", "outcome")
+        for damage in damage_cases:
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory(
+                prefix=f"modlab-predecessor-{damage}-"
+            ) as directory:
+                store = ContainmentStore(Path(directory))
+                prior = "containment-run:" + "7" * 32
+                current = "containment-run:" + "8" * 32
+                source = store.root / "source"
+                steam = store.root / "steam"
+                prior_ids = write_cohort_run(
+                    store, prior, source, steam, "artifact:cohort"
+                )
+                write_cohort_run(
+                    store,
+                    current,
+                    source,
+                    steam,
+                    "artifact:cohort",
+                    predecessors=(prior,),
+                )
+                damaged_scenario = ContainmentScenario.REPLACE_EXISTING
+                if damage == "intent":
+                    store.intent_path(prior).write_bytes(b"damaged\n")
+                    resolvable_ids = prior_ids
+                elif damage == "request":
+                    store.request_path(prior).write_bytes(b"damaged\n")
+                    resolvable_ids = prior_ids
+                elif damage == "result":
+                    store.result_path(prior, damaged_scenario).write_bytes(b"damaged\n")
+                    resolvable_ids = tuple(
+                        identifier
+                        for index, identifier in enumerate(prior_ids)
+                        if index != list(ContainmentScenario).index(damaged_scenario)
+                    )
+                else:
+                    (
+                        store.watch_path(prior, damaged_scenario) / "outcome.json"
+                    ).write_bytes(b"damaged\n")
+                    resolvable_ids = tuple(
+                        identifier
+                        for index, identifier in enumerate(prior_ids)
+                        if index != list(ContainmentScenario).index(damaged_scenario)
+                    )
+
+                decision = service.adjudicate_run(store.root, current)
+
+                self.assertEqual(CapabilityVerdict.INCOMPLETE, decision.verdict)
+                self.assertTrue(any(prior in reason for reason in decision.reasons))
+                self.assertTrue(
+                    all(
+                        any(identifier in reason for reason in decision.reasons)
+                        for identifier in resolvable_ids
+                    )
+                )
+
+    def test_adjudicate_run_supersedes_only_exact_consumed_prestart_retry(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-retry-cohort-") as directory:
+            store = ContainmentStore(Path(directory))
+            prior = "containment-run:" + "b" * 32
+            current = "containment-run:" + "c" * 32
+            scenario = ContainmentScenario.MERGE_EXISTING
+            source = store.root / "source"
+            steam = store.root / "steam"
+            artifact = "artifact:retry-cohort"
+            records = write_run_identity(
+                store,
+                prior,
+                source,
+                steam,
+                artifact,
+            )
+            record = records[list(ContainmentScenario).index(scenario)]
+            journal = store.create(
+                ScenarioJournal(
+                    1,
+                    prior,
+                    scenario,
+                    ScenarioState.ARMED,
+                    str(record.source_root),
+                    str(record.stage_root),
+                    str(record.archive_path),
+                    "Protected Existing",
+                    "Protected Existing",
+                    protected(),
+                    42,
+                    None,
+                    None,
+                )
+            )
+            observed = write_bound_watch_evidence(
+                store,
+                journal,
+                completion=WatchEvidenceCompletion.INCOMPLETE,
+            )
+            result = evaluate_scenario(
+                replace(
+                    evidence(scenario),
+                    run_id=prior,
+                    watch_outcome=observed,
+                    scenario_started=False,
+                    fresh_retry_eligible=True,
+                )
+            )
+            result_write = store.write_result(result)
+            recovery = ScenarioRecovery(
+                1,
+                prior,
+                scenario,
+                store.journal_id_for(journal),
+                result_write.content_id,
+                ScenarioCleanupStatus.SUCCEEDED,
+                True,
+                (),
+            )
+            recovery_write = store.write_recovery(recovery)
+            fingerprint = service._command_fingerprint(source, artifact, steam)
+            store.write_retry_authority(
+                recovery,
+                recovery_write.content_id,
+                fingerprint,
+            )
+            retry_binding = store.consume_retry_authority(
+                recovery,
+                recovery_write.content_id,
+                fingerprint,
+                current,
+            )
+            current_ids = write_cohort_run(
+                store,
+                current,
+                source,
+                steam,
+                artifact,
+                predecessors=(prior,),
+                retry_binding=retry_binding,
+            )
+
+            decision = service.adjudicate_run(store.root, current)
+
+            self.assertEqual(CapabilityVerdict.SUPPORTED, decision.verdict)
+            self.assertEqual(current_ids, decision.scenario_result_ids)
+
     def test_adjudicate_run_is_not_poisoned_by_later_same_command_failure(self):
         with tempfile.TemporaryDirectory(prefix="modlab-history-order-") as directory:
             store = ContainmentStore(Path(directory))
@@ -752,41 +1704,18 @@ class ContainmentServiceTests(unittest.TestCase):
             source = store.root / "source"
             steam = store.root / "steam"
             artifact = "artifact:ordered-history"
-            fingerprint = service._command_fingerprint(source, artifact, steam)
-
-            for run_id, failed in ((current_run, False), (later_run, True)):
-                store.write_request(
-                    run_id,
-                    {
-                        "runId": run_id,
-                        "sourceWorkspace": str(source.absolute()),
-                        "mo2ArtifactId": artifact,
-                        "steamRoot": str(steam.absolute()),
-                        "commandFingerprint": fingerprint,
-                        "predecessorRunIds": [],
-                        "retryOf": None,
-                    },
-                )
-                for scenario in ContainmentScenario:
-                    observed = replace(
-                        watch_outcome(
-                            scenario,
-                            events=(event(),)
-                            if failed
-                            and scenario is ContainmentScenario.MERGE_EXISTING
-                            else (),
-                        ),
-                        run_id=run_id,
-                    )
-                    result = evaluate_scenario(
-                        replace(
-                            evidence(scenario),
-                            run_id=run_id,
-                            watch_outcome=observed,
-                        )
-                    )
-                    store.write_watch_outcome(observed)
-                    store.write_result(result)
+            write_cohort_run(
+                store, current_run, source, steam, artifact
+            )
+            write_cohort_run(
+                store,
+                later_run,
+                source,
+                steam,
+                artifact,
+                predecessors=(current_run,),
+                failed_scenario=ContainmentScenario.MERGE_EXISTING,
+            )
 
             decision = service.adjudicate_run(store.root, current_run)
             self.assertEqual(CapabilityVerdict.SUPPORTED, decision.verdict)
@@ -835,6 +1764,56 @@ class ContainmentServiceTests(unittest.TestCase):
                 CapabilityVerdict.REJECTED,
                 service.adjudicate_run(store.root, run_id).verdict,
             )
+
+    def test_adjudicate_run_preserves_historical_failed_over_predecessor_damage(self):
+        for damage in ("request", "result", "outcome"):
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory(
+                prefix=f"modlab-historical-failed-{damage}-"
+            ) as directory:
+                store = ContainmentStore(Path(directory))
+                prior = "containment-run:" + "d" * 32
+                current = "containment-run:" + "e" * 32
+                source = store.root / "source"
+                steam = store.root / "steam"
+                artifact = "artifact:historical-failed-damage"
+                prior_ids = write_cohort_run(
+                    store,
+                    prior,
+                    source,
+                    steam,
+                    artifact,
+                    failed_scenario=ContainmentScenario.MERGE_EXISTING,
+                )
+                write_cohort_run(
+                    store,
+                    current,
+                    source,
+                    steam,
+                    artifact,
+                    predecessors=(prior,),
+                )
+                damaged = ContainmentScenario.REPLACE_EXISTING
+                if damage == "request":
+                    store.request_path(prior).write_bytes(b"damaged\n")
+                elif damage == "result":
+                    store.result_path(prior, damaged).write_bytes(b"damaged\n")
+                else:
+                    (store.watch_path(prior, damaged) / "outcome.json").write_bytes(
+                        b"damaged\n"
+                    )
+
+                decision = service.adjudicate_run(store.root, current)
+
+                failed_id = prior_ids[
+                    list(ContainmentScenario).index(
+                        ContainmentScenario.MERGE_EXISTING
+                    )
+                ]
+                self.assertEqual(CapabilityVerdict.REJECTED, decision.verdict)
+                self.assertTrue(
+                    any(failed_id in reason for reason in decision.reasons)
+                )
+
     def test_adoption_failures_and_exact_outputs_fail_closed(self):
         scenario = ContainmentScenario.FOMOD_DEPENDENCY
         cases = (
@@ -902,7 +1881,7 @@ class ContainmentRecoveryTests(unittest.TestCase):
             str(scenario_root / "stage"),
             str(scenario_root / "archive.zip"),
             "Protected Existing",
-            "ModLab Spike New",
+            "Protected Existing",
             protected(),
             17,
             None,
@@ -956,6 +1935,7 @@ class ContainmentRecoveryTests(unittest.TestCase):
             stage_integrity=IntegrityObservation.LOW,
             projection_count=1,
             projection_targets_verified=True,
+            projection_observation_complete=True,
             projection_payload_bytes_copied=0,
             blockers=(),
         )
@@ -988,6 +1968,7 @@ class ContainmentRecoveryTests(unittest.TestCase):
             stage_integrity=IntegrityObservation.UNKNOWN,
             projection_count=0,
             projection_targets_verified=False,
+            projection_observation_complete=False,
             projection_payload_bytes_copied=0,
             blockers=("worker-identity-uncertain",),
         )
@@ -1055,6 +2036,315 @@ class ContainmentRecoveryTests(unittest.TestCase):
             self.store.load_result(RUN_ID, started.scenario).outcome,
         )
 
+    def test_scenario_started_without_launch_evidence_is_permanently_refused(self):
+        started = self.store.transition(
+            self.journal,
+            ScenarioState.SCENARIO_STARTED,
+        )
+        record = fixture_record(self.root, started.scenario)
+        write_bound_watch_evidence(self.store, started, events=(event(),))
+        quarantine = self.store.quarantine_path(RUN_ID)
+        before = tuple(quarantine.iterdir())
+        with (
+            patch.object(service, "_load_fixture_record", return_value=record),
+            patch.object(
+                service._windows_watch,
+                "_exact_process_status",
+                return_value=("dead", None, "exact process is absent"),
+            ),
+            patch.object(
+                service,
+                "inspect_mo2_processes",
+                return_value=ProcessObservation(True, (), None),
+            ),
+            patch.object(service, "_capture_protected", return_value=protected()),
+            patch.object(
+                service,
+                "_perform_recovery_cleanup",
+                side_effect=AssertionError("stage cleanup must never begin"),
+            ) as cleanup,
+        ):
+            recovery = recover_scenario(self.root, RUN_ID, started.scenario)
+
+        self.assertEqual(ScenarioCleanupStatus.REFUSED, recovery.cleanup_status)
+        self.assertFalse(recovery.fresh_run_permitted)
+        self.assertIsNotNone(recovery.result_id)
+        self.assertIn("mo2-launch-proof-unavailable:missing", recovery.blockers)
+        self.assertEqual(before, tuple(quarantine.iterdir()))
+        cleanup.assert_not_called()
+        self.assertEqual(
+            ScenarioOutcome.FAILED,
+            self.store.load_result(RUN_ID, started.scenario).outcome,
+        )
+
+    def test_started_damaged_or_unbound_launch_proof_refuses_without_mutation(self):
+        for damage in ("damaged", "unbound"):
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory(
+                prefix=f"modlab-started-launch-{damage}-"
+            ) as directory:
+                root = Path(directory)
+                store = ContainmentStore(root)
+                record = fixture_record(root, ContainmentScenario.MERGE_EXISTING)
+                prepared = store.create(
+                    ScenarioJournal(
+                        1,
+                        RUN_ID,
+                        record.scenario,
+                        ScenarioState.PREPARED,
+                        str(record.source_root),
+                        str(record.stage_root),
+                        str(record.archive_path),
+                        "Protected Existing",
+                        "Protected Existing",
+                        protected(),
+                        None,
+                        None,
+                        None,
+                    )
+                )
+                armed = store.transition(
+                    prepared,
+                    ScenarioState.ARMED,
+                    monitor_pid=42,
+                )
+                started = store.transition(armed, ScenarioState.SCENARIO_STARTED)
+                journal = (
+                    store.transition(started, ScenarioState.LAUNCHED, mo2_pid=52)
+                    if damage == "unbound"
+                    else started
+                )
+                write_bound_watch_evidence(store, journal, events=(event(),))
+                if damage == "damaged":
+                    store.launch_path(RUN_ID, record.scenario).write_bytes(b"damaged\n")
+                else:
+                    store.write_launch_evidence(
+                        RUN_ID,
+                        record.scenario,
+                        {
+                            "schemaVersion": 1,
+                            "runId": RUN_ID,
+                            "scenario": record.scenario.value,
+                            "purpose": "stage-mo2-scenario",
+                            "pid": 51,
+                            "creationTime": 987654321,
+                            "executable": str(record.executable),
+                            "executableVersion": "2.5.2.0",
+                            "arguments": ["--profile", "ModLab - Lab"],
+                            "workingDirectory": str(record.stage_app),
+                            "integrity": IntegrityObservation.LOW.value,
+                        },
+                    )
+                quarantine = store.quarantine_path(RUN_ID)
+                before = tuple(quarantine.iterdir())
+                with (
+                    patch.object(service, "_load_fixture_record", return_value=record),
+                    patch.object(
+                        service._windows_watch,
+                        "_exact_process_status",
+                        return_value=("dead", None, "exact process is absent"),
+                    ),
+                    patch.object(
+                        service,
+                        "inspect_mo2_processes",
+                        return_value=ProcessObservation(True, (), None),
+                    ),
+                    patch.object(service, "_capture_protected", return_value=protected()),
+                    patch.object(
+                        service,
+                        "_perform_recovery_cleanup",
+                        side_effect=AssertionError("stage cleanup must never begin"),
+                    ) as cleanup,
+                ):
+                    recovery = recover_scenario(store.root, RUN_ID, record.scenario)
+
+                self.assertEqual(ScenarioCleanupStatus.REFUSED, recovery.cleanup_status)
+                self.assertIsNotNone(recovery.result_id)
+                self.assertEqual(before, tuple(quarantine.iterdir()))
+                cleanup.assert_not_called()
+
+    def test_prove_recovery_parses_exact_task4_bindings_and_rejects_mismatch(self):
+        record = fixture_record(self.root, self.journal.scenario)
+        observed = write_bound_watch_evidence(self.store, self.journal)
+        with (
+            patch.object(
+                service._windows_watch,
+                "_exact_process_status",
+                return_value=("dead", None, "exact process is absent"),
+            ),
+            patch.object(
+                service,
+                "inspect_mo2_processes",
+                return_value=ProcessObservation(True, (), None),
+            ),
+            patch.object(service, "_capture_protected", return_value=protected()),
+        ):
+            proved = service._prove_recovery(self.store, record, self.journal)
+            self.assertEqual((), proved.blockers)
+            self.assertEqual(observed, proved.watch_outcome)
+
+            request_path = self.store.watch_path(
+                RUN_ID, self.journal.scenario
+            ) / "request.json"
+            request = service.watch_request_from_bytes(request_path.read_bytes())
+            mismatched = WorkerLaunch(
+                1,
+                watch_request_sha256(request),
+                request.session_id,
+                request.run_id,
+                request.scenario,
+                (self.journal.monitor_pid or 42) + 1,
+                1002,
+            )
+            (request.evidence_root / LAUNCH_NAME).write_bytes(
+                worker_launch_to_bytes(mismatched, request)
+            )
+            refused = service._prove_recovery(self.store, record, self.journal)
+
+        self.assertIsNone(refused.watch_outcome)
+        self.assertTrue(
+            any("watch-proof-unavailable" in item for item in refused.blockers)
+        )
+
+    def test_recovery_process_access_uncertainty_refuses_without_cleanup(self):
+        record = fixture_record(self.root, self.journal.scenario)
+        write_bound_watch_evidence(self.store, self.journal)
+        before = tuple(self.store.quarantine_path(RUN_ID).iterdir())
+        with (
+            patch.object(service, "_load_fixture_record", return_value=record),
+            patch.object(
+                service._windows_watch,
+                "_exact_process_status",
+                return_value=("dead", None, "exact process is absent"),
+            ),
+            patch.object(
+                service,
+                "inspect_mo2_processes",
+                side_effect=OSError("access denied"),
+            ),
+            patch.object(service, "_capture_protected", return_value=protected()),
+            patch.object(
+                service,
+                "_perform_recovery_cleanup",
+                side_effect=AssertionError("cleanup mutation must not begin"),
+            ) as cleanup,
+        ):
+            recovery = recover_scenario(
+                self.store.root,
+                RUN_ID,
+                self.journal.scenario,
+            )
+
+        self.assertEqual(ScenarioCleanupStatus.REFUSED, recovery.cleanup_status)
+        self.assertIn("mo2-process-proof-unavailable:OSError", recovery.blockers)
+        self.assertEqual(before, tuple(self.store.quarantine_path(RUN_ID).iterdir()))
+        cleanup.assert_not_called()
+
+    def test_reprove_retry_absence_uses_durable_exact_bindings_after_restart(self):
+        old_run = "containment-run:" + "9" * 32
+        new_run = "containment-run:" + "a" * 32
+        scenario = ContainmentScenario.MERGE_EXISTING
+        source = self.root / "retry-source"
+        steam = self.root / "retry-steam"
+        artifact = "artifact:retry-proof"
+        records = write_run_identity(
+            self.store,
+            old_run,
+            source,
+            steam,
+            artifact,
+        )
+        record = records[list(ContainmentScenario).index(scenario)]
+        journal = self.store.create(
+            ScenarioJournal(
+                1,
+                old_run,
+                scenario,
+                ScenarioState.ARMED,
+                str(record.source_root),
+                str(record.stage_root),
+                str(record.archive_path),
+                "Protected Existing",
+                "Protected Existing",
+                protected(),
+                42,
+                None,
+                None,
+            )
+        )
+        observed = write_bound_watch_evidence(
+            self.store,
+            journal,
+            completion=WatchEvidenceCompletion.INCOMPLETE,
+        )
+        result = evaluate_scenario(
+            replace(
+                evidence(scenario),
+                run_id=old_run,
+                watch_outcome=observed,
+                scenario_started=False,
+                fresh_retry_eligible=True,
+            )
+        )
+        result_write = self.store.write_result(result)
+        recovery = ScenarioRecovery(
+            1,
+            old_run,
+            scenario,
+            self.store.journal_id_for(journal),
+            result_write.content_id,
+            ScenarioCleanupStatus.SUCCEEDED,
+            True,
+            (),
+        )
+        recovery_write = self.store.write_recovery(recovery)
+        fingerprint = service._command_fingerprint(source, artifact, steam)
+        self.store.write_retry_authority(
+            recovery,
+            recovery_write.content_id,
+            fingerprint,
+        )
+        binding = self.store.consume_retry_authority(
+            recovery,
+            recovery_write.content_id,
+            fingerprint,
+            new_run,
+        )
+
+        with (
+            patch.object(
+                service._windows_watch,
+                "_exact_process_status",
+                return_value=("dead", None, "exact process is absent"),
+            ),
+            patch.object(
+                service,
+                "inspect_mo2_processes",
+                return_value=ProcessObservation(True, (), None),
+            ),
+            patch.object(service, "_capture_protected", return_value=protected()),
+        ):
+            service._reprove_retry_absence(self.store, new_run, binding)
+
+            request_path = self.store.watch_path(old_run, scenario) / "request.json"
+            request = service.watch_request_from_bytes(request_path.read_bytes())
+            mismatched = WorkerLaunch(
+                1,
+                watch_request_sha256(request),
+                request.session_id,
+                request.run_id,
+                request.scenario,
+                99,
+                1002,
+            )
+            (request.evidence_root / LAUNCH_NAME).write_bytes(
+                worker_launch_to_bytes(mismatched, request)
+            )
+            with self.assertRaisesRegex(
+                service.ContainmentServiceError,
+                "absence is not exact",
+            ):
+                service._reprove_retry_absence(self.store, new_run, binding)
+
     def test_cleanup_after_result_publication_reuses_immutable_result(self):
         outcome = watch_outcome(
             self.journal.scenario,
@@ -1085,6 +2375,7 @@ class ContainmentRecoveryTests(unittest.TestCase):
             stage_integrity=IntegrityObservation.LOW,
             projection_count=1,
             projection_targets_verified=True,
+            projection_observation_complete=True,
             projection_payload_bytes_copied=0,
             blockers=(),
         )

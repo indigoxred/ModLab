@@ -87,7 +87,7 @@ def _unique_json(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 @contextmanager
-def _windows_run_mutex(identity: str):
+def _windows_run_mutex(identity: str, *, blocking: bool = False):
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR)
     kernel32.CreateMutexW.restype = wintypes.HANDLE
@@ -110,7 +110,7 @@ def _windows_run_mutex(identity: str):
     acquired = False
     primary_error: BaseException | None = None
     try:
-        result = kernel32.WaitForSingleObject(handle, 0)
+        result = kernel32.WaitForSingleObject(handle, 0xFFFFFFFF if blocking else 0)
         if result == 0x00000102:
             raise ContainmentStoreError("containment run is already being changed")
         if result not in {0x00000000, 0x00000080}:
@@ -307,6 +307,31 @@ class ContainmentStore:
     def load_request(self, run_id: str) -> dict[str, object]:
         with self._run_lock(run_id):
             return self._load_request_unlocked(run_id)
+
+    def write_intent(
+        self,
+        run_id: str,
+        document: dict[str, object],
+    ) -> ImmutableWrite[dict[str, object]]:
+        checked = _intent_document(document, run_id)
+        data = _canonical(checked)
+        target = self.intent_path(run_id)
+        with self._run_lock(run_id):
+            self._prepare_run(run_id)
+            existed = self._write_immutable(target, data, "run intent")
+            loaded = self._load_intent_unlocked(run_id)
+            if loaded != checked:
+                raise ContainmentStoreError("stored run intent differs after write")
+            return ImmutableWrite(
+                loaded,
+                "containment-intent-sha256:" + hashlib.sha256(data).hexdigest(),
+                target,
+                existed,
+            )
+
+    def load_intent(self, run_id: str) -> dict[str, object]:
+        with self._run_lock(run_id):
+            return self._load_intent_unlocked(run_id)
 
     def write_launch_evidence(
         self,
@@ -594,11 +619,44 @@ class ContainmentStore:
             rows.append("containment-run:" + entry.name)
         return tuple(sorted(rows))
 
+    @contextmanager
+    def command_lock(self, command_fingerprint: str):
+        if (
+            type(command_fingerprint) is not str
+            or re.fullmatch(
+                r"containment-command-sha256:[0-9a-f]{64}",
+                command_fingerprint,
+            )
+            is None
+        ):
+            raise ContainmentStoreError("command fingerprint is malformed")
+        identity = hashlib.sha256(
+            (
+                str(self.root).casefold()
+                + "\0prepare\0"
+                + command_fingerprint
+            ).encode("utf-8")
+        ).hexdigest()
+        if os.name == "nt":
+            with _windows_run_mutex(identity, blocking=True):
+                yield
+            return
+        with _PROCESS_LOCKS_GUARD:
+            lock = _PROCESS_LOCKS.setdefault(identity, threading.Lock())
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+
     def run_path(self, run_id: str) -> Path:
         return self.root / self._run_hex(run_id)
 
     def request_path(self, run_id: str) -> Path:
         return self.run_path(run_id) / "request.json"
+
+    def intent_path(self, run_id: str) -> Path:
+        return self.run_path(run_id) / "intent.json"
 
     def scenario_path(self, run_id: str, scenario: ContainmentScenario) -> Path:
         if not isinstance(scenario, ContainmentScenario):
@@ -668,6 +726,19 @@ class ContainmentStore:
         if _canonical(value) != data:
             raise ContainmentStoreError("request bytes are not canonical")
         return value
+
+    def _load_intent_unlocked(self, run_id: str) -> dict[str, object]:
+        data = self._read(self.intent_path(run_id), "run intent")
+        try:
+            document = json.loads(
+                data.decode("utf-8"), object_pairs_hook=_unique_json
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ContainmentStoreError(f"run intent is malformed: {error}") from error
+        checked = _intent_document(document, run_id)
+        if _canonical(checked) != data:
+            raise ContainmentStoreError("stored run intent bytes are not canonical")
+        return checked
 
     def _load_launch_evidence_unlocked(
         self,
@@ -1021,6 +1092,77 @@ class ContainmentStore:
             return converter(data)
         except ContainmentFormatError as error:
             raise ContainmentStoreError(f"stored {label} is invalid: {error}") from error
+
+
+def _intent_document(value: object, run_id: str) -> dict[str, object]:
+    fields = {
+        "schemaVersion",
+        "runId",
+        "mechanism",
+        "sourceWorkspace",
+        "mo2ArtifactId",
+        "steamRoot",
+        "commandFingerprint",
+        "predecessorRunIds",
+        "retryOf",
+    }
+    if type(value) is not dict or set(value) != fields:
+        raise ContainmentStoreError("run intent fields are not exact")
+    predecessors = value["predecessorRunIds"]
+    if (
+        value["schemaVersion"] != 1
+        or value["runId"] != run_id
+        or value["mechanism"] != "isolated-low-integrity-junction-projection-v1"
+        or type(value["sourceWorkspace"]) is not str
+        or not Path(value["sourceWorkspace"]).is_absolute()
+        or type(value["mo2ArtifactId"]) is not str
+        or not value["mo2ArtifactId"]
+        or type(value["steamRoot"]) is not str
+        or not Path(value["steamRoot"]).is_absolute()
+        or type(value["commandFingerprint"]) is not str
+        or re.fullmatch(
+            r"containment-command-sha256:[0-9a-f]{64}",
+            value["commandFingerprint"],
+        )
+        is None
+        or type(predecessors) is not list
+        or any(type(item) is not str or _RUN.fullmatch(item) is None for item in predecessors)
+        or tuple(predecessors) != tuple(sorted(set(predecessors)))
+        or run_id in predecessors
+        or not _retry_reference(value["retryOf"], value["commandFingerprint"])
+    ):
+        raise ContainmentStoreError("run intent values are malformed")
+    return dict(value)
+
+
+def _retry_reference(value: object, command_fingerprint: object) -> bool:
+    if value is None:
+        return True
+    fields = {
+        "runId", "scenario", "recoveryId", "authorityId", "commandFingerprint"
+    }
+    if type(value) is not dict or set(value) != fields:
+        return False
+    try:
+        scenario = ContainmentScenario(value["scenario"])
+    except (TypeError, ValueError):
+        return False
+    return (
+        scenario.value == value["scenario"]
+        and type(value["runId"]) is str
+        and _RUN.fullmatch(value["runId"]) is not None
+        and value["commandFingerprint"] == command_fingerprint
+        and type(value["recoveryId"]) is str
+        and re.fullmatch(
+            r"containment-recovery-sha256:[0-9a-f]{64}", value["recoveryId"]
+        )
+        is not None
+        and type(value["authorityId"]) is str
+        and re.fullmatch(
+            r"containment-retry-sha256:[0-9a-f]{64}", value["authorityId"]
+        )
+        is not None
+    )
 
 
 def _retry_basis(

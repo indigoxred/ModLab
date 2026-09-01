@@ -165,8 +165,12 @@ def valid_scenario_result(
         watcher_events=watch_outcome.events,
         projection_count=1,
         projection_targets_verified=True,
+        projection_observation_complete=True,
         projection_payload_bytes_copied=0,
         production_backup_names=(),
+        production_observation_complete=True,
+        staging_observation_complete=True,
+        output_observation_complete=True,
         source_restored_after_quarantine=True,
         reasons=(),
     )
