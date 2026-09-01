@@ -1,12 +1,13 @@
 import ctypes
 from ctypes import wintypes
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -34,6 +35,107 @@ from modlab.validation.windows_watch import (
     watch_receipt_from_files,
     watch_root,
 )
+
+
+@dataclass(frozen=True)
+class CancelDrainProof:
+    every_completion_observed: bool
+    storage_reused_before_completion: bool
+
+
+def run_cancel_completion_fixture(completion: str) -> tuple[CancelDrainProof, tuple[str, ...]]:
+    root = mock.Mock(root_kind="SourceMods")
+    journal = mock.Mock()
+    errors: list[str] = []
+    state = windows_watch._WatchState(
+        root=root,
+        logical_root_kinds=("SourceMods",),
+        directory_path=Path(r"C:\watched"),
+        label="cancel-fixture",
+        directory_handle=101,
+        expected_volume_serial=1,
+        expected_file_id=2,
+        event_handle=102,
+        recursive=True,
+        notify_filter=windows_watch._NOTIFY_FILTER,
+        membership_name=None,
+        journal=journal,
+        stopping=threading.Event(),
+        errors=errors,
+        errors_lock=threading.Lock(),
+        buffer=ctypes.create_string_buffer(64),
+        overlapped=windows_watch._OVERLAPPED(),
+        armed=threading.Event(),
+        pending_lock=threading.Lock(),
+        pending=True,
+    )
+    completion_observed = False
+    storage_reused_before_completion = False
+
+    def cancel_io(*_args: object) -> bool:
+        if completion == "cancel-not-found-after-completion":
+            ctypes.set_last_error(windows_watch._ERROR_NOT_FOUND)
+            return False
+        return True
+
+    def get_result(
+        _handle: object,
+        _overlapped: object,
+        transferred_pointer: object,
+        _wait: object,
+    ) -> bool:
+        nonlocal completion_observed
+        completion_observed = True
+        if completion in {"operation-aborted", "wait-failed-then-aborted"}:
+            ctypes.set_last_error(windows_watch._ERROR_OPERATION_ABORTED)
+            return False
+        if completion == "unexpected-error":
+            ctypes.set_last_error(123)
+            return False
+        ctypes.cast(
+            transferred_pointer,
+            ctypes.POINTER(wintypes.DWORD),
+        ).contents.value = 12
+        return True
+
+    def parse_final_data(_buffer: object, _byte_count: int):
+        nonlocal storage_reused_before_completion
+        if not completion_observed:
+            storage_reused_before_completion = True
+        return ((1, "final.txt"),)
+
+    with mock.patch.object(
+        windows_watch._kernel32,
+        "CancelIoEx",
+        side_effect=cancel_io,
+    ), mock.patch.object(
+        windows_watch._kernel32,
+        "WaitForSingleObject",
+        return_value=(
+            windows_watch._WAIT_FAILED
+            if completion == "wait-failed-then-aborted"
+            else windows_watch._WAIT_OBJECT_0
+        ),
+    ), mock.patch.object(
+        windows_watch._kernel32,
+        "GetOverlappedResult",
+        side_effect=get_result,
+    ), mock.patch.object(
+        windows_watch,
+        "_parse_notification_buffer",
+        side_effect=parse_final_data,
+    ):
+        windows_watch._cancel_and_drain(state)
+
+    if state.pending or not completion_observed:
+        storage_reused_before_completion = True
+    return (
+        CancelDrainProof(
+            every_completion_observed=completion_observed and not state.pending,
+            storage_reused_before_completion=storage_reused_before_completion,
+        ),
+        tuple(errors),
+    )
 
 
 def _canonical(value: object) -> bytes:
@@ -2617,7 +2719,16 @@ class MutationWatchTests(unittest.TestCase):
         case_root.mkdir()
         _, request_path = self._direct_worker_request(case_root, self._request().roots)
         original_close = windows_watch._close_handle
+        original_process_creation_time = windows_watch._process_handle_creation_time
         retained_handles: list[int] = []
+        identity_inspections = 0
+
+        def fail_worker_identity_inspection(handle: int, pid: int) -> int:
+            nonlocal identity_inspections
+            identity_inspections += 1
+            if identity_inspections == 2:
+                raise WatchProtocolError("injected worker identity inspection")
+            return original_process_creation_time(handle, pid)
 
         def fail_identity_close(handle: int, label: str) -> str | None:
             if label == f"worker process {os.getpid()}":
@@ -2629,7 +2740,7 @@ class MutationWatchTests(unittest.TestCase):
             with mock.patch.object(
                 windows_watch,
                 "_process_handle_creation_time",
-                side_effect=WatchProtocolError("injected worker identity inspection"),
+                side_effect=fail_worker_identity_inspection,
             ), mock.patch.object(
                 windows_watch,
                 "_close_handle",
@@ -2647,6 +2758,159 @@ class MutationWatchTests(unittest.TestCase):
         finally:
             for handle in set(retained_handles):
                 original_close(handle, "test worker identity unwind cleanup")
+
+    def test_worker_self_cancels_after_exact_controller_death(self):
+        controller_script = "\n".join(
+            (
+                "from dataclasses import replace",
+                "import os",
+                "from pathlib import Path",
+                "import sys",
+                "import time",
+                "from modlab.validation.mo2_containment_model import ContainmentScenario",
+                "from modlab.validation.windows_watch import ROOT_KINDS, WatchRequest, start_watch, watch_root",
+                "evidence, watched, barrier = map(Path, sys.argv[1:4])",
+                "root = watch_root('SourceMods', watched)",
+                "request = WatchRequest(",
+                "    request_id='watch-request:' + '6' * 64,",
+                "    session_id='watch-session:' + '7' * 64,",
+                "    run_id='containment-run:0123456789abcdef0123456789abcdef',",
+                "    scenario=ContainmentScenario.MERGE_EXISTING,",
+                "    evidence_root=evidence,",
+                "    stop_token_path=evidence / 'stop.token',",
+                "    roots=tuple(replace(root, root_kind=kind) for kind in ROOT_KINDS),",
+                ")",
+                "worker_pid = start_watch(request)",
+                "barrier.write_text(str(worker_pid), encoding='ascii')",
+                "while True: time.sleep(1)",
+            )
+        )
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.GetExitCodeProcess.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+
+        def run_case(case_name: str, *, terminal_collision: bool):
+            case_root = self.root / case_name
+            evidence = case_root / "evidence"
+            watched = case_root / "watched"
+            barrier = case_root / "controller-ready.txt"
+            evidence.mkdir(parents=True)
+            watched.mkdir()
+            controller = subprocess.Popen(
+                (
+                    sys.executable,
+                    "-B",
+                    "-c",
+                    controller_script,
+                    str(evidence),
+                    str(watched),
+                    str(barrier),
+                ),
+                cwd=Path(__file__).resolve().parents[1],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            worker_handle = 0
+            worker_pid = 0
+            sentinel = b'{"sentinel":"immutable"}\n'
+            try:
+                deadline = time.monotonic() + 20.0
+                while not barrier.exists() and time.monotonic() < deadline:
+                    if controller.poll() is not None:
+                        self.fail(f"controller exited before ready: {controller.returncode}")
+                    time.sleep(0.02)
+                self.assertTrue(barrier.is_file(), "controller did not publish ready barrier")
+                worker_pid = int(barrier.read_text(encoding="ascii"))
+                worker_handle, _ = windows_watch._open_process_identity(worker_pid)
+                if terminal_collision:
+                    (evidence / "terminal.json").write_bytes(sentinel)
+
+                controller.terminate()
+                controller.wait(timeout=10)
+                self.assertEqual(
+                    windows_watch._WAIT_OBJECT_0,
+                    kernel32.WaitForSingleObject(worker_handle, 15_000),
+                    "worker remained alive after its exact controller died",
+                )
+                exit_code = wintypes.DWORD()
+                self.assertTrue(kernel32.GetExitCodeProcess(worker_handle, ctypes.byref(exit_code)))
+                return evidence, sentinel, exit_code.value
+            finally:
+                if controller.poll() is None:
+                    controller.terminate()
+                    controller.wait(timeout=10)
+                if worker_handle:
+                    if kernel32.WaitForSingleObject(worker_handle, 0) != windows_watch._WAIT_OBJECT_0:
+                        terminate_handle = kernel32.OpenProcess(
+                            0x0001 | windows_watch._SYNCHRONIZE,
+                            False,
+                            worker_pid,
+                        )
+                        if terminate_handle:
+                            try:
+                                kernel32.TerminateProcess(terminate_handle, 97)
+                                kernel32.WaitForSingleObject(terminate_handle, 10_000)
+                            finally:
+                                kernel32.CloseHandle(terminate_handle)
+                    self.assertIsNone(
+                        windows_watch._close_handle(worker_handle, "controller-loss test worker")
+                    )
+
+        evidence, _, exit_code = run_case(
+            "controller-loss-terminal",
+            terminal_collision=False,
+        )
+        terminal = json.loads((evidence / "terminal.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, exit_code)
+        self.assertFalse(terminal["complete"])
+        self.assertIn("controller-session-lost", terminal["error"])
+
+        collision_evidence, sentinel, collision_exit = run_case(
+            "controller-loss-collision",
+            terminal_collision=True,
+        )
+        self.assertEqual(2, collision_exit)
+        self.assertEqual(sentinel, (collision_evidence / "terminal.json").read_bytes())
+        loss = json.loads(
+            (collision_evidence / "controller-loss.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("controller-session-lost", loss["reasonCode"])
+
+    def test_cancel_io_completion_races_are_drained(self):
+        for completion in (
+            "operation-aborted",
+            "normal-final-event",
+            "cancel-not-found-after-completion",
+        ):
+            with self.subTest(completion=completion):
+                proof, errors = run_cancel_completion_fixture(completion)
+                self.assertTrue(proof.every_completion_observed)
+                self.assertFalse(proof.storage_reused_before_completion)
+                self.assertEqual((), errors)
+
+        proof, errors = run_cancel_completion_fixture("unexpected-error")
+        self.assertTrue(proof.every_completion_observed)
+        self.assertFalse(proof.storage_reused_before_completion)
+        self.assertTrue(errors)
+        self.assertIn("WinError 123", errors[0])
+
+        proof, errors = run_cancel_completion_fixture("wait-failed-then-aborted")
+        self.assertTrue(proof.every_completion_observed)
+        self.assertFalse(proof.storage_reused_before_completion)
+        self.assertTrue(errors)
+        self.assertIn("watch completion wait failed", errors[0])
 
     def test_worker_death_without_terminal_record_is_incomplete(self):
         request_path, worker_pid = self._start()
@@ -2715,6 +2979,21 @@ class MutationWatchTests(unittest.TestCase):
         process_handle, worker_creation_time = windows_watch._open_process_identity(os.getpid())
         self.assertIsNone(windows_watch._close_handle(process_handle, "test worker process"))
         request_sha256 = hashlib.sha256(request_path.read_bytes()).hexdigest()
+        controller_pid, controller_creation_time = (
+            windows_watch._current_controller_identity()
+        )
+        claim = windows_watch.ControllerClaim(
+            schema_version=1,
+            request_sha256=request_sha256,
+            session_id=request.session_id,
+            run_id=request.run_id,
+            scenario=request.scenario,
+            controller_pid=controller_pid,
+            controller_creation_time=controller_creation_time,
+        )
+        (case_root / "controller-claim.json").write_bytes(
+            windows_watch.controller_claim_to_bytes(claim, request)
+        )
         (case_root / "owner.json").write_bytes(
             _canonical(
                 {
@@ -2967,6 +3246,24 @@ class MutationWatchTests(unittest.TestCase):
         request_bytes, request_sha256 = windows_watch._request_bytes_and_sha256(request)
         request_path = case_root / "request.json"
         request_path.write_bytes(request_bytes)
+        controller_pid, controller_creation_time = (
+            windows_watch._current_controller_identity()
+        )
+        claim = windows_watch.ControllerClaim(
+            schema_version=1,
+            request_sha256=request_sha256,
+            session_id=request.session_id,
+            run_id=request.run_id,
+            scenario=request.scenario,
+            controller_pid=controller_pid,
+            controller_creation_time=controller_creation_time,
+        )
+        claim_bytes = windows_watch.controller_claim_to_bytes(claim, request)
+        windows_watch.publish_new_verified(
+            case_root / "controller-claim.json",
+            claim_bytes,
+            lambda data: windows_watch.controller_claim_from_bytes(data, request),
+        )
         process_handle, creation_time = windows_watch._open_process_identity(os.getpid())
         self.assertIsNone(windows_watch._close_handle(process_handle, "direct worker process"))
         (case_root / "owner.json").write_bytes(

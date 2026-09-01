@@ -25,16 +25,26 @@ from modlab.validation.mo2_containment_model import (
     WatcherEvent,
 )
 from modlab.validation.windows_watch_protocol import (
+    CLAIM_NAME as _CLAIM_NAME,
+    CONTROLLER_LOSS_NAME as _CONTROLLER_LOSS_NAME,
     EVENTS_NAME as _EVENTS_NAME,
     READY_NAME as _READY_NAME,
     REQUEST_NAME as _REQUEST_NAME,
     ROOT_KINDS,
     STOP_NAME as _STOP_NAME,
     TERMINAL_NAME as _TERMINAL_NAME,
+    ControllerClaim,
+    ControllerLoss,
+    WorkerLaunch,
     WatchProtocolError,
     WatchReceipt,
     WatchRequest,
     WatchRoot,
+    controller_claim_from_bytes,
+    controller_claim_to_bytes,
+    controller_loss_from_bytes,
+    controller_loss_to_bytes,
+    publish_new_verified,
     watch_request_from_bytes,
     watch_request_sha256,
     watch_request_to_bytes,
@@ -95,6 +105,7 @@ _ERROR_NOTIFY_ENUM_DIR = 1022
 _WAIT_OBJECT_0 = 0
 _WAIT_ABANDONED = 0x00000080
 _WAIT_TIMEOUT = 258
+_WAIT_FAILED = 0xFFFFFFFF
 _INFINITE = 0xFFFFFFFF
 _FILE_BEGIN = 0
 _SYNCHRONIZE = 0x00100000
@@ -331,6 +342,9 @@ class _WatchState:
         with self.errors_lock:
             self.errors.append(message)
         self.stopping.set()
+
+    def consume_completion_after_stop(self) -> None:
+        _consume_watch_completion(self, after_stop=True)
 
 
 @dataclass(frozen=True)
@@ -1511,11 +1525,13 @@ def start_watch(request: WatchRequest) -> int:
     ready_path = normalized.evidence_root / _READY_NAME
     events_path = normalized.evidence_root / _EVENTS_NAME
     terminal_path = normalized.evidence_root / _TERMINAL_NAME
+    claim_path = normalized.evidence_root / _CLAIM_NAME
     owner_path = normalized.evidence_root / _OWNER_NAME
     if owner_path.exists():
         raise WatchProtocolError("atomic owner claim already exists")
     for path in (
         request_path,
+        claim_path,
         ready_path,
         events_path,
         terminal_path,
@@ -1524,6 +1540,20 @@ def start_watch(request: WatchRequest) -> int:
         if path.exists():
             raise WatchProtocolError(f"watch protocol path already exists: {path.name}")
     request_bytes, request_sha256 = _request_bytes_and_sha256(normalized)
+    controller_pid, controller_creation_time = _current_controller_identity()
+    controller_claim = ControllerClaim(
+        schema_version=_SCHEMA_VERSION,
+        request_sha256=request_sha256,
+        session_id=normalized.session_id,
+        run_id=normalized.run_id,
+        scenario=normalized.scenario,
+        controller_pid=controller_pid,
+        controller_creation_time=controller_creation_time,
+    )
+    controller_claim_bytes = controller_claim_to_bytes(
+        controller_claim,
+        normalized,
+    )
     owner_token = secrets.token_hex(32)
     try:
         _write_new(
@@ -1544,6 +1574,11 @@ def start_watch(request: WatchRequest) -> int:
         raise WatchProtocolError("atomic owner claim already exists") from error
     try:
         _write_new(request_path, request_bytes)
+        publish_new_verified(
+            claim_path,
+            controller_claim_bytes,
+            lambda data: controller_claim_from_bytes(data, normalized),
+        )
         resolved_request_path = request_path.resolve(strict=True)
     except (OSError, WatchProtocolError) as error:
         message = _publish_launch_failure(
@@ -1864,6 +1899,83 @@ def _validate_relative_path(value: str) -> None:
             raise WatchProtocolError("event relative path is unsafe")
 
 
+def _process_notification_completion(state: _WatchState, transferred: int) -> None:
+    if transferred == 0:
+        state.fail(f"watch overflow: ERROR_NOTIFY_ENUM_DIR ({state.root.root_kind})")
+        return
+    try:
+        records = _parse_notification_buffer(state.buffer, transferred)
+        if state.membership_name is not None:
+            if any(
+                relative_path.casefold() == state.membership_name.casefold()
+                for _, relative_path in records
+            ):
+                state.fail(
+                    f"root membership changed during watch: {state.root.root_kind}"
+                )
+        else:
+            state.journal.append(state.logical_root_kinds, records)
+    except (OSError, WatchProtocolError) as error:
+        state.fail(f"malformed watch completion for {state.root.root_kind}: {error}")
+
+
+def _consume_watch_completion(
+    state: _WatchState,
+    *,
+    after_stop: bool,
+    wait: bool = False,
+) -> None:
+    """Consume one signalled OVERLAPPED result and only then release its storage."""
+    transferred = wintypes.DWORD()
+    completed = _kernel32.GetOverlappedResult(
+        state.directory_handle,
+        ctypes.byref(state.overlapped),
+        ctypes.byref(transferred),
+        wait,
+    )
+    if not completed:
+        code = ctypes.get_last_error()
+        if code != _ERROR_OPERATION_ABORTED or not (
+            after_stop or state.stopping.is_set()
+        ):
+            state.fail(_completion_error(state.root.root_kind, code))
+        state.pending = False
+        return
+    _process_notification_completion(state, transferred.value)
+    state.pending = False
+
+
+def _cancel_and_drain(state: _WatchState) -> None:
+    """Request cancellation and retain ownership until its completion is observed."""
+    with state.pending_lock:
+        if not state.pending:
+            return
+        cancelled = _kernel32.CancelIoEx(
+            state.directory_handle,
+            ctypes.byref(state.overlapped),
+        )
+        if not cancelled:
+            code = ctypes.get_last_error()
+            if code != _ERROR_NOT_FOUND:
+                state.fail(
+                    f"watch cancellation failed for {state.root.root_kind}: "
+                    f"WinError {code} ({ctypes.FormatError(code)})"
+                )
+        wait_result = _kernel32.WaitForSingleObject(state.event_handle, _INFINITE)
+        if wait_result != _WAIT_OBJECT_0:
+            state.fail(
+                f"watch completion wait failed for {state.root.root_kind}: "
+                f"{wait_result}"
+            )
+            _consume_watch_completion(
+                state,
+                after_stop=True,
+                wait=True,
+            )
+            return
+        state.consume_completion_after_stop()
+
+
 def _watch_thread(state: _WatchState) -> None:
     while not state.stopping.is_set():
         if not _kernel32.ResetEvent(state.event_handle):
@@ -1893,44 +2005,12 @@ def _watch_thread(state: _WatchState) -> None:
             state.armed.set()
         wait_result = _kernel32.WaitForSingleObject(state.event_handle, _INFINITE)
         if wait_result != _WAIT_OBJECT_0:
-            with state.pending_lock:
-                state.pending = False
             state.fail(f"watch completion wait failed for {state.root.root_kind}: {wait_result}")
             return
-        transferred = wintypes.DWORD()
-        completed = _kernel32.GetOverlappedResult(
-            state.directory_handle,
-            ctypes.byref(state.overlapped),
-            ctypes.byref(transferred),
-            False,
-        )
         with state.pending_lock:
-            state.pending = False
-        if not completed:
-            code = ctypes.get_last_error()
-            if code == _ERROR_OPERATION_ABORTED and state.stopping.is_set():
+            if not state.pending:
                 return
-            state.fail(_completion_error(state.root.root_kind, code))
-            return
-        if transferred.value == 0:
-            state.fail(f"watch overflow: ERROR_NOTIFY_ENUM_DIR ({state.root.root_kind})")
-            return
-        try:
-            records = _parse_notification_buffer(state.buffer, transferred.value)
-            if state.membership_name is not None:
-                if any(
-                    relative_path.casefold() == state.membership_name.casefold()
-                    for _, relative_path in records
-                ):
-                    state.fail(
-                        f"root membership changed during watch: {state.root.root_kind}"
-                    )
-                    return
-            else:
-                state.journal.append(state.logical_root_kinds, records)
-        except (OSError, WatchProtocolError) as error:
-            state.fail(f"malformed watch completion for {state.root.root_kind}: {error}")
-            return
+            _consume_watch_completion(state, after_stop=False)
 
 
 def _completion_error(root_kind: str, code: int) -> str:
@@ -2056,14 +2136,46 @@ def _arm_directory_state(
 
 
 def run_watch_worker(request_path: Path) -> int:
-    """Run the confined worker protocol for one persisted request."""
+    """Run one fail-closed worker: 0 complete, 1 incomplete, 2 untrustworthy."""
     _require_windows()
-    request = _load_request_path(request_path)
-    _, request_sha256 = _request_bytes_and_sha256(request)
+    try:
+        request = _load_request_path(request_path)
+        _, request_sha256 = _request_bytes_and_sha256(request)
+        claim = controller_claim_from_bytes(
+            (request.evidence_root / _CLAIM_NAME).read_bytes(),
+            request,
+        )
+    except (OSError, WatchProtocolError):
+        return 2
     ready_path = request.evidence_root / _READY_NAME
     events_path = request.evidence_root / _EVENTS_NAME
     terminal_path = request.evidence_root / _TERMINAL_NAME
+    controller_loss_path = request.evidence_root / _CONTROLLER_LOSS_NAME
     worker_pid = os.getpid()
+    controller_handle = 0
+    controller_handle_label = f"launching controller process {claim.controller_pid}"
+    controller_open_error: str | None = None
+    retained_controller_handle = False
+    try:
+        controller_handle, observed_controller_creation = _open_process_identity(
+            claim.controller_pid
+        )
+        if observed_controller_creation != claim.controller_creation_time:
+            controller_open_error = "controller process identity mismatch"
+    except _HandleOwnershipError as error:
+        controller_handle = error.handle
+        controller_handle_label = error.label
+        retained_controller_handle = True
+        controller_open_error = f"controller identity acquisition failed: {error}"
+    except (OSError, WatchProtocolError) as error:
+        controller_open_error = f"controller identity acquisition failed: {error}"
+    if controller_open_error == "controller process identity mismatch" and controller_handle:
+        close_error = _close_handle(controller_handle, controller_handle_label)
+        if close_error is None:
+            controller_handle = 0
+        else:
+            retained_controller_handle = True
+            controller_open_error = f"{controller_open_error}; {close_error}"
     try:
         worker_handle, worker_creation_time = _open_process_identity(worker_pid)
     except _HandleOwnershipError as identity_error:
@@ -2104,6 +2216,13 @@ def run_watch_worker(request_path: Path) -> int:
         time.sleep(0.01)
     errors: list[str] = []
     retained_worker_handles: list[tuple[int, str]] = []
+    if controller_open_error is not None:
+        errors.append(controller_open_error)
+    if retained_controller_handle and controller_handle:
+        retained_worker_handles.append(
+            (controller_handle, controller_handle_label)
+        )
+        controller_handle = 0
     if worker_close_error is not None:
         errors.append(worker_close_error)
         retained_worker_handles.append(
@@ -2259,6 +2378,19 @@ def run_watch_worker(request_path: Path) -> int:
             if request.stop_token_path.exists():
                 stopping.set()
                 break
+            if controller_handle:
+                controller_wait = _kernel32.WaitForSingleObject(
+                    controller_handle,
+                    0,
+                )
+                if controller_wait == _WAIT_OBJECT_0:
+                    errors.append("controller-session-lost")
+                    stopping.set()
+                    break
+                if controller_wait == _WAIT_FAILED:
+                    errors.append("controller-liveness-wait-failed")
+                    stopping.set()
+                    break
             time.sleep(0.02)
     except _HandleOwnershipError as error:
         errors.append(str(error))
@@ -2270,16 +2402,7 @@ def run_watch_worker(request_path: Path) -> int:
     finally:
         stopping.set()
         for state in states:
-            with state.pending_lock:
-                if state.pending and not _kernel32.CancelIoEx(
-                    state.directory_handle,
-                    ctypes.byref(state.overlapped),
-                ):
-                    code = ctypes.get_last_error()
-                    if code != _ERROR_NOT_FOUND:
-                        errors.append(
-                            f"CancelIoEx failed for {state.label}: WinError {code}"
-                        )
+            _cancel_and_drain(state)
         for state in states:
             if state.thread is not None and state.started:
                 state.thread.join()
@@ -2325,6 +2448,25 @@ def run_watch_worker(request_path: Path) -> int:
             if close_error:
                 errors.append(close_error)
                 failed_closes += 1
+        if controller_handle:
+            controller_wait = _kernel32.WaitForSingleObject(controller_handle, 0)
+            if (
+                controller_wait == _WAIT_OBJECT_0
+                and "controller-session-lost" not in errors
+            ):
+                errors.append("controller-session-lost")
+            elif (
+                controller_wait == _WAIT_FAILED
+                and "controller-liveness-wait-failed" not in errors
+            ):
+                errors.append("controller-liveness-wait-failed")
+            close_error = _close_handle(
+                controller_handle,
+                controller_handle_label,
+            )
+            if close_error:
+                errors.append(close_error)
+                failed_closes += 1
         event_digest = journal_evidence.sha256
         complete = ready and not errors and failed_closes == 0 and root_identities_unchanged
         terminal = _terminal_document(
@@ -2344,6 +2486,47 @@ def run_watch_worker(request_path: Path) -> int:
         try:
             _write_new(terminal_path, _canonical_bytes(terminal))
         except (FileExistsError, OSError):
+            if "controller-session-lost" in errors:
+                launch = WorkerLaunch(
+                    schema_version=_SCHEMA_VERSION,
+                    request_sha256=request_sha256,
+                    session_id=request.session_id,
+                    run_id=request.run_id,
+                    scenario=request.scenario,
+                    worker_pid=worker_pid,
+                    worker_creation_time=worker_creation_time,
+                )
+                loss = ControllerLoss(
+                    schema_version=_SCHEMA_VERSION,
+                    request_sha256=request_sha256,
+                    session_id=request.session_id,
+                    run_id=request.run_id,
+                    scenario=request.scenario,
+                    controller_pid=claim.controller_pid,
+                    controller_creation_time=claim.controller_creation_time,
+                    worker_pid=worker_pid,
+                    worker_creation_time=worker_creation_time,
+                    reason_code="controller-session-lost",
+                )
+                loss_bytes = controller_loss_to_bytes(
+                    loss,
+                    request,
+                    claim,
+                    launch,
+                )
+                try:
+                    publish_new_verified(
+                        controller_loss_path,
+                        loss_bytes,
+                        lambda data: controller_loss_from_bytes(
+                            data,
+                            request,
+                            claim,
+                            launch,
+                        ),
+                    )
+                except (FileExistsError, OSError, WatchProtocolError):
+                    pass
             return 2
     return 0 if complete else 1
 
