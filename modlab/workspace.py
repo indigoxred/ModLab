@@ -28,6 +28,7 @@ _DIRECTORIES = (
     "runtime/jobs",
     "runtime/jobs/mo2-bootstrap/plans",
     "runtime/transactions",
+    "runtime/validation/mo2-containment",
 )
 
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
@@ -68,6 +69,7 @@ class WorkspaceLayout:
     mo2_bootstrap_jobs: Path
     mo2_bootstrap_plans: Path
     mo2_bootstrap_receipts: Path
+    mo2_containment_validation: Path
 
 
 def default_workspace_root() -> Path:
@@ -109,6 +111,7 @@ def workspace_layout(root: Path) -> WorkspaceLayout:
         mo2_bootstrap_jobs=mo2_bootstrap_jobs,
         mo2_bootstrap_plans=mo2_bootstrap_jobs / "plans",
         mo2_bootstrap_receipts=skyrim / "tool-installations" / "mo2",
+        mo2_containment_validation=resolved / "runtime" / "validation" / "mo2-containment",
     )
 
 

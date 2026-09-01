@@ -46,6 +46,8 @@ EXPECTED_RELATIVE_DIRECTORIES = {
     "runtime/jobs/mo2-bootstrap",
     "runtime/jobs/mo2-bootstrap/plans",
     "runtime/transactions",
+    "runtime/validation",
+    "runtime/validation/mo2-containment",
 }
 
 
@@ -108,6 +110,22 @@ class WorkspaceTests(unittest.TestCase):
                 / "mo2",
                 layout.mo2_bootstrap_receipts,
             )
+
+    def test_containment_validation_root_is_direct_and_preserves_unknown_content(self):
+        # Catches the validation harness writing outside a dedicated workspace root.
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory, "workspace")
+            layout = initialize_workspace(workspace)
+            marker = layout.mo2_containment_validation / "user-owned.txt"
+            marker.write_bytes(b"preserve me")
+
+            repeated = initialize_workspace(workspace)
+
+            self.assertEqual(
+                workspace.resolve() / "runtime" / "validation" / "mo2-containment",
+                repeated.mo2_containment_validation,
+            )
+            self.assertEqual(b"preserve me", marker.read_bytes())
 
     def test_reinitializing_never_removes_an_unknown_user_file(self):
         with tempfile.TemporaryDirectory() as directory:
