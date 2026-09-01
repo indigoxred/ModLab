@@ -111,9 +111,7 @@ class MutationWatchTests(unittest.TestCase):
 
     def test_intentional_cancel_completes_without_an_overflow(self):
         request_path, worker_pid = self._start()
-        local_process = windows_watch._LOCAL_WORKERS[request_path.absolute()].process
-        self.assertIsNotNone(local_process)
-        self.assertFalse(local_process._handle.closed)
+        self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
 
         receipt = stop_watch(request_path)
 
@@ -126,7 +124,97 @@ class MutationWatchTests(unittest.TestCase):
             hashlib.sha256(request_path.read_bytes()).hexdigest(),
             receipt.request_bytes_sha256,
         )
-        self.assertTrue(local_process._handle.closed)
+        self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+
+    def test_successful_start_closes_launcher_handles_before_running(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        original_close = windows_watch._close_handle
+        closed_labels: list[str] = []
+
+        def track_close(handle: int, label: str) -> str | None:
+            result = original_close(handle, label)
+            if result is None and label.startswith(("launch identity ", "launch Popen ")):
+                closed_labels.append(label)
+            return result
+
+        with mock.patch.object(windows_watch, "_close_handle", side_effect=track_close):
+            worker_pid = start_watch(request)
+        self.active_requests.append(request_path)
+
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        self.assertEqual("Running", owner["state"])
+        self.assertEqual(worker_pid, owner["workerPid"])
+        self.assertEqual(2, len(closed_labels), closed_labels)
+        self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+
+    def test_running_publication_failure_reopens_exact_recovery_ownership(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        original_replace = windows_watch._replace_owner_state
+        injected = False
+
+        def fail_running_once(*args, **kwargs):
+            nonlocal injected
+            if kwargs.get("state") == "Running" and not injected:
+                injected = True
+                raise OSError("injected post-close Running publication failure")
+            return original_replace(*args, **kwargs)
+
+        with mock.patch.object(
+            windows_watch,
+            "_replace_owner_state",
+            side_effect=fail_running_once,
+        ):
+            with self.assertRaisesRegex(WatchProtocolError, "post-close Running"):
+                start_watch(request)
+
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        self.assertEqual("RecoveryRequired", owner["state"])
+        retained = windows_watch._LOCAL_WORKERS[request_path.absolute()]
+        self.assertGreater(retained.process_handle, 0)
+        recovered = stop_watch(request_path)
+        self.assertTrue(recovered.complete, recovered.error)
+
+    def test_running_publication_and_immediate_reopen_failure_remains_recoverable(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        original_replace = windows_watch._replace_owner_state
+        original_verified = windows_watch._verified_process_handle
+        injected = False
+
+        def fail_running_once(*args, **kwargs):
+            nonlocal injected
+            if kwargs.get("state") == "Running" and not injected:
+                injected = True
+                raise OSError("injected post-close Running publication failure")
+            return original_replace(*args, **kwargs)
+
+        with mock.patch.object(
+            windows_watch,
+            "_replace_owner_state",
+            side_effect=fail_running_once,
+        ), mock.patch.object(
+            windows_watch,
+            "_verified_process_handle",
+            side_effect=WatchProtocolError("injected immediate reopen failure"),
+        ):
+            with self.assertRaisesRegex(WatchProtocolError, "immediate reopen failure"):
+                start_watch(request)
+
+        self.active_requests.append(request_path)
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        self.assertEqual("Starting", owner["state"])
+        self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+
+        with mock.patch.object(
+            windows_watch,
+            "_verified_process_handle",
+            wraps=original_verified,
+        ) as reopened:
+            recovered = stop_watch(request_path)
+        self.assertTrue(recovered.complete, recovered.error)
+        reopened.assert_called_once()
 
     def test_live_event_journal_cannot_be_reopened_for_write_or_delete(self):
         request_path, _ = self._start()
@@ -314,6 +402,109 @@ class MutationWatchTests(unittest.TestCase):
         self.assertIn("injected launch failure", terminal["error"])
         self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
 
+    def test_launch_failure_journal_constructor_close_failure_retains_exact_handle(self):
+        request = self._request()
+        retained_handle = 9876
+        try:
+            with mock.patch.object(
+                windows_watch.subprocess,
+                "Popen",
+                side_effect=OSError("injected launch failure"),
+            ), mock.patch.object(
+                windows_watch,
+                "_EventJournal",
+                side_effect=windows_watch._HandleOwnershipError(
+                    "unclosed handle: injected launch journal constructor",
+                    retained_handle,
+                    "launch-failure event journal",
+                ),
+            ):
+                with self.assertRaisesRegex(WatchProtocolError, "launch journal constructor"):
+                    start_watch(request)
+
+            terminal = json.loads((self.evidence / "terminal.json").read_text(encoding="utf-8"))
+            self.assertEqual(1, terminal["openHandleCount"])
+            self.assertIn("launch journal constructor", terminal["error"])
+            self.assertIn(
+                retained_handle,
+                windows_watch._RETAINED_AUXILIARY_HANDLES[self.evidence.absolute()],
+            )
+        finally:
+            with windows_watch._RETAINED_AUXILIARY_HANDLES_LOCK:
+                windows_watch._RETAINED_AUXILIARY_HANDLES.pop(
+                    self.evidence.absolute(), None
+                )
+
+    def test_launch_failure_journal_close_failure_is_incomplete_and_retained(self):
+        request = self._request()
+        original_close = windows_watch._close_handle
+        retained_handle = 0
+
+        def fail_launch_journal_close(handle: int, label: str) -> str | None:
+            nonlocal retained_handle
+            if label == "event journal" and not retained_handle:
+                retained_handle = handle
+                return "unclosed handle: injected launch journal close"
+            return original_close(handle, label)
+
+        try:
+            with mock.patch.object(
+                windows_watch.subprocess,
+                "Popen",
+                side_effect=OSError("injected launch failure"),
+            ), mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                side_effect=fail_launch_journal_close,
+            ):
+                with self.assertRaisesRegex(WatchProtocolError, "launch journal close"):
+                    start_watch(request)
+
+            terminal = json.loads((self.evidence / "terminal.json").read_text(encoding="utf-8"))
+            self.assertEqual(1, terminal["openHandleCount"])
+            self.assertIn(
+                retained_handle,
+                windows_watch._RETAINED_AUXILIARY_HANDLES[self.evidence.absolute()],
+            )
+        finally:
+            if retained_handle:
+                original_close(retained_handle, "test launch journal cleanup")
+            with windows_watch._RETAINED_AUXILIARY_HANDLES_LOCK:
+                windows_watch._RETAINED_AUXILIARY_HANDLES.pop(
+                    self.evidence.absolute(), None
+                )
+
+    def test_launch_failure_journal_evidence_and_close_failure_retains_handle(self):
+        request = self._request()
+        journal = mock.Mock(_handle=9876)
+        journal.evidence.side_effect = OSError("injected launch journal evidence failure")
+        journal.close.return_value = "unclosed handle: injected launch journal close"
+        try:
+            with mock.patch.object(
+                windows_watch.subprocess,
+                "Popen",
+                side_effect=OSError("injected launch failure"),
+            ), mock.patch.object(
+                windows_watch,
+                "_EventJournal",
+                return_value=journal,
+            ):
+                with self.assertRaisesRegex(WatchProtocolError, "journal evidence failure"):
+                    start_watch(request)
+
+            terminal = json.loads((self.evidence / "terminal.json").read_text(encoding="utf-8"))
+            self.assertEqual(1, terminal["openHandleCount"])
+            self.assertIn("launch journal close", terminal["error"])
+            self.assertIn(
+                9876,
+                windows_watch._RETAINED_AUXILIARY_HANDLES[self.evidence.absolute()],
+            )
+        finally:
+            with windows_watch._RETAINED_AUXILIARY_HANDLES_LOCK:
+                windows_watch._RETAINED_AUXILIARY_HANDLES.pop(
+                    self.evidence.absolute(), None
+                )
+
     def test_request_publication_failure_is_durable_before_spawn(self):
         request = self._request()
         original_write = windows_watch._write_new
@@ -479,7 +670,7 @@ class MutationWatchTests(unittest.TestCase):
         def fail_running_owner(path: Path, data: bytes) -> None:
             nonlocal rejected_running
             document = json.loads(data)
-            if document.get("state") == "Running" and not rejected_running:
+            if document.get("state") == "Starting" and not rejected_running:
                 rejected_running = True
                 raise OSError("injected owner promotion failure")
             original_replace(path, data)
@@ -527,7 +718,7 @@ class MutationWatchTests(unittest.TestCase):
         def fail_running_owner(path: Path, data: bytes) -> None:
             nonlocal rejected_running
             document = json.loads(data)
-            if document.get("state") == "Running" and not rejected_running:
+            if document.get("state") == "Starting" and not rejected_running:
                 rejected_running = True
                 raise OSError("injected owner promotion failure")
             original_replace(path, data)
@@ -601,6 +792,38 @@ class MutationWatchTests(unittest.TestCase):
         finally:
             with windows_watch._LOCAL_WORKERS_LOCK:
                 windows_watch._LOCAL_WORKERS.pop(request_path.absolute(), None)
+
+    def test_clean_pre_ready_exit_publishes_cleanup_complete(self):
+        request = self._request()
+        process = mock.Mock(pid=4242)
+        process.poll.return_value = 19
+        process.wait.return_value = 19
+        original_close = windows_watch._close_handle
+
+        def close_fake_identity(handle: int, label: str) -> str | None:
+            if handle == 9876:
+                return None
+            return original_close(handle, label)
+
+        with mock.patch.object(
+            windows_watch.subprocess,
+            "Popen",
+            return_value=process,
+        ), mock.patch.object(
+            windows_watch,
+            "_open_process_identity",
+            return_value=(9876, 123456789),
+        ), mock.patch.object(
+            windows_watch,
+            "_close_handle",
+            side_effect=close_fake_identity,
+        ):
+            with self.assertRaises(WatchProtocolError):
+                start_watch(request)
+
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        self.assertEqual("CleanupComplete", owner["state"])
+        self.assertGreater(owner["observerControllerCreationTime"], 0)
 
     def test_ready_timeout_preserves_recovery_owner_when_exit_is_uncertain(self):
         request = self._request()
@@ -1269,7 +1492,10 @@ class MutationWatchTests(unittest.TestCase):
         owner_path = case_root / "owner.json"
         owner = json.loads(owner_path.read_text(encoding="utf-8"))
         owner["state"] = "Running"
+        owner["completedReceipt"] = None
         owner["workerCreationTime"] += 1
+        owner["observerControllerPid"] = 0
+        owner["observerControllerCreationTime"] = 0
         owner_path.write_bytes(_canonical(owner))
 
         receipt = stop_watch(case_root / "request.json")
@@ -1290,7 +1516,12 @@ class MutationWatchTests(unittest.TestCase):
         owner_path = case_root / "owner.json"
         owner = json.loads(owner_path.read_text(encoding="utf-8"))
         owner["state"] = "RecoveryRequired"
+        owner["completedReceipt"] = None
         owner["error"] = "injected retained controller ownership"
+        owner["observerControllerPid"] = 0
+        owner["observerControllerCreationTime"] = 0
+        owner["retainingControllerPid"] = os.getpid()
+        owner["retainingControllerCreationTime"] = owner["workerCreationTime"]
         owner_path.write_bytes(_canonical(owner))
         request = replace(
             self._request(),
@@ -1322,6 +1553,9 @@ class MutationWatchTests(unittest.TestCase):
         owner_path = case_root / "owner.json"
         owner = json.loads(owner_path.read_text(encoding="utf-8"))
         owner["state"] = "Running"
+        owner["completedReceipt"] = None
+        owner["observerControllerPid"] = 0
+        owner["observerControllerCreationTime"] = 0
         owner_path.write_bytes(_canonical(owner))
         request = replace(
             self._request(),
@@ -1353,6 +1587,9 @@ class MutationWatchTests(unittest.TestCase):
         owner_path = case_root / "owner.json"
         owner = json.loads(owner_path.read_text(encoding="utf-8"))
         owner["state"] = "Running"
+        owner["completedReceipt"] = None
+        owner["observerControllerPid"] = 0
+        owner["observerControllerCreationTime"] = 0
         owner_path.write_bytes(_canonical(owner))
 
         with mock.patch.object(windows_watch, "_wait_process_handle", return_value=False):
@@ -1405,16 +1642,17 @@ class MutationWatchTests(unittest.TestCase):
         owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
         self.assertEqual("Completed", owner["state"])
 
-    def test_local_popen_handle_close_failure_is_durable_and_retryable(self):
-        request_path, worker_pid = self._start()
+    def test_launch_popen_handle_close_failure_is_durable_and_blocks_other_controllers(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
         original_close = windows_watch._close_handle
         retained_popen_handle = 0
 
         def fail_popen_close_once(handle: int, label: str) -> str | None:
             nonlocal retained_popen_handle
-            if label == f"local Popen process {worker_pid}" and not retained_popen_handle:
+            if label.startswith("launch Popen ") and not retained_popen_handle:
                 retained_popen_handle = handle
-                return "unclosed handle: injected local Popen process"
+                return "unclosed handle: injected launch Popen process"
             return original_close(handle, label)
 
         with mock.patch.object(
@@ -1422,15 +1660,33 @@ class MutationWatchTests(unittest.TestCase):
             "_close_handle",
             side_effect=fail_popen_close_once,
         ):
-            receipt = stop_watch(request_path)
+            with self.assertRaisesRegex(WatchProtocolError, "injected launch Popen"):
+                start_watch(request)
 
-        self.assertFalse(receipt.complete)
-        self.assertIn("injected local Popen process", receipt.error)
         owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
         self.assertEqual("RecoveryRequired", owner["state"])
+        self.assertEqual(os.getpid(), owner["retainingControllerPid"])
+        self.assertGreater(owner["retainingControllerCreationTime"], 0)
         retained = windows_watch._LOCAL_WORKERS[request_path.absolute()]
-        self.assertEqual(0, retained.process_handle)
         self.assertEqual(retained_popen_handle, retained.popen_handle)
+
+        script = (
+            "import json,sys; from pathlib import Path; "
+            "from modlab.validation.windows_watch import stop_watch; "
+            "r=stop_watch(Path(sys.argv[1])); "
+            "print(json.dumps({'complete':r.complete,'error':r.error}))"
+        )
+        blocked = subprocess.run(
+            [windows_watch.sys.executable, "-B", "-c", script, str(request_path)],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        blocked_receipt = json.loads(blocked.stdout)
+        self.assertFalse(blocked_receipt["complete"])
+        self.assertIn("retaining controller remains live", blocked_receipt["error"])
 
         recovered = stop_watch(request_path)
         self.assertTrue(recovered.complete, recovered.error)
@@ -1482,12 +1738,146 @@ class MutationWatchTests(unittest.TestCase):
 
         self.assertEqual(2, len(receipts))
         self.assertTrue(all(receipt.complete for receipt in receipts), receipts)
-        self.assertEqual(2, len(observed_process_handles))
-        request_sha256 = hashlib.sha256(request_path.read_bytes()).hexdigest()
+        self.assertEqual(1, len(observed_process_handles))
+        mutex_name = windows_watch._stop_mutex_name(request_path)
         self.assertEqual(
-            [f"Local\\ModLab-Watch-Stop-{request_sha256}"] * 2,
+            [mutex_name] * 2,
             observed_mutex_names,
         )
+
+    def test_stop_mutex_name_is_stable_when_request_bytes_change_or_disappear(self):
+        request_path, _ = self._start()
+        expected = windows_watch._stop_mutex_name(request_path)
+        original = request_path.read_bytes()
+
+        request_path.write_bytes(b"tampered request bytes\n")
+        self.assertEqual(expected, windows_watch._stop_mutex_name(request_path))
+        request_path.unlink()
+        self.assertEqual(expected, windows_watch._stop_mutex_name(request_path))
+        request_path.write_bytes(original)
+
+    def test_stop_mutex_uses_owner_canonical_path_across_windows_aliases(self):
+        request_path, _ = self._start()
+        expected = windows_watch._stop_mutex_name(request_path)
+        owner_bytes = (self.evidence / "owner.json").read_bytes()
+        alias = Path(r"C:\MODLAB~1\EVIDEN~1\REQUEST.JSON")
+        original_read_bytes = Path.read_bytes
+
+        def read_owner(path: Path) -> bytes:
+            if Path(path).name.casefold() == "owner.json":
+                return owner_bytes
+            return original_read_bytes(path)
+
+        with mock.patch.object(Path, "read_bytes", read_owner), mock.patch.object(
+            windows_watch.os.path,
+            "samefile",
+            return_value=True,
+        ):
+            observed = windows_watch._stop_mutex_name(alias)
+            completed = mock.Mock()
+            with mock.patch.object(
+                windows_watch,
+                "_stop_watch_locked",
+                return_value=completed,
+            ) as locked, mock.patch.object(
+                windows_watch._kernel32,
+                "CreateMutexW",
+                return_value=9876,
+            ), mock.patch.object(
+                windows_watch._kernel32,
+                "WaitForSingleObject",
+                return_value=windows_watch._WAIT_OBJECT_0,
+            ), mock.patch.object(
+                windows_watch._kernel32,
+                "ReleaseMutex",
+                return_value=True,
+            ), mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                return_value=None,
+            ):
+                self.assertIs(completed, stop_watch(alias))
+
+        self.assertEqual(expected, observed)
+        locked.assert_called_once_with(request_path.absolute())
+
+    def test_stop_mutex_aliases_converge_when_owner_is_unreadable(self):
+        request_path, _ = self._start()
+        expected = windows_watch._stop_mutex_name(request_path)
+        alias = Path(r"C:\MODLAB~1\EVIDEN~1\REQUEST.JSON")
+        original_read_bytes = Path.read_bytes
+        original_resolve = Path.resolve
+
+        def unreadable_alias_owner(path: Path) -> bytes:
+            if Path(path).parent == alias.parent and Path(path).name == "owner.json":
+                raise OSError("injected unreadable owner")
+            return original_read_bytes(path)
+
+        def resolve_alias(path: Path, strict: bool = False) -> Path:
+            if Path(path) == alias:
+                return request_path
+            if Path(path) == alias.parent:
+                return request_path.parent
+            return original_resolve(path, strict=strict)
+
+        with mock.patch.object(
+            Path,
+            "read_bytes",
+            unreadable_alias_owner,
+        ), mock.patch.object(
+            Path,
+            "resolve",
+            resolve_alias,
+        ):
+            observed = windows_watch._stop_mutex_name(alias)
+
+        self.assertEqual(expected, observed)
+
+    def test_mutated_request_uses_immutable_owner_copy_to_stop_exact_worker(self):
+        request_path, worker_pid = self._start()
+        original = request_path.read_bytes()
+        mutated = json.loads(original)
+        mutated["requestId"] = "watch-request:" + "b" * 64
+        request_path.write_bytes(_canonical(mutated))
+        try:
+            failed = stop_watch(request_path)
+        finally:
+            request_path.write_bytes(original)
+
+        self.assertEqual(worker_pid, failed.worker_pid)
+        self.assertFalse(failed.complete)
+        self.assertIn("disagrees with immutable owner request", failed.error)
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        self.assertEqual("CleanupComplete", owner["state"])
+        recovered = stop_watch(request_path)
+        self.assertTrue(recovered.complete, recovered.error)
+
+    def test_two_independent_controller_processes_serialize_stop(self):
+        request_path, _ = self._start()
+        script = (
+            "import json,sys; from pathlib import Path; "
+            "from modlab.validation.windows_watch import stop_watch; "
+            "r=stop_watch(Path(sys.argv[1])); "
+            "print(json.dumps({'complete':r.complete,'error':r.error}))"
+        )
+        controllers = [
+            subprocess.Popen(
+                [windows_watch.sys.executable, "-B", "-c", script, str(request_path)],
+                shell=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in range(2)
+        ]
+        results = []
+        for controller in controllers:
+            stdout, stderr = controller.communicate(timeout=45)
+            self.assertEqual(0, controller.returncode, stderr)
+            results.append(json.loads(stdout))
+
+        self.assertTrue(all(result["complete"] for result in results), results)
+        self.assertTrue((self.evidence / "terminal.json").is_file())
 
     def test_completed_publication_failure_retries_from_cleanup_complete(self):
         request_path, _ = self._start()
@@ -1516,6 +1906,251 @@ class MutationWatchTests(unittest.TestCase):
 
         recovered = stop_watch(request_path)
         self.assertTrue(recovered.complete, recovered.error)
+
+    def test_completed_is_final_and_returns_prevalidated_receipt_without_reopening(self):
+        request_path, _ = self._start()
+        original_read = windows_watch._read_exact_journal
+
+        def reject_post_completed_open(path: Path):
+            owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+            if owner["state"] == "Completed":
+                raise AssertionError("evidence reopened after Completed")
+            return original_read(path)
+
+        with mock.patch.object(
+            windows_watch,
+            "_read_exact_journal",
+            side_effect=reject_post_completed_open,
+        ):
+            receipt = stop_watch(request_path)
+
+        self.assertTrue(receipt.complete, receipt.error)
+
+        with mock.patch.object(
+            windows_watch,
+            "_read_exact_journal",
+            side_effect=AssertionError("Completed retry reopened evidence"),
+        ):
+            repeated = stop_watch(request_path)
+        self.assertTrue(repeated.complete, repeated.error)
+
+    def test_exit_observed_precedes_process_close_and_cleanup_complete(self):
+        request_path, worker_pid = self._start()
+        original_replace = windows_watch._replace_owner_state
+        original_close = windows_watch._close_handle
+        states: list[str] = []
+
+        def track_state(*args, **kwargs):
+            states.append(kwargs["state"])
+            return original_replace(*args, **kwargs)
+
+        def require_exit_observed(handle: int, label: str) -> str | None:
+            if label == f"worker process {worker_pid}":
+                owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+                self.assertEqual("ExitObserved", owner["state"])
+                self.assertEqual(os.getpid(), owner["observerControllerPid"])
+                self.assertGreater(owner["observerControllerCreationTime"], 0)
+            return original_close(handle, label)
+
+        with mock.patch.object(
+            windows_watch,
+            "_replace_owner_state",
+            side_effect=track_state,
+        ), mock.patch.object(
+            windows_watch,
+            "_close_handle",
+            side_effect=require_exit_observed,
+        ):
+            receipt = stop_watch(request_path)
+
+        self.assertTrue(receipt.complete, receipt.error)
+        self.assertEqual(
+            ["ExitObserved", "CleanupComplete", "Completed"],
+            [state for state in states if state in {"ExitObserved", "CleanupComplete", "Completed"}],
+        )
+
+    def test_exit_observed_publication_gap_recovers_after_observer_proof(self):
+        request_path, _ = self._start()
+        original_replace = windows_watch._replace_owner_state
+        injected = False
+
+        def fail_cleanup_complete_once(*args, **kwargs):
+            nonlocal injected
+            if kwargs.get("state") == "CleanupComplete" and not injected:
+                injected = True
+                raise OSError("injected cleanup publication gap")
+            return original_replace(*args, **kwargs)
+
+        with mock.patch.object(
+            windows_watch,
+            "_replace_owner_state",
+            side_effect=fail_cleanup_complete_once,
+        ):
+            failed = stop_watch(request_path)
+
+        self.assertFalse(failed.complete)
+        owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+        self.assertEqual("ExitObserved", owner["state"])
+
+        recovered = stop_watch(request_path)
+        self.assertTrue(recovered.complete, recovered.error)
+
+    def test_exit_observed_restart_waits_for_observer_exit_then_promotes(self):
+        case_root = self.root / "exit-observer-restart"
+        case_root.mkdir()
+        self._receipt_fixture(
+            case_root,
+            event_bytes=b"",
+            complete=True,
+            terminal_error=None,
+            open_handle_count=0,
+        )
+        observer = subprocess.Popen(
+            [windows_watch.sys.executable, "-B", "-c", "import time; time.sleep(30)"],
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        observer_handle, observer_creation = windows_watch._open_process_identity(observer.pid)
+        self.assertIsNone(windows_watch._close_handle(observer_handle, "test observer identity"))
+        owner_path = case_root / "owner.json"
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        owner["state"] = "ExitObserved"
+        owner["completedReceipt"] = None
+        owner["observerControllerPid"] = observer.pid
+        owner["observerControllerCreationTime"] = observer_creation
+        owner_path.write_bytes(_canonical(owner))
+        request_path = case_root / "request.json"
+        try:
+            blocked = stop_watch(request_path)
+            self.assertFalse(blocked.complete)
+            self.assertIn("observer remains live", blocked.error)
+
+            observer.terminate()
+            observer.wait(timeout=15)
+            recovered = stop_watch(request_path)
+            self.assertTrue(recovered.complete, recovered.error)
+        finally:
+            if observer.poll() is None:
+                observer.kill()
+                observer.wait(timeout=15)
+
+    def test_exit_observed_recovery_handles_promote_after_retainer_exit(self):
+        case_root = self.root / "exit-recovery-retainer"
+        case_root.mkdir()
+        self._receipt_fixture(
+            case_root,
+            event_bytes=b"",
+            complete=True,
+            terminal_error=None,
+            open_handle_count=0,
+        )
+        retainer = subprocess.Popen(
+            [windows_watch.sys.executable, "-B", "-c", "pass"],
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        retainer_handle, retainer_creation = windows_watch._open_process_identity(retainer.pid)
+        self.assertIsNone(windows_watch._close_handle(retainer_handle, "test retainer identity"))
+        retainer.wait(timeout=15)
+        owner_path = case_root / "owner.json"
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        owner["state"] = "RecoveryRequired"
+        owner["completedReceipt"] = None
+        owner["error"] = "injected post-exit retained handle"
+        owner["retainingControllerPid"] = retainer.pid
+        owner["retainingControllerCreationTime"] = retainer_creation
+        owner["observerControllerPid"] = retainer.pid
+        owner["observerControllerCreationTime"] = retainer_creation
+        owner_path.write_bytes(_canonical(owner))
+
+        with mock.patch.object(
+            windows_watch,
+            "_verified_process_handle",
+            side_effect=AssertionError("post-exit recovery reopened worker PID"),
+        ):
+            receipt = stop_watch(case_root / "request.json")
+
+        self.assertTrue(receipt.complete, receipt.error)
+
+    def test_released_mutex_close_failure_does_not_invalidate_completed_evidence(self):
+        request_path, _ = self._start()
+        original_close = windows_watch._close_handle
+        retained_mutex = 0
+
+        def fail_mutex_close_once(handle: int, label: str) -> str | None:
+            nonlocal retained_mutex
+            if label == "per-request stop mutex" and not retained_mutex:
+                retained_mutex = handle
+                return "unclosed handle: injected released mutex"
+            return original_close(handle, label)
+
+        try:
+            with mock.patch.object(
+                windows_watch,
+                "_close_handle",
+                side_effect=fail_mutex_close_once,
+            ):
+                receipt = stop_watch(request_path)
+
+            self.assertTrue(receipt.complete, receipt.error)
+            owner = json.loads((self.evidence / "owner.json").read_text(encoding="utf-8"))
+            self.assertEqual("Completed", owner["state"])
+            self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+            self.assertIn(
+                retained_mutex,
+                windows_watch._RETAINED_SYNCHRONIZATION_HANDLES,
+            )
+            self.assertIn(
+                "injected released mutex",
+                windows_watch._SYNCHRONIZATION_CLEANUP_WARNINGS[-1],
+            )
+            windows_watch._retry_synchronization_handles()
+            self.assertNotIn(
+                retained_mutex,
+                windows_watch._RETAINED_SYNCHRONIZATION_HANDLES,
+            )
+        finally:
+            if (
+                retained_mutex
+                and retained_mutex in windows_watch._RETAINED_SYNCHRONIZATION_HANDLES
+            ):
+                original_close(retained_mutex, "test mutex cleanup")
+                windows_watch._RETAINED_SYNCHRONIZATION_HANDLES.remove(retained_mutex)
+            if windows_watch._SYNCHRONIZATION_CLEANUP_WARNINGS:
+                windows_watch._SYNCHRONIZATION_CLEANUP_WARNINGS.pop()
+
+    def test_mutex_release_failure_retains_owned_handle_until_exact_release(self):
+        request_path, _ = self._start()
+        original_release = windows_watch._kernel32.ReleaseMutex
+        original_close = windows_watch._close_handle
+        close_labels: list[str] = []
+
+        def track_close(handle: int, label: str) -> str | None:
+            close_labels.append(label)
+            return original_close(handle, label)
+
+        with mock.patch.object(
+            windows_watch._kernel32,
+            "ReleaseMutex",
+            return_value=False,
+        ), mock.patch.object(
+            windows_watch,
+            "_close_handle",
+            side_effect=track_close,
+        ):
+            receipt = stop_watch(request_path)
+
+        self.assertFalse(receipt.complete)
+        self.assertIn("release per-request stop mutex", receipt.error)
+        self.assertNotIn("per-request stop mutex", close_labels)
+        self.assertEqual(1, len(windows_watch._RETAINED_OWNED_MUTEX_HANDLES))
+
+        windows_watch._retry_synchronization_handles()
+        self.assertEqual([], windows_watch._RETAINED_OWNED_MUTEX_HANDLES)
 
     def test_stop_retains_failed_journal_readback_close_for_retry(self):
         request_path, _ = self._start()
@@ -1550,13 +2185,28 @@ class MutationWatchTests(unittest.TestCase):
 
     def test_retained_handle_establishes_previously_unknown_creation_time(self):
         request_path, worker_pid = self._start()
-        retained = windows_watch._LOCAL_WORKERS[request_path.absolute()]
-        retained.process_creation_time = 0
         owner_path = self.evidence / "owner.json"
         owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        retained_handle, _ = windows_watch._open_process_identity(worker_pid)
+        request = windows_watch._load_request_path(request_path)
+        with windows_watch._LOCAL_WORKERS_LOCK:
+            windows_watch._LOCAL_WORKERS[request_path.absolute()] = windows_watch._LocalWorker(
+                None,
+                worker_pid,
+                request,
+                owner["requestBytesSha256"],
+                retained_handle,
+                0,
+                owner["ownerToken"],
+            )
         owner["state"] = "RecoveryRequired"
+        owner["completedReceipt"] = None
         owner["workerCreationTime"] = 0
         owner["error"] = "injected unknown creation time"
+        owner["observerControllerPid"] = 0
+        owner["observerControllerCreationTime"] = 0
+        owner["retainingControllerPid"] = os.getpid()
+        owner["retainingControllerCreationTime"] = owner["workerCreationTime"] or windows_watch._current_controller_identity()[1]
         owner_path.write_bytes(_canonical(owner))
 
         receipt = stop_watch(request_path)
@@ -1580,6 +2230,9 @@ class MutationWatchTests(unittest.TestCase):
         owner_path = case_root / "owner.json"
         owner = json.loads(owner_path.read_text(encoding="utf-8"))
         owner["state"] = "Running"
+        owner["completedReceipt"] = None
+        owner["observerControllerPid"] = 0
+        owner["observerControllerCreationTime"] = 0
         owner_path.write_bytes(_canonical(owner))
         request_path = case_root / "request.json"
         worker_pid = os.getpid()
@@ -1696,6 +2349,52 @@ class MutationWatchTests(unittest.TestCase):
         finally:
             if retained_handle:
                 original_close(retained_handle, "test liveness ownership cleanup")
+
+    def test_controller_identity_access_denied_is_not_proof_of_exit(self):
+        with mock.patch.object(
+            windows_watch,
+            "_open_process_identity",
+            side_effect=ctypes.WinError(5),
+        ):
+            with self.assertRaises(PermissionError):
+                windows_watch._process_identity_alive(4242, 123456789)
+
+    def test_controller_identity_invalid_parameter_is_exact_exit_proof(self):
+        with mock.patch.object(
+            windows_watch,
+            "_open_process_identity",
+            side_effect=windows_watch._winerror(
+                "injected absent controller",
+                windows_watch._ERROR_INVALID_PARAMETER,
+            ),
+        ):
+            self.assertFalse(
+                windows_watch._process_identity_alive(4242, 123456789)
+            )
+
+    def test_controller_identity_probe_closes_handle_when_wait_fails(self):
+        original_close = windows_watch._close_handle
+        closed: list[int] = []
+
+        def track_close(handle: int, label: str) -> str | None:
+            closed.append(handle)
+            return original_close(handle, label)
+
+        with mock.patch.object(
+            windows_watch,
+            "_wait_process_handle",
+            side_effect=WatchProtocolError("injected controller wait failure"),
+        ), mock.patch.object(
+            windows_watch,
+            "_close_handle",
+            side_effect=track_close,
+        ):
+            with self.assertRaisesRegex(WatchProtocolError, "controller wait failure"):
+                windows_watch._process_identity_alive(
+                    os.getpid(), windows_watch._current_controller_identity()[1]
+                )
+
+        self.assertEqual(1, len(closed))
 
     def test_event_journal_init_retains_handle_when_unwind_close_fails(self):
         original_close = windows_watch._close_handle
@@ -1998,12 +2697,18 @@ class MutationWatchTests(unittest.TestCase):
         (case_root / "owner.json").write_bytes(
             _canonical(
                 {
+                    "completedReceipt": None,
                     "error": None,
+                    "observerControllerCreationTime": 0,
+                    "observerControllerPid": 0,
                     "ownerToken": "2" * 64,
+                    "request": json.loads(request_path.read_text(encoding="utf-8")),
                     "requestBytesSha256": request_sha256,
                     "requestId": request.request_id,
                     "schemaVersion": 1,
                     "state": "Running",
+                    "retainingControllerCreationTime": 0,
+                    "retainingControllerPid": 0,
                     "workerCreationTime": worker_creation_time,
                     "workerPid": os.getpid(),
                 }
@@ -2146,7 +2851,10 @@ class MutationWatchTests(unittest.TestCase):
         self.assertTrue(removed)
         self.assertFalse(receipt.complete)
         self.assertIn("evidence", receipt.error)
-        self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_WORKERS)
+        retained = windows_watch._LOCAL_WORKERS[request_path.absolute()]
+        self.assertTrue(retained.cleanup_complete)
+        with windows_watch._LOCAL_WORKERS_LOCK:
+            windows_watch._LOCAL_WORKERS.pop(request_path.absolute(), None)
 
     def test_protocol_record_is_not_visible_until_its_bytes_are_complete(self):
         target = self.root / "atomic-ready.json"
@@ -2235,12 +2943,18 @@ class MutationWatchTests(unittest.TestCase):
         (case_root / "owner.json").write_bytes(
             _canonical(
                 {
+                    "completedReceipt": None,
                     "error": None,
+                    "observerControllerCreationTime": 0,
+                    "observerControllerPid": 0,
                     "ownerToken": "3" * 64,
+                    "request": json.loads(request_bytes),
                     "requestBytesSha256": request_sha256,
                     "requestId": request.request_id,
                     "schemaVersion": 1,
                     "state": "Running",
+                    "retainingControllerCreationTime": 0,
+                    "retainingControllerPid": 0,
                     "workerCreationTime": creation_time,
                     "workerPid": os.getpid(),
                 }
@@ -2287,16 +3001,34 @@ class MutationWatchTests(unittest.TestCase):
             }
         )
         request_sha256 = hashlib.sha256(request_bytes).hexdigest()
+        observer_handle, observer_creation_time = windows_watch._open_process_identity(os.getpid())
+        self.assertIsNone(windows_watch._close_handle(observer_handle, "test observer process"))
         (case_root / "request.json").write_bytes(request_bytes)
         (case_root / "owner.json").write_bytes(
             _canonical(
                 {
+                    "completedReceipt": {
+                        "complete": True,
+                        "error": None,
+                        "eventBytesSha256": hashlib.sha256(b"").hexdigest(),
+                        "events": [],
+                        "openedRootKinds": list(windows_watch.ROOT_KINDS),
+                        "ready": True,
+                        "requestBytesSha256": request_sha256,
+                        "requestId": request.request_id,
+                        "workerPid": worker_pid,
+                    },
                     "error": None,
+                    "observerControllerCreationTime": observer_creation_time,
+                    "observerControllerPid": os.getpid(),
                     "ownerToken": "1" * 64,
+                    "request": json.loads(request_bytes),
                     "requestBytesSha256": request_sha256,
                     "requestId": request.request_id,
                     "schemaVersion": 1,
                     "state": "Completed",
+                    "retainingControllerCreationTime": 0,
+                    "retainingControllerPid": 0,
                     "workerCreationTime": worker_creation_time,
                     "workerPid": worker_pid,
                 }

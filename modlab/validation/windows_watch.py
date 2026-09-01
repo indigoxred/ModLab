@@ -157,6 +157,10 @@ _LOCAL_WORKERS: dict[Path, _LocalWorker] = {}
 _LOCAL_WORKERS_LOCK = threading.Lock()
 _RETAINED_AUXILIARY_HANDLES: dict[Path, list[int]] = {}
 _RETAINED_AUXILIARY_HANDLES_LOCK = threading.Lock()
+_RETAINED_SYNCHRONIZATION_HANDLES: list[int] = []
+_RETAINED_OWNED_MUTEX_HANDLES: list[tuple[int, int]] = []
+_RETAINED_SYNCHRONIZATION_HANDLES_LOCK = threading.Lock()
+_SYNCHRONIZATION_CLEANUP_WARNINGS: list[str] = []
 
 
 if os.name == "nt":
@@ -268,6 +272,8 @@ if os.name == "nt":
     _kernel32.OpenProcess.restype = wintypes.HANDLE
     _kernel32.GetProcessId.argtypes = [wintypes.HANDLE]
     _kernel32.GetProcessId.restype = wintypes.DWORD
+    _kernel32.GetCurrentProcess.argtypes = []
+    _kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     _kernel32.GetProcessTimes.argtypes = [
         wintypes.HANDLE,
         ctypes.POINTER(wintypes.FILETIME),
@@ -829,6 +835,12 @@ def _process_handle_creation_time(handle: int, pid: int) -> int:
     return _filetime_integer(creation)
 
 
+def _current_controller_identity() -> tuple[int, int]:
+    """Return this controller's identity through the non-owned process pseudo-handle."""
+    pid = os.getpid()
+    return pid, _process_handle_creation_time(_kernel32.GetCurrentProcess(), pid)
+
+
 def _open_process_identity(pid: int) -> tuple[int, int]:
     if type(pid) is not int or pid <= 0:
         raise WatchProtocolError("worker PID must be a positive integer")
@@ -852,6 +864,89 @@ def _open_process_identity(pid: int) -> tuple[int, int]:
         raise
 
 
+def _completed_receipt_document(receipt: WatchReceipt) -> dict[str, object]:
+    return {
+        "complete": receipt.complete,
+        "error": receipt.error,
+        "eventBytesSha256": receipt.event_bytes_sha256,
+        "events": [
+            {
+                "action": event.action,
+                "relativePath": event.relative_path,
+                "rootKind": event.root_kind,
+                "sequence": event.sequence,
+            }
+            for event in receipt.events
+        ],
+        "openedRootKinds": list(receipt.opened_root_kinds),
+        "ready": receipt.ready,
+        "requestBytesSha256": receipt.request_bytes_sha256,
+        "requestId": receipt.request_id,
+        "workerPid": receipt.worker_pid,
+    }
+
+
+def _completed_receipt_from_document(
+    value: object,
+    request: WatchRequest,
+    worker_pid: int,
+    request_sha256: str,
+) -> WatchReceipt:
+    if type(value) is not dict:
+        raise WatchProtocolError("completed owner receipt must be an object")
+    _exact_fields(
+        value,
+        {
+            "complete",
+            "error",
+            "eventBytesSha256",
+            "events",
+            "openedRootKinds",
+            "ready",
+            "requestBytesSha256",
+            "requestId",
+            "workerPid",
+        },
+        "completed owner receipt",
+    )
+    if value["complete"] is not True or value["ready"] is not True or value["error"] is not None:
+        raise WatchProtocolError("completed owner receipt is not complete")
+    if (
+        value["requestId"] != request.request_id
+        or value["requestBytesSha256"] != request_sha256
+        or _required_int(value["workerPid"], "completed receipt worker PID", minimum=1)
+        != worker_pid
+    ):
+        raise WatchProtocolError("completed owner receipt identity mismatch")
+    opened_value = value["openedRootKinds"]
+    if type(opened_value) is not list or not all(type(kind) is str for kind in opened_value):
+        raise WatchProtocolError("completed owner root kinds must be strings")
+    opened = tuple(opened_value)
+    if opened != tuple(root.root_kind for root in request.roots):
+        raise WatchProtocolError("completed owner root coverage mismatch")
+    event_values = value["events"]
+    if type(event_values) is not list:
+        raise WatchProtocolError("completed owner events must be an array")
+    event_bytes = b""
+    for event_value in event_values:
+        event_bytes += _canonical_bytes(event_value)
+    events = _parse_events(event_bytes, request)
+    digest = _required_text(value["eventBytesSha256"], "completed event SHA-256")
+    if digest != hashlib.sha256(event_bytes).hexdigest():
+        raise WatchProtocolError("completed owner event SHA-256 mismatch")
+    return WatchReceipt(
+        request.request_id,
+        worker_pid,
+        True,
+        True,
+        opened,
+        events,
+        digest,
+        None,
+        request_sha256,
+    )
+
+
 def _owner_document(
     request: WatchRequest,
     request_sha256: str,
@@ -861,12 +956,35 @@ def _owner_document(
     worker_pid: int,
     worker_creation_time: int,
     error: str | None,
+    retaining_controller_pid: int = 0,
+    retaining_controller_creation_time: int = 0,
+    observer_controller_pid: int = 0,
+    observer_controller_creation_time: int = 0,
+    completed_receipt: WatchReceipt | None = None,
 ) -> dict[str, object]:
+    if state in {"Starting", "RecoveryRequired"} and retaining_controller_pid == 0:
+        retaining_controller_pid, retaining_controller_creation_time = (
+            _current_controller_identity()
+        )
+    if state in {"ExitObserved", "CleanupComplete", "Completed"} and observer_controller_pid == 0:
+        observer_controller_pid, observer_controller_creation_time = (
+            _current_controller_identity()
+        )
     return {
+        "completedReceipt": (
+            _completed_receipt_document(completed_receipt)
+            if completed_receipt is not None
+            else None
+        ),
         "error": error,
+        "observerControllerCreationTime": observer_controller_creation_time,
+        "observerControllerPid": observer_controller_pid,
         "ownerToken": owner_token,
+        "request": _request_document(request),
         "requestBytesSha256": request_sha256,
         "requestId": request.request_id,
+        "retainingControllerCreationTime": retaining_controller_creation_time,
+        "retainingControllerPid": retaining_controller_pid,
         "schemaVersion": _SCHEMA_VERSION,
         "state": state,
         "workerCreationTime": worker_creation_time,
@@ -883,6 +1001,11 @@ def _replace_owner_state(
     worker_pid: int,
     worker_creation_time: int,
     error: str | None,
+    retaining_controller_pid: int = 0,
+    retaining_controller_creation_time: int = 0,
+    observer_controller_pid: int = 0,
+    observer_controller_creation_time: int = 0,
+    completed_receipt: WatchReceipt | None = None,
 ) -> None:
     _replace_record(
         request.evidence_root / _OWNER_NAME,
@@ -895,6 +1018,11 @@ def _replace_owner_state(
                 worker_pid=worker_pid,
                 worker_creation_time=worker_creation_time,
                 error=error,
+                retaining_controller_pid=retaining_controller_pid,
+                retaining_controller_creation_time=retaining_controller_creation_time,
+                observer_controller_pid=observer_controller_pid,
+                observer_controller_creation_time=observer_controller_creation_time,
+                completed_receipt=completed_receipt,
             )
         ),
     )
@@ -909,12 +1037,18 @@ def _parse_owner(
     _exact_fields(
         value,
         {
+            "completedReceipt",
             "error",
+            "observerControllerCreationTime",
+            "observerControllerPid",
             "ownerToken",
+            "request",
             "requestBytesSha256",
             "requestId",
             "schemaVersion",
             "state",
+            "retainingControllerCreationTime",
+            "retainingControllerPid",
             "workerCreationTime",
             "workerPid",
         },
@@ -924,6 +1058,10 @@ def _parse_owner(
         raise WatchProtocolError("unsupported owner schema version")
     if value["requestId"] != request.request_id:
         raise WatchProtocolError("owner record request ID mismatch")
+    if value["request"] != _request_document(request):
+        raise WatchProtocolError(
+            "owner record request SHA-256 mismatch: embedded request document differs"
+        )
     digest = _required_text(value["requestBytesSha256"], "owner request SHA-256")
     if digest != request_sha256:
         raise WatchProtocolError("owner record request SHA-256 mismatch")
@@ -933,7 +1071,9 @@ def _parse_owner(
     state = _required_text(value["state"], "owner state")
     if state not in {
         "Launching",
+        "Starting",
         "Running",
+        "ExitObserved",
         "CleanupComplete",
         "Completed",
         "LaunchFailed",
@@ -948,21 +1088,84 @@ def _parse_owner(
     error = value["error"]
     if error is not None:
         _required_text(error, "owner error")
-    if state in {"Running", "Completed"}:
+    retaining_pid = _required_int(
+        value["retainingControllerPid"], "retaining controller PID"
+    )
+    retaining_creation = _required_int(
+        value["retainingControllerCreationTime"],
+        "retaining controller creation time",
+    )
+    observer_pid = _required_int(value["observerControllerPid"], "observer controller PID")
+    observer_creation = _required_int(
+        value["observerControllerCreationTime"],
+        "observer controller creation time",
+    )
+    if (retaining_pid == 0) != (retaining_creation == 0):
+        raise WatchProtocolError("retaining controller identity is incomplete")
+    if (observer_pid == 0) != (observer_creation == 0):
+        raise WatchProtocolError("observer controller identity is incomplete")
+    completed_receipt = value["completedReceipt"]
+    if state in {"Starting", "Running"}:
         if pid == 0 or creation_time == 0 or error is not None:
             raise WatchProtocolError(f"{state.lower()} owner record is incomplete")
-    elif state == "CleanupComplete":
-        if pid == 0 or creation_time == 0 or error is None:
-            raise WatchProtocolError("cleanup-complete owner record is inconsistent")
+        if observer_pid or (state == "Starting") != bool(retaining_pid):
+            raise WatchProtocolError(f"{state.lower()} owner controller identity is inconsistent")
+        if completed_receipt is not None:
+            raise WatchProtocolError(f"{state.lower()} owner completed receipt is inconsistent")
+    elif state in {"ExitObserved", "CleanupComplete", "Completed"}:
+        if pid == 0 or creation_time == 0 or error is not None or not observer_pid:
+            raise WatchProtocolError(f"{state.lower()} owner record is inconsistent")
+        if retaining_pid:
+            raise WatchProtocolError(f"{state.lower()} owner retention is inconsistent")
+        if state == "Completed":
+            _completed_receipt_from_document(
+                completed_receipt, request, pid, request_sha256
+            )
+        elif completed_receipt is not None:
+            raise WatchProtocolError(f"{state.lower()} owner completed receipt is inconsistent")
     elif state == "RecoveryRequired":
-        if pid == 0 or error is None:
+        if pid == 0 or error is None or not retaining_pid:
             raise WatchProtocolError("recovery-required owner record is inconsistent")
+        if completed_receipt is not None:
+            raise WatchProtocolError("recovery-required owner completed receipt is inconsistent")
     elif state == "LaunchFailed":
-        if pid != 0 or creation_time != 0 or error is None:
+        if pid != 0 or creation_time != 0 or error is None or retaining_pid or observer_pid:
             raise WatchProtocolError("launch-failed owner record is inconsistent")
-    elif pid != 0 or creation_time != 0 or error is not None:
+        if completed_receipt is not None:
+            raise WatchProtocolError("launch-failed owner completed receipt is inconsistent")
+    elif pid != 0 or creation_time != 0 or error is not None or retaining_pid or observer_pid or completed_receipt is not None:
         raise WatchProtocolError("launching owner record is inconsistent")
     return value
+
+
+def _request_from_owner_unbound(data: bytes, request_path: Path) -> WatchRequest:
+    """Recover the immutable request copy when request.json is unavailable."""
+    value = _object_from_bytes(data, "owner record")
+    request_value = value.get("request")
+    if type(request_value) is not dict:
+        raise WatchProtocolError("owner record immutable request is unavailable")
+    request_bytes = _canonical_bytes(request_value)
+    request = _request_from_bytes(request_bytes)
+    expected_path = request.evidence_root / _REQUEST_NAME
+    if expected_path.absolute() != Path(request_path).absolute():
+        raise WatchProtocolError("owner request path identity mismatch")
+    request_sha256 = hashlib.sha256(request_bytes).hexdigest()
+    _parse_owner(data, request, request_sha256)
+    return request
+
+
+def _worker_identity_from_ready(
+    data: bytes,
+    request: WatchRequest,
+    request_sha256: str,
+) -> tuple[int, int]:
+    value = _object_from_bytes(data, "ready record")
+    pid = _required_int(value.get("workerPid"), "ready worker PID", minimum=1)
+    creation_time = _required_int(
+        value.get("workerCreationTime"), "ready worker creation time", minimum=1
+    )
+    _parse_ready(data, request, pid, request_sha256, creation_time)
+    return pid, creation_time
 
 
 def _load_request_path(request_path: Path) -> WatchRequest:
@@ -1045,16 +1248,30 @@ def _publish_launch_failure(
     message: str,
 ) -> str:
     journal_evidence = _JournalEvidence(0, 0, b"", 0, 0)
+    retained_journal_handles: list[int] = []
     try:
         journal = _EventJournal(events_path)
         try:
             journal_evidence = journal.evidence()
-        finally:
-            journal_close_error = journal.close()
+        except (OSError, WatchProtocolError) as journal_evidence_error:
+            message = (
+                f"{message}; launch-failure journal evidence failed: "
+                f"{journal_evidence_error}"
+            )
+        journal_close_error = journal.close()
         if journal_close_error is not None:
             message = f"{message}; {journal_close_error}"
+            retained_journal_handles.append(journal._handle)
+    except _HandleOwnershipError as journal_error:
+        retained_journal_handles.append(journal_error.handle)
+        message = f"{message}; launch-failure journal publication failed: {journal_error}"
     except (OSError, WatchProtocolError) as journal_error:
         message = f"{message}; launch-failure journal publication failed: {journal_error}"
+    if retained_journal_handles:
+        with _RETAINED_AUXILIARY_HANDLES_LOCK:
+            _RETAINED_AUXILIARY_HANDLES.setdefault(
+                request.evidence_root.absolute(), []
+            ).extend(retained_journal_handles)
     _replace_record(
         owner_path,
         _canonical_bytes(
@@ -1078,7 +1295,7 @@ def _publish_launch_failure(
         ready=False,
         event_digest=journal_evidence.sha256,
         errors=[message],
-        open_handle_count=0,
+        open_handle_count=len(retained_journal_handles),
         root_identities_unchanged=False,
         opened_root_kinds=(),
         journal_evidence=journal_evidence,
@@ -1150,7 +1367,9 @@ def _detach_local_popen_handle(process: subprocess.Popen[bytes]) -> int:
         return 0
     if getattr(handle, "closed", False):
         return 0
-    return int(handle.Detach())
+    detached = int(handle.Detach())
+    process._child_created = False
+    return detached
 
 
 def _record_spawned_failure(
@@ -1187,7 +1406,7 @@ def _record_spawned_failure(
     request_key = request_path.absolute()
     with _LOCAL_WORKERS_LOCK:
         _LOCAL_WORKERS[request_key] = _LocalWorker(
-            process,
+            process if getattr(process, "_child_created", True) else None,
             process.pid,
             request,
             request_sha256,
@@ -1233,6 +1452,21 @@ def _release_started_worker(
     except OSError as error:
         message = f"{failure_message}: worker exit wait failed: {error}"
     else:
+        observer_pid, observer_creation_time = _current_controller_identity()
+        try:
+            _replace_owner_state(
+                request,
+                request_sha256,
+                owner_token,
+                state="ExitObserved",
+                worker_pid=process.pid,
+                worker_creation_time=process_creation_time,
+                error=None,
+                observer_controller_pid=observer_pid,
+                observer_controller_creation_time=observer_creation_time,
+            )
+        except (OSError, WatchProtocolError) as error:
+            return f"{failure_message}: exit-observed publication failed: {error}"
         retained_process_handle = process_handle
         retained_popen_handle = _detach_local_popen_handle(process)
         close_errors: list[str] = []
@@ -1254,29 +1488,55 @@ def _release_started_worker(
                 retained_popen_handle = 0
             else:
                 close_errors.append(close_error)
-        if not close_errors:
-            with _LOCAL_WORKERS_LOCK:
-                _LOCAL_WORKERS.pop(request_path.absolute(), None)
-            return None
         with _LOCAL_WORKERS_LOCK:
             local_worker = _LOCAL_WORKERS.get(request_path.absolute())
             if local_worker is not None:
+                if not getattr(process, "_child_created", True):
+                    local_worker.process = None
                 local_worker.process_handle = retained_process_handle
                 local_worker.popen_handle = retained_popen_handle
+                local_worker.cleanup_complete = not close_errors
+        if not close_errors:
+            try:
+                _replace_owner_state(
+                    request,
+                    request_sha256,
+                    owner_token,
+                    state="CleanupComplete",
+                    worker_pid=process.pid,
+                    worker_creation_time=process_creation_time,
+                    error=None,
+                    observer_controller_pid=observer_pid,
+                    observer_controller_creation_time=observer_creation_time,
+                )
+            except (OSError, WatchProtocolError) as error:
+                return (
+                    f"{failure_message}: cleanup-complete publication failed: {error}"
+                )
+            with _LOCAL_WORKERS_LOCK:
+                _LOCAL_WORKERS.pop(request_path.absolute(), None)
+            return None
         message = f"{failure_message}: {'; '.join(close_errors)}"
-    _replace_record(
-        owner_path,
-        _canonical_bytes(
-            _owner_document(
-                request,
-                request_sha256,
-                owner_token,
-                state="RecoveryRequired",
-                worker_pid=process.pid,
-                worker_creation_time=process_creation_time,
-                error=message,
-            )
-        ),
+        _replace_owner_state(
+            request,
+            request_sha256,
+            owner_token,
+            state="RecoveryRequired",
+            worker_pid=process.pid,
+            worker_creation_time=process_creation_time,
+            error=message,
+            observer_controller_pid=observer_pid,
+            observer_controller_creation_time=observer_creation_time,
+        )
+        return message
+    _replace_owner_state(
+        request,
+        request_sha256,
+        owner_token,
+        state="RecoveryRequired",
+        worker_pid=process.pid,
+        worker_creation_time=process_creation_time,
+        error=message,
     )
     return message
 
@@ -1390,7 +1650,7 @@ def start_watch(request: WatchRequest) -> int:
                     normalized,
                     request_sha256,
                     owner_token,
-                    state="Running",
+                    state="Starting",
                     worker_pid=process.pid,
                     worker_creation_time=process_creation_time,
                     error=None,
@@ -1454,6 +1714,91 @@ def start_watch(request: WatchRequest) -> int:
                 if cleanup_error is not None:
                     raise WatchProtocolError(cleanup_error) from error
                 raise
+            local_worker = _LOCAL_WORKERS[request_key]
+            local_worker.popen_handle = _detach_local_popen_handle(process)
+            local_worker.process = None
+            launch_close_errors: list[str] = []
+            for handle, label, field_name in (
+                (
+                    local_worker.process_handle,
+                    f"launch identity process {process.pid}",
+                    "process_handle",
+                ),
+                (
+                    local_worker.popen_handle,
+                    f"launch Popen process {process.pid}",
+                    "popen_handle",
+                ),
+            ):
+                if not handle:
+                    continue
+                close_error = _close_handle(handle, label)
+                if close_error is None:
+                    setattr(local_worker, field_name, 0)
+                else:
+                    launch_close_errors.append(close_error)
+            if launch_close_errors:
+                message = "; ".join(launch_close_errors)
+                _replace_owner_state(
+                    normalized,
+                    request_sha256,
+                    owner_token,
+                    state="RecoveryRequired",
+                    worker_pid=process.pid,
+                    worker_creation_time=process_creation_time,
+                    error=message,
+                )
+                raise WatchProtocolError(message)
+            with _LOCAL_WORKERS_LOCK:
+                _LOCAL_WORKERS.pop(request_key, None)
+            try:
+                _replace_owner_state(
+                    normalized,
+                    request_sha256,
+                    owner_token,
+                    state="Running",
+                    worker_pid=process.pid,
+                    worker_creation_time=process_creation_time,
+                    error=None,
+                )
+            except (OSError, WatchProtocolError) as error:
+                message = f"watch owner promotion failed after launcher cleanup: {error}"
+                try:
+                    recovery_handle = _verified_process_handle(
+                        process.pid, process_creation_time
+                    )
+                except _HandleOwnershipError as ownership_error:
+                    recovery_handle = ownership_error.handle
+                    message = f"{message}; {ownership_error}"
+                except (OSError, WatchProtocolError) as recovery_error:
+                    raise WatchProtocolError(
+                        f"{message}; exact recovery handle acquisition failed: {recovery_error}"
+                    ) from error
+                with _LOCAL_WORKERS_LOCK:
+                    _LOCAL_WORKERS[request_key] = _LocalWorker(
+                        None,
+                        process.pid,
+                        normalized,
+                        request_sha256,
+                        recovery_handle,
+                        process_creation_time,
+                        owner_token,
+                    )
+                try:
+                    _replace_owner_state(
+                        normalized,
+                        request_sha256,
+                        owner_token,
+                        state="RecoveryRequired",
+                        worker_pid=process.pid,
+                        worker_creation_time=process_creation_time,
+                        error=message,
+                    )
+                except (OSError, WatchProtocolError) as recovery_error:
+                    message = (
+                        f"{message}; recovery owner publication failed: {recovery_error}"
+                    )
+                raise WatchProtocolError(message) from error
             return process.pid
         if terminal_path.exists() or process.poll() is not None:
             cleanup_error = _release_started_worker(
@@ -1777,7 +2122,7 @@ def run_watch_worker(request_path: Path) -> int:
             request,
             request_sha256,
         )
-        if owner["state"] == "Running":
+        if owner["state"] in {"Starting", "Running"}:
             if (
                 owner["workerPid"] != worker_pid
                 or (
@@ -2531,6 +2876,33 @@ def _wait_process_handle(handle: int, timeout_ms: int) -> bool:
     raise WatchProtocolError(f"worker process wait failed: {result}")
 
 
+def _process_identity_alive(pid: int, creation_time: int) -> bool:
+    try:
+        handle, observed_creation_time = _open_process_identity(pid)
+    except OSError as error:
+        if (
+            getattr(error, "winerror", None) == _ERROR_INVALID_PARAMETER
+            or getattr(error, "errno", None) == _ERROR_INVALID_PARAMETER
+        ):
+            return False
+        raise
+    try:
+        alive = observed_creation_time == creation_time and not _wait_process_handle(handle, 0)
+    except BaseException as error:
+        close_error = _close_handle(handle, f"controller identity probe {pid}")
+        if close_error is not None:
+            raise _HandleOwnershipError(
+                f"{error}; {close_error}",
+                handle,
+                f"controller identity probe {pid}",
+            ) from error
+        raise
+    close_error = _close_handle(handle, f"controller identity probe {pid}")
+    if close_error is not None:
+        raise _HandleOwnershipError(close_error, handle, f"controller identity probe {pid}")
+    return alive
+
+
 def _incomplete_receipt(
     request: WatchRequest,
     worker_pid: int,
@@ -2583,6 +2955,26 @@ def _finalize_cleanup_complete(
     events_path = request.evidence_root / _EVENTS_NAME
     terminal_path = request.evidence_root / _TERMINAL_NAME
     evidence_key = request.evidence_root.absolute()
+    try:
+        cleanup_owner = _parse_owner(
+            (request.evidence_root / _OWNER_NAME).read_bytes(), request, request_sha256
+        )
+        cleanup_observer_pid = _required_int(
+            cleanup_owner["observerControllerPid"],
+            "cleanup observer controller PID",
+            minimum=1,
+        )
+        cleanup_observer_creation = _required_int(
+            cleanup_owner["observerControllerCreationTime"],
+            "cleanup observer controller creation time",
+            minimum=1,
+        )
+    except (OSError, WatchProtocolError) as error:
+        return _incomplete_receipt(
+            request,
+            worker_pid,
+            f"cleanup owner unavailable before evidence validation: {error}",
+        )
 
     def retain_auxiliary_recovery(message: str) -> WatchReceipt:
         with _LOCAL_WORKERS_LOCK:
@@ -2608,6 +3000,8 @@ def _finalize_cleanup_complete(
                 worker_pid=worker_pid,
                 worker_creation_time=worker_creation_time,
                 error=message,
+                observer_controller_pid=cleanup_observer_pid,
+                observer_controller_creation_time=cleanup_observer_creation,
             )
         except (OSError, WatchProtocolError) as owner_error:
             message = f"{message}; recovery owner publication failed: {owner_error}"
@@ -2664,36 +3058,112 @@ def _finalize_cleanup_complete(
             worker_pid=worker_pid,
             worker_creation_time=worker_creation_time,
             error=None,
+            observer_controller_pid=cleanup_observer_pid,
+            observer_controller_creation_time=cleanup_observer_creation,
+            completed_receipt=provisional,
         )
     except (OSError, WatchProtocolError) as error:
         return _force_incomplete(
             provisional,
             f"completed owner publication failed: {error}",
         )
-    return watch_receipt_from_files(
-        request,
-        worker_pid,
-        ready_path,
-        events_path,
-        terminal_path,
-    )
+    return provisional
+
+
+def _owner_canonical_request_path(request_path: Path) -> Path:
+    supplied = Path(request_path)
+    owner_bytes = (supplied.parent / _OWNER_NAME).read_bytes()
+    owner = _object_from_bytes(owner_bytes, "owner record")
+    request_value = owner.get("request")
+    if type(request_value) is not dict:
+        raise WatchProtocolError("owner record immutable request is unavailable")
+    request_bytes = _canonical_bytes(request_value)
+    request = _request_from_bytes(request_bytes)
+    request_sha256 = hashlib.sha256(request_bytes).hexdigest()
+    _parse_owner(owner_bytes, request, request_sha256)
+    if not os.path.samefile(supplied.parent, request.evidence_root):
+        raise WatchProtocolError("owner request path identity mismatch")
+    return request.evidence_root / _REQUEST_NAME
+
+
+def _filesystem_canonical_request_path(request_path: Path) -> Path:
+    supplied = Path(request_path)
+    try:
+        return supplied.resolve(strict=True)
+    except FileNotFoundError:
+        return supplied.parent.resolve(strict=True) / _REQUEST_NAME
+
+
+def _stop_mutex_name(request_path: Path) -> str:
+    supplied = Path(request_path)
+    try:
+        identity_path = _owner_canonical_request_path(supplied)
+    except (OSError, WatchProtocolError):
+        identity_path = _filesystem_canonical_request_path(supplied)
+    canonical = os.path.normcase(os.path.abspath(os.fspath(identity_path)))
+    identity = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"Local\\ModLab-Watch-Stop-{identity}"
+
+
+def _retry_synchronization_handles() -> None:
+    with _RETAINED_SYNCHRONIZATION_HANDLES_LOCK:
+        retained = tuple(_RETAINED_SYNCHRONIZATION_HANDLES)
+        _RETAINED_SYNCHRONIZATION_HANDLES.clear()
+        retained_owned = tuple(_RETAINED_OWNED_MUTEX_HANDLES)
+        _RETAINED_OWNED_MUTEX_HANDLES.clear()
+    still_retained: list[int] = []
+    for handle in retained:
+        close_error = _close_handle(handle, "retained stop synchronization handle")
+        if close_error is not None:
+            still_retained.append(handle)
+            _SYNCHRONIZATION_CLEANUP_WARNINGS.append(close_error)
+    if still_retained:
+        with _RETAINED_SYNCHRONIZATION_HANDLES_LOCK:
+            _RETAINED_SYNCHRONIZATION_HANDLES.extend(still_retained)
+    still_owned: list[tuple[int, int]] = []
+    current_thread = threading.get_ident()
+    for handle, owner_thread in retained_owned:
+        acquired_for_release = owner_thread == current_thread
+        if not acquired_for_release:
+            wait_result = _kernel32.WaitForSingleObject(handle, 0)
+            if wait_result in {_WAIT_OBJECT_0, _WAIT_ABANDONED}:
+                acquired_for_release = True
+            elif wait_result == _WAIT_TIMEOUT:
+                still_owned.append((handle, owner_thread))
+                continue
+            else:
+                _SYNCHRONIZATION_CLEANUP_WARNINGS.append(
+                    f"retained stop mutex wait failed: {wait_result}"
+                )
+                still_owned.append((handle, owner_thread))
+                continue
+        if not _kernel32.ReleaseMutex(handle):
+            _SYNCHRONIZATION_CLEANUP_WARNINGS.append(
+                str(_winerror("could not release retained stop mutex"))
+            )
+            still_owned.append((handle, owner_thread))
+            continue
+        close_error = _close_handle(handle, "released retained stop mutex")
+        if close_error is not None:
+            still_retained.append(handle)
+            _SYNCHRONIZATION_CLEANUP_WARNINGS.append(close_error)
+    if still_owned or still_retained:
+        with _RETAINED_SYNCHRONIZATION_HANDLES_LOCK:
+            _RETAINED_OWNED_MUTEX_HANDLES.extend(still_owned)
+            for handle in still_retained:
+                if handle not in _RETAINED_SYNCHRONIZATION_HANDLES:
+                    _RETAINED_SYNCHRONIZATION_HANDLES.append(handle)
 
 
 def stop_watch(request_path: Path) -> WatchReceipt:
     """Serialize stop/recovery across threads and controller processes."""
-    request_key = Path(request_path).absolute()
-    with _LOCAL_WORKERS_LOCK:
-        local_worker = _LOCAL_WORKERS.get(request_key)
-    if local_worker is not None:
-        request_sha256 = local_worker.request_bytes_sha256
-    else:
-        try:
-            request_sha256 = hashlib.sha256(request_key.read_bytes()).hexdigest()
-        except OSError:
-            request_sha256 = hashlib.sha256(
-                str(request_key).casefold().encode("utf-8")
-            ).hexdigest()
-    mutex_name = f"Local\\ModLab-Watch-Stop-{request_sha256}"
+    _retry_synchronization_handles()
+    supplied_path = Path(request_path)
+    try:
+        request_key = _owner_canonical_request_path(supplied_path).absolute()
+    except (OSError, WatchProtocolError):
+        request_key = _filesystem_canonical_request_path(supplied_path).absolute()
+    mutex_name = _stop_mutex_name(request_key)
     mutex_handle = _kernel32.CreateMutexW(None, False, mutex_name)
     if not mutex_handle:
         raise _winerror("could not create per-request stop mutex")
@@ -2702,26 +3172,44 @@ def stop_watch(request_path: Path) -> WatchReceipt:
         close_error = _close_handle(mutex_handle, "unacquired stop mutex")
         detail = f"per-request stop mutex wait failed: {result}"
         if close_error is not None:
+            with _RETAINED_SYNCHRONIZATION_HANDLES_LOCK:
+                _RETAINED_SYNCHRONIZATION_HANDLES.append(mutex_handle)
+                _SYNCHRONIZATION_CLEANUP_WARNINGS.append(close_error)
             detail = f"{detail}; {close_error}"
         raise WatchProtocolError(detail)
     receipt: WatchReceipt | None = None
     release_error: str | None = None
+    released = False
     try:
         receipt = _stop_watch_locked(request_key)
     finally:
         if not _kernel32.ReleaseMutex(mutex_handle):
             release_error = str(_winerror("could not release per-request stop mutex"))
-        close_error = _close_handle(mutex_handle, "per-request stop mutex")
-        if close_error is not None:
-            with _RETAINED_AUXILIARY_HANDLES_LOCK:
-                _RETAINED_AUXILIARY_HANDLES.setdefault(request_key.parent, []).append(
-                    mutex_handle
+            with _RETAINED_SYNCHRONIZATION_HANDLES_LOCK:
+                _RETAINED_OWNED_MUTEX_HANDLES.append(
+                    (mutex_handle, threading.get_ident())
                 )
-            release_error = (
-                close_error
-                if release_error is None
-                else f"{release_error}; {close_error}"
-            )
+        else:
+            released = True
+        close_error = (
+            _close_handle(mutex_handle, "per-request stop mutex")
+            if released
+            else None
+        )
+        if close_error is not None:
+            if released:
+                with _RETAINED_SYNCHRONIZATION_HANDLES_LOCK:
+                    _RETAINED_SYNCHRONIZATION_HANDLES.append(mutex_handle)
+                    _SYNCHRONIZATION_CLEANUP_WARNINGS.append(close_error)
+            else:
+                with _RETAINED_SYNCHRONIZATION_HANDLES_LOCK:
+                    _RETAINED_SYNCHRONIZATION_HANDLES.append(mutex_handle)
+                    _SYNCHRONIZATION_CLEANUP_WARNINGS.append(close_error)
+                release_error = (
+                    close_error
+                    if release_error is None
+                    else f"{release_error}; {close_error}"
+                )
     if receipt is None:
         raise WatchProtocolError(release_error or "stop mutex failed before receipt")
     if release_error is not None:
@@ -2741,36 +3229,38 @@ def _stop_watch_locked(request_path: Path) -> WatchReceipt:
         request = _load_request_path(request_key)
     except (OSError, WatchProtocolError) as error:
         if local_worker is None:
-            fallback = WatchRequest(
-                "watch-request:" + "0" * 64,
-                evidence_root,
-                evidence_root / _STOP_NAME,
-                (),
-            )
             try:
-                _write_new(fallback.stop_token_path, b"stop\n")
-            except (FileExistsError, OSError):
-                pass
-            return WatchReceipt(
-                fallback.request_id,
-                0,
-                False,
-                False,
-                (),
-                (),
-                hashlib.sha256(b"").hexdigest(),
-                f"request record unavailable during stop: {error}",
-                "",
-            )
-        request = local_worker.request
+                request = _request_from_owner_unbound(
+                    (evidence_root / _OWNER_NAME).read_bytes(), request_key
+                )
+            except (OSError, WatchProtocolError) as owner_error:
+                fallback = WatchRequest(
+                    "watch-request:" + "0" * 64,
+                    evidence_root,
+                    evidence_root / _STOP_NAME,
+                    (),
+                )
+                try:
+                    _write_new(fallback.stop_token_path, b"stop\n")
+                except (FileExistsError, OSError):
+                    pass
+                return WatchReceipt(
+                    fallback.request_id,
+                    0,
+                    False,
+                    False,
+                    (),
+                    (),
+                    hashlib.sha256(b"").hexdigest(),
+                    f"request and owner records unavailable during stop: {error}; {owner_error}",
+                    "",
+                )
+        else:
+            request = local_worker.request
         request_error = f"request record unavailable during stop: {error}"
     ready_path = request.evidence_root / _READY_NAME
     events_path = request.evidence_root / _EVENTS_NAME
     terminal_path = request.evidence_root / _TERMINAL_NAME
-    try:
-        _write_new(request.stop_token_path, b"stop\n")
-    except FileExistsError:
-        pass
     _, request_sha256 = _request_bytes_and_sha256(request)
     owner_error: str | None = None
     owner_token = local_worker.owner_token if local_worker is not None else ""
@@ -2789,15 +3279,71 @@ def _stop_watch_locked(request_path: Path) -> WatchReceipt:
         )
     except (FileNotFoundError, OSError, WatchProtocolError) as error:
         if local_worker is None:
-            return _incomplete_receipt(
-                request,
-                0,
-                f"owner record unavailable during stop: {error}",
-            )
-        owner_error = f"owner record unavailable during stop: {error}"
-        owner_state = "Running"
-        worker_pid = local_worker.worker_pid
-        worker_creation_time = local_worker.process_creation_time
+            durable_owner_recovered = False
+            try:
+                durable_request = _request_from_owner_unbound(
+                    (evidence_root / _OWNER_NAME).read_bytes(), request_key
+                )
+                if durable_request != request:
+                    request_error = (
+                        "request record disagrees with immutable owner request"
+                    )
+                    request = durable_request
+                    ready_path = request.evidence_root / _READY_NAME
+                    events_path = request.evidence_root / _EVENTS_NAME
+                    terminal_path = request.evidence_root / _TERMINAL_NAME
+                    _, request_sha256 = _request_bytes_and_sha256(request)
+                    owner = _parse_owner(
+                        (request.evidence_root / _OWNER_NAME).read_bytes(),
+                        request,
+                        request_sha256,
+                    )
+                    owner_state = str(owner["state"])
+                    owner_token = _required_text(owner["ownerToken"], "owner token")
+                    worker_pid = _required_int(owner["workerPid"], "owner worker PID")
+                    worker_creation_time = _required_int(
+                        owner["workerCreationTime"],
+                        "owner worker creation time",
+                    )
+                    durable_owner_recovered = True
+            except (OSError, WatchProtocolError):
+                pass
+            if durable_owner_recovered:
+                owner_error = request_error
+            else:
+                try:
+                    worker_pid, worker_creation_time = _worker_identity_from_ready(
+                        ready_path.read_bytes(), request, request_sha256
+                    )
+                    owner_token = secrets.token_hex(32)
+                    _replace_owner_state(
+                        request,
+                        request_sha256,
+                        owner_token,
+                        state="Running",
+                        worker_pid=worker_pid,
+                        worker_creation_time=worker_creation_time,
+                        error=None,
+                    )
+                    owner = _parse_owner(
+                        (request.evidence_root / _OWNER_NAME).read_bytes(),
+                        request,
+                        request_sha256,
+                    )
+                except (FileNotFoundError, OSError, WatchProtocolError) as recovery_error:
+                    return _incomplete_receipt(
+                        request,
+                        0,
+                        f"owner record unavailable during stop: {error}; "
+                        f"ready identity recovery failed: {recovery_error}",
+                    )
+                owner_error = f"owner record unavailable during stop: {error}"
+                owner_state = "Running"
+        else:
+            owner_error = f"owner record unavailable during stop: {error}"
+            owner_state = "Running"
+            worker_pid = local_worker.worker_pid
+            worker_creation_time = local_worker.process_creation_time
     if owner_state == "CleanupComplete":
         with _LOCAL_WORKERS_LOCK:
             _LOCAL_WORKERS.pop(request_key, None)
@@ -2808,7 +3354,157 @@ def _stop_watch_locked(request_path: Path) -> WatchReceipt:
             request_sha256,
             owner_token,
         )
+    if owner_state == "ExitObserved" and not (
+        local_worker is not None and not local_worker.cleanup_complete
+    ):
+        observer_pid = _required_int(
+            owner["observerControllerPid"], "observer controller PID", minimum=1
+        )
+        observer_creation = _required_int(
+            owner["observerControllerCreationTime"],
+            "observer controller creation time",
+            minimum=1,
+        )
+        local_exit_proof = local_worker is not None and local_worker.cleanup_complete
+        if not local_exit_proof:
+            try:
+                observer_alive = _process_identity_alive(observer_pid, observer_creation)
+            except _HandleOwnershipError as error:
+                with _RETAINED_AUXILIARY_HANDLES_LOCK:
+                    _RETAINED_AUXILIARY_HANDLES.setdefault(
+                        request.evidence_root.absolute(), []
+                    ).append(error.handle)
+                return _incomplete_receipt(request, worker_pid, str(error))
+            except (OSError, WatchProtocolError) as error:
+                return _incomplete_receipt(
+                    request,
+                    worker_pid,
+                    f"observer identity proof failed: {error}",
+                )
+            if observer_alive:
+                return _incomplete_receipt(
+                    request,
+                    worker_pid,
+                    "observer remains live without local cleanup proof",
+                )
+        try:
+            _replace_owner_state(
+                request,
+                request_sha256,
+                owner_token,
+                state="CleanupComplete",
+                worker_pid=worker_pid,
+                worker_creation_time=worker_creation_time,
+                error=None,
+                observer_controller_pid=observer_pid,
+                observer_controller_creation_time=observer_creation,
+            )
+        except (OSError, WatchProtocolError) as error:
+            return _incomplete_receipt(
+                request,
+                worker_pid,
+                f"cleanup-complete owner publication failed: {error}",
+            )
+        with _LOCAL_WORKERS_LOCK:
+            _LOCAL_WORKERS.pop(request_key, None)
+        return _finalize_cleanup_complete(
+            request,
+            worker_pid,
+            worker_creation_time,
+            request_sha256,
+            owner_token,
+        )
+    if owner_state in {"Starting", "RecoveryRequired"} and local_worker is None:
+        retaining_pid = _required_int(
+            owner["retainingControllerPid"], "retaining controller PID", minimum=1
+        )
+        retaining_creation = _required_int(
+            owner["retainingControllerCreationTime"],
+            "retaining controller creation time",
+            minimum=1,
+        )
+        try:
+            retaining_alive = _process_identity_alive(retaining_pid, retaining_creation)
+        except _HandleOwnershipError as error:
+            with _RETAINED_AUXILIARY_HANDLES_LOCK:
+                _RETAINED_AUXILIARY_HANDLES.setdefault(
+                    request.evidence_root.absolute(), []
+                ).append(error.handle)
+            return _incomplete_receipt(request, worker_pid, str(error))
+        except (OSError, WatchProtocolError) as error:
+            return _incomplete_receipt(
+                request,
+                worker_pid,
+                f"retaining controller identity proof failed: {error}",
+            )
+        current_controller_pid, current_controller_creation = (
+            _current_controller_identity()
+        )
+        same_starting_controller = owner_state == "Starting" and (
+            retaining_pid == current_controller_pid
+            and retaining_creation == current_controller_creation
+        )
+        if retaining_alive and not same_starting_controller:
+            return _incomplete_receipt(
+                request,
+                worker_pid,
+                "retaining controller remains live with inaccessible recovery handles",
+            )
+        if (
+            not retaining_alive
+            and owner_state == "RecoveryRequired"
+            and owner["observerControllerPid"]
+        ):
+            observer_pid = _required_int(
+                owner["observerControllerPid"],
+                "observer controller PID",
+                minimum=1,
+            )
+            observer_creation = _required_int(
+                owner["observerControllerCreationTime"],
+                "observer controller creation time",
+                minimum=1,
+            )
+            try:
+                _replace_owner_state(
+                    request,
+                    request_sha256,
+                    owner_token,
+                    state="CleanupComplete",
+                    worker_pid=worker_pid,
+                    worker_creation_time=worker_creation_time,
+                    error=None,
+                    observer_controller_pid=observer_pid,
+                    observer_controller_creation_time=observer_creation,
+                )
+            except (OSError, WatchProtocolError) as error:
+                return _incomplete_receipt(
+                    request,
+                    worker_pid,
+                    f"cleanup-complete owner publication failed: {error}",
+                )
+            return _finalize_cleanup_complete(
+                request,
+                worker_pid,
+                worker_creation_time,
+                request_sha256,
+                owner_token,
+            )
     if local_worker is not None:
+        if owner_state in {"Starting", "RecoveryRequired"}:
+            current_controller_pid, current_controller_creation = (
+                _current_controller_identity()
+            )
+            if (
+                owner["retainingControllerPid"] != current_controller_pid
+                or owner["retainingControllerCreationTime"]
+                != current_controller_creation
+            ):
+                return _incomplete_receipt(
+                    request,
+                    worker_pid,
+                    "recovery handles belong to a different live controller identity",
+                )
         if local_worker.cleanup_complete:
             try:
                 _replace_owner_state(
@@ -2818,7 +3514,7 @@ def _stop_watch_locked(request_path: Path) -> WatchReceipt:
                     state="CleanupComplete",
                     worker_pid=worker_pid,
                     worker_creation_time=worker_creation_time,
-                    error="retrying retained cleanup evidence handle",
+                    error=None,
                 )
             except (OSError, WatchProtocolError) as error:
                 return _incomplete_receipt(
@@ -2835,6 +3531,10 @@ def _stop_watch_locked(request_path: Path) -> WatchReceipt:
                 request_sha256,
                 owner_token,
             )
+        try:
+            _write_new(request.stop_token_path, b"stop\n")
+        except FileExistsError:
+            pass
         process_handle = local_worker.process_handle or local_worker.popen_handle
         if local_worker.process_creation_time == 0 and process_handle:
             try:
@@ -2898,14 +3598,17 @@ def _stop_watch_locked(request_path: Path) -> WatchReceipt:
         )
         return _force_incomplete(receipt, str(owner["error"]))
     elif owner_state == "Completed":
-        return watch_receipt_from_files(
+        return _completed_receipt_from_document(
+            owner["completedReceipt"],
             request,
             worker_pid,
-            ready_path,
-            events_path,
-            terminal_path,
+            request_sha256,
         )
     else:
+        try:
+            _write_new(request.stop_token_path, b"stop\n")
+        except FileExistsError:
+            pass
         try:
             process_handle = _verified_process_handle(worker_pid, worker_creation_time)
         except _HandleOwnershipError as error:
@@ -2937,9 +3640,15 @@ def _stop_watch_locked(request_path: Path) -> WatchReceipt:
                 )
             return _incomplete_receipt(request, worker_pid, str(error))
         except (OSError, WatchProtocolError) as error:
-            return _incomplete_receipt(
+            receipt = watch_receipt_from_files(
                 request,
                 worker_pid,
+                ready_path,
+                events_path,
+                terminal_path,
+            )
+            return _force_incomplete(
+                receipt,
                 f"exact worker process could not be verified: {error}",
             )
         owns_temporary_handle = True
@@ -3007,16 +3716,18 @@ def _stop_watch_locked(request_path: Path) -> WatchReceipt:
                 local_worker.popen_handle = _detach_local_popen_handle(
                     local_worker.process
                 )
-    pending_message = "controller completion pending terminal validation"
+    observer_pid, observer_creation_time = _current_controller_identity()
     try:
         _replace_owner_state(
             request,
             request_sha256,
             owner_token,
-            state="RecoveryRequired",
+            state="ExitObserved",
             worker_pid=worker_pid,
             worker_creation_time=worker_creation_time,
-            error=pending_message,
+            error=None,
+            observer_controller_pid=observer_pid,
+            observer_controller_creation_time=observer_creation_time,
         )
     except (OSError, WatchProtocolError) as error:
         if owns_temporary_handle:
@@ -3085,6 +3796,8 @@ def _stop_watch_locked(request_path: Path) -> WatchReceipt:
                 worker_pid=worker_pid,
                 worker_creation_time=worker_creation_time,
                 error=close_error,
+                observer_controller_pid=observer_pid,
+                observer_controller_creation_time=observer_creation_time,
             )
         except (OSError, WatchProtocolError) as error:
             close_error = f"{close_error}; recovery owner publication failed: {error}"
@@ -3097,6 +3810,18 @@ def _stop_watch_locked(request_path: Path) -> WatchReceipt:
         )
         return _force_incomplete(receipt, close_error)
 
+    with _LOCAL_WORKERS_LOCK:
+        _LOCAL_WORKERS[request_key] = _LocalWorker(
+            None,
+            worker_pid,
+            request,
+            request_sha256,
+            0,
+            worker_creation_time,
+            owner_token,
+            0,
+            True,
+        )
     try:
         _replace_owner_state(
             request,
@@ -3105,11 +3830,11 @@ def _stop_watch_locked(request_path: Path) -> WatchReceipt:
             state="CleanupComplete",
             worker_pid=worker_pid,
             worker_creation_time=worker_creation_time,
-            error="controller handles closed; terminal validation pending",
+            error=None,
+            observer_controller_pid=observer_pid,
+            observer_controller_creation_time=observer_creation_time,
         )
     except (OSError, WatchProtocolError) as error:
-        with _LOCAL_WORKERS_LOCK:
-            _LOCAL_WORKERS.pop(request_key, None)
         return _incomplete_receipt(
             request,
             worker_pid,
