@@ -99,6 +99,8 @@ if os.name == "nt":
     _LABEL_SECURITY_INFORMATION = 0x00000010
     _SYSTEM_MANDATORY_LABEL_ACE_TYPE = 0x11
     _SYSTEM_MANDATORY_LABEL_NO_WRITE_UP = 0x00000001
+    _OBJECT_INHERIT_ACE = 0x01
+    _CONTAINER_INHERIT_ACE = 0x02
     _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     _TOKEN_QUERY = 0x0008
     _TOKEN_ADJUST_DEFAULT = 0x0080
@@ -307,7 +309,7 @@ def _integrity_from_label_ace(ace: int) -> IntegrityLevel:
     return _integrity_from_sid(sid_address)
 
 
-def inspect_path_integrity(path: Path) -> IntegrityLevel:
+def _inspect_path_integrity_evidence(path: Path) -> tuple[IntegrityLevel, int | None]:
     _require_windows()
     target = Path(path)
     if not target.is_absolute():
@@ -329,24 +331,30 @@ def inspect_path_integrity(path: Path) -> IntegrityLevel:
         raise _winerror(f"GetNamedSecurityInfoW failed for {target}", result)
     try:
         if not sacl:
-            return IntegrityLevel.MEDIUM
+            return IntegrityLevel.MEDIUM, None
         acl = ctypes.cast(sacl, ctypes.POINTER(_ACL)).contents
-        observed: list[IntegrityLevel] = []
+        observed: list[tuple[IntegrityLevel, int]] = []
         for index in range(acl.AceCount):
             ace = ctypes.c_void_p()
             if not _advapi32.GetAce(sacl, index, ctypes.byref(ace)):
                 raise _winerror(f"GetAce failed for {target}")
             header = ctypes.cast(ace, ctypes.POINTER(_ACE_HEADER)).contents
             if header.AceType == _SYSTEM_MANDATORY_LABEL_ACE_TYPE:
-                observed.append(_integrity_from_label_ace(ace.value))
+                observed.append(
+                    (_integrity_from_label_ace(ace.value), int(header.AceFlags))
+                )
         if not observed:
-            return IntegrityLevel.MEDIUM
+            return IntegrityLevel.MEDIUM, None
         if len(observed) != 1:
             raise OSError(f"multiple mandatory integrity labels observed for {target}")
         return observed[0]
     finally:
         if security_descriptor:
             _kernel32.LocalFree(security_descriptor)
+
+
+def inspect_path_integrity(path: Path) -> IntegrityLevel:
+    return _inspect_path_integrity_evidence(path)[0]
 
 
 def inspect_process_integrity(pid: int) -> IntegrityLevel:
@@ -496,11 +504,20 @@ def _validate_medium_integrity_entries(
     if not paths:
         raise ValueError("integrity entries must not be empty")
 
-    seen: set[str] = set()
-    entries: list[tuple[Path, bool]] = []
+    snapshots: list[Path] = []
     for value in paths:
         if not isinstance(value, Path):
             raise TypeError("integrity entries must contain Path values")
+        snapshot = os.fspath(value)
+        if not isinstance(snapshot, str):
+            raise TypeError(
+                "integrity entry paths must have a native string representation"
+            )
+        snapshots.append(Path(snapshot))
+
+    seen: set[str] = set()
+    entries: list[tuple[Path, bool]] = []
+    for value in snapshots:
         if not value.is_absolute():
             raise ValueError(f"integrity entry must be absolute: {value}")
         identity = os.path.normcase(os.path.normpath(str(value)))
@@ -581,6 +598,15 @@ def set_medium_integrity_entries(
                 raise OSError(
                     f"icacls did not apply MEDIUM integrity to {path}: {observed.name}"
                 )
+            if was_directory:
+                _, ace_flags = _inspect_path_integrity_evidence(path)
+                required_flags = _OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE
+                if ace_flags is None or ace_flags & required_flags != required_flags:
+                    raise OSError(
+                        "icacls did not apply inheritable MEDIUM integrity to "
+                        f"{path}: mandatory label inheritance flags were "
+                        f"{ace_flags!r}"
+                    )
         except Exception as exc:
             evidence = IntegrityLabelBatchEvidence(tuple(receipts), str(path))
             raise IntegrityLabelBatchError(
