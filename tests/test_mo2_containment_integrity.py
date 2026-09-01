@@ -1,6 +1,7 @@
 import hashlib
 import os
 from pathlib import Path
+import shutil
 import struct
 import sys
 import tempfile
@@ -488,44 +489,57 @@ class WindowsIntegrityTests(unittest.TestCase):
 
             self.assertFalse(marker.exists())
 
-    def test_ordering_test_preserves_primary_assertion_when_cleanup_fails(self):
+    def test_ordering_test_retains_root_and_primary_when_exit_wait_fails(self):
         primary_error = AssertionError("injected primary marker failure")
         cleanup_error = OSError("injected cleanup wait failure")
         launch = mock.Mock(pid=424242)
+        retained_root = Path(tempfile.mkdtemp(prefix="modlab-integrity-retained-"))
         caught = None
 
-        with (
-            mock.patch(f"{__name__}.set_low_integrity_tree"),
-            mock.patch(
-                f"{__name__}.launch_low_integrity_process", return_value=launch
-            ),
-            mock.patch.object(self, "_wait_for_file", side_effect=primary_error),
-            mock.patch.object(
-                self, "_wait_for_process_exit", side_effect=cleanup_error
-            ),
-        ):
-            try:
-                self.test_child_is_low_before_its_first_instruction_runs()
-            except BaseException as observed:
-                caught = observed
-            else:
-                self.fail("ordering test unexpectedly returned without its primary error")
+        try:
+            with (
+                mock.patch.object(
+                    tempfile, "mkdtemp", return_value=str(retained_root)
+                ),
+                mock.patch(f"{__name__}.set_low_integrity_tree"),
+                mock.patch(
+                    f"{__name__}.launch_low_integrity_process", return_value=launch
+                ),
+                mock.patch.object(self, "_wait_for_file", side_effect=primary_error),
+                mock.patch.object(
+                    self, "_wait_for_process_exit", side_effect=cleanup_error
+                ),
+            ):
+                try:
+                    self.test_child_is_low_before_its_first_instruction_runs()
+                except BaseException as observed:
+                    caught = observed
+                else:
+                    self.fail(
+                        "ordering test unexpectedly returned without its primary error"
+                    )
 
-        self.assertIs(primary_error, caught)
-        notes = getattr(caught, "__notes__", ())
-        self.assertTrue(any("cleanup wait failure" in note for note in notes))
+            self.assertIs(primary_error, caught)
+            self.assertEqual("injected primary marker failure", str(caught))
+            self.assertTrue(retained_root.is_dir())
+            notes = getattr(caught, "__notes__", ())
+            self.assertTrue(any("cleanup wait failure" in note for note in notes))
+            self.assertTrue(any(str(retained_root) in note for note in notes))
+        finally:
+            if retained_root.exists():
+                shutil.rmtree(retained_root)
 
     def test_child_is_low_before_its_first_instruction_runs(self):
-        with tempfile.TemporaryDirectory(prefix="modlab-integrity-order-") as temporary:
-            root = Path(temporary)
+        root = Path(tempfile.mkdtemp(prefix="modlab-integrity-order-"))
+        launch = None
+        primary_error = None
+        try:
             stage = root / "stage"
             stage.mkdir()
             marker = stage / "first-instruction.marker"
             set_low_integrity_tree(stage)
             real_resume = windows_integrity._resume_verified_child
             observed_barrier = []
-            launch = None
-            primary_error = None
 
             def inspect_barrier(process, thread, pid):
                 self.assertFalse(marker.exists())
@@ -534,36 +548,52 @@ class WindowsIntegrityTests(unittest.TestCase):
                 return real_resume(process, thread, pid)
 
             code = "from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b'ran')"
-            try:
-                with mock.patch.object(
-                    windows_integrity,
-                    "_resume_verified_child",
-                    side_effect=inspect_barrier,
-                ):
-                    launch = launch_low_integrity_process(
-                        PYTHON,
-                        ("-B", "-c", code, str(marker)),
-                        root,
-                        dict(os.environ),
-                    )
+            with mock.patch.object(
+                windows_integrity,
+                "_resume_verified_child",
+                side_effect=inspect_barrier,
+            ):
+                launch = launch_low_integrity_process(
+                    PYTHON,
+                    ("-B", "-c", code, str(marker)),
+                    root,
+                    dict(os.environ),
+                )
 
-                self._wait_for_file(marker)
-                self.assertEqual([launch.pid], observed_barrier)
-                self.assertEqual(b"ran", marker.read_bytes())
-            except BaseException as error:
-                primary_error = error
-                raise
-            finally:
-                if launch is not None:
-                    try:
-                        self._wait_for_process_exit(launch.pid)
-                    except BaseException as cleanup_error:
-                        if primary_error is None:
-                            raise
-                        primary_error.add_note(
-                            f"cleanup wait for child pid {launch.pid} also failed: "
-                            f"{cleanup_error!r}"
-                        )
+            self._wait_for_file(marker)
+            self.assertEqual([launch.pid], observed_barrier)
+            self.assertEqual(b"ran", marker.read_bytes())
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            exit_confirmed = launch is None
+            if launch is not None:
+                try:
+                    self._wait_for_process_exit(launch.pid)
+                except BaseException as wait_error:
+                    retained = f"retained test root {root}"
+                    if primary_error is None:
+                        wait_error.add_note(retained)
+                        raise
+                    primary_error.add_note(
+                        f"cleanup wait for child pid {launch.pid} failed; "
+                        f"{retained}: {wait_error!r}"
+                    )
+                else:
+                    exit_confirmed = True
+            if exit_confirmed:
+                try:
+                    shutil.rmtree(root)
+                except BaseException as deletion_error:
+                    retained = f"retained test root {root}"
+                    if primary_error is None:
+                        deletion_error.add_note(retained)
+                        raise
+                    primary_error.add_note(
+                        f"test root deletion failed; {retained}: "
+                        f"{deletion_error!r}"
+                    )
 
     def test_pre_resume_failure_terminates_exact_child_without_running_marker(self):
         with tempfile.TemporaryDirectory(prefix="modlab-integrity-failure-") as temporary:
@@ -721,7 +751,7 @@ class WindowsIntegrityTests(unittest.TestCase):
                     with self.assertRaises(error_type):
                         self._wait_for_process_exit(0x7FFFFFFE)
 
-    def test_process_exit_wait_accepts_only_documented_missing_pid_open_error(self):
+    def test_process_exit_wait_accepts_empirical_invalid_parameter_for_known_child(self):
         import ctypes
 
         kernel32 = mock.Mock()
@@ -764,6 +794,8 @@ class WindowsIntegrityTests(unittest.TestCase):
         handle = kernel32.OpenProcess(synchronize, False, pid)
         if not handle:
             error = ctypes.get_last_error()
+            # Empirical already-gone result for our known positive child PID;
+            # this is not a general documented missing-PID guarantee.
             if error == error_invalid_parameter:
                 return
             raise ctypes.WinError(error)
