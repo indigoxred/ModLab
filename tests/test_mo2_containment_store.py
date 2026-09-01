@@ -246,6 +246,36 @@ class ContainmentStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ContainmentStoreError, "canonical|bytes"):
             store.load_journal(journal.run_id, journal.scenario)
 
+    def test_malformed_scenario_result_has_a_typed_read_error(self):
+        store = ContainmentStore(self.root)
+        result, outcome = valid_scenario_result()
+        store.write_watch_outcome(outcome)
+        store.result_path(RUN_ID, result.scenario).write_bytes(b"{}\n")
+
+        with self.assertRaises(
+            containment_store.ContainmentStoreMalformedEvidence,
+        ):
+            store.load_result(RUN_ID, result.scenario)
+
+    def test_noncanonical_scenario_result_has_a_typed_read_error(self):
+        store = ContainmentStore(self.root)
+        result, outcome = valid_scenario_result()
+        store.write_watch_outcome(outcome)
+        store.write_result(result)
+        path = store.result_path(RUN_ID, result.scenario)
+        path.write_bytes(path.read_bytes().replace(b"{", b"{ ", 1))
+
+        with self.assertRaises(
+            containment_store.ContainmentStoreMalformedEvidence,
+        ):
+            store.load_result(RUN_ID, result.scenario)
+
+    def test_malformed_capability_decision_has_a_typed_read_error(self):
+        with self.assertRaises(
+            containment_store.ContainmentStoreMalformedEvidence,
+        ):
+            ContainmentStore._decision_probe(b"{}\n", RUN_ID)
+
     def test_captured_transition_requires_durable_after_and_result(self):
         store = ContainmentStore(self.root)
         prepared = store.create(valid_prepared_journal(self.root))

@@ -33,6 +33,7 @@ from .mo2_containment_service import (
 from .mo2_containment_store import (
     ContainmentStore,
     ContainmentStoreError,
+    ContainmentStoreMalformedEvidence,
     ContainmentStoreNotFound,
 )
 
@@ -48,6 +49,23 @@ class CliInputError(ValueError):
 class _ArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise CliInputError(message)
+
+
+@dataclass(frozen=True)
+class _ValidationProgress:
+    run_id: str
+    scenario: ContainmentScenario
+    validation_root: Path
+    stage_root: Path | None
+    written_paths: tuple[Path, ...]
+    launched_processes: tuple[str, ...]
+
+
+class _ValidationControllerRefusal(RuntimeError):
+    def __init__(self, progress: _ValidationProgress, cause: BaseException):
+        super().__init__(str(cause))
+        self.progress = progress
+        self.cause = cause
 
 
 class _Service(Protocol):
@@ -277,11 +295,54 @@ def _exit_for_verdict(verdict: CapabilityVerdict) -> int:
 
 def _exit_for_operational_error(error: BaseException) -> int:
     """Keep malformed retained evidence distinct from an uncertain live state."""
-    if isinstance(error, ContainmentStoreError):
-        text = str(error).casefold()
-        if any(token in text for token in ("invalid", "malformed", "canonical", "schema", "fields")):
-            return 2
-    return 3
+    return 2 if isinstance(error, ContainmentStoreMalformedEvidence) else 3
+
+
+def _result_changes(result: ScenarioResult) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    source_changes: list[str] = []
+    game_changes: list[str] = []
+    source_fields = (
+        ("SourceMods", result.protected_before.source_mods, result.protected_after.source_mods),
+        ("LabProfile", result.protected_before.lab_profile_sha256, result.protected_after.lab_profile_sha256),
+        ("PlayProfile", result.protected_before.play_profile_sha256, result.protected_after.play_profile_sha256),
+        ("Downloads", result.protected_before.downloads, result.protected_after.downloads),
+        ("Overwrite", result.protected_before.overwrite, result.protected_after.overwrite),
+    )
+    for label, before, after in source_fields:
+        if before != after:
+            source_changes.append(f"Protected {label} evidence changed")
+    if result.protected_before.bounded_game != result.protected_after.bounded_game:
+        game_changes.append("Protected BoundedGame evidence changed")
+    for event in result.watcher_events:
+        change = f"{event.root_kind}: {event.action} {event.relative_path}"
+        if event.root_kind == "BoundedGame":
+            game_changes.append(change)
+        elif event.root_kind in {"SourceMods", "LabProfile", "PlayProfile", "Downloads", "Overwrite"}:
+            source_changes.append(change)
+    production_changes = tuple(
+        f"Observed production backup: {name}"
+        for name in result.production_backup_names
+    )
+    return (
+        tuple(dict.fromkeys(source_changes)),
+        tuple(dict.fromkeys(game_changes)),
+        production_changes,
+    )
+
+
+def _progress_response(progress: _ValidationProgress, cause: BaseException) -> dict[str, object]:
+    reasons = [f"Safe refusal: {cause}"]
+    if progress.stage_root is not None:
+        reasons.append(f"Contained mutation root: {progress.stage_root}")
+    return _response(
+        "validate",
+        run_id=progress.run_id,
+        scenario=progress.scenario,
+        state="RecoveryRequired",
+        written_paths=progress.written_paths,
+        launched_processes=progress.launched_processes,
+        reasons=tuple(reasons),
+    )
 
 
 def _prepare(args: argparse.Namespace, service: _Service) -> tuple[int, dict[str, object]]:
@@ -308,9 +369,35 @@ def _validate(
     run_id = _require_run_id(args.run_id)
     scenario = _require_scenario(args.scenario)
     validation = _validation_root(args.workspace)
-    service.arm_scenario(validation, run_id, scenario)
-    launched = service.launch_scenario(validation, run_id, scenario)
+    armed = service.arm_scenario(validation, run_id, scenario)
+    stage_value = getattr(armed, "stage_root", None)
+    stage_root = Path(stage_value) if isinstance(stage_value, str) and stage_value else None
+    scenario_path = _scenario_path(validation, run_id, scenario)
+    progress = _ValidationProgress(
+        run_id,
+        scenario,
+        validation,
+        stage_root,
+        (scenario_path / "before.json", scenario_path / "journal.json"),
+        (),
+    )
+    try:
+        launched = service.launch_scenario(validation, run_id, scenario)
+    except (ContainmentServiceError, ContainmentStoreError, OSError, RuntimeError) as error:
+        raise _ValidationControllerRefusal(progress, error) from error
     pid = getattr(launched, "mo2_pid", None)
+    progress = _ValidationProgress(
+        run_id,
+        scenario,
+        validation,
+        stage_root,
+        (
+            *progress.written_paths,
+            scenario_path / "watch" / "request.json",
+            scenario_path / "launch.json",
+        ),
+        () if not isinstance(pid, int) or pid <= 0 else (f"MO2 PID: {pid}",),
+    )
     procedure = _instructions(scenario)
     published_instructions = (
         ("Interactive operator procedure was displayed on stderr.",)
@@ -333,23 +420,40 @@ def _validate(
             run_id=run_id,
             scenario=scenario,
             state="Launched",
-            written_paths=(_scenario_path(validation, run_id, scenario) / "journal.json",),
-            launched_processes=() if pid is None else (f"MO2 PID: {pid}",),
+            written_paths=progress.written_paths,
+            launched_processes=progress.launched_processes,
             instructions=published_instructions,
             reasons=("Capture was not continued; recover performs cleanup only.",),
         )
-    result = service.capture_scenario(validation, run_id, scenario)
-    if result.run_id != run_id or result.scenario is not scenario:
-        raise ContainmentServiceError("capture returned evidence bound to another scenario")
-    result_path = _scenario_path(validation, run_id, scenario) / "result.json"
+    try:
+        result = service.capture_scenario(validation, run_id, scenario)
+        if result.run_id != run_id or result.scenario is not scenario:
+            raise ContainmentServiceError(
+                "capture returned evidence bound to another scenario"
+            )
+        source_changes, game_changes, production_changes = _result_changes(result)
+    except (ContainmentServiceError, ContainmentStoreError, OSError, RuntimeError) as error:
+        raise _ValidationControllerRefusal(progress, error) from error
     return _exit_for_outcome(result.outcome), _response(
         "validate",
         run_id=run_id,
         scenario=scenario,
         state="Captured",
         outcome=result.outcome.value,
-        written_paths=(result_path,),
-        launched_processes=() if result.mo2_process is None else (f"MO2 PID: {result.mo2_process.pid}",),
+        written_paths=(
+            *progress.written_paths,
+            scenario_path / "watch" / "outcome.json",
+            scenario_path / "after.json",
+            scenario_path / "result.json",
+        ),
+        launched_processes=(
+            progress.launched_processes
+            if result.mo2_process is None
+            else (f"MO2 PID: {result.mo2_process.pid}",)
+        ),
+        source_changes=source_changes,
+        game_changes=game_changes,
+        production_mo2_changes=production_changes,
         instructions=published_instructions,
         reasons=result.reasons,
     )
@@ -380,27 +484,32 @@ def _show(args: argparse.Namespace, service: _Service) -> tuple[int, dict[str, o
         decision = service.load_decision(validation, run_id)
     except ContainmentStoreNotFound:
         decision = None
-    if decision is not None:
-        return 0, _response(
-            "show",
-            run_id=run_id,
-            verdict=decision.verdict.value,
-            reasons=decision.reasons,
-        )
+    results: list[ScenarioResult] = []
     for scenario in ContainmentScenario:
         try:
             result = service.load_result(validation, run_id, scenario)
         except ContainmentStoreNotFound:
             continue
-        return 0, _response(
-            "show",
-            run_id=run_id,
-            scenario=scenario,
-            state="Captured",
-            outcome=result.outcome.value,
-            reasons=result.reasons,
-        )
-    raise ContainmentStoreNotFound("no containment result or decision exists for this run")
+        results.append(result)
+    if not results and decision is None:
+        raise ContainmentStoreNotFound("no containment result or decision exists for this run")
+    rank = {ScenarioOutcome.PASSED: 0, ScenarioOutcome.INCOMPLETE: 1, ScenarioOutcome.FAILED: 2}
+    selected = max(results, key=lambda value: rank[value.outcome]) if results else None
+    reasons: list[str] = []
+    for result in results:
+        reasons.append(f"Scenario {result.scenario.value}: {result.outcome.value}")
+        reasons.extend(f"{result.scenario.value}: {reason}" for reason in result.reasons)
+    if decision is not None:
+        reasons.extend(f"Decision: {reason}" for reason in decision.reasons)
+    return 0, _response(
+        "show",
+        run_id=run_id,
+        scenario=None if selected is None else selected.scenario,
+        state=None if selected is None else "Captured",
+        outcome=None if selected is None else selected.outcome.value,
+        verdict=None if decision is None else decision.verdict.value,
+        reasons=tuple(reasons),
+    )
 
 
 def _adjudicate(args: argparse.Namespace, service: _Service) -> tuple[int, dict[str, object]]:
@@ -432,6 +541,16 @@ def main(
     try:
         args = parser.parse_args(argv)
     except CliInputError as error:
+        raw = sys.argv[1:] if argv is None else argv
+        command = next((item for item in raw if item in {"prepare", "validate", "recover", "show", "adjudicate"}), "unknown")
+        json_requested = any(
+            item == "--format=json"
+            or (item == "--format" and index + 1 < len(raw) and raw[index + 1] == "json")
+            for index, item in enumerate(raw)
+        )
+        if json_requested:
+            _emit(_response(command, reasons=(str(error),)), output, "json")
+            return 2
         print(f"Containment validation argument error: {error}", file=errors)
         return 2
     active_service: _Service = _LiveService() if service is None else service
@@ -453,6 +572,9 @@ def main(
         else:
             print(f"Containment validation argument error: {error}", file=errors)
         return 2
+    except _ValidationControllerRefusal as error:
+        _emit(_progress_response(error.progress, error.cause), output, args.format)
+        return _exit_for_operational_error(error.cause)
     except (ContainmentServiceError, ContainmentStoreError, OSError, RuntimeError) as error:
         refusal = _response(
             args.command,

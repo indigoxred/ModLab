@@ -58,6 +58,10 @@ class ContainmentStoreError(RuntimeError):
     """A containment document could not be stored or proved exact."""
 
 
+class ContainmentStoreMalformedEvidence(ContainmentStoreError):
+    """Stored containment evidence exists but cannot be parsed exactly."""
+
+
 class ContainmentStoreNotFound(ContainmentStoreError):
     """A required containment document is absent."""
 
@@ -799,11 +803,15 @@ class ContainmentStore:
         value = self._parse(watch_outcome_from_bytes, data, "watch outcome")
         observed_id = watch_outcome_id_for(value)
         if value.run_id != run_id or value.scenario is not scenario:
-            raise ContainmentStoreError("watch outcome has the wrong run/scenario binding")
+            raise ContainmentStoreMalformedEvidence(
+                "watch outcome has the wrong run/scenario binding"
+            )
         if expected_id is not None and observed_id != expected_id:
             raise ContainmentStoreError("watch outcome content ID mismatch")
         if watch_outcome_to_bytes(value) != data:
-            raise ContainmentStoreError("watch outcome bytes are not canonical")
+            raise ContainmentStoreMalformedEvidence(
+                "watch outcome bytes are not canonical"
+            )
         return value
 
     def _load_result_unlocked(
@@ -819,9 +827,13 @@ class ContainmentStore:
             "scenario result",
         )
         if value.run_id != run_id or value.scenario is not scenario:
-            raise ContainmentStoreError("scenario result has the wrong run/scenario binding")
+            raise ContainmentStoreMalformedEvidence(
+                "scenario result has the wrong run/scenario binding"
+            )
         if scenario_result_to_bytes(value, watch) != data:
-            raise ContainmentStoreError("scenario result bytes are not canonical")
+            raise ContainmentStoreMalformedEvidence(
+                "scenario result bytes are not canonical"
+            )
         return value
 
     def _load_recovery_unlocked(
@@ -895,7 +907,9 @@ class ContainmentStore:
                 return capability_decision_to_bytes(value, results, outcomes)
             return capability_decision_to_bytes(value)
         except ContainmentFormatError as error:
-            raise ContainmentStoreError(f"capability decision is invalid: {error}") from error
+            raise ContainmentStoreMalformedEvidence(
+                f"capability decision is malformed: {error}"
+            ) from error
 
     def _decision_from_bytes(
         self,
@@ -908,14 +922,18 @@ class ContainmentStore:
                 return capability_decision_from_bytes(data, results, outcomes)
             return capability_decision_from_bytes(data)
         except ContainmentFormatError as error:
-            raise ContainmentStoreError(f"capability decision is invalid: {error}") from error
+            raise ContainmentStoreMalformedEvidence(
+                f"capability decision is malformed: {error}"
+            ) from error
 
     @staticmethod
     def _decision_probe(data: bytes, run_id: str) -> CapabilityDecision:
         try:
             document = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_json)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ContainmentStoreError(f"capability decision is malformed: {error}") from error
+            raise ContainmentStoreMalformedEvidence(
+                f"capability decision is malformed: {error}"
+            ) from error
         fields = {
             "schemaVersion",
             "runId",
@@ -925,7 +943,9 @@ class ContainmentStore:
             "reasons",
         }
         if type(document) is not dict or set(document) != fields or _canonical(document) != data:
-            raise ContainmentStoreError("capability decision bytes are not canonical")
+            raise ContainmentStoreMalformedEvidence(
+                "capability decision bytes are not canonical"
+            )
         identifiers = document["scenarioResultIds"]
         reasons = document["reasons"]
         if (
@@ -935,11 +955,15 @@ class ContainmentStore:
             or type(reasons) is not list
             or any(type(item) is not str for item in reasons)
         ):
-            raise ContainmentStoreError("capability decision binding is malformed")
+            raise ContainmentStoreMalformedEvidence(
+                "capability decision binding is malformed"
+            )
         try:
             verdict = CapabilityVerdict(document["verdict"])
         except (TypeError, ValueError) as error:
-            raise ContainmentStoreError("capability decision verdict is malformed") from error
+            raise ContainmentStoreMalformedEvidence(
+                "capability decision verdict is malformed"
+            ) from error
         return CapabilityDecision(
             document["schemaVersion"],
             run_id,
@@ -1103,7 +1127,9 @@ class ContainmentStore:
         try:
             return converter(data)
         except ContainmentFormatError as error:
-            raise ContainmentStoreError(f"stored {label} is invalid: {error}") from error
+            raise ContainmentStoreMalformedEvidence(
+                f"stored {label} is malformed: {error}"
+            ) from error
 
 
 def _intent_document(value: object, run_id: str) -> dict[str, object]:
@@ -1398,6 +1424,7 @@ def _replace_durable(source: Path, target: Path) -> None:
 __all__ = [
     "ContainmentStore",
     "ContainmentStoreError",
+    "ContainmentStoreMalformedEvidence",
     "ContainmentStoreNotFound",
     "ImmutableWrite",
 ]

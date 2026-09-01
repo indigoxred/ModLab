@@ -20,6 +20,7 @@ from modlab.validation.mo2_containment_model import (
     ScenarioState,
     TreeIdentity,
     WatchEvidenceCompletion,
+    WatcherEvent,
 )
 from modlab.validation import mo2_containment_cli as cli
 from modlab.validation.mo2_containment_store import (
@@ -116,7 +117,7 @@ class FakeService:
     def arm_scenario(self, validation, run_id, scenario):
         self.mutations.append("arm")
         self.calls.append("arm")
-        return SimpleNamespace(mo2_pid=None)
+        return SimpleNamespace(mo2_pid=None, stage_root=r"C:\contained-stage")
 
     def launch_scenario(self, validation, run_id, scenario):
         self.mutations.append("launch")
@@ -264,6 +265,66 @@ class ContainmentCliTests(unittest.TestCase):
         self.assertEqual(1, failed_code)
         self.assertEqual(3, incomplete_code)
 
+    def test_validate_discloses_typed_result_evidence_and_all_confirmed_artifacts(self):
+        changed = replace(
+            result(ScenarioOutcome.FAILED),
+            watcher_events=(
+                WatcherEvent(1, "SourceMods", "Modified", "marker.txt"),
+                WatcherEvent(2, "BoundedGame", "Modified", "Skyrim.esm"),
+            ),
+            production_backup_names=("Protected Existing_backup",),
+        )
+
+        code, output, _ = invoke_cli(
+            scenario_args(output_format="json"),
+            FakeService(scenario_result=changed),
+        )
+
+        document = json.loads(output)
+        self.assertEqual(1, code)
+        self.assertTrue(any("SourceMods" in item for item in document["sourceChanges"]))
+        self.assertTrue(any("BoundedGame" in item for item in document["gameChanges"]))
+        self.assertTrue(any("Protected Existing_backup" in item for item in document["productionMo2Changes"]))
+        self.assertTrue(any(path.endswith("journal.json") for path in document["writtenPaths"]))
+        self.assertTrue(any(path.endswith("watch\\request.json") for path in document["writtenPaths"]))
+        self.assertTrue(any(path.endswith("launch.json") for path in document["writtenPaths"]))
+        self.assertTrue(any(path.endswith("watch\\outcome.json") for path in document["writtenPaths"]))
+        self.assertTrue(any(path.endswith("result.json") for path in document["writtenPaths"]))
+
+    def test_post_launch_capture_refusal_retains_pid_artifacts_and_containment_root(self):
+        service = FakeService()
+
+        def capture_refusal(*_args):
+            raise ContainmentStoreError("capture operation interrupted")
+
+        service.capture_scenario = capture_refusal
+        code, output, _ = invoke_cli(scenario_args(output_format="json"), service)
+
+        document = json.loads(output)
+        self.assertEqual(3, code)
+        self.assertEqual(RUN_ID, document["runId"])
+        self.assertEqual("MergeExisting", document["scenario"])
+        self.assertIn("MO2 PID: 2468", document["launchedProcesses"])
+        self.assertTrue(any(path.endswith("journal.json") for path in document["writtenPaths"]))
+        self.assertTrue(any(path.endswith("watch\\request.json") for path in document["writtenPaths"]))
+        self.assertTrue(any(path.endswith("launch.json") for path in document["writtenPaths"]))
+        self.assertTrue(any(r"C:\contained-stage" in reason for reason in document["reasons"]))
+
+    def test_post_launch_capture_binding_refusal_retains_controller_context(self):
+        service = FakeService()
+        service.capture_scenario = lambda *_args: replace(
+            result(),
+            run_id="containment-run:" + "f" * 32,
+        )
+
+        code, output, _ = invoke_cli(scenario_args(output_format="json"), service)
+
+        document = json.loads(output)
+        self.assertEqual(3, code)
+        self.assertEqual("MergeExisting", document["scenario"])
+        self.assertIn("MO2 PID: 2468", document["launchedProcesses"])
+        self.assertTrue(any(path.endswith("launch.json") for path in document["writtenPaths"]))
+
     def test_adjudicate_never_defaults_incomplete_to_supported(self):
         service = FakeService(
             decision=CapabilityDecision(
@@ -338,6 +399,64 @@ class ContainmentCliTests(unittest.TestCase):
         self.assertIn("Outcome: Failed", output)
         self.assertEqual([], service.mutations)
 
+    def test_show_displays_every_retained_scenario_history_and_decision(self):
+        service = FakeService(
+            decision=CapabilityDecision(
+                1,
+                RUN_ID,
+                "isolated-low-integrity-junction-projection-v1",
+                CapabilityVerdict.REJECTED,
+                (),
+                ("containment-breach",),
+            )
+        )
+        results = {
+            ContainmentScenario.NEW_FOLDER: replace(
+                result(ScenarioOutcome.PASSED),
+                scenario=ContainmentScenario.NEW_FOLDER,
+            ),
+            ContainmentScenario.MERGE_EXISTING: result(ScenarioOutcome.FAILED),
+        }
+
+        def load_result(_validation, _run_id, scenario):
+            if scenario not in results:
+                raise ContainmentStoreNotFound("result is absent")
+            return results[scenario]
+
+        service.load_result = load_result
+        code, output, _ = invoke_cli(run_args("show", output_format="json"), service)
+
+        document = json.loads(output)
+        self.assertEqual(0, code)
+        self.assertEqual("Failed", document["outcome"])
+        self.assertEqual("Rejected", document["verdict"])
+        self.assertIn("Scenario NewFolder: Passed", document["reasons"])
+        self.assertIn("Scenario MergeExisting: Failed", document["reasons"])
+
+    def test_parse_time_json_error_writes_one_complete_json_response(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = cli.main(
+            ["show", "--workspace", r"C:\workspace", "--format", "json"],
+            stdout=stdout,
+            stderr=stderr,
+            service=FakeService(),
+        )
+
+        document = json.loads(stdout.getvalue())
+        self.assertEqual(2, code)
+        self.assertEqual("show", document["command"])
+        self.assertEqual(
+            {
+                "command", "runId", "scenario", "state", "outcome", "verdict",
+                "writtenPaths", "launchedProcesses", "sourceChanges", "gameChanges",
+                "productionMo2Changes", "instructions", "reasons",
+            },
+            set(document),
+        )
+        self.assertEqual("", stderr.getvalue())
+
     def test_recover_success_returns_zero_without_upgrading_old_result(self):
         service = FakeService(
             scenario_result=result(ScenarioOutcome.INCOMPLETE),
@@ -370,16 +489,16 @@ class ContainmentCliTests(unittest.TestCase):
         self.assertIn("run ID", errors)
         self.assertNotIn("Traceback", errors)
 
-    def test_malformed_stored_schema_uses_exit_two_not_safe_refusal(self):
+    def test_operational_invalid_transition_uses_exit_three_not_message_matching(self):
         service = FakeService()
 
-        def malformed_result(*_args):
-            raise ContainmentStoreError("stored scenario result is invalid")
+        def invalid_transition(*_args):
+            raise ContainmentStoreError("invalid transition")
 
-        service.load_result = malformed_result
+        service.load_result = invalid_transition
         code, _, _ = invoke_cli(run_args("show"), service)
 
-        self.assertEqual(2, code)
+        self.assertEqual(3, code)
 
 
 if __name__ == "__main__":
