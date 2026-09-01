@@ -25,6 +25,7 @@ from modlab.validation.mo2_containment_model import (
 from modlab.validation import mo2_containment_cli as cli
 from modlab.validation.mo2_containment_store import (
     ContainmentStoreError,
+    ContainmentStoreMalformedEvidence,
     ContainmentStoreNotFound,
 )
 
@@ -499,6 +500,24 @@ class ContainmentCliTests(unittest.TestCase):
         code, _, _ = invoke_cli(run_args("show"), service)
 
         self.assertEqual(3, code)
+
+    def test_malformed_evidence_through_cli_uses_exit_two_and_one_json_response(self):
+        service = FakeService()
+
+        def malformed_decision(*_args):
+            raise ContainmentStoreMalformedEvidence("decision bytes are not canonical")
+
+        service.load_decision = malformed_decision
+        code, output, errors = invoke_cli(
+            run_args("show", output_format="json"),
+            service,
+        )
+
+        document = json.loads(output)
+        self.assertEqual(2, code)
+        self.assertEqual("show", document["command"])
+        self.assertIn("Safe refusal", document["reasons"][0])
+        self.assertEqual("", errors)
 
 
 if __name__ == "__main__":
