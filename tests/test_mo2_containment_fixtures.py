@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from modlab.adapters.mo2.ini import decode_qsettings_path, parse_ini_bytes
+from modlab.artifacts.vault import ArchiveVault
 from modlab.validation import mo2_containment_fixtures as fixtures
 from modlab.validation.mo2_containment_fixtures import write_scenario_archives
 from modlab.validation.windows_integrity import IntegrityLevel
@@ -105,6 +106,59 @@ class ContainmentFixtureTests(unittest.TestCase):
             inspect_junction(fixture.stage_mods / "Protected Existing").target_path,
         )
         self.assertEqual(b"+Protected Existing\r\n", fixture.stage_lab_modlist.read_bytes())
+
+    def test_fixture_inner_vaults_retain_the_source_artifact_official_name(self):
+        # Catches inner vault imports using the content-addressed payload filename.
+        fixture = prepare_fixture_with_fake_bootstrap(self.root)
+
+        source_record, = ArchiveVault(fixture.source_workspace).list()
+        stage_record, = ArchiveVault(fixture.stage_workspace).list()
+        outer_record, = ArchiveVault(self.root / "source-vault").list()
+        bootstrap_copy = (
+            fixture.run_root / "bootstrap-archive" / "Mod.Organizer-2.5.2.7z"
+        )
+        self.assertEqual("Mod.Organizer-2.5.2.7z", source_record.original_name)
+        self.assertEqual("Mod.Organizer-2.5.2.7z", stage_record.original_name)
+        self.assertFalse(
+            bootstrap_copy.samefile(outer_record.stored_path(self.root / "source-vault"))
+        )
+
+    def test_materialized_bootstrap_archive_refuses_unsafe_original_name(self):
+        # Catches an original name escaping the run-scoped bootstrap-archive directory.
+        payload = self.root / "payload.7z"
+        payload.write_bytes(b"trusted payload")
+        record = SimpleNamespace(
+            original_name="../escape.7z",
+            sha256=hashlib.sha256(b"trusted payload").hexdigest(),
+            size=len(b"trusted payload"),
+        )
+
+        with self.assertRaisesRegex(
+            fixtures.ContainmentFixtureError, "unsafe original name"
+        ):
+            fixtures._materialize_verified_bootstrap_archive(
+                record, payload, self.root / "run"
+            )
+
+    def test_materialized_bootstrap_archive_refuses_changed_payload(self):
+        # Catches payload bytes changing after the source-vault verification.
+        payload = self.root / "payload.7z"
+        payload.write_bytes(b"changed payload")
+        record = SimpleNamespace(
+            original_name="Mod.Organizer-2.5.2.7z",
+            sha256=hashlib.sha256(b"original payload").hexdigest(),
+            size=len(b"original payload"),
+        )
+
+        with self.assertRaisesRegex(
+            fixtures.ContainmentFixtureError, "changed during materialization"
+        ):
+            fixtures._materialize_verified_bootstrap_archive(
+                record, payload, self.root / "run"
+            )
+        self.assertFalse(
+            (self.root / "run" / "bootstrap-archive" / record.original_name).exists()
+        )
 
     def test_real_fixture_evidence_derives_version_projection_and_steam_mutation(self):
         # Catches evidence that is fabricated instead of read from the prepared fixture.

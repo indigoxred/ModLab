@@ -5,8 +5,10 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path, PurePosixPath
+import stat
 from types import MappingProxyType
 from typing import Callable, Mapping
 import uuid
@@ -181,15 +183,18 @@ def prepare_containment_fixture(
         run_root = current
     run_root = _require_direct_directory(run_root, create=True)
     _require_beneath(validation, run_root)
+    bootstrap_archive = _materialize_verified_bootstrap_archive(
+        source_record, payload, run_root
+    )
     source_instance = run_root / "source-workspace"
     stage_instance = run_root / "stage-workspace"
     source_documents = _write_documents_root(run_root / "source-documents")
     stage_documents = _write_documents_root(run_root / "stage-documents")
     source_artifact = ArchiveVault(source_instance).import_archive(
-        payload, source_note="disposable containment source fixture"
+        bootstrap_archive, source_note="disposable containment source fixture"
     )
     stage_artifact = ArchiveVault(stage_instance).import_archive(
-        payload, source_note="disposable containment stage fixture"
+        bootstrap_archive, source_note="disposable containment stage fixture"
     )
 
     source_planned = prepare_mo2_setup(
@@ -294,6 +299,68 @@ def _require_direct_directory(path: Path, *, create: bool) -> Path:
         raise ContainmentFixtureError(f"fixture directory is unavailable: {candidate}") from error
     if candidate.is_symlink() or not candidate.is_dir() or bool(getattr(metadata, "st_file_attributes", 0) & 0x400):
         raise ContainmentFixtureError(f"fixture directory must be direct: {candidate}")
+    return candidate.resolve(strict=True)
+
+
+def _materialize_verified_bootstrap_archive(
+    source_record, payload: Path, run_root: Path
+) -> Path:
+    """Copy the retained MO2 archive into the disposable run under its original name."""
+    name = _require_safe_archive_filename(source_record.original_name)
+    source = _require_direct_regular_file(Path(payload), "retained MO2 archive")
+    destination_root = _require_direct_directory(
+        run_root / "bootstrap-archive", create=True
+    )
+    _require_beneath(run_root, destination_root)
+    destination = destination_root / name
+
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with source.open("rb") as reader, destination.open("xb") as writer:
+            while chunk := reader.read(1024 * 1024):
+                size += len(chunk)
+                digest.update(chunk)
+                writer.write(chunk)
+    except OSError as error:
+        raise ContainmentFixtureError(
+            "could not materialize disposable MO2 archive"
+        ) from error
+
+    if size != source_record.size or digest.hexdigest() != source_record.sha256:
+        destination.unlink(missing_ok=True)
+        raise ContainmentFixtureError(
+            "retained MO2 archive changed during materialization"
+        )
+    return _require_direct_regular_file(destination, "disposable MO2 archive")
+
+
+def _require_safe_archive_filename(name: object) -> str:
+    if (
+        not isinstance(name, str)
+        or name in {"", ".", ".."}
+        or "/" in name
+        or "\\" in name
+        or Path(name).name != name
+        or PurePosixPath(name).name != name
+        or Path(name).suffix.casefold() != ".7z"
+    ):
+        raise ContainmentFixtureError("retained MO2 archive has an unsafe original name")
+    return name
+
+
+def _require_direct_regular_file(path: Path, description: str) -> Path:
+    candidate = Path(path).expanduser().absolute()
+    try:
+        metadata = candidate.lstat()
+    except OSError as error:
+        raise ContainmentFixtureError(f"{description} is unavailable: {candidate}") from error
+    if (
+        candidate.is_symlink()
+        or bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
+        or not stat.S_ISREG(metadata.st_mode)
+    ):
+        raise ContainmentFixtureError(f"{description} must be a direct regular file")
     return candidate.resolve(strict=True)
 
 
