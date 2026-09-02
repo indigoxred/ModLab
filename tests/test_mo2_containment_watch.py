@@ -2,6 +2,7 @@ import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass, replace
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,12 @@ import unittest
 import warnings
 from unittest import mock
 
+from modlab.platform import windows_exact_fs
+from modlab.platform.windows_exact_fs import (
+    ExactObjectOwnershipError,
+    PinnedIdentity,
+    PinnedObject,
+)
 from modlab.validation import windows_watch
 from modlab.validation.mo2_containment_model import (
     ContainmentScenario,
@@ -179,6 +186,28 @@ class MutationWatchTests(unittest.TestCase):
                 pass
         self.temporary.cleanup()
 
+    def test_new_write_ownership_error_preserves_role_and_retry_contract(self):
+        candidates = (
+            PinnedObject(self.root / "ready-one.json", 71, PinnedIdentity(1, 1, 0)),
+            PinnedObject(self.root / "ready-two.json", 72, PinnedIdentity(1, 2, 0)),
+        )
+        owner_type = windows_exact_fs.RetainedObjectOwner
+        role = windows_exact_fs.RetainedObjectRole
+        ownership = ExactObjectOwnershipError(
+            "injected",
+            owners=tuple(owner_type(role.CANDIDATE, candidate) for candidate in candidates),
+        )
+        with (
+            mock.patch.object(windows_watch, "publish_new_pinned", side_effect=ownership),
+            mock.patch.object(windows_watch, "resolve_retained_ownership", side_effect=ownership),
+        ):
+            with self.assertRaises(windows_watch.WatchProtocolOwnershipError) as raised:
+                windows_watch._write_new(self.root / "ready.json", b"ready\n")
+        self.assertEqual(ownership.owners, raised.exception.owners)
+        self.assertEqual(candidates, raised.exception.candidates)
+        self.assertIs(candidates[0], raised.exception.candidate)
+        self.assertIsNone(raised.exception.destination_parent)
+
     def _request(self, *roots: WatchRoot) -> WatchRequest:
         if not roots:
             physical = watch_root("SourceMods", self.watched)
@@ -192,6 +221,483 @@ class MutationWatchTests(unittest.TestCase):
             stop_token_path=self.evidence / "stop.token",
             roots=tuple(roots),
         )
+
+    def test_outcome_publication_keeps_the_validated_candidate_handle_through_rename(self):
+        request = self._request()
+        claim = windows_watch.ControllerClaim(
+            schema_version=1,
+            request_sha256=windows_watch.watch_request_sha256(request),
+            session_id=request.session_id,
+            run_id=request.run_id,
+            scenario=request.scenario,
+            request_path=self.evidence / "request.json",
+            worker_command=("python.exe",),
+            controller_pid=101,
+            controller_creation_time=102,
+        )
+        launch = windows_watch.WorkerLaunch(
+            schema_version=1,
+            request_sha256=windows_watch.watch_request_sha256(request),
+            session_id=request.session_id,
+            run_id=request.run_id,
+            scenario=request.scenario,
+            worker_pid=103,
+            worker_creation_time=104,
+        )
+        outcome = windows_watch._watch_outcome(
+            request,
+            claim,
+            launch,
+            completion=WatchEvidenceCompletion.INCOMPLETE,
+            worker_exit_code=None,
+            reasons=("test-publication",),
+            captured=None,
+        )
+        expected = windows_watch.watch_outcome_to_bytes(outcome)
+        real_read = windows_exact_fs.read_pinned_file
+        swapped = False
+
+        def read_then_replace_old_path(pinned):
+            nonlocal swapped
+            data = real_read(pinned)
+            if not swapped and pinned.path.name.startswith(".outcome.json."):
+                swapped = True
+                old_path = pinned.path.with_name("stolen-outcome.json")
+                pinned.path.rename(old_path)
+                pinned.path.write_bytes(b'{"replacement":true}\n')
+            return data
+
+        with mock.patch.object(
+            windows_exact_fs,
+            "read_pinned_file",
+            side_effect=read_then_replace_old_path,
+        ):
+            published = windows_watch._publish_outcome_commit(outcome, request, claim, launch)
+
+        self.assertTrue(swapped)
+        self.assertEqual(outcome, published)
+        self.assertEqual(expected, (self.evidence / "outcome.json").read_bytes())
+
+    def test_outcome_publication_has_no_pathname_rename_fallback(self):
+        source = inspect.getsource(windows_watch._publish_outcome_commit)
+        shared = inspect.getsource(windows_exact_fs.publish_new_pinned)
+        self.assertNotIn("MoveFileExW", source)
+        self.assertNotIn("os.rename", source)
+        self.assertNotIn("Path.rename", source)
+        self.assertNotIn("os.rename", shared)
+
+    def test_outcome_publication_preserves_parent_ownership_for_retry(self):
+        request = self._request()
+        claim = windows_watch.ControllerClaim(1, windows_watch.watch_request_sha256(request), request.session_id, request.run_id, request.scenario, self.evidence / "request.json", ("python.exe",), 101, 102)
+        launch = windows_watch.WorkerLaunch(1, windows_watch.watch_request_sha256(request), request.session_id, request.run_id, request.scenario, 103, 104)
+        outcome = windows_watch._watch_outcome(request, claim, launch, completion=WatchEvidenceCompletion.INCOMPLETE, worker_exit_code=None, reasons=("test",), captured=None)
+        parent = PinnedObject(self.evidence, 72, PinnedIdentity(1, 2, 0x10))
+        ownership = ExactObjectOwnershipError("injected", destination_parent=parent)
+        with (
+            mock.patch.object(windows_watch, "publish_new_pinned", side_effect=ownership),
+            mock.patch.object(windows_watch, "resolve_retained_ownership", side_effect=ownership),
+        ):
+            with self.assertRaises(windows_watch.WatchProtocolOwnershipError) as raised:
+                windows_watch._publish_outcome_commit(outcome, request, claim, launch)
+        self.assertIsNone(raised.exception.candidate)
+        self.assertIs(parent, raised.exception.destination_parent)
+
+    def test_worker_ready_boundary_rethrows_same_unresolved_ownership_across_retries(self):
+        case_root = self.root / "worker-ready-ownership"
+        case_root.mkdir()
+        request, request_path = self._direct_worker_request(
+            case_root,
+            self._request().roots,
+        )
+        owner_path = self.root / "worker-ready-owner.txt"
+        owner_path.write_bytes(b"owner")
+        owner = windows_exact_fs.pin_direct_object(owner_path, kind="file")
+        protocol_error = windows_watch.WatchProtocolOwnershipError(
+            "injected worker ready ownership",
+            ExactObjectOwnershipError("injected", verification=(owner,)),
+        )
+        real_write = windows_watch._write_new
+        real_close = PinnedObject.close
+        real_handle_identity = windows_watch._handle_identity
+        close_failures = 0
+
+        def fail_ready(path: Path, data: bytes) -> None:
+            if path.name == "ready.json":
+                raise protocol_error
+            if path.name == "terminal.json":
+                raise OSError("injected terminal publication failure")
+            real_write(path, data)
+
+        def fail_owner_close_twice(pinned) -> None:
+            nonlocal close_failures
+            if pinned is owner and close_failures < 2:
+                close_failures += 1
+                raise OSError("injected worker owner close failure")
+            real_close(pinned)
+
+        def synthetic_directory_identity(handle: int, path: Path):
+            if Path(path) == case_root / "events.ndjson":
+                return real_handle_identity(handle, path)
+            return (
+                request.roots[0].volume_serial,
+                request.roots[0].file_id,
+                windows_watch._FILE_ATTRIBUTE_DIRECTORY,
+            )
+
+        try:
+            with (
+                mock.patch.object(windows_watch, "_write_new", side_effect=fail_ready),
+                mock.patch.object(
+                    PinnedObject,
+                    "close",
+                    new=fail_owner_close_twice,
+                ),
+                mock.patch.object(
+                    windows_watch,
+                    "_open_directory",
+                    return_value=123,
+                ),
+                mock.patch.object(
+                    windows_watch,
+                    "_handle_identity",
+                    side_effect=synthetic_directory_identity,
+                ),
+                mock.patch.object(windows_watch, "_arm_directory_state"),
+            ):
+                observed_error = None
+                try:
+                    run_watch_worker(request_path)
+                except BaseException as error:
+                    observed_error = error
+
+                self.assertIs(protocol_error, observed_error)
+                self.assertEqual(1, close_failures)
+                with self.assertRaises(windows_watch.WatchProtocolOwnershipError) as retry:
+                    observed_error.resolve()
+                self.assertIs(protocol_error, retry.exception)
+                retry.exception.resolve()
+
+            self.assertEqual(2, close_failures)
+            self.assertEqual(0, owner.handle)
+            self.assertEqual(b"owner", owner_path.read_bytes())
+        finally:
+            if owner.handle:
+                real_close(owner)
+
+    def test_worker_terminal_and_controller_loss_boundaries_resolve_all_ownership(self):
+        case_root = self.root / "worker-terminal-loss-ownership"
+        case_root.mkdir()
+        _request, request_path = self._direct_worker_request(
+            case_root,
+            self._request().roots,
+        )
+        terminal_path = self.root / "terminal-owner.txt"
+        loss_path = self.root / "loss-owner.txt"
+        terminal_path.write_bytes(b"terminal")
+        loss_path.write_bytes(b"loss")
+        terminal_owner = windows_exact_fs.pin_direct_object(terminal_path, kind="file")
+        loss_owner = windows_exact_fs.pin_direct_object(loss_path, kind="file")
+        terminal_error = windows_watch.WatchProtocolOwnershipError(
+            "injected terminal ownership",
+            ExactObjectOwnershipError("terminal", verification=(terminal_owner,)),
+        )
+        loss_error = windows_watch.WatchProtocolOwnershipError(
+            "injected controller loss ownership",
+            ExactObjectOwnershipError("loss", verification=(loss_owner,)),
+        )
+        real_write = windows_watch._write_new
+        real_publish = windows_watch.publish_new_verified
+        real_wait = windows_watch._kernel32.WaitForSingleObject
+        loss_publications = 0
+
+        def fail_terminal(path: Path, data: bytes) -> None:
+            if path.name == "terminal.json":
+                raise terminal_error
+            real_write(path, data)
+
+        def fail_controller_loss(path: Path, data: bytes, validator):
+            nonlocal loss_publications
+            if path.name == "controller-loss.json":
+                loss_publications += 1
+                raise loss_error
+            return real_publish(path, data, validator)
+
+        def report_controller_loss(handle: int, timeout: int) -> int:
+            if timeout == 0:
+                return windows_watch._WAIT_OBJECT_0
+            return real_wait(handle, timeout)
+
+        try:
+            with (
+                mock.patch.object(windows_watch, "_write_new", side_effect=fail_terminal),
+                mock.patch.object(
+                    windows_watch,
+                    "publish_new_verified",
+                    side_effect=fail_controller_loss,
+                ),
+                mock.patch.object(
+                    windows_watch._kernel32,
+                    "WaitForSingleObject",
+                    side_effect=report_controller_loss,
+                ),
+            ):
+                result = run_watch_worker(request_path)
+
+            self.assertEqual(2, result)
+            self.assertEqual(1, loss_publications)
+            self.assertEqual(0, terminal_owner.handle)
+            self.assertEqual(0, loss_owner.handle)
+            self.assertEqual(b"terminal", terminal_path.read_bytes())
+            self.assertEqual(b"loss", loss_path.read_bytes())
+        finally:
+            for owner in (terminal_owner, loss_owner):
+                if owner.handle:
+                    owner.close()
+
+    def test_public_stop_token_boundary_rethrows_same_unresolved_ownership(self):
+        case_root = self.root / "stop-token-ownership"
+        case_root.mkdir()
+        request, request_path = self._direct_worker_request(
+            case_root,
+            self._request().roots,
+        )
+        claim = windows_watch._load_controller_claim(request)
+        launch = windows_watch._load_worker_launch(request)
+        session = windows_watch._LocalWatchSession(
+            request=request,
+            request_sha256=windows_watch.watch_request_sha256(request),
+            claim=claim,
+            launch=launch,
+            controller_pid=claim.controller_pid,
+            controller_creation_time=claim.controller_creation_time,
+            worker_pid=launch.worker_pid,
+            worker_creation_time=launch.worker_creation_time,
+            process=mock.Mock(),
+            lock=threading.Lock(),
+            poison_reasons=[],
+        )
+        owner_path = self.root / "stop-token-owner.txt"
+        owner_path.write_bytes(b"owner")
+        owner = windows_exact_fs.pin_direct_object(owner_path, kind="file")
+        protocol_error = windows_watch.WatchProtocolOwnershipError(
+            "injected stop-token ownership",
+            ExactObjectOwnershipError("stop", verification=(owner,)),
+        )
+        real_close = PinnedObject.close
+        close_failures = 0
+
+        def fail_owner_close_twice(pinned) -> None:
+            nonlocal close_failures
+            if pinned is owner and close_failures < 2:
+                close_failures += 1
+                raise OSError("injected stop owner close failure")
+            real_close(pinned)
+
+        with windows_watch._LOCAL_SESSIONS_LOCK:
+            windows_watch._LOCAL_SESSIONS[request_path.absolute()] = session
+        try:
+            with (
+                mock.patch.object(windows_watch, "_write_new", side_effect=protocol_error),
+                mock.patch.object(PinnedObject, "close", new=fail_owner_close_twice),
+                mock.patch.object(windows_watch, "_popen_process_handle", return_value=501),
+                mock.patch.object(windows_watch, "_verify_retained_process_handle"),
+                mock.patch.object(
+                    windows_watch._kernel32,
+                    "WaitForSingleObject",
+                    return_value=windows_watch._WAIT_OBJECT_0,
+                ),
+                mock.patch.object(windows_watch, "_get_process_exit_code", return_value=1),
+                mock.patch.object(
+                    windows_watch,
+                    "_capture_worker_evidence",
+                    side_effect=OSError("injected capture failure"),
+                ),
+                mock.patch.object(
+                    windows_watch,
+                    "_close_popen_process_handle",
+                    return_value=None,
+                ),
+                mock.patch.object(
+                    windows_watch,
+                    "_publish_or_load_outcome",
+                    side_effect=lambda outcome, *_args: outcome,
+                ),
+            ):
+                observed_error = None
+                try:
+                    stop_watch(request_path)
+                except BaseException as error:
+                    observed_error = error
+
+                self.assertIs(protocol_error, observed_error)
+                self.assertEqual(1, close_failures)
+                with self.assertRaises(windows_watch.WatchProtocolOwnershipError) as retry:
+                    observed_error.resolve()
+                self.assertIs(protocol_error, retry.exception)
+                retry.exception.resolve()
+
+            self.assertEqual(2, close_failures)
+            self.assertEqual(0, owner.handle)
+        finally:
+            with windows_watch._LOCAL_SESSIONS_LOCK:
+                windows_watch._LOCAL_SESSIONS.pop(request_path.absolute(), None)
+            if owner.handle:
+                real_close(owner)
+
+    def test_outcome_and_fallback_boundaries_resolve_ownership_before_receipt(self):
+        case_root = self.root / "outcome-fallback-ownership"
+        case_root.mkdir()
+        request, request_path = self._direct_worker_request(
+            case_root,
+            self._request().roots,
+        )
+        claim = windows_watch._load_controller_claim(request)
+        launch = windows_watch._load_worker_launch(request)
+        session = windows_watch._LocalWatchSession(
+            request=request,
+            request_sha256=windows_watch.watch_request_sha256(request),
+            claim=claim,
+            launch=launch,
+            controller_pid=claim.controller_pid,
+            controller_creation_time=claim.controller_creation_time,
+            worker_pid=launch.worker_pid,
+            worker_creation_time=launch.worker_creation_time,
+            process=mock.Mock(),
+            lock=threading.Lock(),
+            poison_reasons=[],
+        )
+        owners = []
+        errors = []
+        for name in ("primary", "fallback"):
+            owner_path = self.root / f"{name}-outcome-owner.txt"
+            owner_path.write_bytes(name.encode("ascii"))
+            owner = windows_exact_fs.pin_direct_object(owner_path, kind="file")
+            owners.append(owner)
+            errors.append(
+                windows_watch.WatchProtocolOwnershipError(
+                    f"injected {name} outcome ownership",
+                    ExactObjectOwnershipError(name, verification=(owner,)),
+                )
+            )
+        outcome_calls = 0
+
+        def fail_both_outcomes(*_args):
+            nonlocal outcome_calls
+            error = errors[outcome_calls]
+            outcome_calls += 1
+            raise error
+
+        with windows_watch._LOCAL_SESSIONS_LOCK:
+            windows_watch._LOCAL_SESSIONS[request_path.absolute()] = session
+        try:
+            with (
+                mock.patch.object(windows_watch, "_write_new"),
+                mock.patch.object(windows_watch, "_popen_process_handle", return_value=502),
+                mock.patch.object(windows_watch, "_verify_retained_process_handle"),
+                mock.patch.object(
+                    windows_watch._kernel32,
+                    "WaitForSingleObject",
+                    return_value=windows_watch._WAIT_OBJECT_0,
+                ),
+                mock.patch.object(windows_watch, "_get_process_exit_code", return_value=1),
+                mock.patch.object(
+                    windows_watch,
+                    "_capture_worker_evidence",
+                    side_effect=OSError("injected capture failure"),
+                ),
+                mock.patch.object(
+                    windows_watch,
+                    "_close_popen_process_handle",
+                    return_value=None,
+                ),
+                mock.patch.object(
+                    windows_watch,
+                    "_publish_or_load_outcome",
+                    side_effect=fail_both_outcomes,
+                ),
+            ):
+                receipt = stop_watch(request_path)
+
+            self.assertFalse(receipt.complete)
+            self.assertEqual(2, outcome_calls)
+            self.assertTrue(all(owner.handle == 0 for owner in owners))
+        finally:
+            with windows_watch._LOCAL_SESSIONS_LOCK:
+                windows_watch._LOCAL_SESSIONS.pop(request_path.absolute(), None)
+            for owner in owners:
+                if owner.handle:
+                    owner.close()
+
+    def test_public_non_owner_stop_never_flattens_live_ownership_into_a_receipt(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        claim = windows_watch.ControllerClaim(
+            1,
+            windows_watch.watch_request_sha256(request),
+            request.session_id,
+            request.run_id,
+            request.scenario,
+            request_path,
+            ("python.exe",),
+            101,
+            102,
+        )
+        launch = windows_watch.WorkerLaunch(
+            1,
+            windows_watch.watch_request_sha256(request),
+            request.session_id,
+            request.run_id,
+            request.scenario,
+            103,
+            104,
+        )
+        owner_path = self.root / "non-owner-stop-owner.txt"
+        owner_path.write_bytes(b"owner")
+        owner = windows_exact_fs.pin_direct_object(owner_path, kind="file")
+        protocol_error = windows_watch.WatchProtocolOwnershipError(
+            "injected public stop ownership",
+            ExactObjectOwnershipError("stop", verification=(owner,)),
+        )
+        real_close = PinnedObject.close
+        close_failures = 0
+
+        def fail_owner_close_twice(pinned) -> None:
+            nonlocal close_failures
+            if pinned is owner and close_failures < 2:
+                close_failures += 1
+                raise OSError("injected public stop close failure")
+            real_close(pinned)
+
+        try:
+            with (
+                mock.patch.object(windows_watch, "_load_request_path", return_value=request),
+                mock.patch.object(windows_watch, "_load_controller_claim", return_value=claim),
+                mock.patch.object(windows_watch, "_load_worker_launch", return_value=launch),
+                mock.patch.object(
+                    windows_watch,
+                    "_stop_non_owner",
+                    side_effect=protocol_error,
+                ),
+                mock.patch.object(PinnedObject, "close", new=fail_owner_close_twice),
+            ):
+                observed_error = None
+                try:
+                    stop_watch(request_path)
+                except BaseException as error:
+                    observed_error = error
+
+                self.assertIs(protocol_error, observed_error)
+                self.assertEqual(1, close_failures)
+                with self.assertRaises(windows_watch.WatchProtocolOwnershipError) as retry:
+                    observed_error.resolve()
+                self.assertIs(protocol_error, retry.exception)
+                retry.exception.resolve()
+
+            self.assertEqual(2, close_failures)
+            self.assertEqual(0, owner.handle)
+        finally:
+            if owner.handle:
+                real_close(owner)
 
     def _start(self, *roots: WatchRoot) -> tuple[Path, int]:
         request = self._request(*roots)
@@ -696,6 +1202,86 @@ class MutationWatchTests(unittest.TestCase):
                     process.wait(timeout=10)
                 windows_watch._close_popen_process_handle(process)
 
+    def test_start_launch_boundary_rethrows_same_unresolved_ownership(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        owner_path = self.root / "launch-publication-owner.txt"
+        owner_path.write_bytes(b"owner")
+        owner = windows_exact_fs.pin_direct_object(owner_path, kind="file")
+        protocol_error = windows_watch.WatchProtocolOwnershipError(
+            "injected launch publication ownership",
+            ExactObjectOwnershipError("launch", verification=(owner,)),
+        )
+        real_publish = windows_watch.publish_new_verified
+        real_close = PinnedObject.close
+        close_failures = 0
+
+        def fail_launch_record(path: Path, data: bytes, parse):
+            if path.name == "worker-launch.json":
+                raise protocol_error
+            return real_publish(path, data, parse)
+
+        def fail_owner_close_twice(pinned) -> None:
+            nonlocal close_failures
+            if pinned is owner and close_failures < 2:
+                close_failures += 1
+                raise OSError("injected launch owner close failure")
+            real_close(pinned)
+
+        fake_process = mock.Mock(pid=123)
+        try:
+            with (
+                mock.patch.object(
+                    windows_watch.subprocess,
+                    "Popen",
+                    return_value=fake_process,
+                ),
+                mock.patch.object(
+                    windows_watch,
+                    "_popen_process_handle",
+                    return_value=77,
+                ),
+                mock.patch.object(
+                    windows_watch,
+                    "_process_handle_creation_time",
+                    return_value=88,
+                ),
+                mock.patch.object(
+                    windows_watch,
+                    "publish_new_verified",
+                    side_effect=fail_launch_record,
+                ),
+                mock.patch.object(windows_watch, "_stop_local_session") as cleanup,
+                mock.patch.object(
+                    PinnedObject,
+                    "close",
+                    new=fail_owner_close_twice,
+                ),
+            ):
+                cleanup.return_value = mock.Mock(error="injected cleanup")
+                observed_error = None
+                try:
+                    start_watch(request)
+                except BaseException as error:
+                    observed_error = error
+
+                self.assertIs(protocol_error, observed_error)
+                self.assertEqual(1, close_failures)
+                cleanup.assert_not_called()
+                with self.assertRaises(windows_watch.WatchProtocolOwnershipError) as retry:
+                    observed_error.resolve()
+                self.assertIs(protocol_error, retry.exception)
+                retry.exception.resolve()
+
+            self.assertEqual(2, close_failures)
+            self.assertEqual(0, owner.handle)
+            self.assertEqual(b"owner", owner_path.read_bytes())
+        finally:
+            with windows_watch._LOCAL_SESSIONS_LOCK:
+                windows_watch._LOCAL_SESSIONS.pop(request_path.absolute(), None)
+            if owner.handle:
+                real_close(owner)
+
     def test_startup_ready_exact_read_failure_aborts_incomplete(self):
         request = self._request()
         request_path = self.evidence / "request.json"
@@ -1171,18 +1757,19 @@ class MutationWatchTests(unittest.TestCase):
         request_path, _ = self._start_case("outcome-publication-failure")
         outcome_attempts = 0
 
-        def fail_first_outcome(source: Path, destination: Path) -> None:
+        real_rename = windows_exact_fs.rename_pinned_no_replace
+
+        def fail_first_outcome(source, destination: Path, destination_parent) -> None:
             nonlocal outcome_attempts
             outcome_attempts += 1
             if outcome_attempts == 1:
                 raise OSError("injected outcome publication failure")
-            os.rename(source, destination)
+            real_rename(source, destination, destination_parent)
 
         with mock.patch.object(
-            windows_watch,
-            "_promote_outcome_candidate",
+            windows_exact_fs,
+            "rename_pinned_no_replace",
             side_effect=fail_first_outcome,
-            create=True,
         ):
             receipt = stop_watch(request_path)
 
@@ -1198,19 +1785,20 @@ class MutationWatchTests(unittest.TestCase):
         request_path, _ = self._start_case("outcome-candidate-readback-failure")
         candidate_reads = 0
 
-        def fail_first_outcome_candidate(path: Path, label: str) -> bytes:
+        real_read = windows_exact_fs.read_pinned_file
+
+        def fail_first_outcome_candidate(pinned) -> bytes:
             nonlocal candidate_reads
-            if path.name.startswith(".outcome.json."):
+            if pinned.path.name.startswith(".outcome.json."):
                 candidate_reads += 1
                 if candidate_reads == 1:
                     raise OSError("injected private outcome readback failure")
-            return path.read_bytes()
+            return real_read(pinned)
 
         with mock.patch.object(
-            windows_watch,
-            "_read_exact_regular_file",
+            windows_exact_fs,
+            "read_pinned_file",
             side_effect=fail_first_outcome_candidate,
-            create=True,
         ):
             first = stop_watch(request_path)
 
@@ -3637,14 +4225,18 @@ class MutationWatchTests(unittest.TestCase):
         target = self.root / "atomic-ready.json"
         entered_write = threading.Event()
         release_write = threading.Event()
-        real_write = windows_watch.os.write
+        real_write = windows_exact_fs.write_pinned_file
 
-        def delayed_write(descriptor, data):
+        def delayed_write(candidate, data):
             entered_write.set()
             self.assertTrue(release_write.wait(5.0))
-            return real_write(descriptor, data)
+            return real_write(candidate, data)
 
-        with mock.patch.object(windows_watch.os, "write", side_effect=delayed_write):
+        with mock.patch.object(
+            windows_exact_fs,
+            "write_pinned_file",
+            side_effect=delayed_write,
+        ):
             writer = threading.Thread(target=windows_watch._write_new, args=(target, b"ready\n"))
             writer.start()
             self.assertTrue(entered_write.wait(5.0))
@@ -3660,27 +4252,17 @@ class MutationWatchTests(unittest.TestCase):
         target = self.root / "controller-pid.txt"
         entered_write = threading.Event()
         release_write = threading.Event()
-        real_os_write = os.write
+        real_write = windows_exact_fs.write_pinned_file
 
-        def delayed_path_write_text(path: Path, data: str, **kwargs: object) -> int:
-            with path.open("w", **kwargs) as stream:
-                entered_write.set()
-                self.assertTrue(release_write.wait(5.0))
-                return stream.write(data)
-
-        def delayed_os_write(descriptor: int, data: object) -> int:
+        def delayed_write(candidate, data):
             entered_write.set()
             self.assertTrue(release_write.wait(5.0))
-            return real_os_write(descriptor, data)
+            return real_write(candidate, data)
 
         with mock.patch.object(
-            Path,
-            "write_text",
-            new=delayed_path_write_text,
-        ), mock.patch.object(
-            windows_watch.os,
-            "write",
-            side_effect=delayed_os_write,
+            windows_exact_fs,
+            "write_pinned_file",
+            side_effect=delayed_write,
         ):
             writer = threading.Thread(
                 target=_publish_controller_pid_barrier,

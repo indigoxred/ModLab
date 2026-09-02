@@ -8,6 +8,13 @@ import tempfile
 import unittest
 from unittest import mock
 
+from modlab.platform import windows_exact_fs
+from modlab.validation import windows_watch_protocol
+from modlab.platform.windows_exact_fs import (
+    ExactObjectOwnershipError,
+    PinnedIdentity,
+    PinnedObject,
+)
 from modlab.validation.mo2_containment_model import (
     ContainmentScenario,
     WatchEvidenceCompletion,
@@ -27,6 +34,7 @@ from modlab.validation.windows_watch_protocol import (
     ControllerClaim,
     ControllerLoss,
     WatchProtocolError,
+    WatchProtocolOwnershipError,
     WatchReceipt,
     WatchRequest,
     WatchRoot,
@@ -63,6 +71,49 @@ class WatchProtocolTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_publication_ownership_error_preserves_each_explicit_role(self) -> None:
+        for candidate_live, parent_live in ((True, False), (False, True), (True, True)):
+            candidate = PinnedObject(self.evidence / "record.json", 11 if candidate_live else 0, PinnedIdentity(1, 1, 0))
+            parent = PinnedObject(self.evidence, 12 if parent_live else 0, PinnedIdentity(1, 2, 0x10))
+            ownership = ExactObjectOwnershipError(
+                "injected ownership", candidate=candidate if candidate_live else None,
+                destination_parent=parent if parent_live else None,
+            )
+            with mock.patch.object(
+                windows_watch_protocol, "publish_new_pinned", side_effect=ownership
+            ):
+                with self.assertRaises(WatchProtocolOwnershipError) as raised:
+                    publish_new_verified(self.evidence / "record.json", b"{}\n", lambda value: value)
+            self.assertIs(ownership, raised.exception.ownership)
+            self.assertIs(candidate if candidate_live else None, raised.exception.candidate)
+            self.assertIs(parent if parent_live else None, raised.exception.destination_parent)
+
+    def test_publication_ownership_error_preserves_the_full_owner_collection(self) -> None:
+        candidates = (
+            PinnedObject(self.evidence / "one.json", 21, PinnedIdentity(1, 1, 0)),
+            PinnedObject(self.evidence / "two.json", 22, PinnedIdentity(1, 2, 0)),
+        )
+        owner_type = windows_exact_fs.RetainedObjectOwner
+        role = windows_exact_fs.RetainedObjectRole
+        ownership = ExactObjectOwnershipError(
+            "injected ownership",
+            owners=tuple(owner_type(role.CANDIDATE, candidate) for candidate in candidates),
+        )
+        with mock.patch.object(
+            windows_watch_protocol,
+            "publish_new_pinned",
+            side_effect=ownership,
+        ):
+            with self.assertRaises(WatchProtocolOwnershipError) as raised:
+                publish_new_verified(
+                    self.evidence / "record.json",
+                    b"{}\n",
+                    lambda value: value,
+                )
+
+        self.assertEqual(ownership.owners, raised.exception.owners)
+        self.assertEqual(candidates, raised.exception.candidates)
 
     def request(self) -> WatchRequest:
         roots = tuple(
@@ -312,27 +363,13 @@ class WatchProtocolTests(unittest.TestCase):
             ).complete
         )
 
-    def test_publish_new_verified_handles_partial_writes_and_refuses_collision(self):
+    def test_publish_new_verified_uses_retained_publication_and_refuses_collision(self):
         path = self.evidence / CLAIM_NAME
         data = _canonical({"schemaVersion": 1})
-        calls = 0
-        real_write = os.write
-
-        def partial_write(descriptor: int, remaining) -> int:
-            nonlocal calls
-            calls += 1
-            amount = max(1, len(remaining) // 2)
-            return real_write(descriptor, remaining[:amount])
-
-        with mock.patch(
-            "modlab.validation.windows_watch_protocol.os.write",
-            side_effect=partial_write,
-        ):
-            self.assertEqual(
-                data,
-                publish_new_verified(path, data, lambda value: json.loads(value)),
-            )
-        self.assertGreater(calls, 1)
+        self.assertEqual(
+            data,
+            publish_new_verified(path, data, lambda value: json.loads(value)),
+        )
         self.assertEqual(data, path.read_bytes())
 
         with self.assertRaises(FileExistsError):
@@ -347,9 +384,10 @@ class WatchProtocolTests(unittest.TestCase):
             nonlocal parsed
             parsed = True
 
-        with mock.patch(
-            "modlab.validation.windows_watch_protocol.os.write",
-            return_value=0,
+        with mock.patch.object(
+            windows_exact_fs,
+            "write_pinned_file",
+            side_effect=OSError("injected write failure"),
         ):
             with self.assertRaises(OSError):
                 publish_new_verified(path, b"payload", parse)
@@ -358,13 +396,17 @@ class WatchProtocolTests(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertEqual([], list(self.evidence.glob(".*.tmp")))
 
-    def test_publication_flush_rename_and_readback_fail_closed(self):
-        cases = ("fsync", "rename")
-        for operation in cases:
+    def test_publication_write_rename_and_readback_fail_closed(self):
+        cases = (
+            ("write_pinned_file", "write"),
+            ("rename_pinned_no_replace", "rename"),
+        )
+        for attribute, operation in cases:
             with self.subTest(operation=operation):
                 path = self.evidence / f"{operation}.json"
-                with mock.patch(
-                    f"modlab.validation.windows_watch_protocol.os.{operation}",
+                with mock.patch.object(
+                    windows_exact_fs,
+                    attribute,
                     side_effect=OSError(f"injected {operation}"),
                 ):
                     with self.assertRaisesRegex(OSError, f"injected {operation}"):
@@ -373,37 +415,33 @@ class WatchProtocolTests(unittest.TestCase):
                 self.assertEqual([], list(self.evidence.glob(".*.tmp")))
 
         path = self.evidence / OUTCOME_NAME
-        path_type = type(path)
-        with mock.patch.object(path_type, "read_bytes", return_value=b"wrong"):
+        with mock.patch.object(
+            windows_exact_fs,
+            "read_pinned_file",
+            side_effect=(b"payload", b"wrong"),
+        ):
             with self.assertRaisesRegex(WatchProtocolError, "readback mismatch"):
                 publish_new_verified(path, b"payload", lambda value: value)
-        self.assertEqual(b"payload", path.read_bytes())
+        self.assertFalse(path.exists())
 
     def test_publication_close_failure_preserves_the_primary_error(self):
         path = self.evidence / "close.json"
-        leaked_descriptors: list[int] = []
+        real_close = windows_exact_fs.PinnedObject.close
 
-        def fail_close(descriptor: int) -> None:
-            leaked_descriptors.append(descriptor)
-            raise OSError("injected close failure")
+        def close_parent_then_fail(pinned):
+            real_close(pinned)
+            if pinned.path == self.evidence:
+                raise OSError("injected close failure")
 
-        try:
-            with mock.patch(
-                "modlab.validation.windows_watch_protocol.os.close",
-                side_effect=fail_close,
-            ):
-                with self.assertRaisesRegex(OSError, "injected close failure"):
-                    publish_new_verified(path, b"payload", lambda value: value)
+        with mock.patch.object(
+            windows_exact_fs.PinnedObject,
+            "close",
+            new=close_parent_then_fail,
+        ):
+            with self.assertRaisesRegex(OSError, "injected close failure"):
+                publish_new_verified(path, b"payload", lambda value: value)
 
-            self.assertFalse(path.exists())
-        finally:
-            for descriptor in set(leaked_descriptors):
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-            for temporary in self.evidence.glob(".*.tmp"):
-                temporary.unlink()
+        self.assertFalse(path.exists())
 
     def test_windows_watch_facade_reexports_protocol_values(self):
         from modlab.validation.windows_watch import (

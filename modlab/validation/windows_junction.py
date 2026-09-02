@@ -12,6 +12,11 @@ from pathlib import Path, PureWindowsPath
 import stat
 import struct
 
+from modlab.platform.windows_exact_fs import (
+    ExactObjectError,
+    ExactObjectOwnershipError,
+    rename_pinned_no_replace,
+)
 from modlab.validation.mo2_containment_model import TreeIdentity
 from modlab.validation.windows_integrity import (
     IntegrityLevel,
@@ -54,6 +59,75 @@ class ContainmentSafetyError(RuntimeError):
     """A filesystem observation is insufficiently exact for safe containment."""
 
 
+class JunctionOwnershipError(ContainmentSafetyError):
+    """A junction operation retains exact pins that require deterministic retry."""
+
+    def __init__(
+        self,
+        message: str,
+        pins: tuple[object, ...],
+        *,
+        exact_ownership: ExactObjectOwnershipError | None = None,
+    ) -> None:
+        super().__init__(message)
+        exact_pins = (
+            exact_ownership.retained_objects
+            if exact_ownership is not None
+            else ()
+        )
+        self._local_pins = tuple(
+            pin
+            for index, pin in enumerate(pins)
+            if pin.handle
+            and all(pin is not prior for prior in pins[:index])
+            and all(pin is not exact_pin for exact_pin in exact_pins)
+        )
+        self.exact_ownership = exact_ownership
+        self.pins = (*exact_pins, *self._local_pins)
+
+    @property
+    def owners(self):
+        if self.exact_ownership is None:
+            return ()
+        return self.exact_ownership.owners
+
+    def resolve(self) -> None:
+        exact_error: ExactObjectOwnershipError | None = None
+        if self.exact_ownership is not None:
+            resolved_ownership = self.exact_ownership
+            try:
+                resolved_ownership.resolve()
+            except ExactObjectOwnershipError as unresolved:
+                self.exact_ownership = unresolved
+                exact_error = unresolved
+            except BaseException:
+                raise
+            else:
+                if resolved_ownership.retained_objects:
+                    exact_error = resolved_ownership
+                else:
+                    self.exact_ownership = None
+        local_error: JunctionOwnershipError | None = None
+        try:
+            _close_pinned_objects(
+                self._local_pins,
+                "junction ownership retry",
+            )
+        except JunctionOwnershipError as unresolved:
+            self._local_pins = unresolved.pins
+            local_error = unresolved
+        else:
+            self._local_pins = ()
+        exact_pins = (
+            self.exact_ownership.retained_objects
+            if self.exact_ownership is not None
+            else ()
+        )
+        self.pins = (*exact_pins, *self._local_pins)
+        if self.pins:
+            raise self from (exact_error or local_error)
+
+
 @dataclass(frozen=True)
 class JunctionEvidence:
     link_path: Path
@@ -94,6 +168,83 @@ class _PinnedObject:
             self.handle = 0
 
 
+def _close_pinned_objects(pins: tuple[_PinnedObject, ...], label: str) -> None:
+    """Attempt every exact close and retain only the handles that still need retry."""
+    failures: list[BaseException] = []
+    live: list[_PinnedObject] = []
+    seen: set[int] = set()
+    for pinned in pins:
+        marker = id(pinned)
+        if marker in seen or not pinned.handle:
+            continue
+        seen.add(marker)
+        try:
+            pinned.close()
+        except BaseException as error:
+            failures.append(error)
+        if pinned.handle:
+            live.append(pinned)
+    if live:
+        raise JunctionOwnershipError(
+            f"{label} retained live exact pin(s): "
+            + "; ".join(str(error) for error in failures),
+            tuple(live),
+        )
+
+
+def _close_retained_owners(owners: tuple[object, ...], label: str) -> None:
+    """Finalize all pinned owners, surfacing every handle still recoverable."""
+    live: list[_PinnedObject] = []
+    exact_errors: list[ExactObjectOwnershipError] = []
+    failures: list[BaseException] = []
+    for owner in owners:
+        if owner is None:
+            continue
+        if isinstance(owner, JunctionOwnershipError):
+            failures.append(owner)
+            if owner.exact_ownership is not None:
+                exact_errors.append(owner.exact_ownership)
+            live.extend(pin for pin in owner._local_pins if pin.handle)
+            continue
+        if isinstance(owner, ExactObjectOwnershipError):
+            failures.append(owner)
+            exact_errors.append(owner)
+            continue
+        try:
+            owner.close()
+        except JunctionOwnershipError as error:
+            failures.append(error)
+            if error.exact_ownership is not None:
+                exact_errors.append(error.exact_ownership)
+            live.extend(error._local_pins)
+        except BaseException as error:
+            failures.append(error)
+            pinned = owner if isinstance(owner, _PinnedObject) else getattr(owner, "pinned", None)
+            if isinstance(pinned, _PinnedObject) and pinned.handle:
+                live.append(pinned)
+    exact_errors = [
+        error for error in exact_errors if error.retained_objects
+    ]
+    exact_ownership: ExactObjectOwnershipError | None = None
+    if len(exact_errors) == 1:
+        exact_ownership = exact_errors[0]
+    elif exact_errors:
+        exact_ownership = ExactObjectOwnershipError(
+            f"{label} retained shared exact ownership",
+            owners=tuple(
+                owner
+                for error in exact_errors
+                for owner in error.owners
+            ),
+        )
+    if live or exact_ownership is not None:
+        raise JunctionOwnershipError(
+            f"{label} retained live exact pin(s): " + "; ".join(str(error) for error in failures),
+            tuple(live),
+            exact_ownership=exact_ownership,
+        )
+
+
 @dataclass
 class _PinnedEntry:
     relative_path: str
@@ -108,13 +259,25 @@ class _PinnedTree:
     current_path: Path
 
     def close_descendants(self) -> None:
-        for entry in reversed(self.entries):
-            entry.pinned.close()
-        self.entries.clear()
+        try:
+            _close_pinned_objects(
+                tuple(entry.pinned for entry in reversed(self.entries)),
+                "pinned tree descendants",
+            )
+        finally:
+            self.entries = [entry for entry in self.entries if entry.pinned.handle]
 
     def close(self) -> None:
-        self.close_descendants()
-        self.root.close()
+        try:
+            _close_pinned_objects(
+                (
+                    *(entry.pinned for entry in reversed(self.entries)),
+                    self.root,
+                ),
+                "pinned tree close",
+            )
+        finally:
+            self.entries = [entry for entry in self.entries if entry.pinned.handle]
 
 
 class _PinnedTreeRejected(ContainmentSafetyError):
@@ -245,8 +408,8 @@ def _winerror(message: str, code: int | None = None) -> OSError:
 
 
 def _close_handle(handle: int | None) -> None:
-    if handle and handle != _INVALID_HANDLE_VALUE:
-        _kernel32.CloseHandle(handle)
+    if handle and handle != _INVALID_HANDLE_VALUE and not _kernel32.CloseHandle(handle):
+        raise _winerror("CloseHandle failed")
 
 
 def _absolute(path: Path) -> Path:
@@ -685,16 +848,26 @@ def _pin_object(
         raise ContainmentSafetyError(
             f"cannot acquire identity pin before mutation for {target}: {error}"
         ) from error
+    pinned = _PinnedObject(target, handle, (0, 0))
     try:
         attributes, tag = _attribute_tag_for_handle(handle, target)
         if _is_reparse(attributes, tag) and not allow_reparse:
             raise ContainmentSafetyError(f"reparse object cannot be pinned: {target}")
         identity = _file_identity(_handle_information(handle, target))
+        pinned.identity = identity
         if expected_identity is not None and identity != expected_identity:
             raise ContainmentSafetyError(f"object changed before identity pin: {target}")
-        return _PinnedObject(target, handle, identity)
-    except BaseException:
-        _close_handle(handle)
+        return pinned
+    except BaseException as error:
+        try:
+            pinned.close()
+        except BaseException as close_error:
+            if pinned.handle:
+                raise JunctionOwnershipError(
+                    "identity pin validation retained a live handle after close "
+                    f"failed: {close_error}",
+                    (pinned,),
+                ) from error
         raise
 
 
@@ -740,26 +913,22 @@ def _pin_descendants(tree: _PinnedTree) -> None:
                 desired_access=_DELETE | _GENERIC_READ,
                 allow_reparse=True,
             )
-            try:
-                attributes, tag = _attribute_tag_for_handle(pinned.handle, path)
-                if _is_reparse(attributes, tag):
-                    raise _PinnedTreeRejected(
-                        f"reparse descendant is not allowed: {relative}", tree
-                    )
-                pinned_is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
-                if (
-                    not pinned_is_directory
-                    and _kernel32.GetFileType(pinned.handle) != _FILE_TYPE_DISK
-                ):
-                    raise _PinnedTreeRejected(
-                        f"non-regular tree entry is not allowed: {relative}", tree
-                    )
-            except BaseException:
-                pinned.close()
-                raise
-            retained = _PinnedEntry(relative, pinned_is_directory, pinned)
+            retained = _PinnedEntry(relative, False, pinned)
             tree.entries.append(retained)
             retained_children.append(retained)
+            attributes, tag = _attribute_tag_for_handle(pinned.handle, path)
+            if _is_reparse(attributes, tag):
+                raise _PinnedTreeRejected(
+                    f"reparse descendant is not allowed: {relative}", tree
+                )
+            retained.is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
+            if (
+                not retained.is_directory
+                and _kernel32.GetFileType(pinned.handle) != _FILE_TYPE_DISK
+            ):
+                raise _PinnedTreeRejected(
+                    f"non-regular tree entry is not allowed: {relative}", tree
+                )
         for retained in retained_children:
             if retained.is_directory:
                 walk(
@@ -772,8 +941,17 @@ def _pin_descendants(tree: _PinnedTree) -> None:
             raise ContainmentSafetyError("pinned tree root identity changed")
         walk(tree.current_path, ())
         _assert_pinned_tree(tree)
-    except BaseException:
-        tree.close_descendants()
+    except BaseException as error:
+        try:
+            tree.close_descendants()
+        except JunctionOwnershipError as ownership_error:
+            prior_pins = (
+                error.pins if isinstance(error, JunctionOwnershipError) else ()
+            )
+            raise JunctionOwnershipError(
+                "pinned descendant construction retained live ownership",
+                (*prior_pins, *ownership_error.pins),
+            ) from error
         raise
 
 
@@ -790,8 +968,14 @@ def _pin_tree(root: Path) -> _PinnedTree:
         return _pin_tree_from_root(root_pin)
     except _PinnedTreeRejected:
         raise
-    except BaseException:
-        root_pin.close()
+    except BaseException as error:
+        try:
+            _close_retained_owners(
+                (error, root_pin),
+                "pinned tree construction",
+            )
+        except JunctionOwnershipError as ownership_error:
+            raise ownership_error from error
         raise
 
 
@@ -808,7 +992,6 @@ def _pin_tree_from_root(root_pin: _PinnedObject) -> _PinnedTree:
     except _PinnedTreeRejected:
         raise
     except BaseException:
-        tree.close_descendants()
         raise
 
 
@@ -857,46 +1040,21 @@ def _rename_pinned_object(
     destination: Path,
     destination_parent: _PinnedObject,
 ) -> None:
-    destination_path = _absolute(destination)
-    if destination_path.parent != destination_parent.path:
-        raise ContainmentSafetyError("pinned rename destination parent mismatch")
-    if _identity_at_path(destination_parent.path) != destination_parent.identity:
-        raise ContainmentSafetyError("pinned rename destination parent changed")
-    source_information = _handle_information(pinned.handle, pinned.path)
-    parent_information = _handle_information(
-        destination_parent.handle, destination_parent.path
-    )
-    if source_information.dwVolumeSerialNumber != parent_information.dwVolumeSerialNumber:
-        raise ContainmentSafetyError("rename requires source and destination on the same volume")
-
-    encoded_name = str(destination_path).encode("utf-16-le")
-    name_offset = _FILE_RENAME_INFO.FileName.offset
-    native_buffer = ctypes.create_string_buffer(name_offset + len(encoded_name) + 2)
-    rename = _FILE_RENAME_INFO.from_buffer(native_buffer)
-    rename.Flags = 0
-    rename.RootDirectory = None
-    rename.FileNameLength = len(encoded_name)
-    ctypes.memmove(
-        ctypes.addressof(native_buffer) + name_offset,
-        encoded_name,
-        len(encoded_name),
-    )
-    ctypes.set_last_error(0)
-    if not _kernel32.SetFileInformationByHandle(
-        pinned.handle,
-        _FILE_RENAME_INFO_CLASS,
-        native_buffer,
-        len(native_buffer),
-    ):
-        error = ctypes.get_last_error()
-        if error in {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}:
-            raise FileExistsError(error, "destination already exists", str(destination_path))
-        raise _winerror(
-            f"handle-based no-replace rename failed for {destination_path}", error
+    try:
+        rename_pinned_no_replace(
+            pinned,
+            destination,
+            destination_parent,
+            identity_at_path_fn=_identity_at_path,
         )
-    pinned.path = destination_path
-    if _identity_at_path(destination_path) != pinned.identity:
-        raise ContainmentSafetyError("renamed destination is not the pinned source object")
+    except ExactObjectOwnershipError as error:
+        raise JunctionOwnershipError(
+            str(error),
+            error.retained_objects,
+            exact_ownership=error,
+        ) from error
+    except ExactObjectError as error:
+        raise ContainmentSafetyError(str(error)) from error
 
 
 def _hash_direct_file(path: Path) -> tuple[str, int]:
@@ -1079,6 +1237,7 @@ def _quarantine_pinned_objects(
 ) -> None:
     quarantine = _require_direct_directory(quarantine_root)
     parent_pin = _pin_parent_directory(quarantine)
+    ownership_error: JunctionOwnershipError | None = None
     try:
         for pinned in pinned_entries:
             source = pinned.path
@@ -1097,13 +1256,25 @@ def _quarantine_pinned_objects(
                 raise ContainmentSafetyError(
                     f"quarantined source path is still present: {source}"
                 )
+    except JunctionOwnershipError as error:
+        ownership_error = error
+        raise
     finally:
-        parent_pin.close()
+        try:
+            _close_retained_owners(
+                (ownership_error, parent_pin),
+                "quarantine object finalizer",
+            )
+        except JunctionOwnershipError as finalizer_error:
+            if ownership_error is not None:
+                raise finalizer_error from ownership_error
+            raise
 
 
 def _quarantine_pinned_tree(tree: _PinnedTree, quarantine_root: Path) -> None:
     quarantine = _require_direct_directory(quarantine_root)
     parent_pin = _pin_parent_directory(quarantine)
+    ownership_error: JunctionOwnershipError | None = None
     try:
         source = tree.current_path
         destination = quarantine / tree.current_path.name
@@ -1126,8 +1297,19 @@ def _quarantine_pinned_tree(tree: _PinnedTree, quarantine_root: Path) -> None:
             raise ContainmentSafetyError(
                 f"quarantined source path is still present: {source}"
             )
+    except JunctionOwnershipError as error:
+        ownership_error = error
+        raise
     finally:
-        parent_pin.close()
+        try:
+            _close_retained_owners(
+                (ownership_error, parent_pin),
+                "quarantine tree finalizer",
+            )
+        except JunctionOwnershipError as finalizer_error:
+            if ownership_error is not None:
+                raise finalizer_error from ownership_error
+            raise
 
 
 def ensure_direct_subdirectory(parent: Path, name: str) -> Path:
@@ -1181,6 +1363,7 @@ def quarantine_exact_object(source: Path, quarantine_root: Path) -> Path:
         desired_access=_DELETE | _FILE_READ_ATTRIBUTES,
         allow_reparse=True,
     )
+    ownership_error: JunctionOwnershipError | None = None
     try:
         attributes, tag = _attribute_tag_for_handle(pinned.handle, source_path)
         is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
@@ -1193,8 +1376,19 @@ def quarantine_exact_object(source: Path, quarantine_root: Path) -> Path:
             )
         _quarantine_pinned_objects((pinned,), quarantine)
         return pinned.path
+    except JunctionOwnershipError as error:
+        ownership_error = error
+        raise
     finally:
-        pinned.close()
+        try:
+            _close_retained_owners(
+                (ownership_error, pinned),
+                "exact quarantine finalizer",
+            )
+        except JunctionOwnershipError as finalizer_error:
+            if ownership_error is not None:
+                raise finalizer_error from ownership_error
+            raise
 
 
 def quarantine_replacement_tree(
@@ -1213,17 +1407,32 @@ def quarantine_replacement_tree(
         tree = _pin_tree(candidate)
     except _PinnedTreeRejected as rejection:
         rejected_tree = rejection.tree
+        quarantine_failure: BaseException | None = None
+        ownership_error: JunctionOwnershipError | None = None
         try:
             rejected_tree.close_descendants()
             _quarantine_pinned_tree(rejected_tree, quarantine)
-        except BaseException as quarantine_error:
+        except JunctionOwnershipError as error:
+            ownership_error = error
+        except BaseException as error:
+            quarantine_failure = error
+        finally:
+            try:
+                _close_retained_owners(
+                    (ownership_error, rejected_tree),
+                    "replacement rejection finalizer",
+                )
+            except JunctionOwnershipError as finalizer_error:
+                raise finalizer_error from (ownership_error or quarantine_failure or rejection)
+        if ownership_error is not None:
+            raise ownership_error from rejection
+        if quarantine_failure is not None:
             raise ContainmentSafetyError(
                 "replacement tree rejection and quarantine both failed: "
-                f"{quarantine_error}"
+                f"{quarantine_failure}"
             ) from rejection
-        finally:
-            rejected_tree.close()
         raise ContainmentSafetyError(str(rejection)) from rejection
+    ownership_error: JunctionOwnershipError | None = None
     try:
         before_tree = _stable_pinned_tree_identity(
             tree,
@@ -1278,8 +1487,19 @@ def quarantine_replacement_tree(
             before_tree=before_tree,
             after_tree=after_tree,
         )
+    except JunctionOwnershipError as error:
+        ownership_error = error
+        raise
     finally:
-        tree.close()
+        try:
+            _close_retained_owners(
+                (ownership_error, tree),
+                "replacement quarantine finalizer",
+            )
+        except JunctionOwnershipError as finalizer_error:
+            if ownership_error is not None:
+                raise finalizer_error from ownership_error
+            raise
 
 
 def _select_unique_new_directory(
@@ -1319,8 +1539,13 @@ def _select_unique_new_directory(
                 )
             )
     except BaseException as pin_error:
-        for pinned in reversed(pinned_entries):
-            pinned.close()
+        try:
+            _close_retained_owners(
+                (pin_error, *reversed(pinned_entries)),
+                "staging classification cleanup",
+            )
+        except JunctionOwnershipError as ownership_error:
+            raise ownership_error from pin_error
         raise ContainmentSafetyError(
             "staging classification could not establish every exact entry identity; "
             "ambiguous paths were left untouched"
@@ -1394,9 +1619,14 @@ def _select_unique_new_directory(
                 "new staging entry is not a direct regular directory"
             )
         return _StagingSelection(candidate, baselines)
-    except BaseException:
-        for pinned in reversed(pinned_entries):
-            pinned.close()
+    except BaseException as selection_error:
+        try:
+            _close_retained_owners(
+                (selection_error, *reversed(pinned_entries)),
+                "staging selection cleanup",
+            )
+        except JunctionOwnershipError as ownership_error:
+            raise ownership_error from selection_error
         raise
 
 
@@ -1429,6 +1659,7 @@ def adopt_unique_staged_mod(
     destination: Path | None = None
     quarantined = False
     source_parent: _PinnedObject | None = None
+    ownership_errors: list[JunctionOwnershipError] = []
     try:
         try:
             tree = _pin_tree_from_root(selection.candidate)
@@ -1483,6 +1714,8 @@ def adopt_unique_staged_mod(
             final_is_reparse=final_is_reparse,
         )
     except BaseException as error:
+        if isinstance(error, JunctionOwnershipError):
+            ownership_errors.append(error)
         if tree is None:
             tree = _PinnedTree(
                 root=selection.candidate,
@@ -1495,6 +1728,9 @@ def adopt_unique_staged_mod(
                 tree.current_path = tree.root.path
                 _quarantine_pinned_tree(tree, quarantine_root)
                 quarantined = True
+            except JunctionOwnershipError as quarantine_error:
+                ownership_errors.append(quarantine_error)
+                raise quarantine_error from error
             except BaseException as quarantine_error:
                 raise ContainmentSafetyError(
                     f"adoption failed and quarantine also failed: {quarantine_error}"
@@ -1503,17 +1739,21 @@ def adopt_unique_staged_mod(
             raise
         raise ContainmentSafetyError(f"adoption failed safely: {error}") from error
     finally:
-        if source_parent is not None:
-            source_parent.close()
-        if tree is not None:
-            tree.close()
-        for baseline in reversed(baselines):
-            baseline.close()
+        try:
+            _close_retained_owners(
+                (*ownership_errors, source_parent, tree, *reversed(baselines)),
+                "adoption finalizer",
+            )
+        except JunctionOwnershipError as finalizer_error:
+            if ownership_errors:
+                raise finalizer_error from ownership_errors[-1]
+            raise
 
 
 __all__ = [
     "AdoptionEvidence",
     "ContainmentSafetyError",
+    "JunctionOwnershipError",
     "IO_REPARSE_TAG_MOUNT_POINT",
     "JunctionEvidence",
     "ReplacementQuarantineEvidence",

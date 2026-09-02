@@ -16,6 +16,12 @@ import threading
 from typing import Callable, Generic, TypeVar
 import uuid
 
+from modlab.platform.windows_exact_fs import (
+    ExactObjectError,
+    ExactObjectOwnershipError,
+    publish_new_pinned,
+    resolve_retained_ownership,
+)
 from .mo2_containment_model import (
     CapabilityDecision,
     CapabilityVerdict,
@@ -56,6 +62,49 @@ _T = TypeVar("_T")
 
 class ContainmentStoreError(RuntimeError):
     """A containment document could not be stored or proved exact."""
+
+
+class ContainmentStoreOwnershipError(ContainmentStoreError):
+    """An immutable store write leaves explicitly-owned exact handles live."""
+
+    def __init__(self, message: str, ownership: ExactObjectOwnershipError) -> None:
+        super().__init__(message)
+        self.ownership = ownership
+
+    @property
+    def candidate(self):
+        return self.ownership.candidate
+
+    @property
+    def candidates(self):
+        return self.ownership.candidates
+
+    @property
+    def destination_parent(self):
+        return self.ownership.destination_parent
+
+    @property
+    def destination_parents(self):
+        return self.ownership.destination_parents
+
+    @property
+    def verification(self):
+        return self.ownership.verification
+
+    @property
+    def owners(self):
+        return self.ownership.owners
+
+    @property
+    def retained_objects(self):
+        return self.ownership.retained_objects
+
+    def resolve(self) -> None:
+        try:
+            self.ownership.resolve()
+        except ExactObjectOwnershipError as unresolved:
+            self.ownership = unresolved
+            raise self from unresolved
 
 
 class ContainmentStoreMalformedEvidence(ContainmentStoreError):
@@ -548,20 +597,24 @@ class ContainmentStore:
                 raise ContainmentStoreError("retry authority command/recovery binding differs")
             if current["state"] != "Available" or current["consumedByRunId"] is not None:
                 raise ContainmentStoreError("retry authority is already consumed")
-            replacement = {
-                **current,
-                "state": "Consumed",
-                "consumedByRunId": new_run_id,
-            }
-            self._atomic_replace(
-                self.retry_path(recovery.run_id, recovery.scenario),
-                _canonical(replacement),
-                _canonical(current),
-                "retry authority",
-            )
-            loaded = self._load_retry_authority_unlocked(
+            marker = _retry_consumption_document(current, new_run_id)
+            marker_target = self.retry_consumption_path(
                 recovery.run_id, recovery.scenario
             )
+            self._write_immutable(
+                marker_target,
+                _canonical(marker),
+                "retry authority consumption",
+            )
+            loaded = self._load_retry_authority_unlocked(recovery.run_id, recovery.scenario)
+            if (
+                loaded["state"] != "Consumed"
+                or loaded["consumedByRunId"] != new_run_id
+            ):
+                raise ContainmentStoreError(
+                    "retry authority consumption marker readback did not prove "
+                    "the requested consuming run"
+                )
             return {
                 "runId": recovery.run_id,
                 "scenario": recovery.scenario.value,
@@ -690,6 +743,13 @@ class ContainmentStore:
 
     def retry_path(self, run_id: str, scenario: ContainmentScenario) -> Path:
         return self.scenario_path(run_id, scenario) / "retry.json"
+
+    def retry_consumption_path(
+        self,
+        run_id: str,
+        scenario: ContainmentScenario,
+    ) -> Path:
+        return self.scenario_path(run_id, scenario) / "retry-consumption.json"
 
     def launch_path(self, run_id: str, scenario: ContainmentScenario) -> Path:
         return self.scenario_path(run_id, scenario) / "launch.json"
@@ -865,7 +925,29 @@ class ContainmentStore:
         checked = _retry_document(document, run_id, scenario)
         if _canonical(checked) != data:
             raise ContainmentStoreError("stored retry authority bytes are not canonical")
-        return checked
+        try:
+            consumed_data = self._read(
+                self.retry_consumption_path(run_id, scenario),
+                "retry authority consumption",
+            )
+        except ContainmentStoreNotFound:
+            return checked
+        try:
+            consumed = json.loads(
+                consumed_data.decode("utf-8"), object_pairs_hook=_unique_json
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ContainmentStoreError(
+                f"retry authority consumption is malformed: {error}"
+            ) from error
+        consumed = _retry_consumption_value(consumed, checked)
+        if _canonical(consumed) != consumed_data:
+            raise ContainmentStoreError("stored retry authority consumption bytes are not canonical")
+        return {
+            **checked,
+            "state": "Consumed",
+            "consumedByRunId": consumed["consumedByRunId"],
+        }
 
     def _resolve_decision_evidence_unlocked(
         self,
@@ -1007,6 +1089,46 @@ class ContainmentStore:
             if existing != data:
                 raise ContainmentStoreError(f"stored {label} path contains different bytes")
             return True
+        if os.name == "nt":
+            try:
+                def validate(candidate: bytes) -> bytes:
+                    if candidate != data:
+                        raise ContainmentStoreError(
+                            f"stored {label} differs during exact immutable publication"
+                        )
+                    return candidate
+
+                publish_new_pinned(target, data, validate)
+                return False
+            except FileExistsError:
+                existing = self._read(target, label)
+                if existing != data:
+                    raise ContainmentStoreError(
+                        f"stored {label} path contains different bytes"
+                    )
+                return True
+            except ExactObjectOwnershipError as error:
+                try:
+                    resolve_retained_ownership(error)
+                except ExactObjectOwnershipError as unresolved:
+                    error = unresolved
+                else:
+                    raise ContainmentStoreError(
+                        f"exact immutable {label} cleanup completed after publication failure"
+                    ) from error
+                resolved = ContainmentStoreOwnershipError(
+                    f"cannot exactly create immutable {label}; live retained ownership requires resolution: {error}",
+                    error,
+                )
+                raise resolved from error
+            except ExactObjectError as error:
+                raise ContainmentStoreError(
+                    f"cannot exactly create immutable {label}: {error}"
+                ) from error
+            except OSError as error:
+                raise ContainmentStoreError(
+                    f"cannot atomically create {label} through retained ownership: {error}"
+                ) from error
         part = target.parent / f".{target.name}.{uuid.uuid4().hex}.part"
         promoted = False
         try:
@@ -1015,7 +1137,7 @@ class ContainmentStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             self._reject_redirect(part)
-            _promote_no_replace(part, target)
+            _promote_no_replace_posix(part, target)
             promoted = True
             if self._read(target, label) != data:
                 raise ContainmentStoreError(f"stored {label} differs after atomic promotion")
@@ -1253,16 +1375,8 @@ def _retry_document(
         or type(value["authorityId"]) is not str
         or re.fullmatch(r"containment-retry-sha256:[0-9a-f]{64}", value["authorityId"])
         is None
-        or type(value["state"]) is not str
-        or value["state"] not in {"Available", "Consumed"}
-        or (
-            value["consumedByRunId"] is not None
-            and (
-                type(value["consumedByRunId"]) is not str
-                or _RUN.fullmatch(value["consumedByRunId"]) is None
-            )
-        )
-        or (value["state"] == "Available") != (value["consumedByRunId"] is None)
+        or value["state"] != "Available"
+        or value["consumedByRunId"] is not None
     ):
         raise ContainmentStoreError("retry authority values are malformed")
     basis = {
@@ -1277,6 +1391,49 @@ def _retry_document(
     ).hexdigest()
     if value["authorityId"] != expected_id:
         raise ContainmentStoreError("retry authority content ID is invalid")
+    return dict(value)
+
+
+def _retry_consumption_document(
+    authority: dict[str, object],
+    new_run_id: str,
+) -> dict[str, object]:
+    if type(new_run_id) is not str or _RUN.fullmatch(new_run_id) is None:
+        raise ContainmentStoreError("retry consumption run ID is malformed")
+    return {
+        "schemaVersion": 1,
+        "oldRunId": authority["oldRunId"],
+        "scenario": authority["scenario"],
+        "recoveryId": authority["recoveryId"],
+        "authorityId": authority["authorityId"],
+        "commandFingerprint": authority["commandFingerprint"],
+        "consumedByRunId": new_run_id,
+    }
+
+
+def _retry_consumption_value(
+    value: object,
+    authority: dict[str, object],
+) -> dict[str, object]:
+    fields = {
+        "schemaVersion", "oldRunId", "scenario", "recoveryId", "authorityId",
+        "commandFingerprint", "consumedByRunId",
+    }
+    if type(value) is not dict or set(value) != fields:
+        raise ContainmentStoreError("retry authority consumption fields are not exact")
+    if (
+        value["schemaVersion"] != 1
+        or any(
+            value[name] != authority[name]
+            for name in (
+                "oldRunId", "scenario", "recoveryId", "authorityId",
+                "commandFingerprint",
+            )
+        )
+        or type(value["consumedByRunId"]) is not str
+        or _RUN.fullmatch(value["consumedByRunId"]) is None
+    ):
+        raise ContainmentStoreError("retry authority consumption binding is invalid")
     return dict(value)
 
 
@@ -1384,17 +1541,12 @@ def _protected_from_document(value: object) -> ProtectedState:
     )
 
 
-def _promote_no_replace(source: Path, target: Path) -> None:
+def _promote_no_replace_posix(source: Path, target: Path) -> None:
+    """Hard-link a POSIX immutable candidate into place without replacement."""
     if os.name == "nt":
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.MoveFileExW.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD)
-        kernel32.MoveFileExW.restype = wintypes.BOOL
-        if kernel32.MoveFileExW(str(source), str(target), 0x00000008):
-            return
-        error = ctypes.get_last_error()
-        if error in {80, 183}:
-            raise FileExistsError(error, "destination already exists", str(target))
-        raise OSError(error, "atomic no-replace promotion failed", str(target))
+        raise ContainmentStoreError(
+            "POSIX-only immutable promotion cannot run on Windows"
+        )
     os.link(source, target, follow_symlinks=False)
     source.unlink()
 
@@ -1424,6 +1576,7 @@ def _replace_durable(source: Path, target: Path) -> None:
 __all__ = [
     "ContainmentStore",
     "ContainmentStoreError",
+    "ContainmentStoreOwnershipError",
     "ContainmentStoreMalformedEvidence",
     "ContainmentStoreNotFound",
     "ImmutableWrite",

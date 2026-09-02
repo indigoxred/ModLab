@@ -6,14 +6,16 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import hashlib
 import json
-import os
 from pathlib import Path, PureWindowsPath
 import re
-import secrets
 import sys
-import threading
 from typing import Any
 
+from modlab.platform.windows_exact_fs import (
+    ExactObjectError,
+    ExactObjectOwnershipError,
+    publish_new_pinned,
+)
 from modlab.validation.mo2_containment_model import (
     ContainmentScenario,
     WatchEvidenceCompletion,
@@ -31,6 +33,7 @@ TERMINAL_NAME = "terminal.json"
 CONTROLLER_LOSS_NAME = "controller-loss.json"
 OUTCOME_NAME = "outcome.json"
 STOP_NAME = "stop.token"
+
 
 ROOT_KINDS = (
     "SourceMods",
@@ -97,6 +100,49 @@ _LOSS_FIELDS = {
 
 class WatchProtocolError(RuntimeError):
     """A watcher record is unsafe, malformed, noncanonical, or unbound."""
+
+
+class WatchProtocolOwnershipError(WatchProtocolError):
+    """A protocol publication failed with explicit retained-handle ownership."""
+
+    def __init__(self, message: str, ownership: ExactObjectOwnershipError) -> None:
+        super().__init__(message)
+        self.ownership = ownership
+
+    @property
+    def candidate(self):
+        return self.ownership.candidate
+
+    @property
+    def candidates(self):
+        return self.ownership.candidates
+
+    @property
+    def destination_parent(self):
+        return self.ownership.destination_parent
+
+    @property
+    def destination_parents(self):
+        return self.ownership.destination_parents
+
+    @property
+    def verification(self):
+        return self.ownership.verification
+
+    @property
+    def owners(self):
+        return self.ownership.owners
+
+    @property
+    def retained_objects(self):
+        return self.ownership.retained_objects
+
+    def resolve(self) -> None:
+        try:
+            self.ownership.resolve()
+        except ExactObjectOwnershipError as unresolved:
+            self.ownership = unresolved
+            raise self from unresolved
 
 
 @dataclass(frozen=True)
@@ -383,63 +429,26 @@ def publish_new_verified(
     if not callable(parse):
         raise WatchProtocolError("publication parser must be callable")
 
-    temporary = path.with_name(
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}."
-        f"{secrets.token_hex(8)}.tmp"
-    )
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    descriptor: int | None = None
-    promoted = False
-    primary_error: BaseException | None = None
-    try:
-        descriptor = os.open(temporary, flags, 0o600)
-        try:
-            remaining = memoryview(data)
-            while remaining:
-                written = os.write(descriptor, remaining)
-                if written <= 0:
-                    raise OSError(f"incomplete write for {path}")
-                remaining = remaining[written:]
-            os.fsync(descriptor)
-        except BaseException as error:
-            primary_error = error
-        try:
-            os.close(descriptor)
-            descriptor = None
-        except BaseException as close_error:
-            if primary_error is None:
-                primary_error = close_error
-            else:
-                primary_error.add_note(f"temporary close also failed: {close_error}")
-        if primary_error is not None:
-            raise primary_error
+    def validate(candidate: bytes) -> bytes:
+        parse(candidate)
+        if candidate != data:
+            raise WatchProtocolError(f"durable readback mismatch for {path.name}")
+        return candidate
 
-        os.rename(temporary, path)
-        promoted = True
-        reloaded = path.read_bytes()
-        parse(reloaded)
-        if reloaded != data:
-            raise WatchProtocolError(
-                f"durable readback mismatch for {path.name}"
-            )
-        return reloaded
-    finally:
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        if not promoted:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as cleanup_error:
-                if primary_error is None:
-                    raise
-                primary_error.add_note(
-                    f"unpublished temporary cleanup also failed: {cleanup_error}"
-                )
+    try:
+        published = publish_new_pinned(path, data, validate)
+    except ExactObjectOwnershipError as error:
+        raise WatchProtocolOwnershipError(
+            f"exact immutable publication retained ownership for {path.name}: {error}",
+            error,
+        ) from error
+    except ExactObjectError as error:
+        raise WatchProtocolError(
+            f"exact immutable publication failed for {path.name}: {error}"
+        ) from error
+    if type(published) is not bytes:
+        raise WatchProtocolError("immutable publication validator returned invalid bytes")
+    return published
 
 
 def _validate_request(value: WatchRequest) -> WatchRequest:

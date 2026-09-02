@@ -18,6 +18,12 @@ import threading
 import time
 import warnings
 
+from modlab.platform.windows_exact_fs import (
+    ExactObjectError,
+    ExactObjectOwnershipError,
+    publish_new_pinned,
+    resolve_retained_ownership,
+)
 from modlab.validation.mo2_containment_model import (
     ContainmentScenario,
     ProtectedState,
@@ -47,6 +53,7 @@ from modlab.validation.windows_watch_protocol import (
     ControllerLoss,
     WorkerLaunch,
     WatchProtocolError,
+    WatchProtocolOwnershipError,
     WatchReceipt,
     WatchRequest,
     WatchRoot,
@@ -125,7 +132,6 @@ _FILE_BEGIN = 0
 _SYNCHRONIZE = 0x00100000
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _STILL_ACTIVE = 259
-_MOVEFILE_WRITE_THROUGH = 0x00000008
 _BUFFER_SIZE = 64 * 1024
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
@@ -235,12 +241,6 @@ if os.name == "nt":
     _kernel32.CreateFileW.restype = wintypes.HANDLE
     _kernel32.GetFileAttributesW.argtypes = [wintypes.LPCWSTR]
     _kernel32.GetFileAttributesW.restype = wintypes.DWORD
-    _kernel32.MoveFileExW.argtypes = [
-        wintypes.LPCWSTR,
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-    ]
-    _kernel32.MoveFileExW.restype = wintypes.BOOL
     _kernel32.GetFileInformationByHandle.argtypes = [
         wintypes.HANDLE,
         ctypes.POINTER(_BY_HANDLE_FILE_INFORMATION),
@@ -810,30 +810,32 @@ def _request_from_bytes(data: bytes) -> WatchRequest:
 
 
 def _write_new(path: Path, data: bytes) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_BINARY"):
-        flags |= os.O_BINARY
-    temporary = path.with_name(
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(8)}.tmp"
-    )
-    descriptor = os.open(temporary, flags, 0o600)
-    promoted = False
     try:
-        written = os.write(descriptor, data)
-        if written != len(data):
-            raise OSError(f"incomplete write for {path}")
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
-        os.rename(temporary, path)
-        promoted = True
-    finally:
-        if not promoted:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+        publish_new_pinned(path, data, lambda candidate: candidate)
+    except ExactObjectOwnershipError as error:
+        try:
+            resolve_retained_ownership(error)
+        except ExactObjectOwnershipError as unresolved:
+            raise WatchProtocolOwnershipError(
+                f"exact immutable write retained unresolved ownership for {path.name}: {unresolved}",
+                unresolved,
+            ) from unresolved
+        raise WatchProtocolError(
+            f"exact immutable write cleanup completed after failure for {path.name}"
+        ) from error
+    except ExactObjectError as error:
+        raise WatchProtocolError(
+            f"exact immutable write failed for {path.name}: {error}"
+        ) from error
+
+
+def _resolve_watch_protocol_ownership(
+    error: WatchProtocolOwnershipError,
+) -> None:
+    """Resolve every retained exact object or preserve the structured error."""
+    error.resolve()
+    if error.ownership.retained_objects:
+        raise error
 
 
 def _filetime_integer(value: wintypes.FILETIME) -> int:
@@ -1086,6 +1088,7 @@ def start_watch(request: WatchRequest) -> int:
     request_key = request_path.absolute()
     session: _LocalWatchSession | None = None
     session_registered = False
+    startup_error: OSError | WatchProtocolError | None = None
     try:
         process_handle = _popen_process_handle(process)
         worker_creation_time = _process_handle_creation_time(
@@ -1125,7 +1128,12 @@ def start_watch(request: WatchRequest) -> int:
             launch_bytes,
             lambda data: worker_launch_from_bytes(data, normalized),
         )
+    except WatchProtocolOwnershipError as error:
+        _resolve_watch_protocol_ownership(error)
+        startup_error = error
     except (OSError, WatchProtocolError) as error:
+        startup_error = error
+    if startup_error is not None:
         cleanup_error = "watch startup cleanup was incomplete"
         if session is not None and session_registered:
             receipt = _stop_local_session(
@@ -1144,9 +1152,9 @@ def start_watch(request: WatchRequest) -> int:
             if close_error is not None:
                 cleanup_error = f"{cleanup_error}; {close_error}"
         raise WatchProtocolError(
-            f"watch worker identity/launch publication failed: {error}; "
+            f"watch worker identity/launch publication failed: {startup_error}; "
             f"{cleanup_error}"
-        ) from error
+        ) from startup_error
     assert session is not None
     deadline = time.monotonic() + 15.0
     try:
@@ -1614,6 +1622,7 @@ def run_watch_worker(request_path: Path) -> int:
     root_identities_unchanged = False
     failed_closes = 0
     journal_evidence = _JournalEvidence(0, 0, b"", 0, 0)
+    unresolved_protocol_ownership: WatchProtocolOwnershipError | None = None
     try:
         if errors:
             raise WatchProtocolError(errors[-1])
@@ -1773,6 +1782,12 @@ def run_watch_worker(request_path: Path) -> int:
         errors.append(str(error))
         retained_worker_handles.append((error.handle, error.label))
         stopping.set()
+    except WatchProtocolOwnershipError as error:
+        unresolved_protocol_ownership = error
+        _resolve_watch_protocol_ownership(error)
+        unresolved_protocol_ownership = None
+        errors.append(str(error))
+        stopping.set()
     except (OSError, WatchProtocolError) as error:
         errors.append(str(error))
         stopping.set()
@@ -1860,9 +1875,17 @@ def run_watch_worker(request_path: Path) -> int:
             opened_root_kinds=tuple(opened_kinds),
             journal_evidence=journal_evidence,
         )
+        if unresolved_protocol_ownership is not None:
+            raise unresolved_protocol_ownership
+        terminal_publication_failed = False
         try:
             _write_new(terminal_path, _canonical_bytes(terminal))
-        except (FileExistsError, OSError):
+        except WatchProtocolOwnershipError as error:
+            _resolve_watch_protocol_ownership(error)
+            terminal_publication_failed = True
+        except (FileExistsError, OSError, WatchProtocolError):
+            terminal_publication_failed = True
+        if terminal_publication_failed:
             if "controller-session-lost" in errors:
                 launch = WorkerLaunch(
                     schema_version=_SCHEMA_VERSION,
@@ -1902,6 +1925,8 @@ def run_watch_worker(request_path: Path) -> int:
                             launch,
                         ),
                     )
+                except WatchProtocolOwnershipError as error:
+                    _resolve_watch_protocol_ownership(error)
                 except (FileExistsError, OSError, WatchProtocolError):
                     pass
             return 2
@@ -2402,19 +2427,6 @@ def _validate_outcome_binding(
     return outcome
 
 
-def _promote_outcome_candidate(source: Path, destination: Path) -> None:
-    if _kernel32.MoveFileExW(
-        str(source),
-        str(destination),
-        _MOVEFILE_WRITE_THROUGH,
-    ):
-        return
-    code = ctypes.get_last_error()
-    if code in {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}:
-        raise FileExistsError(code, ctypes.FormatError(code), str(destination))
-    raise _winerror(f"could not commit immutable watch outcome {destination}", code)
-
-
 def _publish_outcome_commit(
     outcome: WatchOutcome,
     request: WatchRequest,
@@ -2432,68 +2444,24 @@ def _publish_outcome_commit(
             launch,
         )
 
-    temporary = path.with_name(
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}."
-        f"{secrets.token_hex(8)}.tmp"
-    )
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    descriptor: int | None = None
-    promoted = False
-    primary_error: BaseException | None = None
     try:
-        descriptor = os.open(temporary, flags, 0o600)
+        published = publish_new_pinned(path, data, parse)
+    except ExactObjectOwnershipError as error:
         try:
-            remaining = memoryview(data)
-            while remaining:
-                written = os.write(descriptor, remaining)
-                if written <= 0:
-                    raise OSError(f"incomplete write for {path}")
-                remaining = remaining[written:]
-            os.fsync(descriptor)
-        except BaseException as error:
-            primary_error = error
-        try:
-            os.close(descriptor)
-            descriptor = None
-        except BaseException as close_error:
-            if primary_error is None:
-                primary_error = close_error
-            else:
-                primary_error.add_note(f"temporary close also failed: {close_error}")
-        if primary_error is not None:
-            raise primary_error
-
-        reloaded = _read_exact_regular_file(temporary, "outcome candidate")
-        parsed = parse(reloaded)
-        if reloaded != data:
-            raise WatchProtocolError("private outcome candidate readback mismatch")
-        _promote_outcome_candidate(temporary, path)
-        promoted = True
-        return parsed
-    except BaseException as error:
-        primary_error = error
-        raise
-    finally:
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError as close_error:
-                if primary_error is None:
-                    raise
-                primary_error.add_note(
-                    f"outcome candidate close also failed: {close_error}"
-                )
-        if not promoted:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as cleanup_error:
-                if primary_error is None:
-                    raise
-                primary_error.add_note(
-                    f"unpublished outcome cleanup also failed: {cleanup_error}"
-                )
+            resolve_retained_ownership(error)
+        except ExactObjectOwnershipError as unresolved:
+            raise WatchProtocolOwnershipError(
+                f"exact outcome publication retained unresolved ownership: {unresolved}",
+                unresolved,
+            ) from unresolved
+        raise WatchProtocolError(
+            "exact outcome publication cleanup completed after failure"
+        ) from error
+    except ExactObjectError as error:
+        raise WatchProtocolError(f"exact outcome publication failed: {error}") from error
+    if not isinstance(published, WatchOutcome):
+        raise WatchProtocolError("published outcome validator returned an invalid value")
+    return published
 
 
 def _publish_or_load_outcome(
@@ -2621,7 +2589,10 @@ def _stop_local_session(
             _write_new(request.stop_token_path, b"stop\n")
         except FileExistsError:
             pass
-        except OSError:
+        except WatchProtocolOwnershipError as error:
+            _resolve_watch_protocol_ownership(error)
+            reasons.append("stop-token-publication-failed")
+        except (OSError, WatchProtocolError):
             reasons.append("stop-token-publication-failed")
         process_handle = 0
         worker_signalled = False
@@ -2686,11 +2657,17 @@ def _stop_local_session(
             reasons=tuple(reasons),
             captured=captured,
         )
+        publication_error: BaseException | None = None
         try:
             return _receipt_from_outcome(
                 _publish_or_load_outcome(outcome, request, claim, launch)
             )
+        except WatchProtocolOwnershipError as error:
+            _resolve_watch_protocol_ownership(error)
+            publication_error = error
         except (OSError, ContainmentFormatError, WatchProtocolError) as error:
+            publication_error = error
+        if publication_error is not None:
             fallback = _watch_outcome(
                 request,
                 claim,
@@ -2704,11 +2681,19 @@ def _stop_local_session(
                 return _receipt_from_outcome(
                     _publish_or_load_outcome(fallback, request, claim, launch)
                 )
+            except WatchProtocolOwnershipError as fallback_error:
+                _resolve_watch_protocol_ownership(fallback_error)
+                return _incomplete_without_outcome(
+                    request,
+                    launch.worker_pid,
+                    f"outcome publication failed: {publication_error}; "
+                    f"incomplete fallback failed: {fallback_error}",
+                )
             except (OSError, ContainmentFormatError, WatchProtocolError) as fallback_error:
                 return _incomplete_without_outcome(
                     request,
                     launch.worker_pid,
-                    f"outcome publication failed: {error}; "
+                    f"outcome publication failed: {publication_error}; "
                     f"incomplete fallback failed: {fallback_error}",
                 )
 
@@ -2821,7 +2806,10 @@ def _stop_non_owner(
             _write_new(request.stop_token_path, b"stop\n")
         except FileExistsError:
             pass
-        except OSError:
+        except WatchProtocolOwnershipError as error:
+            _resolve_watch_protocol_ownership(error)
+            reasons.append("worker-cleanup-refused")
+        except (OSError, WatchProtocolError):
             reasons.append("worker-cleanup-refused")
         wait_result = _kernel32.WaitForSingleObject(worker_handle, 15_000)
         if wait_result == _WAIT_OBJECT_0:
@@ -2905,6 +2893,13 @@ def stop_watch(request_path: Path) -> WatchReceipt:
         request = _load_request_path(supplied)
         claim = _load_controller_claim(request)
         launch = _load_worker_launch(request)
+    except WatchProtocolOwnershipError as error:
+        _resolve_watch_protocol_ownership(error)
+        return _incomplete_without_outcome(
+            object(),
+            0,
+            f"watch protocol is unavailable: {error}",
+        )
     except (OSError, WatchProtocolError) as error:
         return _incomplete_without_outcome(
             object(),
@@ -2913,6 +2908,13 @@ def stop_watch(request_path: Path) -> WatchReceipt:
         )
     try:
         return _stop_non_owner(request, claim, launch)
+    except WatchProtocolOwnershipError as error:
+        _resolve_watch_protocol_ownership(error)
+        return _incomplete_without_outcome(
+            request,
+            launch.worker_pid,
+            f"non-owner cleanup failed: {error}",
+        )
     except (OSError, ContainmentFormatError, WatchProtocolError) as error:
         return _incomplete_without_outcome(
             request,
@@ -3011,6 +3013,9 @@ def main(argv: list[str] | None = None) -> int:
     arguments = _parse_args(sys.argv[1:] if argv is None else argv)
     try:
         return run_watch_worker(arguments.worker)
+    except WatchProtocolOwnershipError as error:
+        _resolve_watch_protocol_ownership(error)
+        return 2
     except (OSError, WatchProtocolError):
         return 2
 

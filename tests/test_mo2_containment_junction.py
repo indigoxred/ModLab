@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from modlab.platform import windows_exact_fs
 from modlab.validation import windows_junction
 from modlab.validation.windows_integrity import (
     IntegrityLevel,
@@ -17,6 +18,7 @@ from modlab.validation.windows_integrity import (
 from modlab.validation.windows_junction import (
     ContainmentSafetyError,
     IO_REPARSE_TAG_MOUNT_POINT,
+    JunctionOwnershipError,
     adopt_unique_staged_mod,
     build_projection,
     create_mod_projection,
@@ -473,11 +475,11 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
         held = self.root / "held-root"
         candidate.mkdir()
         (candidate / "marker.txt").write_bytes(b"original")
-        real_set_information = windows_junction._kernel32.SetFileInformationByHandle
+        real_set_information = windows_exact_fs._ntdll.NtSetInformationFile
         race = {"attempted": False, "blocked": False}
 
-        def set_information_with_root_swap(handle, information_class, information, size):
-            if information_class == windows_junction._FILE_RENAME_INFO_CLASS:
+        def set_information_with_root_swap(handle, io_status, information, size, information_class):
+            if information_class == windows_exact_fs._FILE_RENAME_INFORMATION_CLASS:
                 race["attempted"] = True
                 try:
                     candidate.rename(held)
@@ -485,11 +487,11 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
                     (candidate / "marker.txt").write_bytes(b"replacement")
                 except PermissionError:
                     race["blocked"] = True
-            return real_set_information(handle, information_class, information, size)
+            return real_set_information(handle, io_status, information, size, information_class)
 
         with mock.patch.object(
-            windows_junction._kernel32,
-            "SetFileInformationByHandle",
+            windows_exact_fs._ntdll,
+            "NtSetInformationFile",
             side_effect=set_information_with_root_swap,
         ):
             result = quarantine_replacement_tree(
@@ -975,7 +977,7 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
         held_original = self.root / "held-original"
         candidate.mkdir()
         (candidate / "marker.txt").write_bytes(b"original")
-        real_set_information = windows_junction._kernel32.SetFileInformationByHandle
+        real_set_information = windows_exact_fs._ntdll.NtSetInformationFile
         race = {"attempted": False, "blocked": False}
 
         def attempt_replacement() -> None:
@@ -989,10 +991,10 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
             except PermissionError:
                 race["blocked"] = True
 
-        def set_information_with_replacement(handle, information_class, information, size):
-            if information_class == 3:
+        def set_information_with_replacement(handle, io_status, information, size, information_class):
+            if information_class == windows_exact_fs._FILE_RENAME_INFORMATION_CLASS:
                 attempt_replacement()
-            return real_set_information(handle, information_class, information, size)
+            return real_set_information(handle, io_status, information, size, information_class)
 
         with (
             mock.patch.object(
@@ -1001,8 +1003,8 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
                 side_effect=OSError("injected normalization failure"),
             ),
             mock.patch.object(
-                windows_junction._kernel32,
-                "SetFileInformationByHandle",
+                windows_exact_fs._ntdll,
+                "NtSetInformationFile",
                 side_effect=set_information_with_replacement,
             ),
         ):
@@ -1280,6 +1282,1055 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
         self.assertEqual(result.before_tree, result.after_tree)
         self.assertEqual(b"before", (source / "Expected" / "marker.txt").read_bytes())
         self.assertEqual([], list(quarantine.iterdir()))
+
+    def test_legacy_pinned_close_failure_keeps_live_handle_ownership(self):
+        pinned = windows_junction._PinnedObject(self.root / "retained", 123, (1, 2))
+
+        def fail_close(_handle):
+            ctypes.set_last_error(5)
+            return False
+
+        with mock.patch.object(
+            windows_junction._kernel32,
+            "CloseHandle",
+            side_effect=fail_close,
+        ):
+            with self.assertRaisesRegex(OSError, "CloseHandle failed"):
+                pinned.close()
+
+        self.assertEqual(123, pinned.handle)
+
+    def test_shared_exact_rename_adapter_preserves_full_typed_ownership(self):
+        owner_type = windows_exact_fs.RetainedObjectOwner
+        role = windows_exact_fs.RetainedObjectRole
+        candidates = (
+            windows_exact_fs.PinnedObject(
+                self.root / "candidate-one",
+                171,
+                windows_exact_fs.PinnedIdentity(1, 1, 0),
+            ),
+            windows_exact_fs.PinnedObject(
+                self.root / "candidate-two",
+                172,
+                windows_exact_fs.PinnedIdentity(1, 2, 0),
+            ),
+        )
+        ownership = windows_exact_fs.ExactObjectOwnershipError(
+            "injected shared ownership",
+            owners=tuple(owner_type(role.CANDIDATE, candidate) for candidate in candidates),
+        )
+        source = windows_junction._PinnedObject(self.root / "source", 173, (1, 3))
+        parent = windows_junction._PinnedObject(self.root, 174, (1, 4))
+
+        with mock.patch.object(
+            windows_junction,
+            "rename_pinned_no_replace",
+            side_effect=ownership,
+        ):
+            with self.assertRaises(JunctionOwnershipError) as raised:
+                windows_junction._rename_pinned_object(
+                    source,
+                    self.root / "destination",
+                    parent,
+                )
+
+        self.assertIs(ownership, raised.exception.exact_ownership)
+        self.assertEqual(ownership.owners, raised.exception.owners)
+        self.assertEqual(candidates, raised.exception.pins)
+
+        local = windows_junction._PinnedObject(self.root / "local-owner", 175, (1, 5))
+
+        def fail_local_close(pinned):
+            if pinned is local:
+                raise OSError("injected local close failure")
+            pinned.handle = 0
+
+        with mock.patch.object(
+            windows_junction._PinnedObject,
+            "close",
+            new=fail_local_close,
+        ):
+            with self.assertRaises(JunctionOwnershipError) as aggregated:
+                windows_junction._close_retained_owners(
+                    (raised.exception, local),
+                    "shared ownership aggregation",
+                )
+
+        self.assertIs(ownership, aggregated.exception.exact_ownership)
+        self.assertEqual(ownership.owners, aggregated.exception.owners)
+        self.assertEqual((*candidates, local), aggregated.exception.pins)
+
+        def close_local(pinned):
+            self.assertIs(local, pinned)
+            pinned.handle = 0
+
+        with (
+            mock.patch.object(ownership, "resolve"),
+            mock.patch.object(
+                windows_junction._PinnedObject,
+                "close",
+                new=close_local,
+            ),
+        ):
+            with self.assertRaises(JunctionOwnershipError) as unresolved:
+                aggregated.exception.resolve()
+        self.assertIs(ownership, unresolved.exception.exact_ownership)
+        self.assertEqual(ownership.owners, unresolved.exception.owners)
+
+        def resolve_exact():
+            for candidate in candidates:
+                candidate.handle = 0
+
+        with (
+            mock.patch.object(
+                ownership,
+                "resolve",
+                side_effect=resolve_exact,
+            ) as exact_resolver,
+            mock.patch.object(
+                windows_junction._PinnedObject,
+                "close",
+                new=close_local,
+            ),
+        ):
+            unresolved.exception.resolve()
+        exact_resolver.assert_called_once_with()
+        self.assertEqual(0, local.handle)
+
+    def test_pinned_tree_close_attempts_every_pin_and_supports_exact_retry(self):
+        for position, failing_handle in (("first", 93), ("middle", 92), ("final", 91)):
+            with self.subTest(position=position):
+                root = windows_junction._PinnedObject(self.root / "root", 91, (1, 1))
+                earlier = windows_junction._PinnedObject(self.root / "earlier", 92, (1, 2))
+                later = windows_junction._PinnedObject(self.root / "later", 93, (1, 3))
+                tree = windows_junction._PinnedTree(
+                    root,
+                    [
+                        windows_junction._PinnedEntry("earlier", False, earlier),
+                        windows_junction._PinnedEntry("later", False, later),
+                    ],
+                    self.root,
+                )
+                pins = (later, earlier, root)
+
+                def close_once(handle):
+                    if handle == failing_handle:
+                        raise OSError("injected close failure")
+
+                with mock.patch.object(
+                    windows_junction,
+                    "_close_handle",
+                    side_effect=close_once,
+                ):
+                    with self.assertRaises(JunctionOwnershipError) as raised:
+                        tree.close()
+
+                failing = next(pin for pin in pins if pin.handle == failing_handle)
+                self.assertEqual((failing,), raised.exception.pins)
+                self.assertEqual(
+                    [failing_handle],
+                    [pin.handle for pin in pins if pin.handle],
+                )
+
+                with mock.patch.object(
+                    windows_junction,
+                    "_close_handle",
+                    side_effect=lambda _handle: None,
+                ):
+                    raised.exception.resolve()
+                self.assertEqual(0, failing.handle)
+
+    def test_changed_baseline_cleanup_attempts_every_close_and_retains_only_failures(self):
+        stage, source, quarantine = self._adoption_roots()
+        protected = source / "Protected Existing"
+        wrong_target = self.root / "wrong-target"
+        baseline = stage / "Protected Existing"
+        candidate = stage / "Expected"
+        protected.mkdir()
+        wrong_target.mkdir()
+        (wrong_target / "marker.txt").write_bytes(b"wrong")
+        create_mod_projection(wrong_target, baseline)
+        candidate.mkdir()
+        (candidate / "marker.txt").write_bytes(b"candidate")
+
+        real_pin = windows_junction._pin_object
+        real_close = windows_junction._close_handle
+        top_level_pins = []
+        failed_once = False
+
+        def record_top_level_pin(path, *args, **kwargs):
+            pinned = real_pin(path, *args, **kwargs)
+            if Path(path).parent == stage:
+                top_level_pins.append(pinned)
+            return pinned
+
+        def fail_baseline_close_once(handle):
+            nonlocal failed_once
+            baseline_pin = next(
+                (pinned for pinned in top_level_pins if pinned.path.name == baseline.name),
+                None,
+            )
+            if baseline_pin is not None and handle == baseline_pin.handle and not failed_once:
+                failed_once = True
+                raise OSError("injected baseline close failure")
+            return real_close(handle)
+
+        raised = None
+        try:
+            with (
+                mock.patch.object(
+                    windows_junction,
+                    "_pin_object",
+                    side_effect=record_top_level_pin,
+                ),
+                mock.patch.object(
+                    windows_junction,
+                    "_close_handle",
+                    side_effect=fail_baseline_close_once,
+                ),
+            ):
+                with self.assertRaises(JunctionOwnershipError) as caught:
+                    adopt_unique_staged_mod(
+                        stage_mods=stage,
+                        source_mods=source,
+                        expected_name="Expected",
+                        before_names=("Protected Existing",),
+                        quarantine_root=quarantine,
+                    )
+                raised = caught.exception
+
+            self.assertTrue(failed_once)
+            baseline_pin = next(
+                pinned for pinned in top_level_pins if pinned.path.name == baseline.name
+            )
+            candidate_pin = next(
+                pinned for pinned in top_level_pins if pinned.path.name == candidate.name
+            )
+            self.assertEqual((baseline_pin,), raised.pins)
+            self.assertNotEqual(0, baseline_pin.handle)
+            self.assertEqual(0, candidate_pin.handle)
+            self.assertFalse(baseline.exists())
+            self.assertFalse(candidate.exists())
+            self.assertEqual(
+                b"wrong",
+                (quarantine / "Protected Existing" / "marker.txt").read_bytes(),
+            )
+            self.assertEqual(
+                b"candidate",
+                (quarantine / "Expected" / "marker.txt").read_bytes(),
+            )
+        finally:
+            for pinned in top_level_pins:
+                if pinned.handle:
+                    real_close(pinned.handle)
+                    pinned.handle = 0
+
+    def test_exact_quarantine_finalizers_aggregate_source_and_parent_ownership(self):
+        stage, _source, quarantine = self._adoption_roots()
+        candidate = stage / "Unexpected"
+        destination = quarantine / candidate.name
+        candidate.mkdir()
+        (candidate / "marker.txt").write_bytes(b"candidate")
+
+        real_pin = windows_junction._pin_object
+        real_parent_pin = windows_junction._pin_parent_directory
+        real_close = windows_junction._close_handle
+        retained = {}
+
+        def record_source(path, *args, **kwargs):
+            pinned = real_pin(path, *args, **kwargs)
+            if Path(path) == candidate:
+                retained["source"] = pinned
+            return pinned
+
+        def record_parent(path):
+            pinned = real_parent_pin(path)
+            retained["parent"] = pinned
+            return pinned
+
+        def fail_owned_closes(handle):
+            if handle in {
+                retained.get("source").handle if retained.get("source") else None,
+                retained.get("parent").handle if retained.get("parent") else None,
+            }:
+                raise OSError("injected retained close failure")
+            return real_close(handle)
+
+        raised = None
+        try:
+            with (
+                mock.patch.object(windows_junction, "_pin_object", side_effect=record_source),
+                mock.patch.object(
+                    windows_junction,
+                    "_pin_parent_directory",
+                    side_effect=record_parent,
+                ),
+                mock.patch.object(
+                    windows_junction,
+                    "_close_handle",
+                    side_effect=fail_owned_closes,
+                ),
+            ):
+                with self.assertRaises(JunctionOwnershipError) as caught:
+                    quarantine_exact_object(candidate, quarantine)
+                raised = caught.exception
+
+            self.assertEqual(
+                (retained["parent"], retained["source"]),
+                raised.pins,
+            )
+            self.assertFalse(candidate.exists())
+            self.assertEqual(b"candidate", (destination / "marker.txt").read_bytes())
+            self.assertNotEqual(0, retained["parent"].handle)
+            self.assertNotEqual(0, retained["source"].handle)
+        finally:
+            for pinned in retained.values():
+                if pinned.handle:
+                    real_close(pinned.handle)
+                    pinned.handle = 0
+
+    def test_tree_quarantine_finalizers_aggregate_root_and_parent_ownership(self):
+        stage, _source, quarantine = self._adoption_roots()
+        candidate = stage / "Protected Existing"
+        destination = quarantine / candidate.name
+        candidate.mkdir()
+        (candidate / "marker.txt").write_bytes(b"replacement")
+
+        real_pin_tree = windows_junction._pin_tree
+        real_parent_pin = windows_junction._pin_parent_directory
+        real_close = windows_junction._close_handle
+        retained = {}
+
+        def record_tree(path):
+            tree = real_pin_tree(path)
+            retained["root"] = tree.root
+            return tree
+
+        def record_parent(path):
+            pinned = real_parent_pin(path)
+            retained["parent"] = pinned
+            return pinned
+
+        def fail_owned_closes(handle):
+            if any(handle == pinned.handle for pinned in retained.values()):
+                raise OSError("injected tree-quarantine close failure")
+            return real_close(handle)
+
+        try:
+            with (
+                mock.patch.object(windows_junction, "_pin_tree", side_effect=record_tree),
+                mock.patch.object(
+                    windows_junction,
+                    "_pin_parent_directory",
+                    side_effect=record_parent,
+                ),
+                mock.patch.object(
+                    windows_junction,
+                    "_close_handle",
+                    side_effect=fail_owned_closes,
+                ),
+            ):
+                with self.assertRaises(JunctionOwnershipError) as caught:
+                    quarantine_replacement_tree(
+                        stage_mods=stage,
+                        expected_name="Protected Existing",
+                        quarantine_root=quarantine,
+                    )
+
+            self.assertEqual(
+                (retained["parent"], retained["root"]),
+                caught.exception.pins,
+            )
+            self.assertFalse(candidate.exists())
+            self.assertEqual(b"replacement", (destination / "marker.txt").read_bytes())
+        finally:
+            for pinned in retained.values():
+                if pinned.handle:
+                    real_close(pinned.handle)
+                    pinned.handle = 0
+
+    def test_object_quarantine_body_ownership_unions_exact_candidates_and_parent(self):
+        self._assert_quarantine_body_owner_union(tree=False)
+
+    def test_tree_quarantine_body_ownership_unions_exact_candidates_and_parent(self):
+        self._assert_quarantine_body_owner_union(tree=True)
+
+    def _assert_quarantine_body_owner_union(self, *, tree: bool):
+        stage, _source, quarantine = self._adoption_roots()
+        candidate = stage / ("Tree Candidate" if tree else "Object Candidate")
+        destination = quarantine / candidate.name
+        if tree:
+            candidate.mkdir()
+            (candidate / "marker.txt").write_bytes(b"moved tree")
+            retained_subject = windows_junction._pin_tree(candidate)
+            retained_subject.close_descendants()
+            pinned = retained_subject.root
+        else:
+            candidate.write_bytes(b"moved object")
+            pinned = windows_junction._pin_object(
+                candidate,
+                desired_access=(
+                    windows_junction._DELETE
+                    | windows_junction._GENERIC_READ
+                    | windows_junction._FILE_READ_ATTRIBUTES
+                ),
+                allow_reparse=True,
+            )
+            retained_subject = pinned
+
+        exact_paths = (
+            self.root / f"{'tree' if tree else 'object'}-cleanup-one.tmp",
+            self.root / f"{'tree' if tree else 'object'}-cleanup-two.tmp",
+        )
+        for index, path in enumerate(exact_paths, start=1):
+            path.write_bytes(f"exact-{index}".encode("ascii"))
+        exact_candidates = tuple(
+            windows_exact_fs.pin_direct_object(path, "file") for path in exact_paths
+        )
+        owner_type = windows_exact_fs.RetainedObjectOwner
+        role = windows_exact_fs.RetainedObjectRole
+        exact_ownership = windows_exact_fs.ExactObjectOwnershipError(
+            "injected active exact candidates",
+            owners=(
+                owner_type(role.CANDIDATE, exact_candidates[0]),
+                owner_type(role.CANDIDATE, exact_candidates[0]),
+                owner_type(role.CANDIDATE, exact_candidates[1]),
+            ),
+        )
+
+        real_rename = windows_junction._rename_pinned_object
+        real_parent_pin = windows_junction._pin_parent_directory
+        real_local_close = windows_junction._PinnedObject.close
+        real_exact_delete = windows_exact_fs.delete_pinned_object
+        real_exact_close = windows_exact_fs.PinnedObject.close
+        quarantine_parent = None
+        parent_failures = 0
+        delete_calls = {id(exact): 0 for exact in exact_candidates}
+
+        def move_then_surface_ownership(source, target, parent):
+            real_rename(source, target, parent)
+            raise JunctionOwnershipError(
+                "injected post-move quarantine ownership",
+                (pinned, pinned, *exact_candidates),
+                exact_ownership=exact_ownership,
+            )
+
+        def record_parent(path):
+            nonlocal quarantine_parent
+            result = real_parent_pin(path)
+            quarantine_parent = result
+            return result
+
+        def fail_parent_close_twice(local_pin):
+            nonlocal parent_failures
+            if local_pin is quarantine_parent and parent_failures < 2:
+                parent_failures += 1
+                raise OSError("injected quarantine parent close failure")
+            return real_local_close(local_pin)
+
+        def fail_candidate_delete_once(exact):
+            marker = id(exact)
+            delete_calls[marker] += 1
+            if delete_calls[marker] == 1:
+                raise OSError("injected exact candidate delete failure")
+            return real_exact_delete(exact)
+
+        try:
+            with (
+                mock.patch.object(
+                    windows_junction,
+                    "_rename_pinned_object",
+                    side_effect=move_then_surface_ownership,
+                ),
+                mock.patch.object(
+                    windows_junction,
+                    "_pin_parent_directory",
+                    side_effect=record_parent,
+                ),
+                mock.patch.object(
+                    windows_junction._PinnedObject,
+                    "close",
+                    new=fail_parent_close_twice,
+                ),
+                mock.patch.object(
+                    windows_exact_fs,
+                    "delete_pinned_object",
+                    side_effect=fail_candidate_delete_once,
+                ),
+            ):
+                with self.assertRaises(JunctionOwnershipError) as surfaced:
+                    if tree:
+                        windows_junction._quarantine_pinned_tree(
+                            retained_subject,
+                            quarantine,
+                        )
+                    else:
+                        windows_junction._quarantine_pinned_objects(
+                            (retained_subject,),
+                            quarantine,
+                        )
+
+                self.assertFalse(candidate.exists())
+                if tree:
+                    self.assertEqual(
+                        b"moved tree",
+                        (destination / "marker.txt").read_bytes(),
+                    )
+                else:
+                    self.assertEqual(
+                        (hashlib.sha256(b"moved object").hexdigest(), len(b"moved object")),
+                        windows_junction._hash_pinned_file(pinned),
+                    )
+
+                with self.assertRaises(JunctionOwnershipError) as retry:
+                    surfaced.exception.resolve()
+                retry.exception.resolve()
+
+            expected = (*exact_candidates, pinned, quarantine_parent)
+            self.assertEqual(2, parent_failures)
+            self.assertEqual(
+                {id(exact): 2 for exact in exact_candidates},
+                delete_calls,
+            )
+            self.assertTrue(all(owner.handle == 0 for owner in expected))
+            self.assertTrue(all(not path.exists() for path in exact_paths))
+            self.assertFalse(candidate.exists())
+            if tree:
+                self.assertEqual(b"moved tree", (destination / "marker.txt").read_bytes())
+            else:
+                self.assertEqual(b"moved object", destination.read_bytes())
+        finally:
+            for exact in exact_candidates:
+                if exact.handle:
+                    real_exact_close(exact)
+            if pinned.handle:
+                real_local_close(pinned)
+            if quarantine_parent is not None and quarantine_parent.handle:
+                real_local_close(quarantine_parent)
+
+    def test_post_move_adoption_failure_quarantines_exact_tree_and_aggregates_all_finalizers(self):
+        stage, source, quarantine = self._adoption_roots()
+        protected = source / "Protected Existing"
+        baseline = stage / "Protected Existing"
+        candidate = stage / "Expected"
+        destination = source / "Expected"
+        quarantined = quarantine / "Expected"
+        protected.mkdir()
+        (protected / "protected.txt").write_bytes(b"protected")
+        create_mod_projection(protected, baseline)
+        (candidate / "child").mkdir(parents=True)
+        (candidate / "child" / "marker.txt").write_bytes(b"candidate")
+        set_low_integrity_tree(candidate)
+
+        real_identity = windows_junction._stable_pinned_tree_identity
+        real_close = windows_junction._PinnedObject.close
+        identity_calls = 0
+        failed_pins = []
+
+        def fail_after_move(tree, *, required_equal_passes):
+            nonlocal identity_calls
+            identity_calls += 1
+            if identity_calls == 2:
+                self.assertEqual(destination, tree.current_path)
+                raise OSError("injected post-move adoption failure")
+            return real_identity(tree, required_equal_passes=required_equal_passes)
+
+        def fail_each_final_owner(pinned):
+            if pinned.path in {source, quarantined, baseline}:
+                if all(pinned is not existing for existing in failed_pins):
+                    failed_pins.append(pinned)
+                raise OSError(f"injected final close failure for {pinned.path.name}")
+            return real_close(pinned)
+
+        with (
+            mock.patch.object(
+                windows_junction,
+                "_stable_pinned_tree_identity",
+                side_effect=fail_after_move,
+            ),
+            mock.patch.object(
+                windows_junction._PinnedObject,
+                "close",
+                new=fail_each_final_owner,
+            ),
+        ):
+            with self.assertRaises(JunctionOwnershipError) as caught:
+                adopt_unique_staged_mod(
+                    stage_mods=stage,
+                    source_mods=source,
+                    expected_name="Expected",
+                    before_names=("Protected Existing",),
+                    quarantine_root=quarantine,
+                )
+
+        self.assertEqual(2, identity_calls)
+        self.assertEqual(3, len(caught.exception.pins))
+        self.assertEqual(tuple(failed_pins), caught.exception.pins)
+        self.assertFalse(candidate.exists())
+        self.assertFalse(destination.exists())
+        self.assertEqual(
+            b"candidate",
+            (quarantined / "child" / "marker.txt").read_bytes(),
+        )
+        self.assertEqual(
+            protected.resolve(strict=True),
+            inspect_junction(baseline).target_path,
+        )
+
+        caught.exception.resolve()
+        self.assertTrue(all(pinned.handle == 0 for pinned in failed_pins))
+
+    def test_post_move_adoption_preserves_quarantine_parent_close_ownership(self):
+        stage, source, quarantine = self._adoption_roots()
+        candidate = stage / "Expected"
+        destination = source / "Expected"
+        quarantined = quarantine / "Expected"
+        candidate.mkdir()
+        (candidate / "marker.txt").write_bytes(b"candidate")
+        set_low_integrity_tree(candidate)
+
+        real_identity = windows_junction._stable_pinned_tree_identity
+        real_parent_pin = windows_junction._pin_parent_directory
+        real_close = windows_junction._PinnedObject.close
+        identity_calls = 0
+        quarantine_parent = None
+
+        def fail_after_move(tree, *, required_equal_passes):
+            nonlocal identity_calls
+            identity_calls += 1
+            if identity_calls == 2:
+                self.assertEqual(destination, tree.current_path)
+                raise OSError("injected post-move adoption failure")
+            return real_identity(tree, required_equal_passes=required_equal_passes)
+
+        def record_parent(path):
+            nonlocal quarantine_parent
+            pinned = real_parent_pin(path)
+            if Path(path) == quarantine:
+                quarantine_parent = pinned
+            return pinned
+
+        def fail_quarantine_parent_close(pinned):
+            if pinned is quarantine_parent:
+                raise OSError("injected quarantine parent close failure")
+            return real_close(pinned)
+
+        try:
+            with (
+                mock.patch.object(
+                    windows_junction,
+                    "_stable_pinned_tree_identity",
+                    side_effect=fail_after_move,
+                ),
+                mock.patch.object(
+                    windows_junction,
+                    "_pin_parent_directory",
+                    side_effect=record_parent,
+                ),
+                mock.patch.object(
+                    windows_junction._PinnedObject,
+                    "close",
+                    new=fail_quarantine_parent_close,
+                ),
+            ):
+                with self.assertRaises(JunctionOwnershipError) as caught:
+                    adopt_unique_staged_mod(
+                        stage_mods=stage,
+                        source_mods=source,
+                        expected_name="Expected",
+                        before_names=(),
+                        quarantine_root=quarantine,
+                    )
+
+            self.assertEqual((quarantine_parent,), caught.exception.pins)
+            self.assertFalse(candidate.exists())
+            self.assertFalse(destination.exists())
+            self.assertEqual(b"candidate", (quarantined / "marker.txt").read_bytes())
+        finally:
+            if quarantine_parent is not None and quarantine_parent.handle:
+                real_close(quarantine_parent)
+
+    def test_tree_construction_unions_new_leaf_descendant_and_root_across_retries(self):
+        tree_path = self.root / "tree-under-construction"
+        tree_path.mkdir()
+        (tree_path / "a-retained.txt").write_bytes(b"retained")
+        (tree_path / "b-clean.txt").write_bytes(b"clean")
+        (tree_path / "z-rejected.txt").write_bytes(b"rejected")
+
+        real_pin = windows_junction._pin_object
+        real_attributes = windows_junction._attribute_tag_for_handle
+        real_close = windows_junction._close_handle
+        pins: dict[str, object] = {}
+        close_failures: dict[str, int] = {
+            "tree-under-construction": 0,
+            "a-retained.txt": 0,
+            "z-rejected.txt": 0,
+        }
+
+        def record_pin(path, *args, **kwargs):
+            pinned = real_pin(path, *args, **kwargs)
+            pins[Path(path).name] = pinned
+            return pinned
+
+        def reject_new_leaf(handle, path):
+            attributes, tag = real_attributes(handle, path)
+            if Path(path).name == "z-rejected.txt":
+                return (
+                    attributes | windows_junction._FILE_ATTRIBUTE_REPARSE_POINT,
+                    1,
+                )
+            return attributes, tag
+
+        def fail_owned_closes_twice(handle):
+            for name, failure_count in close_failures.items():
+                pinned = pins.get(name)
+                if (
+                    pinned is not None
+                    and handle == pinned.handle
+                    and failure_count < 2
+                ):
+                    close_failures[name] += 1
+                    raise OSError(f"injected {name} close failure")
+            return real_close(handle)
+
+        try:
+            with (
+                mock.patch.object(
+                    windows_junction,
+                    "_pin_object",
+                    side_effect=record_pin,
+                ),
+                mock.patch.object(
+                    windows_junction,
+                    "_attribute_tag_for_handle",
+                    side_effect=reject_new_leaf,
+                ),
+                mock.patch.object(
+                    windows_junction,
+                    "_close_handle",
+                    side_effect=fail_owned_closes_twice,
+                ),
+            ):
+                observed_error = None
+                try:
+                    windows_junction._pin_tree(tree_path)
+                except BaseException as error:
+                    observed_error = error
+
+                self.assertIsInstance(observed_error, JunctionOwnershipError)
+                ownership = observed_error
+                expected = (
+                    pins["z-rejected.txt"],
+                    pins["a-retained.txt"],
+                    pins["tree-under-construction"],
+                )
+                self.assertEqual(expected, ownership.pins)
+                self.assertEqual(0, pins["b-clean.txt"].handle)
+                self.assertEqual(
+                    (hashlib.sha256(b"retained").hexdigest(), len(b"retained")),
+                    windows_junction._hash_pinned_file(pins["a-retained.txt"]),
+                )
+                self.assertEqual(
+                    (hashlib.sha256(b"rejected").hexdigest(), len(b"rejected")),
+                    windows_junction._hash_pinned_file(pins["z-rejected.txt"]),
+                )
+
+                with self.assertRaises(JunctionOwnershipError) as retry:
+                    ownership.resolve()
+                self.assertEqual(expected, retry.exception.pins)
+                retry.exception.resolve()
+
+            self.assertEqual(
+                {
+                    "tree-under-construction": 2,
+                    "a-retained.txt": 2,
+                    "z-rejected.txt": 2,
+                },
+                close_failures,
+            )
+            self.assertTrue(all(pinned.handle == 0 for pinned in expected))
+        finally:
+            for pinned in pins.values():
+                if pinned.handle:
+                    real_close(pinned.handle)
+                    pinned.handle = 0
+
+    def test_rejection_quarantine_unions_parent_and_tree_ownership_across_retries(self):
+        stage, _source, quarantine = self._adoption_roots()
+        candidate = stage / "Rejected"
+        candidate.mkdir()
+        (candidate / "marker.txt").write_bytes(b"candidate")
+        destination = quarantine / candidate.name
+
+        real_pin = windows_junction._pin_object
+        real_parent_pin = windows_junction._pin_parent_directory
+        real_attributes = windows_junction._attribute_tag_for_handle
+        real_close = windows_junction._PinnedObject.close
+        retained: dict[str, object] = {}
+        failures = {"root": 0, "parent": 0}
+
+        def record_pin(path, *args, **kwargs):
+            pinned = real_pin(path, *args, **kwargs)
+            if Path(path) == candidate:
+                retained["root"] = pinned
+            return pinned
+
+        def record_parent(path):
+            pinned = real_parent_pin(path)
+            if Path(path) == quarantine:
+                retained["parent"] = pinned
+            return pinned
+
+        def reject_marker(handle, path):
+            attributes, tag = real_attributes(handle, path)
+            if Path(path).name == "marker.txt":
+                return (
+                    attributes | windows_junction._FILE_ATTRIBUTE_REPARSE_POINT,
+                    1,
+                )
+            return attributes, tag
+
+        def fail_owned_closes_twice(pinned):
+            for role in ("parent", "root"):
+                if pinned is retained.get(role) and failures[role] < 2:
+                    failures[role] += 1
+                    raise OSError(f"injected rejection {role} close failure")
+            return real_close(pinned)
+
+        try:
+            with (
+                mock.patch.object(windows_junction, "_pin_object", side_effect=record_pin),
+                mock.patch.object(
+                    windows_junction,
+                    "_pin_parent_directory",
+                    side_effect=record_parent,
+                ),
+                mock.patch.object(
+                    windows_junction,
+                    "_attribute_tag_for_handle",
+                    side_effect=reject_marker,
+                ),
+                mock.patch.object(
+                    windows_junction._PinnedObject,
+                    "close",
+                    new=fail_owned_closes_twice,
+                ),
+            ):
+                observed_error = None
+                try:
+                    quarantine_replacement_tree(
+                        stage_mods=stage,
+                        expected_name="Rejected",
+                        quarantine_root=quarantine,
+                    )
+                except BaseException as error:
+                    observed_error = error
+
+                self.assertIsInstance(observed_error, JunctionOwnershipError)
+                ownership = observed_error
+                expected = (retained["parent"], retained["root"])
+                self.assertEqual(expected, ownership.pins)
+                self.assertFalse(candidate.exists())
+                self.assertEqual(b"candidate", (destination / "marker.txt").read_bytes())
+
+                with self.assertRaises(JunctionOwnershipError) as retry:
+                    ownership.resolve()
+                self.assertEqual(expected, retry.exception.pins)
+                retry.exception.resolve()
+
+            self.assertEqual({"root": 2, "parent": 2}, failures)
+            self.assertTrue(all(pinned.handle == 0 for pinned in expected))
+        finally:
+            for pinned in retained.values():
+                if pinned.handle:
+                    real_close(pinned)
+
+    def test_staging_rejection_unions_quarantine_parent_and_entry_ownership(self):
+        stage, source, quarantine = self._adoption_roots()
+        first = stage / "First"
+        second = stage / "Second"
+        first.mkdir()
+        second.mkdir()
+        (first / "marker.txt").write_bytes(b"first")
+        (second / "marker.txt").write_bytes(b"second")
+
+        real_pin = windows_junction._pin_object
+        real_parent_pin = windows_junction._pin_parent_directory
+        real_close = windows_junction._PinnedObject.close
+        retained: dict[str, object] = {}
+        failures = {"parent": 0, "entry": 0}
+
+        def record_pin(path, *args, **kwargs):
+            pinned = real_pin(path, *args, **kwargs)
+            if Path(path) == first:
+                retained["entry"] = pinned
+            return pinned
+
+        def record_parent(path):
+            pinned = real_parent_pin(path)
+            if Path(path) == quarantine:
+                retained["parent"] = pinned
+            return pinned
+
+        def fail_owned_closes_twice(pinned):
+            for role in ("parent", "entry"):
+                if pinned is retained.get(role) and failures[role] < 2:
+                    failures[role] += 1
+                    raise OSError(f"injected staging {role} close failure")
+            return real_close(pinned)
+
+        try:
+            with (
+                mock.patch.object(windows_junction, "_pin_object", side_effect=record_pin),
+                mock.patch.object(
+                    windows_junction,
+                    "_pin_parent_directory",
+                    side_effect=record_parent,
+                ),
+                mock.patch.object(
+                    windows_junction._PinnedObject,
+                    "close",
+                    new=fail_owned_closes_twice,
+                ),
+            ):
+                observed_error = None
+                try:
+                    adopt_unique_staged_mod(
+                        stage_mods=stage,
+                        source_mods=source,
+                        expected_name="Expected",
+                        before_names=(),
+                        quarantine_root=quarantine,
+                    )
+                except BaseException as error:
+                    observed_error = error
+
+                self.assertIsInstance(observed_error, JunctionOwnershipError)
+                ownership = observed_error
+                expected = (retained["parent"], retained["entry"])
+                self.assertEqual(expected, ownership.pins)
+                self.assertEqual([], list(stage.iterdir()))
+                self.assertEqual(b"first", (quarantine / "First" / "marker.txt").read_bytes())
+                self.assertEqual(b"second", (quarantine / "Second" / "marker.txt").read_bytes())
+
+                with self.assertRaises(JunctionOwnershipError) as retry:
+                    ownership.resolve()
+                self.assertEqual(expected, retry.exception.pins)
+                retry.exception.resolve()
+
+            self.assertEqual({"parent": 2, "entry": 2}, failures)
+            self.assertTrue(all(pinned.handle == 0 for pinned in expected))
+        finally:
+            for pinned in retained.values():
+                if pinned.handle:
+                    real_close(pinned)
+
+    def test_adoption_unions_prior_and_quarantine_ownership_without_rollback(self):
+        stage, source, quarantine = self._adoption_roots()
+        candidate = stage / "Expected"
+        destination = source / "Expected"
+        quarantined = quarantine / "Expected"
+        candidate.mkdir()
+        (candidate / "marker.txt").write_bytes(b"candidate")
+        set_low_integrity_tree(candidate)
+        prior_path = self.root / "prior-owner.txt"
+        prior_path.write_bytes(b"prior")
+        prior = windows_junction._pin_object(
+            prior_path,
+            desired_access=windows_junction._DELETE | windows_junction._GENERIC_READ,
+            allow_reparse=False,
+        )
+
+        real_identity = windows_junction._stable_pinned_tree_identity
+        real_parent_pin = windows_junction._pin_parent_directory
+        real_close = windows_junction._PinnedObject.close
+        identity_calls = 0
+        quarantine_parent = None
+        failures = {"prior": 0, "quarantine": 0}
+
+        def fail_after_move(tree, *, required_equal_passes):
+            nonlocal identity_calls
+            identity_calls += 1
+            if identity_calls == 2:
+                self.assertEqual(destination, tree.current_path)
+                try:
+                    prior.close()
+                except OSError as error:
+                    raise JunctionOwnershipError(
+                        "injected prior adoption ownership",
+                        (prior,),
+                    ) from error
+            return real_identity(tree, required_equal_passes=required_equal_passes)
+
+        def record_parent(path):
+            nonlocal quarantine_parent
+            pinned = real_parent_pin(path)
+            if Path(path) == quarantine:
+                quarantine_parent = pinned
+            return pinned
+
+        def fail_owned_closes_twice(pinned):
+            if pinned is prior and failures["prior"] < 2:
+                failures["prior"] += 1
+                raise OSError("injected prior close failure")
+            if pinned is quarantine_parent and failures["quarantine"] < 2:
+                failures["quarantine"] += 1
+                raise OSError("injected quarantine parent close failure")
+            return real_close(pinned)
+
+        try:
+            with (
+                mock.patch.object(
+                    windows_junction,
+                    "_stable_pinned_tree_identity",
+                    side_effect=fail_after_move,
+                ),
+                mock.patch.object(
+                    windows_junction,
+                    "_pin_parent_directory",
+                    side_effect=record_parent,
+                ),
+                mock.patch.object(
+                    windows_junction._PinnedObject,
+                    "close",
+                    new=fail_owned_closes_twice,
+                ),
+            ):
+                observed_error = None
+                try:
+                    adopt_unique_staged_mod(
+                        stage_mods=stage,
+                        source_mods=source,
+                        expected_name="Expected",
+                        before_names=(),
+                        quarantine_root=quarantine,
+                    )
+                except BaseException as error:
+                    observed_error = error
+
+                self.assertIsInstance(observed_error, JunctionOwnershipError)
+                ownership = observed_error
+                expected = (prior, quarantine_parent)
+                self.assertEqual(expected, ownership.pins)
+                self.assertFalse(candidate.exists())
+                self.assertFalse(destination.exists())
+                self.assertEqual(b"candidate", (quarantined / "marker.txt").read_bytes())
+                self.assertEqual(
+                    (hashlib.sha256(b"prior").hexdigest(), len(b"prior")),
+                    windows_junction._hash_pinned_file(prior),
+                )
+
+                with self.assertRaises(JunctionOwnershipError) as retry:
+                    ownership.resolve()
+                self.assertEqual(expected, retry.exception.pins)
+                retry.exception.resolve()
+
+            self.assertEqual({"prior": 2, "quarantine": 2}, failures)
+            self.assertTrue(all(pinned.handle == 0 for pinned in expected))
+        finally:
+            for pinned in (prior, quarantine_parent):
+                if pinned is not None and pinned.handle:
+                    real_close(pinned)
 
     def _adoption_roots(self) -> tuple[Path, Path, Path]:
         stage = self.root / "stage"

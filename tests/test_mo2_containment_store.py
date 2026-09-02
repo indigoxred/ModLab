@@ -9,6 +9,12 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+from modlab.platform import windows_exact_fs
+from modlab.platform.windows_exact_fs import (
+    ExactObjectOwnershipError,
+    PinnedIdentity,
+    PinnedObject,
+)
 from modlab.validation.mo2_containment_model import (
     CapabilityDecision,
     CapabilityVerdict,
@@ -33,6 +39,7 @@ from modlab.validation.mo2_containment_serialization import (
 from modlab.validation.mo2_containment_store import (
     ContainmentStore,
     ContainmentStoreError,
+    ContainmentStoreOwnershipError,
 )
 from modlab.validation import mo2_containment_store as containment_store
 
@@ -302,6 +309,143 @@ class ContainmentStoreTests(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertEqual(store.journal_path(RUN_ID, journal.scenario), calls[0][1])
 
+    def test_windows_immutable_writes_route_only_to_retained_publication(self):
+        store = ContainmentStore(self.root)
+        calls = []
+
+        def publish(path, data, validator):
+            calls.append((path, data))
+            self.assertEqual(data, validator(data))
+            return data
+
+        records = (
+            (self.root / "request.json", b'{"record":"request"}\n', "request"),
+            (self.root / "result.json", b'{"record":"result"}\n', "scenario result"),
+            (self.root / "decision.json", b'{"record":"decision"}\n', "capability decision"),
+        )
+        with (
+            mock.patch.object(
+                containment_store,
+                "publish_new_pinned",
+                side_effect=publish,
+            ),
+            mock.patch.object(
+                containment_store,
+                "_promote_no_replace_posix",
+                side_effect=AssertionError("Windows reached POSIX promotion"),
+            ) as posix_promotion,
+        ):
+            for target, data, label in records:
+                self.assertFalse(store._write_immutable(target, data, label))
+
+        self.assertEqual(
+            [(target, data) for target, data, _label in records],
+            calls,
+        )
+        posix_promotion.assert_not_called()
+        self.assertTrue(all(not target.exists() for target, _data, _label in records))
+
+    def test_posix_immutable_promotion_keeps_hard_link_no_replace_behavior(self):
+        source = self.root / "first.part"
+        target = self.root / "immutable.json"
+        source.write_bytes(b"first")
+        with mock.patch.object(containment_store.os, "name", "posix"):
+            containment_store._promote_no_replace_posix(source, target)
+        self.assertFalse(source.exists())
+        self.assertEqual(b"first", target.read_bytes())
+
+        colliding_source = self.root / "second.part"
+        colliding_source.write_bytes(b"second")
+        with (
+            mock.patch.object(containment_store.os, "name", "posix"),
+            self.assertRaises(FileExistsError),
+        ):
+            containment_store._promote_no_replace_posix(colliding_source, target)
+        self.assertEqual(b"second", colliding_source.read_bytes())
+        self.assertEqual(b"first", target.read_bytes())
+
+    def test_posix_immutable_promotion_fails_closed_on_windows(self):
+        source = self.root / "immutable.part"
+        source.write_bytes(b"payload")
+        with self.assertRaisesRegex(ContainmentStoreError, "POSIX-only"):
+            containment_store._promote_no_replace_posix(
+                source,
+                self.root / "immutable.json",
+            )
+        self.assertEqual(b"payload", source.read_bytes())
+
+    def test_windows_immutable_write_preserves_structured_ownership_for_retry(self):
+        store = ContainmentStore(self.root)
+        candidates = (
+            PinnedObject(self.root / "immutable-one.json", 81, PinnedIdentity(1, 1, 0)),
+            PinnedObject(self.root / "immutable-two.json", 82, PinnedIdentity(1, 2, 0)),
+        )
+        owner_type = windows_exact_fs.RetainedObjectOwner
+        role = windows_exact_fs.RetainedObjectRole
+        ownership = ExactObjectOwnershipError(
+            "injected",
+            owners=tuple(owner_type(role.CANDIDATE, candidate) for candidate in candidates),
+        )
+        with (
+            mock.patch.object(containment_store, "publish_new_pinned", side_effect=ownership),
+            mock.patch.object(containment_store, "resolve_retained_ownership", side_effect=ownership),
+        ):
+            with self.assertRaises(ContainmentStoreOwnershipError) as raised:
+                store._write_immutable(self.root / "immutable.json", b"{}\n", "immutable record")
+        self.assertEqual(ownership.owners, raised.exception.owners)
+        self.assertIs(candidates[0], raised.exception.candidate)
+        self.assertEqual(candidates, raised.exception.candidates)
+
+    def test_windows_immutable_write_never_publishes_a_substitute_at_candidate_path(self):
+        store = ContainmentStore(self.root)
+        target = self.root / "immutable.json"
+        data = b'{"ok":true}\n'
+        real_read = windows_exact_fs.read_pinned_file
+        swapped = False
+
+        def read_then_replace_old_candidate(pinned):
+            nonlocal swapped
+            observed = real_read(pinned)
+            if not swapped and pinned.path.name.startswith(".immutable.json."):
+                swapped = True
+                stolen = pinned.path.with_name("stolen-immutable.json")
+                pinned.path.rename(stolen)
+                pinned.path.write_bytes(b'{"replacement":true}\n')
+            return observed
+
+        with mock.patch.object(
+            windows_exact_fs,
+            "read_pinned_file",
+            side_effect=read_then_replace_old_candidate,
+        ):
+            self.assertFalse(store._write_immutable(target, data, "immutable record"))
+
+        self.assertTrue(swapped)
+        self.assertEqual(data, target.read_bytes())
+        replacements = list(self.root.glob(".immutable.json.*.tmp"))
+        self.assertEqual(1, len(replacements))
+        self.assertEqual(b'{"replacement":true}\n', replacements[0].read_bytes())
+
+    def test_retry_authority_consumption_never_uses_durable_replacement(self):
+        store = ContainmentStore(self.root)
+        recovery = ScenarioRecovery(
+            1, RUN_ID, ContainmentScenario.MERGE_EXISTING,
+            "containment-journal-sha256:" + "a" * 64,
+            "containment-result-sha256:" + "b" * 64,
+            ScenarioCleanupStatus.SUCCEEDED, True, (),
+        )
+        written = store.write_recovery(recovery)
+        fingerprint = "containment-command-sha256:" + "c" * 64
+        store.write_retry_authority(recovery, written.content_id, fingerprint)
+        with mock.patch.object(containment_store, "_replace_durable") as replace_call:
+            store.consume_retry_authority(
+                recovery,
+                written.content_id,
+                fingerprint,
+                "containment-run:" + "d" * 32,
+            )
+        replace_call.assert_not_called()
+
     def test_windows_durable_replace_uses_replace_existing_and_write_through(self):
         calls = []
 
@@ -387,6 +531,16 @@ class ContainmentStoreTests(unittest.TestCase):
         )
         self.assertEqual(available.value["authorityId"], retry_of["authorityId"])
         self.assertEqual("Consumed", store.load_retry_authority(RUN_ID, recovery.scenario)["state"])
+        persisted = json.loads(store.retry_path(RUN_ID, recovery.scenario).read_text("utf-8"))
+        self.assertEqual("Available", persisted["state"])
+        self.assertIsNone(persisted["consumedByRunId"])
+        with self.assertRaisesRegex(ContainmentStoreError, "already consumed"):
+            store.consume_retry_authority(
+                recovery,
+                written.content_id,
+                fingerprint,
+                "containment-run:" + "d" * 32,
+            )
         with self.assertRaisesRegex(ContainmentStoreError, "already consumed"):
             store.consume_retry_authority(
                 recovery,
@@ -394,6 +548,157 @@ class ContainmentStoreTests(unittest.TestCase):
                 fingerprint,
                 "containment-run:" + "e" * 32,
             )
+
+    def test_retry_authority_rejects_legacy_embedded_consumption_without_marker(self):
+        store = ContainmentStore(self.root)
+        recovery = ScenarioRecovery(1, RUN_ID, ContainmentScenario.MERGE_EXISTING,
+            "containment-journal-sha256:" + "a" * 64,
+            "containment-result-sha256:" + "b" * 64,
+            ScenarioCleanupStatus.SUCCEEDED, True, ())
+        written = store.write_recovery(recovery)
+        fingerprint = "containment-command-sha256:" + "c" * 64
+        authority = store.write_retry_authority(recovery, written.content_id, fingerprint).value
+        authority["state"] = "Consumed"
+        authority["consumedByRunId"] = "containment-run:" + "d" * 32
+        store.retry_path(RUN_ID, recovery.scenario).write_bytes(containment_store._canonical(authority))
+        with self.assertRaisesRegex(ContainmentStoreError, "retry authority values"):
+            store.load_retry_authority(RUN_ID, recovery.scenario)
+
+    def test_retry_authority_rejects_foreign_consumption_marker(self):
+        store = ContainmentStore(self.root)
+        recovery = ScenarioRecovery(1, RUN_ID, ContainmentScenario.MERGE_EXISTING,
+            "containment-journal-sha256:" + "a" * 64,
+            "containment-result-sha256:" + "b" * 64,
+            ScenarioCleanupStatus.SUCCEEDED, True, ())
+        written = store.write_recovery(recovery)
+        fingerprint = "containment-command-sha256:" + "c" * 64
+        authority = store.write_retry_authority(recovery, written.content_id, fingerprint).value
+        marker = containment_store._retry_consumption_document(authority, "containment-run:" + "d" * 32)
+        marker["authorityId"] = "containment-retry-sha256:" + "f" * 64
+        store.retry_consumption_path(RUN_ID, recovery.scenario).write_bytes(containment_store._canonical(marker))
+        with self.assertRaisesRegex(ContainmentStoreError, "consumption binding"):
+            store.load_retry_authority(RUN_ID, recovery.scenario)
+
+    def test_retry_authority_rejects_malformed_consumption_marker(self):
+        store = ContainmentStore(self.root)
+        recovery = ScenarioRecovery(
+            1, RUN_ID, ContainmentScenario.MERGE_EXISTING,
+            "containment-journal-sha256:" + "a" * 64,
+            "containment-result-sha256:" + "b" * 64,
+            ScenarioCleanupStatus.SUCCEEDED, True, (),
+        )
+        written = store.write_recovery(recovery)
+        store.write_retry_authority(
+            recovery,
+            written.content_id,
+            "containment-command-sha256:" + "c" * 64,
+        )
+        store.retry_consumption_path(RUN_ID, recovery.scenario).write_bytes(b"{broken")
+        with self.assertRaisesRegex(ContainmentStoreError, "consumption is malformed"):
+            store.load_retry_authority(RUN_ID, recovery.scenario)
+
+    def test_retry_authority_rejects_embedded_consumer_marker_conflict(self):
+        store = ContainmentStore(self.root)
+        recovery = ScenarioRecovery(
+            1, RUN_ID, ContainmentScenario.MERGE_EXISTING,
+            "containment-journal-sha256:" + "a" * 64,
+            "containment-result-sha256:" + "b" * 64,
+            ScenarioCleanupStatus.SUCCEEDED, True, (),
+        )
+        written = store.write_recovery(recovery)
+        fingerprint = "containment-command-sha256:" + "c" * 64
+        authority = store.write_retry_authority(
+            recovery,
+            written.content_id,
+            fingerprint,
+        ).value
+        marker = containment_store._retry_consumption_document(
+            authority,
+            "containment-run:" + "d" * 32,
+        )
+        store.retry_consumption_path(RUN_ID, recovery.scenario).write_bytes(
+            containment_store._canonical(marker)
+        )
+        authority["state"] = "Consumed"
+        authority["consumedByRunId"] = "containment-run:" + "e" * 32
+        store.retry_path(RUN_ID, recovery.scenario).write_bytes(
+            containment_store._canonical(authority)
+        )
+
+        with self.assertRaisesRegex(ContainmentStoreError, "retry authority values"):
+            store.load_retry_authority(RUN_ID, recovery.scenario)
+
+    def test_retry_consumption_refuses_success_when_marker_readback_is_missing(self):
+        store = ContainmentStore(self.root)
+        recovery = ScenarioRecovery(
+            1,
+            RUN_ID,
+            ContainmentScenario.MERGE_EXISTING,
+            "containment-journal-sha256:" + "a" * 64,
+            "containment-result-sha256:" + "b" * 64,
+            ScenarioCleanupStatus.SUCCEEDED,
+            True,
+            (),
+        )
+        written = store.write_recovery(recovery)
+        fingerprint = "containment-command-sha256:" + "c" * 64
+        store.write_retry_authority(recovery, written.content_id, fingerprint)
+
+        with mock.patch.object(store, "_write_immutable", return_value=False):
+            with self.assertRaisesRegex(
+                ContainmentStoreError,
+                "consumption marker readback",
+            ):
+                store.consume_retry_authority(
+                    recovery,
+                    written.content_id,
+                    fingerprint,
+                    "containment-run:" + "d" * 32,
+                )
+
+    def test_retry_consumption_publication_failure_leaves_authority_available(self):
+        store = ContainmentStore(self.root)
+        recovery = ScenarioRecovery(
+            1,
+            RUN_ID,
+            ContainmentScenario.MERGE_EXISTING,
+            "containment-journal-sha256:" + "a" * 64,
+            "containment-result-sha256:" + "b" * 64,
+            ScenarioCleanupStatus.SUCCEEDED,
+            True,
+            (),
+        )
+        written = store.write_recovery(recovery)
+        fingerprint = "containment-command-sha256:" + "c" * 64
+        store.write_retry_authority(recovery, written.content_id, fingerprint)
+        marker_path = store.retry_consumption_path(RUN_ID, recovery.scenario)
+        real_write = store._write_immutable
+
+        def fail_marker_publication(target, data, label):
+            if target == marker_path:
+                raise ContainmentStoreError("injected marker publication failure")
+            return real_write(target, data, label)
+
+        with mock.patch.object(
+            store,
+            "_write_immutable",
+            side_effect=fail_marker_publication,
+        ):
+            with self.assertRaisesRegex(
+                ContainmentStoreError,
+                "marker publication failure",
+            ):
+                store.consume_retry_authority(
+                    recovery,
+                    written.content_id,
+                    fingerprint,
+                    "containment-run:" + "d" * 32,
+                )
+
+        self.assertFalse(marker_path.exists())
+        loaded = store.load_retry_authority(RUN_ID, recovery.scenario)
+        self.assertEqual("Available", loaded["state"])
+        self.assertIsNone(loaded["consumedByRunId"])
 
     def test_run_intent_is_immutable_canonical_and_precedes_request(self):
         store = ContainmentStore(self.root)
