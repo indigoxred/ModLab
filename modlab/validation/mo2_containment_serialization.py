@@ -156,12 +156,12 @@ _ADOPTION = {
     ContainmentScenario.NEW_FOLDER: (
         "ModLab Spike New",
         ("ModLab Spike New",),
-        ("meshes/new-folder.bin",),
+        ("meshes/new-folder.bin", "meta.ini"),
     ),
     ContainmentScenario.FOMOD_DEPENDENCY: (
         "ModLab Spike FOMOD",
         ("ModLab Spike FOMOD",),
-        ("always.txt", "dependency-seen.txt"),
+        ("always.txt", "dependency-seen.txt", "meta.ini"),
     ),
 }
 
@@ -774,15 +774,21 @@ def deterministic_policy_violations(result: ScenarioResult) -> tuple[str, ...]:
 
 
 def _failed_policy_violations(result: ScenarioResult) -> tuple[str, ...]:
-    """Accept over-conservative immutable v1 failures without producing them."""
+    """Accept over-conservative immutable pre-v3 failures without producing them."""
     violations = set(deterministic_policy_violations(result))
     if result.scenario in _ADOPTION:
-        _name, staging_new, _staging_output = _ADOPTION[result.scenario]
+        _name, staging_new, staging_output = _ADOPTION[result.scenario]
         if (
             result.staging_observation_complete
             and result.staging_new_names != staging_new
         ):
             violations.add("staging-new-folder-set-invalid")
+        if (
+            result.output_observation_complete
+            and result.staging_output_names == staging_output
+            and "staging-output-set-invalid" in result.reasons
+        ):
+            violations.add("staging-output-set-invalid")
     return tuple(sorted(violations))
 
 

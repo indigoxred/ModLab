@@ -178,7 +178,7 @@ def valid_scenario_result(
         return ScenarioResult(
             **common,
             staging_new_names=("ModLab Spike New",),
-            staging_output_names=("meshes/new-folder.bin",),
+            staging_output_names=("meshes/new-folder.bin", "meta.ini"),
             adopted_name="ModLab Spike New",
             adopted_tree=tree("b"),
             adopted_integrity=IntegrityObservation.MEDIUM,
@@ -187,7 +187,7 @@ def valid_scenario_result(
         return ScenarioResult(
             **common,
             staging_new_names=("ModLab Spike FOMOD",),
-            staging_output_names=("always.txt", "dependency-seen.txt"),
+            staging_output_names=("always.txt", "dependency-seen.txt", "meta.ini"),
             adopted_name="ModLab Spike FOMOD",
             adopted_tree=tree("b"),
             adopted_integrity=IntegrityObservation.MEDIUM,
@@ -383,6 +383,22 @@ class Mo2ContainmentSerializationTests(unittest.TestCase):
                 "output-observation-incomplete",
                 "staging-new-folder-set-invalid",
             ),
+        )
+
+        self.assertEqual(
+            result,
+            scenario_result_from_bytes(
+                scenario_result_to_bytes(result, outcome), outcome
+            ),
+        )
+
+    def test_v2_metadata_false_failure_remains_readable(self):
+        # Catches the v3 metadata correction hiding its immutable v2 diagnostic.
+        outcome = valid_watch_outcome(scenario=ContainmentScenario.NEW_FOLDER)
+        result = replace(
+            valid_scenario_result(ContainmentScenario.NEW_FOLDER, outcome),
+            outcome=ScenarioOutcome.FAILED,
+            reasons=("staging-output-set-invalid",),
         )
 
         self.assertEqual(

@@ -873,20 +873,23 @@ failed: it may represent an interrupted operator workflow and remains
 `Incomplete`. If output observation is complete, any mismatch remains a
 deterministic violation.
 
-- `NewFolder`: all pre-existing source evidence unchanged through the MO2 phase; one exact `ModLab Spike New` direct folder; after watchers stop, adopt the collision-free sibling, verify it, move it to quarantine, and prove the source root returned to its original identity; no extra folder.
+- `NewFolder`: all pre-existing source evidence unchanged through the MO2 phase; one exact `ModLab Spike New` direct folder containing only `meshes/new-folder.bin` and MO2's generated `meta.ini`; after watchers stop, adopt the collision-free sibling, verify it, move it to quarantine, and prove the source root returned to its original identity; no extra folder.
 - `MergeExisting`: source unchanged with zero events; `Protected Existing` source junction still exact; no production backup; nothing adopted.
 - `ReplaceExisting`: same source guarantees; a replaced staging projection or staging backup is identified and quarantined; nothing adopted.
-- `FomodDependency`: all pre-existing source evidence unchanged through the MO2 phase; one exact `ModLab Spike FOMOD` folder containing `always.txt` and `dependency-seen.txt`; after watchers stop, adopt/verify/quarantine it and prove the source root returned to its original identity.
+- `FomodDependency`: all pre-existing source evidence unchanged through the MO2 phase; one exact `ModLab Spike FOMOD` folder containing only `always.txt`, `dependency-seen.txt`, and MO2's generated `meta.ini`; after watchers stop, adopt/verify/quarantine it and prove the source root returned to its original identity.
 
-`adjudicate_run()` computes `Supported` only from four immutable passing result IDs. Any safety failure is `Rejected`; missing or incomplete machine evidence is `Incomplete`. Every earlier immutable result remains visible after a later explicit clean run. A prior `Failed` result causes `Rejected` and cannot be hidden by a later `Passed` result.
+`adjudicate_run()` computes `Supported` only from four immutable passing result IDs. Any safety failure is `Rejected`; missing or incomplete machine evidence is `Incomplete`. Every earlier immutable result remains visible after a later explicit clean run. A prior `Failed` result causes `Rejected` and cannot be hidden by a later `Passed` result within the same exact command-policy fingerprint.
 
 The command fingerprint also binds the exact scenario-classification policy.
-The corrected empty-output rule is `scenario-classification-v2`. Immutable
-legacy results remain parseable and visible, but a legacy fingerprint is not a
-predecessor of the corrected-policy cohort. Therefore an over-conservative
-legacy diagnostic cannot permanently poison a corrected-policy capability
-decision, while a `Failed` result still cannot be hidden by a later `Passed`
-result within the same exact policy fingerprint.
+`scenario-classification-v2` corrected interrupted empty-output handling.
+`scenario-classification-v3` additionally recognizes the exact MO2-generated
+`meta.ini` beside each adoption probe's payload while continuing to reject any
+missing payload or other extra output. The retained legacy and v2 diagnostic
+results remain parseable and visible, but their exact fingerprints are not
+predecessors of the v3 cohort. Therefore an over-conservative older diagnostic
+cannot permanently poison a corrected-policy capability decision, while a
+`Failed` result still cannot be hidden by a later `Passed` result within the
+same exact policy fingerprint.
 
 The command fingerprint also binds the disposable shell-environment protocol.
 `disposable-shell-environment-v2` creates a direct `Desktop` directory beneath
@@ -1146,10 +1149,13 @@ positive breach evidence exists.
 The first diagnostic run used the legacy classification fingerprint. The
 second used `scenario-classification-v2` but the pre-v2 disposable shell
 environment and stopped `Incomplete` when the Windows file picker found no
-disposable Desktop. Both are retained read-only. Prepare the replacement run
-under `scenario-classification-v2` and `disposable-shell-environment-v2`; do not
-edit, delete, reuse, or list either diagnostic run as predecessor evidence for
-the corrected-policy decision.
+disposable Desktop. The third used `scenario-classification-v2` with the v2
+shell environment and safely installed/quarantined the exact NewFolder probe,
+but recorded an over-conservative `Failed` because v2 did not recognize MO2's
+generated `meta.ini`. All three are retained read-only. Prepare the replacement
+run under `scenario-classification-v3` and
+`disposable-shell-environment-v2`; do not edit, delete, reuse, or list any
+diagnostic run as predecessor evidence for the corrected-policy decision.
 
 - [ ] **Step 5: Adjudicate and inspect the decision**
 

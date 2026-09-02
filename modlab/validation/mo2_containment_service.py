@@ -83,7 +83,8 @@ from .windows_watch_protocol import (
 
 _SCHEMA_VERSION = 1
 _MECHANISM = "isolated-low-integrity-junction-projection-v1"
-_CLASSIFICATION_POLICY = "scenario-classification-v2"
+_CLASSIFICATION_POLICY = "scenario-classification-v3"
+_PREVIOUS_CLASSIFICATION_POLICY = "scenario-classification-v2"
 _FIXTURE_POLICY = "disposable-shell-environment-v2"
 _PROTECTED_NAME = "Protected Existing"
 _EXPECTED_NEW = {
@@ -93,10 +94,11 @@ _EXPECTED_NEW = {
     ContainmentScenario.FOMOD_DEPENDENCY: "ModLab Spike FOMOD",
 }
 _EXPECTED_OUTPUTS = {
-    ContainmentScenario.NEW_FOLDER: ("meshes/new-folder.bin",),
+    ContainmentScenario.NEW_FOLDER: ("meshes/new-folder.bin", "meta.ini"),
     ContainmentScenario.FOMOD_DEPENDENCY: (
         "always.txt",
         "dependency-seen.txt",
+        "meta.ini",
     ),
 }
 class ContainmentServiceError(RuntimeError):
@@ -2201,7 +2203,28 @@ def _pre_fixture_policy_command_fingerprint(
     steam_root: Path,
 ) -> str:
     document = {
-        "classificationPolicy": _CLASSIFICATION_POLICY,
+        "classificationPolicy": _PREVIOUS_CLASSIFICATION_POLICY,
+        "mechanism": _MECHANISM,
+        "mo2ArtifactId": mo2_artifact_id,
+        "scenarios": [item.value for item in ContainmentScenario],
+        "sourceWorkspace": os.path.normcase(
+            os.path.normpath(str(Path(source_workspace).expanduser().absolute()))
+        ),
+        "steamRoot": os.path.normcase(
+            os.path.normpath(str(Path(steam_root).expanduser().absolute()))
+        ),
+    }
+    return _command_fingerprint_for(document)
+
+
+def _previous_classification_command_fingerprint(
+    source_workspace: Path,
+    mo2_artifact_id: str,
+    steam_root: Path,
+) -> str:
+    document = {
+        "classificationPolicy": _PREVIOUS_CLASSIFICATION_POLICY,
+        "fixturePolicy": _FIXTURE_POLICY,
         "mechanism": _MECHANISM,
         "mo2ArtifactId": mo2_artifact_id,
         "scenarios": [item.value for item in ContainmentScenario],
@@ -2238,9 +2261,12 @@ def _known_command_fingerprints(
     source_workspace: Path,
     mo2_artifact_id: str,
     steam_root: Path,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     return (
         _command_fingerprint(source_workspace, mo2_artifact_id, steam_root),
+        _previous_classification_command_fingerprint(
+            source_workspace, mo2_artifact_id, steam_root
+        ),
         _pre_fixture_policy_command_fingerprint(
             source_workspace, mo2_artifact_id, steam_root
         ),

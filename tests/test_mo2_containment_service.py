@@ -387,9 +387,9 @@ def evidence(
         else "ModLab Spike FOMOD"
     )
     expected_outputs = (
-        ("meshes/new-folder.bin",)
+        ("meshes/new-folder.bin", "meta.ini")
         if scenario is ContainmentScenario.NEW_FOLDER
-        else ("always.txt", "dependency-seen.txt")
+        else ("always.txt", "dependency-seen.txt", "meta.ini")
     )
     values = dict(
         run_id=RUN_ID,
@@ -768,6 +768,16 @@ class ContainmentServiceTests(unittest.TestCase):
             tuple(item[1] for item in pairs[:-1]),
         )
         self.assertEqual(CapabilityVerdict.INCOMPLETE, incomplete.verdict)
+
+    def test_adoption_accepts_exact_payload_plus_mo2_generated_metadata(self):
+        # Catches normal MO2 meta.ini creation being treated as a containment breach.
+        for scenario in (
+            ContainmentScenario.NEW_FOLDER,
+            ContainmentScenario.FOMOD_DEPENDENCY,
+        ):
+            with self.subTest(scenario=scenario):
+                result = evaluate_scenario(evidence(scenario))
+                self.assertEqual(ScenarioOutcome.PASSED, result.outcome)
 
     def test_valid_forbidden_event_then_controller_death_is_failed_without_retry(self):
         outcome = watch_outcome(
@@ -1416,8 +1426,8 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertEqual([], current["predecessorRunIds"])
             self.assertNotEqual(legacy_fingerprint, current["commandFingerprint"])
 
-    def test_pre_fixture_policy_nonterminal_run_does_not_block_current_fixture_policy(self):
-        # Catches a corrected disposable profile inheriting an incomplete older fixture.
+    def test_pre_v3_nonterminal_runs_do_not_block_current_classification_policy(self):
+        # Catches corrected MO2 metadata policy inheriting either older v2 cohort.
         with tempfile.TemporaryDirectory(prefix="modlab-fixture-lineage-") as directory:
             source = Path(directory) / "source"
             layout = initialize_workspace(source)
@@ -1449,20 +1459,45 @@ class ContainmentServiceTests(unittest.TestCase):
                     ).encode()
                 ).hexdigest()
             )
-            store.write_intent(
-                RUN_ID,
-                {
-                    "schemaVersion": 1,
-                    "runId": RUN_ID,
-                    "mechanism": previous_document["mechanism"],
-                    "sourceWorkspace": previous_document["sourceWorkspace"],
-                    "mo2ArtifactId": artifact,
-                    "steamRoot": previous_document["steamRoot"],
-                    "commandFingerprint": previous_fingerprint,
-                    "predecessorRunIds": [],
-                    "retryOf": None,
-                },
+            v2_fixture_document = {
+                **previous_document,
+                "fixturePolicy": "disposable-shell-environment-v2",
+            }
+            v2_fixture_fingerprint = (
+                "containment-command-sha256:"
+                + hashlib.sha256(
+                    (
+                        json.dumps(
+                            v2_fixture_document,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode()
+                ).hexdigest()
             )
+            for old_run, document, fingerprint in (
+                (RUN_ID, previous_document, previous_fingerprint),
+                (
+                    "containment-run:" + "1" * 32,
+                    v2_fixture_document,
+                    v2_fixture_fingerprint,
+                ),
+            ):
+                store.write_intent(
+                    old_run,
+                    {
+                        "schemaVersion": 1,
+                        "runId": old_run,
+                        "mechanism": document["mechanism"],
+                        "sourceWorkspace": document["sourceWorkspace"],
+                        "mo2ArtifactId": artifact,
+                        "steamRoot": document["steamRoot"],
+                        "commandFingerprint": fingerprint,
+                        "predecessorRunIds": [],
+                        "retryOf": None,
+                    },
+                )
 
             with (
                 patch.object(
@@ -1483,7 +1518,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 new_run = service.prepare_run(source, artifact, steam, store.root)
 
             current_document = {
-                "classificationPolicy": "scenario-classification-v2",
+                "classificationPolicy": "scenario-classification-v3",
                 "fixturePolicy": "disposable-shell-environment-v2",
                 "mechanism": "isolated-low-integrity-junction-projection-v1",
                 "mo2ArtifactId": artifact,
@@ -1508,6 +1543,7 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertEqual([], current["predecessorRunIds"])
             self.assertEqual(expected_current, current["commandFingerprint"])
             self.assertNotEqual(previous_fingerprint, current["commandFingerprint"])
+            self.assertNotEqual(v2_fixture_fingerprint, current["commandFingerprint"])
 
     def test_same_command_prepare_calls_are_serialized_before_snapshot(self):
         with tempfile.TemporaryDirectory(prefix="modlab-prepare-order-") as directory:
@@ -2010,7 +2046,23 @@ class ContainmentServiceTests(unittest.TestCase):
     def test_adoption_failures_and_exact_outputs_fail_closed(self):
         scenario = ContainmentScenario.FOMOD_DEPENDENCY
         cases = (
-            ("FOMOD marker absent", dict(staging_output_names=("always.txt",)), ScenarioOutcome.FAILED),
+            (
+                "FOMOD marker absent",
+                dict(staging_output_names=("always.txt", "meta.ini")),
+                ScenarioOutcome.FAILED,
+            ),
+            (
+                "unexpected extra output",
+                dict(
+                    staging_output_names=(
+                        "always.txt",
+                        "dependency-seen.txt",
+                        "meta.ini",
+                        "other.txt",
+                    )
+                ),
+                ScenarioOutcome.FAILED,
+            ),
             ("adoption collision", dict(adopted_name=None, adopted_tree=None, adopted_integrity=None, safety_reasons=("adoption-collision",)), ScenarioOutcome.INCOMPLETE),
             ("more than one new folder", dict(staging_new_names=("ModLab Spike FOMOD", "Other")), ScenarioOutcome.FAILED),
             ("failed integrity normalization", dict(adopted_integrity=IntegrityObservation.UNKNOWN), ScenarioOutcome.INCOMPLETE),
