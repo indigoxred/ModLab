@@ -1,8 +1,10 @@
+import hashlib
 import os
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from modlab.adapters.mo2.ini import decode_qsettings_path, parse_ini_bytes
@@ -13,6 +15,7 @@ from modlab.validation.windows_junction import inspect_junction
 from modlab.workspace import initialize_workspace
 from tests.support.mo2_containment import (
     capture_production_path_snapshots,
+    import_curated_mo2_archive,
     measure_real_fixture_evidence,
     prepare_fixture_with_fake_bootstrap,
 )
@@ -45,6 +48,51 @@ class ContainmentFixtureTests(unittest.TestCase):
         module = read_zip(archives.fomod_dependency, "fomod/ModuleConfig.xml")
         self.assertIn(b'fileDependency file="marker.txt" state="Active"', module)
         self.assertIn(b'destination="dependency-seen.txt"', module)
+
+    def test_curated_archive_import_replaces_payload_name_without_hardlinking(self):
+        # Catches an opt-in import retaining the vault payload filename as original_name.
+        source = self.root / "payload.7z"
+        data = b"exact-curated-release-bytes"
+        source.write_bytes(data)
+        workspace = self.root / "workspace"
+        curated_copy_root = self.root / "curated-copy"
+        descriptor = SimpleNamespace(
+            archive_name="Mod.Organizer-2.5.2.7z",
+            archive_sha256=hashlib.sha256(data).hexdigest(),
+            archive_size=len(data),
+        )
+
+        with patch(
+            "tests.support.mo2_containment.load_mo2_release",
+            return_value=SimpleNamespace(descriptor=descriptor),
+        ):
+            artifact = import_curated_mo2_archive(source, workspace, curated_copy_root)
+
+        curated_copy = curated_copy_root / descriptor.archive_name
+        self.assertEqual(descriptor.archive_name, artifact.original_name)
+        self.assertEqual(descriptor.archive_sha256, artifact.sha256)
+        self.assertFalse(source.samefile(curated_copy))
+
+    def test_curated_archive_import_refuses_mismatched_bytes(self):
+        # Catches a named temporary copy that is imported without release-byte verification.
+        source = self.root / "payload.7z"
+        source.write_bytes(b"wrong-release-bytes")
+        descriptor = SimpleNamespace(
+            archive_name="Mod.Organizer-2.5.2.7z",
+            archive_sha256="0" * 64,
+            archive_size=len(b"wrong-release-bytes"),
+        )
+
+        with (
+            patch(
+                "tests.support.mo2_containment.load_mo2_release",
+                return_value=SimpleNamespace(descriptor=descriptor),
+            ),
+            self.assertRaisesRegex(RuntimeError, "curated release"),
+        ):
+            import_curated_mo2_archive(
+                source, self.root / "workspace", self.root / "curated-copy"
+            )
 
     def test_fixture_uses_two_confined_instances_and_payload_junctions(self):
         # Catches a stage instance escaping its disposable run or copying source mods.

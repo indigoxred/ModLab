@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path
 import stat
@@ -12,6 +13,7 @@ import tempfile
 from unittest.mock import patch
 
 from modlab.adapters.mo2.bootstrap_model import BootstrapReceiptMode
+from modlab.adapters.mo2.release import bundled_mo2_252_path, load_mo2_release
 from modlab.adapters.skyrim.windows_version import read_windows_file_version
 from modlab.artifacts.vault import ArchiveVault
 from modlab.validation.mo2_containment_fixtures import ContainmentFixture
@@ -48,6 +50,35 @@ class RealContainmentFixtureEvidence:
     executable_version: str | None
     payload_bytes_copied_for_projection: int
     production_paths_written: tuple[Path, ...]
+
+
+def import_curated_mo2_archive(
+    archive_path: Path, workspace: Path, curated_copy_root: Path
+):
+    """Import a verified regular copy under the curated release's official name."""
+    release = load_mo2_release(bundled_mo2_252_path()).descriptor
+    source = Path(archive_path)
+    copy_root = Path(curated_copy_root)
+    copy_root.mkdir(parents=True, exist_ok=True)
+    curated_copy = copy_root / release.archive_name
+
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with source.open("rb") as reader, curated_copy.open("xb") as writer:
+            while chunk := reader.read(1024 * 1024):
+                size += len(chunk)
+                digest.update(chunk)
+                writer.write(chunk)
+    except OSError as error:
+        raise RuntimeError(f"could not copy supplied MO2 archive: {error}") from error
+
+    if size != release.archive_size or digest.hexdigest() != release.archive_sha256:
+        raise RuntimeError("supplied MO2 archive does not match the curated release")
+
+    return ArchiveVault(Path(workspace)).import_archive(
+        curated_copy, source_note="opt-in real containment fixture"
+    )
 
 
 def prepare_fixture_with_fake_bootstrap(root: Path, *, fixture_parent: Path | None = None):
@@ -230,9 +261,7 @@ def prepare_real_containment_fixture(archive_path: Path, steam_root: Path):
         root = Path(directory)
         workspace = root / "source-vault"
         layout = initialize_workspace(workspace)
-        artifact = ArchiveVault(workspace).import_archive(
-            Path(archive_path), source_note="opt-in real containment fixture"
-        )
+        artifact = import_curated_mo2_archive(Path(archive_path), workspace, root)
         fixture = prepare_containment_fixture(
             workspace,
             artifact.artifact_id,
@@ -247,5 +276,6 @@ __all__ = [
     "prepare_fixture_with_fake_bootstrap",
     "prepare_real_containment_fixture",
     "capture_production_path_snapshots",
+    "import_curated_mo2_archive",
     "measure_real_fixture_evidence",
 ]
