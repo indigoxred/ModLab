@@ -34,9 +34,12 @@ RUNTIME_PATHS = ("ModOrganizer.exe", "plugins/plugin_python/dlls/python312.dll",
                  "plugins/plugin_python/libs/mobase.cp312-win_amd64.pyd")
 ARCHIVE = {"sha256": "e6376efd87fd5ddd95aee959405e8f067afa526ea6c2c0c5aa03c5108bf4a815", "size": 149660212}
 EXE_HASH = "442b354a8f34754da0048654c44d27f51628feba54ce46c3187cf58d6c43e622"
+RUNTIME_CONTENT = ((EXE_HASH, 5028352),
+                   ("0522fc235f8ffb2b673d9ced0cd31e4c28da6743b977ffc45253ed261b171a56", 7439360),
+                   ("bc4dd10aef20df58f55e00d407ea15c66dda0618d8468ddea5fbe9c293ce2a00", 1516544))
 MATRIX_FIELDS = {"schemaVersion", "runId", "root", "source", "archive", "candidates"}
 OBS_FIELDS = {"phase", "sequence", "job", "nonce", "pid", "before", "after", "ownBefore", "ownAfter",
-              "runtimeBefore", "runtimeAfter", "exitCode", "normalClose", "loaded", "guarded", "ui", "logs"}
+              "runtimeBefore", "runtimeAfter", "exitCode", "normalClose", "loaded", "guarded", "ui", "logs", "launchProcess"}
 
 
 def _require(condition, message):
@@ -105,7 +108,8 @@ def _runtime(value):
     _inventory(value)
     _require(tuple(item["path"] for item in value) == RUNTIME_PATHS, "runtime file binding differs")
     _require(all(item["kind"] == "file" for item in value), "runtime must contain regular files")
-    _require(value[0]["sha256"] == EXE_HASH and value[0]["size"] == 5028352, "MO2 executable identity differs")
+    _require(tuple((item["sha256"], item["size"]) for item in value) == RUNTIME_CONTENT,
+             "exact retained MO2/Python/mobase content identity differs")
 
 
 def _loaded(value, observation, candidate, matrix):
@@ -122,6 +126,36 @@ def _loaded(value, observation, candidate, matrix):
              and value["mobasePath"] == str(Path(candidate["appRoot"]) / RUNTIME_PATHS[2]), "loaded runtime path binding differs")
 
 
+def _visible_process_binding(ui, launcher, executable, pid):
+    """Validate observed executable correlation, never infer HWND ownership from a sky ID."""
+    _require(ui["app"] == "process:" + executable, "visible app is not the exact disposable executable")
+    _fields(launcher, {"pid", "creationTime", "executable"}, "launcher process identity")
+    _require(_integer(launcher["pid"], 1) and _integer(launcher["creationTime"], 1)
+             and launcher["pid"] == pid and launcher["executable"] == executable, "launcher process binding differs")
+    correlation = ui["processCorrelation"]
+    _fields(correlation, {"kind", "events"}, "visible process correlation")
+    events = correlation["events"]
+    _require(correlation["kind"] == "unique-exact-executable-correlation" and type(events) is list and len(events) == 3,
+             "three ordered process/window correlation events required")
+    for index, event in enumerate(events):
+        if index == 1:
+            _fields(event, {"kind", "windowId", "app", "screenshotIds"}, "correlated window state")
+            _require(_integer(event["windowId"], 1)
+                     and all(event[key] == ui[key] for key in ("windowId", "app", "screenshotIds")),
+                     "correlation is not for the captured visible window")
+        else:
+            _fields(event, {"kind", "complete", "processes"}, "native process observation")
+            _require(event["complete"] is True and type(event["processes"]) is list and len(event["processes"]) == 1,
+                     "one completely observed matching native process required")
+            process = event["processes"][0]
+            _fields(process, {"pid", "creationTime", "executable", "running"}, "observed native process identity")
+            _require(_integer(process["pid"], 1) and _integer(process["creationTime"], 1) and process["running"] is True
+                     and all(process[key] == launcher[key] for key in launcher),
+                     "observed native process is not the live launcher identity")
+        _require(event["kind"] == ("native-before", "window-state", "native-after")[index],
+                 "native process observations do not bracket the window observation")
+
+
 def _observation(value, candidate, matrix, index):
     _fields(value, OBS_FIELDS, "observation")
     _require(value["phase"] == PHASES[index] and type(value["sequence"]) is int and value["sequence"] == index,
@@ -134,8 +168,13 @@ def _observation(value, candidate, matrix, index):
         _inventory(value[field])
     _require(_same_tree(value["ownBefore"], own_inventory(value["before"]))
              and _same_tree(value["ownAfter"], own_inventory(value["after"])), "candidate inventory projection differs")
-    _runtime(value["runtimeBefore"])
-    _runtime(value["runtimeAfter"])
+    for runtime_field, tree_field in (("runtimeBefore", "before"), ("runtimeAfter", "after")):
+        _runtime(value[runtime_field])
+        tree = {item["path"]: item for item in value[tree_field]}
+        for item in value[runtime_field][1:]:
+            relative = item["path"][len("plugins/"):]
+            _require(tree.get(relative) == {**item, "path": relative},
+                     "runtime observation contradicts the complete plugins inventory")
     _loaded(value["loaded"], value, candidate, matrix)
     _loaded(value["guarded"], value, candidate, matrix)
     if index != 4:
@@ -143,11 +182,12 @@ def _observation(value, candidate, matrix, index):
     if index == 0:
         _require(value["loaded"] is None, "control cannot claim candidate loading")
     ui = value["ui"]
-    _fields(ui, {"windowId", "app", "title", "loadedTool", "closeAction", "screenshotIds"}, "visible observation")
+    _fields(ui, {"windowId", "app", "title", "loadedTool", "closeAction", "screenshotIds", "processCorrelation"}, "visible observation")
     _require(_integer(ui["windowId"], 1) and _text(ui["app"]) and _text(ui["title"]), "invalid visible target")
     _require(ui["loadedTool"] in (None, TOOL_NAME) and ui["closeAction"] in (None, "Alt+F4", "Close button", "File/Exit"), "invalid visible action")
     _require(type(ui["screenshotIds"]) is list and bool(ui["screenshotIds"])
              and all(_text(item) for item in ui["screenshotIds"]), "visible observation references missing")
+    _visible_process_binding(ui, value["launchProcess"], str(Path(candidate["appRoot"]) / "ModOrganizer.exe"), value["pid"])
     _require(type(value["logs"]) is list, "logs must be a list")
     seen = set()
     for log in value["logs"]:
@@ -220,6 +260,12 @@ def select_capability(matrix):
         names = ([NAMESPACE + ".py"] if index == 0 else [NAMESPACE, NAMESPACE + "/__init__.py", NAMESPACE + "/plugin.py"])
         _require([item["path"] for item in declared] == names, "candidate declared inventory differs")
         _require(all(item["kind"] == ("directory" if item["path"] == NAMESPACE else "file") for item in declared), "candidate declared types differ")
+        generated = candidate_sources(root, candidate["layout"])
+        for item in declared:
+            if item["kind"] == "file":
+                data = generated[item["path"]]
+                _require(item["sha256"] == hashlib.sha256(data).hexdigest() and item["size"] == len(data),
+                         "candidate content differs from the exact generated harmless probe")
         _require(type(candidate["observations"]) is list and len(candidate["observations"]) == 4, "four ordered launch phases required")
         _observation(candidate["control"], candidate, matrix, 0)
         for phase, observation in enumerate(candidate["observations"], 1):

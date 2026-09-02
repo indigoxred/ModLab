@@ -29,14 +29,26 @@ def fixture(parent=None):
     runtime = [entry("ModOrganizer.exe"), entry("plugins/plugin_python/dlls/python312.dll"),
                entry("plugins/plugin_python/libs/mobase.cp312-win_amd64.pyd")]
     runtime[0].update(sha256="442b354a8f34754da0048654c44d27f51628feba54ce46c3187cf58d6c43e622", size=5028352)
+    runtime[1].update(sha256="0522fc235f8ffb2b673d9ced0cd31e4c28da6743b977ffc45253ed261b171a56", size=7439360)
+    runtime[2].update(sha256="bc4dd10aef20df58f55e00d407ea15c66dda0618d8468ddea5fbe9c293ce2a00", size=1516544)
     candidates = []
-    for layout in ("SingleFile", "Package"):
+    for layout_index, layout in enumerate(("SingleFile", "Package")):
         app = str(Path(root) / layout / "app")
+        for runtime_index, item in enumerate(runtime):
+            item["fileId"] = 100 + layout_index * 10 + runtime_index
         baseline = [entry("bundled.py")]
+        baseline += [entry(path, "directory", file_id=200 + index) for index, path in enumerate(
+            ("plugin_python", "plugin_python/dlls", "plugin_python/libs"))]
+        baseline += [{**item, "path": item["path"][len("plugins/"):]} for item in runtime[1:]]
         declared = ([entry("modlab_capability_probe.py", file_id=8)] if layout == "SingleFile" else
                     [entry("modlab_capability_probe", "directory", file_id=8),
                      entry("modlab_capability_probe/__init__.py", file_id=9),
                      entry("modlab_capability_probe/plugin.py", file_id=10)])
+        generated = cap.candidate_sources(Path(root), layout)
+        for item in declared:
+            if item["kind"] == "file":
+                data = generated[item["path"]]
+                item.update(sha256=hashlib.sha256(data).hexdigest(), size=len(data))
         full = baseline + declared
         observations = []
         for index, phase in enumerate(("Control", "First", "Second", "Passive", "Guarded")):
@@ -56,11 +68,23 @@ def fixture(parent=None):
                 "runtimeBefore": copy.deepcopy(runtime), "runtimeAfter": copy.deepcopy(runtime),
                 "exitCode": 0, "normalClose": True, "loaded": loaded,
                 "guarded": copy.deepcopy(loaded) if phase == "Guarded" else None,
-                "ui": {"windowId": 42, "app": app + "\\ModOrganizer.exe", "title": "Mod Organizer v2.5.2",
+                "ui": {"windowId": 42, "app": "process:" + str(Path(app) / "ModOrganizer.exe"), "title": "Mod Organizer v2.5.2",
                        "loadedTool": None if index == 0 else "ModLab Capability Probe",
                        "closeAction": "Alt+F4", "screenshotIds": ["fixture-observation"]},
                 "logs": [{"path": str(Path(job) / "observed.log"), "sha256": "f" * 64, "size": 10}],
             })
+            observation = observations[-1]
+            launcher = {"pid": 123, "creationTime": 1000 + index, "executable": str(Path(app) / "ModOrganizer.exe")}
+            observation["launchProcess"] = launcher
+            native = {**launcher, "running": True}
+            observation["ui"]["processCorrelation"] = {
+                "kind": "unique-exact-executable-correlation",
+                "events": [
+                    {"kind": "native-before", "complete": True, "processes": [copy.deepcopy(native)]},
+                    {"kind": "window-state", "windowId": 42, "app": observation["ui"]["app"],
+                     "screenshotIds": ["fixture-observation"]},
+                    {"kind": "native-after", "complete": True, "processes": [copy.deepcopy(native)]},
+                ]}
         candidates.append({"layout": layout, "appRoot": app, "declared": declared,
                            "control": observations[0], "observations": observations[1:]})
     return {"schemaVersion": 1, "runId": "a" * 32, "root": root,
@@ -84,6 +108,141 @@ class CapabilitySelectionTests(unittest.TestCase):
                 result = cap.select_capability(value)
                 self.assertEqual(expected, result["selection"])
                 self.assertEqual(result, cap.capability_from_bytes(cap.capability_to_bytes(result)))
+
+    def test_rejects_consistently_substituted_candidate_content(self):
+        for layout_index, target in ((0, "modlab_capability_probe.py"),
+                                     (1, "modlab_capability_probe/__init__.py"),
+                                     (1, "modlab_capability_probe/plugin.py")):
+            for changed_field, replacement in (("sha256", "e" * 64), ("size", 1)):
+                value = fixture()
+                candidate = value["candidates"][layout_index]
+                trees = [candidate["declared"]]
+                trees.extend(observation[field] for observation in candidate["observations"]
+                             for field in ("before", "after", "ownBefore", "ownAfter"))
+                for tree in trees:
+                    next(item for item in tree if item["path"] == target)[changed_field] = replacement
+                with self.subTest(target=target, field=changed_field), self.assertRaises(cap.CapabilityError):
+                    cap.select_capability(value)
+
+    def test_retained_runtime_content_is_fixed_even_if_every_record_is_substituted(self):
+        for runtime_index in (1, 2):
+            for field, replacement in (("sha256", "e" * 64), ("size", 1)):
+                value = fixture()
+                for candidate in value["candidates"]:
+                    for observation in [candidate["control"], *candidate["observations"]]:
+                        for side, runtime_side in (("before", "runtimeBefore"), ("after", "runtimeAfter")):
+                            runtime = observation[runtime_side][runtime_index]
+                            runtime[field] = replacement
+                            relative = runtime["path"][len("plugins/"):]
+                            next(item for item in observation[side] if item["path"] == relative)[field] = replacement
+                with self.subTest(runtime=runtime_index, field=field), self.assertRaises(cap.CapabilityError):
+                    cap.select_capability(value)
+
+    def test_runtime_requires_matching_full_tree_content_kind_and_native_identity(self):
+        for runtime_index in (1, 2):
+            for side, phase in (("before", "Control"), ("after", "Guarded")):
+                for field, replacement in (("missing", None), ("sha256", "e" * 64), ("size", 1),
+                                           ("volume", 2), ("fileId", 999), ("kind", "directory")):
+                    value = fixture()
+                    candidate = value["candidates"][0]
+                    observation = candidate["control"] if phase == "Control" else candidate["observations"][3]
+                    relative = observation["runtimeBefore"][runtime_index]["path"][len("plugins/"):]
+                    item = next(item for item in observation[side] if item["path"] == relative)
+                    if field == "missing":
+                        observation[side].remove(item)
+                    elif field == "kind":
+                        item.update(kind="directory", sha256=None, size=0)
+                    else:
+                        item[field] = replacement
+                    with self.subTest(runtime=runtime_index, side=side, field=field), self.assertRaises(cap.CapabilityError):
+                        cap.select_capability(value)
+
+    def test_exact_runtime_content_allows_distinct_native_ids_between_copies(self):
+        value = fixture()
+        single = value["candidates"][0]["control"]["runtimeBefore"]
+        package = value["candidates"][1]["control"]["runtimeBefore"]
+        self.assertNotEqual([item["fileId"] for item in single], [item["fileId"] for item in package])
+        self.assertEqual("SingleFile", cap.select_capability(value)["selection"])
+
+    def test_visible_target_requires_exact_recognized_disposable_process_app(self):
+        for phase in ("Control", "Guarded"):
+            for target in ("process:C:\\unrelated\\ModOrganizer.exe", "unrecognized-app-id"):
+                value = fixture()
+                candidate = value["candidates"][0]
+                observation = candidate["control"] if phase == "Control" else candidate["observations"][3]
+                observation["ui"]["app"] = target
+                with self.subTest(phase=phase, target=target), self.assertRaises(cap.CapabilityError):
+                    cap.select_capability(value)
+
+    def test_visible_target_refuses_missing_launcher_or_native_process_correlation(self):
+        for missing in ("launchProcess", "processCorrelation"):
+            value = fixture()
+            observation = value["candidates"][0]["control"]
+            (observation if missing == "launchProcess" else observation["ui"]).pop(missing, None)
+            with self.subTest(missing=missing), self.assertRaises(cap.CapabilityError):
+                cap.select_capability(value)
+
+    def test_correlation_refuses_incomplete_ambiguous_or_unobservable_native_records(self):
+        for event_index in (0, 2):
+            for mode in ("empty", "duplicate", "incomplete", "bool-completeness", "unknown", "missing-identity"):
+                value = fixture()
+                event = value["candidates"][0]["control"]["ui"]["processCorrelation"]["events"][event_index]
+                if mode == "empty":
+                    event["processes"] = []
+                elif mode == "duplicate":
+                    event["processes"].append(copy.deepcopy(event["processes"][0]))
+                elif mode == "incomplete":
+                    event["complete"] = False
+                elif mode == "bool-completeness":
+                    event["complete"] = 1
+                elif mode == "unknown":
+                    event["nativeWindowHandle"] = 42
+                else:
+                    event["processes"][0].pop("creationTime")
+                with self.subTest(event=event_index, mode=mode), self.assertRaises(cap.CapabilityError):
+                    cap.select_capability(value)
+
+    def test_correlation_binds_both_live_native_identities_to_actual_launcher(self):
+        for event_index in (0, 2):
+            for field, replacement in (("pid", 124), ("pid", True), ("creationTime", 999),
+                                       ("creationTime", None), ("creationTime", True),
+                                       ("executable", "C:\\unrelated\\ModOrganizer.exe"),
+                                       ("running", False), ("running", 1)):
+                value = fixture()
+                event = value["candidates"][0]["control"]["ui"]["processCorrelation"]["events"][event_index]
+                event["processes"][0][field] = replacement
+                with self.subTest(event=event_index, field=field, replacement=replacement), self.assertRaises(cap.CapabilityError):
+                    cap.select_capability(value)
+
+    def test_correlation_requires_ordered_brackets_around_the_exact_captured_window(self):
+        for mode in ("reversed", "missing", "duplicate", "window", "bool-window", "app", "screenshots", "unknown"):
+            value = fixture()
+            events = value["candidates"][0]["control"]["ui"]["processCorrelation"]["events"]
+            if mode == "reversed":
+                events.reverse()
+            elif mode == "missing":
+                events.pop()
+            elif mode == "duplicate":
+                events[2] = copy.deepcopy(events[0])
+            elif mode == "window":
+                events[1]["windowId"] = 43
+            elif mode == "bool-window":
+                events[1]["windowId"] = True
+            elif mode == "app":
+                events[1]["app"] = "process:C:\\unrelated\\ModOrganizer.exe"
+            elif mode == "screenshots":
+                events[1]["screenshotIds"] = ["different-capture"]
+            else:
+                events[1]["nativeWindowHandle"] = 42
+            with self.subTest(mode=mode), self.assertRaises(cap.CapabilityError):
+                cap.select_capability(value)
+
+    def test_correlation_rejects_a_stale_prior_launch_even_if_pid_and_window_are_reused(self):
+        value = fixture()
+        candidate = value["candidates"][0]
+        candidate["observations"][0]["ui"]["processCorrelation"] = copy.deepcopy(candidate["control"]["ui"]["processCorrelation"])
+        with self.assertRaises(cap.CapabilityError):
+            cap.select_capability(value)
 
     def test_each_phase_requires_exact_full_tree_and_own_inventory(self):
         for phase in range(4):
@@ -126,7 +285,11 @@ class CapabilitySelectionTests(unittest.TestCase):
             else:
                 control["runtimeAfter"][1]["sha256"] = "0" * 64
             with self.subTest(change=change):
-                self.assertEqual("Package", cap.select_capability(value)["selection"])
+                if change == "identity":
+                    with self.assertRaises(cap.CapabilityError):
+                        cap.select_capability(value)
+                else:
+                    self.assertEqual("Package", cap.select_capability(value)["selection"])
 
     def test_rejects_missing_duplicate_or_reordered_launches(self):
         for mode in ("missing", "duplicate", "reordered"):
