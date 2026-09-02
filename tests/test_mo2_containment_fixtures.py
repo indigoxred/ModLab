@@ -81,6 +81,23 @@ class ContainmentFixtureTests(unittest.TestCase):
         self.assertEqual(0, evidence.payload_bytes_copied_for_projection)
         self.assertEqual((steam_root.resolve(),), evidence.production_paths_written)
 
+    def test_real_fixture_evidence_refuses_empty_direct_projection_replacement(self):
+        # Catches a replaced projection that could otherwise be misreported as zero bytes.
+        fixture = prepare_fixture_with_fake_bootstrap(self.root)
+        projection = fixture.stage_mods / "Protected Existing"
+        projection.rmdir()
+        projection.mkdir()
+        before = capture_production_path_snapshots((self.root / "Steam",))
+
+        with (
+            patch(
+                "tests.support.mo2_containment.read_windows_file_version",
+                return_value="2.5.2.0",
+            ),
+            self.assertRaisesRegex(RuntimeError, "junction"),
+        ):
+            measure_real_fixture_evidence(fixture, before)
+
     def test_production_snapshot_records_reparse_without_following_it(self):
         # Catches snapshot traversal into a Steam-root reparse target.
         steam_root = self.root / "Steam"
@@ -94,11 +111,8 @@ class ContainmentFixtureTests(unittest.TestCase):
         except OSError as error:
             self.skipTest(f"directory symlink unavailable: {error}")
 
-        snapshot = capture_production_path_snapshots((steam_root,))[0]
-        entries = {entry.relative_path: entry for entry in snapshot.entries}
-
-        self.assertEqual("reparse", entries["library-link"].kind)
-        self.assertNotIn("library-link/must-not-be-observed.txt", entries)
+        with self.assertRaisesRegex(RuntimeError, "reparse"):
+            capture_production_path_snapshots((steam_root,))
 
     def test_production_snapshot_records_file_metadata_without_payload_hashes(self):
         # Catches a production snapshot that uses content hashes instead of metadata.

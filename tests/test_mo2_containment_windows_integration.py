@@ -22,9 +22,13 @@ class Mo2ContainmentWindowsIntegrationTests(unittest.TestCase):
         ) as evidence:
             fixture = evidence.fixture
             self.assertEqual("2.5.2.0", evidence.executable_version)
-            self.assertEqual(IntegrityLevel.LOW, inspect_path_integrity(fixture.stage_workspace))
+            self.assertEqual(
+                IntegrityLevel.LOW,
+                inspect_path_integrity(fixture.stage_layout.skyrim_mo2),
+            )
             self.assertGreaterEqual(
-                inspect_path_integrity(fixture.source_workspace), IntegrityLevel.MEDIUM
+                inspect_path_integrity(fixture.source_layout.skyrim_mo2),
+                IntegrityLevel.MEDIUM,
             )
             self.assertEqual(0, evidence.payload_bytes_copied_for_projection)
             self.assertEqual((), evidence.production_paths_written)

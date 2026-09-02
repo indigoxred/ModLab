@@ -15,12 +15,11 @@ from modlab.adapters.mo2.bootstrap_model import BootstrapReceiptMode
 from modlab.adapters.skyrim.windows_version import read_windows_file_version
 from modlab.artifacts.vault import ArchiveVault
 from modlab.validation.mo2_containment_fixtures import ContainmentFixture
-from modlab.validation.mo2_containment_model import ContainmentScenario, TreeIdentity
+from modlab.validation.mo2_containment_model import ContainmentScenario
 from modlab.validation.windows_integrity import IntegrityLevel
 from modlab.validation.windows_junction import (
     ContainmentSafetyError,
     inspect_junction,
-    stable_tree_identity,
 )
 from modlab.workspace import initialize_workspace
 
@@ -165,16 +164,14 @@ def _projection_payload_bytes_copied(fixture: ContainmentFixture) -> int:
         path.name for path in source_entries
     ):
         raise RuntimeError("staged projection names do not match source mods")
-    copied_bytes = 0
     for source, stage in zip(source_entries, stage_entries, strict=True):
         try:
             projection = inspect_junction(stage)
-        except (ContainmentSafetyError, OSError):
-            copied_bytes += stable_tree_identity(stage, required_equal_passes=2).total_size
-            continue
+        except (ContainmentSafetyError, OSError) as error:
+            raise RuntimeError("staged projection is not an exact junction") from error
         if projection.target_path != source.resolve(strict=True):
             raise RuntimeError("staged projection target does not match source mod")
-    return copied_bytes
+    return 0
 
 
 def _production_metadata_tree(root: Path) -> tuple[ProductionPathEntry, ...]:
@@ -184,8 +181,8 @@ def _production_metadata_tree(root: Path) -> tuple[ProductionPathEntry, ...]:
         attributes = int(getattr(metadata, "st_file_attributes", 0))
         reparse = path.is_symlink() or bool(attributes & 0x400)
         if reparse:
-            kind = "reparse-directory" if stat.S_ISDIR(metadata.st_mode) else "reparse"
-        elif stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(f"production path contains reparse entry: {relative_path}")
+        if stat.S_ISDIR(metadata.st_mode):
             kind = "directory"
         elif stat.S_ISREG(metadata.st_mode):
             kind = "file"
