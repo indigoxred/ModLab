@@ -866,6 +866,74 @@ class ContainmentCliTests(unittest.TestCase):
         self.assertIn("Safe refusal", document["reasons"][0])
         self.assertEqual("", errors)
 
+    def test_nested_malformed_evidence_outranks_outer_not_ready(self):
+        service = FakeService()
+
+        def nested_failure(*_args):
+            try:
+                raise ContainmentStoreMalformedEvidence(
+                    "nested result bytes are not canonical"
+                )
+            except ContainmentStoreMalformedEvidence as malformed:
+                raise containment_service.ContainmentDecisionNotReady(
+                    "decision not ready"
+                ) from malformed
+
+        service.load_decision = nested_failure
+        code, output, errors = invoke_cli(
+            run_args("show", output_format="json"),
+            service,
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual("show", json.loads(output)["command"])
+        self.assertEqual("", errors)
+
+    def test_suppressed_malformed_context_still_outranks_outer_not_ready(self):
+        service = FakeService()
+
+        def nested_failure(*_args):
+            try:
+                raise ContainmentStoreMalformedEvidence(
+                    "suppressed nested result bytes are not canonical"
+                )
+            except ContainmentStoreMalformedEvidence:
+                raise containment_service.ContainmentDecisionNotReady(
+                    "decision not ready"
+                ) from None
+
+        service.load_decision = nested_failure
+        code, output, errors = invoke_cli(
+            run_args("show", output_format="json"),
+            service,
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual("show", json.loads(output)["command"])
+        self.assertEqual("", errors)
+
+    def test_malformed_prepare_result_preserves_effect_receipt_as_operational_refusal(self):
+        service = FakeService()
+        changed = EFFECT_ROOT / "prepared-before-invalid-result.json"
+        effects = containment_service.ContainmentEffects(
+            written_paths=(changed,),
+        )
+        service.prepare_run = lambda *_args: containment_service.ContainmentServiceResult(
+            "not-a-run-id",
+            effects,
+        )
+
+        code, output, errors = invoke_cli(
+            prepare_args(output_format="json"),
+            service,
+        )
+
+        document = json.loads(output)
+        self.assertEqual(3, code)
+        self.assertEqual([str(changed)], document["writtenPaths"])
+        self.assertIn("Safe refusal", document["reasons"][0])
+        self.assertEqual("", errors)
+
 
 if __name__ == "__main__":
     unittest.main()

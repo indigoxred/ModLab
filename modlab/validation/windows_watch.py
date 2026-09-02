@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Callable
 import warnings
 
 from modlab.platform.windows_exact_fs import (
@@ -1025,9 +1026,15 @@ def _load_worker_launch(request: WatchRequest) -> WorkerLaunch:
     )
 
 
-def start_watch(request: WatchRequest) -> int:
+def start_watch(
+    request: WatchRequest,
+    *,
+    on_created: Callable[[int], None] | None = None,
+) -> int:
     """Start one watcher owned exclusively by this controller process."""
     _require_windows()
+    if on_created is not None and not callable(on_created):
+        raise TypeError("watch creation callback must be callable")
     normalized = _normalize_request(request, inspect_roots=True)
     evidence_root = normalized.evidence_root
     request_path = evidence_root / _REQUEST_NAME
@@ -1085,6 +1092,35 @@ def start_watch(request: WatchRequest) -> int:
         )
     except OSError as error:
         raise WatchProtocolError(f"watch worker launch failed: {error}") from error
+    worker_pid = process.pid
+    if type(worker_pid) is not int or worker_pid <= 0:
+        try:
+            process.terminate()
+            process.wait(timeout=15)
+        except (OSError, subprocess.TimeoutExpired) as cleanup_error:
+            raise WatchProtocolError(
+                "watch worker returned an invalid PID and cleanup failed: "
+                f"{cleanup_error}"
+            ) from cleanup_error
+        raise WatchProtocolError("watch worker returned an invalid PID")
+    if on_created is not None:
+        try:
+            on_created(worker_pid)
+        except BaseException as callback_error:
+            cleanup_error: BaseException | None = None
+            try:
+                process.terminate()
+                process.wait(timeout=15)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                cleanup_error = error
+            close_error = _close_popen_process_handle(process)
+            if cleanup_error is not None and hasattr(callback_error, "add_note"):
+                callback_error.add_note(
+                    f"watch creation callback cleanup failed: {cleanup_error}"
+                )
+            if close_error is not None and hasattr(callback_error, "add_note"):
+                callback_error.add_note(close_error)
+            raise
     request_key = request_path.absolute()
     session: _LocalWatchSession | None = None
     session_registered = False
@@ -1093,7 +1129,7 @@ def start_watch(request: WatchRequest) -> int:
         process_handle = _popen_process_handle(process)
         worker_creation_time = _process_handle_creation_time(
             process_handle,
-            process.pid,
+            worker_pid,
         )
         launch = WorkerLaunch(
             schema_version=_SCHEMA_VERSION,
@@ -1101,7 +1137,7 @@ def start_watch(request: WatchRequest) -> int:
             session_id=normalized.session_id,
             run_id=normalized.run_id,
             scenario=normalized.scenario,
-            worker_pid=process.pid,
+            worker_pid=worker_pid,
             worker_creation_time=worker_creation_time,
         )
         session = _LocalWatchSession(
@@ -1111,7 +1147,7 @@ def start_watch(request: WatchRequest) -> int:
             launch=launch,
             controller_pid=controller_pid,
             controller_creation_time=controller_creation_time,
-            worker_pid=process.pid,
+            worker_pid=worker_pid,
             worker_creation_time=worker_creation_time,
             process=process,
             lock=threading.Lock(),
@@ -1188,11 +1224,11 @@ def start_watch(request: WatchRequest) -> int:
                 _parse_ready(
                     ready_bytes,
                     normalized,
-                    process.pid,
+                    worker_pid,
                     request_sha256,
                     worker_creation_time,
                 )
-                return process.pid
+                return worker_pid
         raise WatchProtocolError("watch worker did not become ready")
     except (OSError, WatchProtocolError) as error:
         receipt = _stop_local_session(

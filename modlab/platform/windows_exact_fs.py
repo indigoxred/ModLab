@@ -428,6 +428,64 @@ def pin_direct_object(path: Path, kind: str) -> PinnedObject:
         raise
 
 
+def pin_stable_direct_object(
+    path: Path,
+    kind: str,
+    *,
+    allow_writes: bool = False,
+) -> PinnedObject:
+    """Retain one direct object while denying rename/delete.
+
+    Snapshot pins also deny concurrent writers.  A mutation-root guard may set
+    ``allow_writes`` so its authorized delegate can mutate children while the
+    root itself remains non-replaceable.
+    """
+    if kind not in {"file", "directory"}:
+        raise ExactObjectError(f"unsupported pinned object kind: {kind!r}")
+    target = _absolute(path)
+    desired_access = (
+        _DELETE | _FILE_READ_ATTRIBUTES
+        if kind == "directory"
+        else _DELETE | _FILE_READ_ATTRIBUTES | _GENERIC_READ
+    )
+    handle = _kernel32.CreateFileW(
+        str(target),
+        desired_access,
+        _FILE_SHARE_READ | (_FILE_SHARE_WRITE if allow_writes else 0),
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )
+    if handle == _INVALID_HANDLE_VALUE:
+        raise _winerror(f"stable CreateFileW failed for {target}")
+    retained = PinnedObject(target, handle, None)
+    try:
+        identity = _handle_identity(handle, target)
+        retained.identity = identity
+        if _is_reparse(identity.attributes):
+            raise ExactObjectError(f"reparse object cannot be observed: {target}")
+        is_directory = bool(identity.attributes & _FILE_ATTRIBUTE_DIRECTORY)
+        if kind == "directory" and not is_directory:
+            raise ExactObjectError(f"direct regular directory required: {target}")
+        if kind == "file" and (
+            is_directory or _kernel32.GetFileType(handle) != _FILE_TYPE_DISK
+        ):
+            raise ExactObjectError(f"direct regular file required: {target}")
+        return retained
+    except BaseException as error:
+        try:
+            retained.close()
+        except BaseException as close_error:
+            if retained.handle:
+                raise ExactObjectOwnershipError(
+                    "stable direct-object validation retained a live handle after "
+                    f"close failed: {close_error}",
+                    verification=(retained,),
+                ) from error
+        raise
+
+
 def create_pinned_new(path: Path, destination_parent: PinnedObject) -> PinnedObject:
     """Create a direct regular file and retain its first handle without reopening it."""
     _require_windows()

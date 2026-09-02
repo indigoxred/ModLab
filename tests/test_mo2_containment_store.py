@@ -41,6 +41,7 @@ from modlab.validation.mo2_containment_serialization import (
 from modlab.validation.mo2_containment_store import (
     ContainmentStore,
     ContainmentStoreError,
+    ContainmentStoreMalformedEvidence,
     ContainmentStoreOwnershipError,
 )
 from modlab.validation import mo2_containment_store as containment_store
@@ -512,6 +513,152 @@ class ContainmentStoreTests(unittest.TestCase):
         posix_promotion.assert_not_called()
         self.assertTrue(all(not target.exists() for target, _data, _label in records))
 
+    def test_failed_windows_immutable_publication_records_unexpected_new_target(self):
+        recorded = []
+        store = ContainmentStore(self.root, _effect_recorder=recorded.append)
+        target = self.root / "unexpected-windows.json"
+
+        def publish_then_fail(path, _data, _validator):
+            path.write_bytes(b"unexpected\n")
+            raise OSError("injected failure after unexpected publication")
+
+        with (
+            mock.patch.object(containment_store.os, "name", "nt"),
+            mock.patch.object(
+                containment_store,
+                "publish_new_pinned",
+                side_effect=publish_then_fail,
+            ),
+            self.assertRaises(ContainmentStoreError),
+        ):
+            store._write_immutable(target, b"expected\n", "Windows record")
+
+        self.assertEqual(b"unexpected\n", target.read_bytes())
+        self.assertEqual([target], recorded)
+
+    def test_failed_posix_immutable_promotion_records_unexpected_new_target(self):
+        recorded = []
+        store = ContainmentStore(self.root, _effect_recorder=recorded.append)
+        target = self.root / "unexpected-posix.json"
+
+        def promote_then_fail(_source, destination):
+            destination.write_bytes(b"unexpected\n")
+            raise OSError("injected failure after unexpected promotion")
+
+        with (
+            mock.patch.object(containment_store.os, "name", "posix"),
+            mock.patch.object(
+                containment_store,
+                "_promote_no_replace_posix",
+                side_effect=promote_then_fail,
+            ),
+            self.assertRaises(ContainmentStoreError),
+        ):
+            store._write_immutable(target, b"expected\n", "POSIX record")
+
+        self.assertEqual(b"unexpected\n", target.read_bytes())
+        self.assertEqual([target], recorded)
+
+    def test_failed_replacement_records_deleted_target(self):
+        recorded = []
+        store = ContainmentStore(self.root, _effect_recorder=recorded.append)
+        target = self.root / "deleted-replacement.json"
+        target.write_bytes(b"before\n")
+
+        def delete_then_fail(_source, destination):
+            destination.unlink()
+            raise OSError("injected failure after target deletion")
+
+        with (
+            mock.patch.object(
+                containment_store,
+                "_replace_durable",
+                side_effect=delete_then_fail,
+            ),
+            self.assertRaises(ContainmentStoreError),
+        ):
+            store._atomic_replace(
+                target,
+                b"after\n",
+                b"before\n",
+                "replacement record",
+            )
+
+        self.assertFalse(target.exists())
+        self.assertEqual([target], recorded)
+
+    def test_failed_immutable_cleanup_records_surviving_part(self):
+        recorded = []
+        store = ContainmentStore(self.root, _effect_recorder=recorded.append)
+        target = self.root / "part-survival.json"
+        token = "1" * 32
+        part = self.root / f".{target.name}.{token}.part"
+        real_unlink = Path.unlink
+
+        def refuse_part_cleanup(path, *args, **kwargs):
+            if path == part:
+                raise OSError("injected part cleanup failure")
+            return real_unlink(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(containment_store.os, "name", "posix"),
+            mock.patch.object(
+                containment_store.uuid,
+                "uuid4",
+                return_value=SimpleNamespace(hex=token),
+            ),
+            mock.patch.object(
+                containment_store,
+                "_promote_no_replace_posix",
+                side_effect=OSError("injected pre-promotion failure"),
+            ),
+            mock.patch.object(type(part), "unlink", new=refuse_part_cleanup),
+            self.assertRaises(ContainmentStoreError),
+        ):
+            store._write_immutable(target, b"payload\n", "part record")
+
+        self.assertTrue(part.is_file())
+        self.assertEqual([part], recorded)
+
+    def test_failed_replacement_cleanup_records_surviving_part_only(self):
+        recorded = []
+        store = ContainmentStore(self.root, _effect_recorder=recorded.append)
+        target = self.root / "replace-part-survival.json"
+        target.write_bytes(b"before\n")
+        token = "2" * 32
+        part = self.root / f".{target.name}.{token}.part"
+        real_unlink = Path.unlink
+
+        def refuse_part_cleanup(path, *args, **kwargs):
+            if path == part:
+                raise OSError("injected replacement part cleanup failure")
+            return real_unlink(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(
+                containment_store.uuid,
+                "uuid4",
+                return_value=SimpleNamespace(hex=token),
+            ),
+            mock.patch.object(
+                containment_store,
+                "_replace_durable",
+                side_effect=OSError("injected pre-replacement failure"),
+            ),
+            mock.patch.object(type(part), "unlink", new=refuse_part_cleanup),
+            self.assertRaises(ContainmentStoreError),
+        ):
+            store._atomic_replace(
+                target,
+                b"after\n",
+                b"before\n",
+                "replacement part record",
+            )
+
+        self.assertEqual(b"before\n", target.read_bytes())
+        self.assertTrue(part.is_file())
+        self.assertEqual([part], recorded)
+
     def test_posix_immutable_promotion_keeps_hard_link_no_replace_behavior(self):
         source = self.root / "first.part"
         target = self.root / "immutable.json"
@@ -562,6 +709,41 @@ class ContainmentStoreTests(unittest.TestCase):
         self.assertEqual(ownership.owners, raised.exception.owners)
         self.assertIs(candidates[0], raised.exception.candidate)
         self.assertEqual(candidates, raised.exception.candidates)
+
+    def test_windows_ownership_failure_records_surviving_candidate_path(self):
+        recorded = []
+        store = ContainmentStore(self.root, _effect_recorder=recorded.append)
+        candidate_path = self.root / ".immutable.json.retained.tmp"
+        candidate_path.write_bytes(b"partial\n")
+        candidate = PinnedObject(
+            candidate_path,
+            91,
+            PinnedIdentity(1, 91, 0),
+        )
+        ownership = ExactObjectOwnershipError(
+            "injected retained candidate",
+            candidate=candidate,
+        )
+        with (
+            mock.patch.object(
+                containment_store,
+                "publish_new_pinned",
+                side_effect=ownership,
+            ),
+            mock.patch.object(
+                containment_store,
+                "resolve_retained_ownership",
+                side_effect=ownership,
+            ),
+            self.assertRaises(ContainmentStoreOwnershipError),
+        ):
+            store._write_immutable(
+                self.root / "immutable.json",
+                b"expected\n",
+                "immutable record",
+            )
+
+        self.assertEqual([candidate_path], recorded)
 
     def test_windows_immutable_write_never_publishes_a_substitute_at_candidate_path(self):
         store = ContainmentStore(self.root)
@@ -999,6 +1181,18 @@ class ContainmentStoreTests(unittest.TestCase):
             "direct.*directory|reparse",
         ):
             store.list_run_ids()
+
+    def test_decision_resolution_does_not_hide_malformed_nested_result(self):
+        store = ContainmentStore(self.root)
+        decision = valid_bound_decision(store)
+        damaged = store.result_path(
+            RUN_ID,
+            ContainmentScenario.MERGE_EXISTING,
+        )
+        damaged.write_bytes(b"{malformed\n")
+
+        with self.assertRaises(ContainmentStoreMalformedEvidence):
+            store.write_decision(decision)
 
 
 if __name__ == "__main__":

@@ -1322,7 +1322,7 @@ class ContainmentStore:
                 continue
             try:
                 result = self._load_result_unlocked(decision.run_id, scenario)
-            except ContainmentStoreError:
+            except ContainmentStoreNotFound:
                 continue
             watch = self._load_watch_outcome_unlocked(
                 decision.run_id,
@@ -1518,11 +1518,11 @@ class ContainmentStore:
             return False, str(error)
         if observed is None:
             return False, None
+        self._record_written_path(target)
         if observed[1] != data:
-            return False, (
+            return True, (
                 f"direct-write effect observation found unexpected bytes for {label}"
             )
-        self._record_written_path(target)
         return True, None
 
     def _observe_failed_replacement(
@@ -1537,7 +1537,8 @@ class ContainmentStore:
         except ContainmentStoreError as error:
             return False, str(error)
         if observed is None:
-            return False, f"direct-write effect observation found missing {label}"
+            self._record_written_path(target)
+            return True, f"direct-write effect observation found missing {label}"
         if observed == before:
             return False, None
         self._record_written_path(target)
@@ -1546,6 +1547,48 @@ class ContainmentStore:
                 f"direct-write effect observation found unexpected bytes for {label}"
             )
         return True, None
+
+    def _observe_retained_candidates(
+        self,
+        error: ExactObjectOwnershipError,
+        target: Path,
+        label: str,
+    ) -> str | None:
+        details: list[str] = []
+        for candidate in error.candidates:
+            path = Path(candidate.path)
+            if path == target:
+                continue
+            try:
+                observed = self._effect_target_observation(
+                    path,
+                    f"retained {label} candidate",
+                )
+            except ContainmentStoreError as observation_error:
+                details.append(str(observation_error))
+                continue
+            if observed is not None:
+                self._record_written_path(path)
+        return "; ".join(details) or None
+
+    def _cleanup_staging_part(self, part: Path, label: str) -> None:
+        try:
+            part.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as cleanup_error:
+            try:
+                observed = self._effect_target_observation(
+                    part,
+                    f"{label} staging part",
+                )
+            except ContainmentStoreError as observation_error:
+                raise ContainmentStoreError(
+                    f"{label} staging cleanup failed and surviving effect "
+                    f"observation is unavailable: {observation_error}"
+                ) from cleanup_error
+            if observed is not None:
+                self._record_written_path(part)
 
     @staticmethod
     def _effect_observation_suffix(detail: str | None) -> str:
@@ -1582,6 +1625,16 @@ class ContainmentStore:
                     data,
                     label,
                 )
+                candidate_detail = self._observe_retained_candidates(
+                    error,
+                    target,
+                    label,
+                )
+                effect_detail = "; ".join(
+                    detail
+                    for detail in (effect_detail, candidate_detail)
+                    if detail is not None
+                ) or None
                 try:
                     resolve_retained_ownership(error)
                 except ExactObjectOwnershipError as unresolved:
@@ -1652,12 +1705,7 @@ class ContainmentStore:
                 f"{self._effect_observation_suffix(effect_detail)}"
             ) from error
         finally:
-            try:
-                part.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
+            self._cleanup_staging_part(part, label)
 
     def _atomic_replace(
         self,
@@ -1698,12 +1746,7 @@ class ContainmentStore:
                 f"{self._effect_observation_suffix(effect_detail)}"
             ) from error
         finally:
-            try:
-                part.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
+            self._cleanup_staging_part(part, label)
 
     def _record_written_path(self, path: Path) -> None:
         if self._effect_recorder is not None:

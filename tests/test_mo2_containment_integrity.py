@@ -174,6 +174,109 @@ class IntegrityPolicyTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Windows integrity APIs are unavailable")
 class WindowsIntegrityTests(unittest.TestCase):
+    def _mock_created_process(self, process_information_pointer) -> None:
+        information = process_information_pointer._obj
+        information.hProcess = 701
+        information.hThread = 702
+        information.dwProcessId = 4242
+        information.dwThreadId = 4243
+
+    def test_launch_notifies_pid_before_internal_post_create_failure(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-integrity-created-callback-") as temporary:
+            root = Path(temporary)
+            executable = root / "fake.exe"
+            executable.write_bytes(b"not executed")
+            created: list[int] = []
+            primary = OSError("injected post-create token failure")
+
+            def create_process(*args):
+                self._mock_created_process(args[-1])
+                return True
+
+            with (
+                mock.patch.object(windows_integrity._kernel32, "CreateProcessW", side_effect=create_process),
+                mock.patch.object(windows_integrity._advapi32, "OpenProcessToken", return_value=False),
+                mock.patch.object(windows_integrity, "_winerror", return_value=primary),
+                mock.patch.object(windows_integrity, "_terminate_created_process") as terminate,
+                mock.patch.object(windows_integrity, "_close_handle"),
+                self.assertRaises(OSError) as raised,
+            ):
+                launch_low_integrity_process(
+                    executable,
+                    (),
+                    root,
+                    {},
+                    on_created=created.append,
+                )
+
+            self.assertIs(primary, raised.exception)
+            self.assertEqual([4242], created)
+            terminate.assert_called_once_with(701)
+
+    def test_launch_does_not_notify_pid_when_create_process_fails(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-integrity-pre-create-") as temporary:
+            root = Path(temporary)
+            executable = root / "fake.exe"
+            executable.write_bytes(b"not executed")
+            created: list[int] = []
+            with (
+                mock.patch.object(windows_integrity._kernel32, "CreateProcessW", return_value=False),
+                mock.patch.object(
+                    windows_integrity,
+                    "_winerror",
+                    return_value=OSError("injected CreateProcess failure"),
+                ),
+                self.assertRaisesRegex(OSError, "CreateProcess failure"),
+            ):
+                launch_low_integrity_process(
+                    executable,
+                    (),
+                    root,
+                    {},
+                    on_created=created.append,
+                )
+
+            self.assertEqual([], created)
+
+    def test_launch_cleanup_failure_keeps_created_pid_and_primary_error(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-integrity-cleanup-callback-") as temporary:
+            root = Path(temporary)
+            executable = root / "fake.exe"
+            executable.write_bytes(b"not executed")
+            created: list[int] = []
+            primary = OSError("injected post-create verification failure")
+            cleanup = OSError("injected termination cleanup failure")
+
+            def create_process(*args):
+                self._mock_created_process(args[-1])
+                return True
+
+            with (
+                mock.patch.object(windows_integrity._kernel32, "CreateProcessW", side_effect=create_process),
+                mock.patch.object(windows_integrity._advapi32, "OpenProcessToken", return_value=False),
+                mock.patch.object(windows_integrity, "_winerror", return_value=primary),
+                mock.patch.object(
+                    windows_integrity,
+                    "_terminate_created_process",
+                    side_effect=cleanup,
+                ),
+                mock.patch.object(windows_integrity, "_close_handle"),
+                self.assertRaises(OSError) as raised,
+            ):
+                launch_low_integrity_process(
+                    executable,
+                    (),
+                    root,
+                    {},
+                    on_created=created.append,
+                )
+
+            self.assertIs(primary, raised.exception)
+            self.assertEqual([4242], created)
+            self.assertTrue(
+                any("termination cleanup failure" in note for note in getattr(primary, "__notes__", ()))
+            )
+
     def test_medium_entries_snapshots_stateful_path_once_and_preserves_receipts(self):
         class RedirectingPath(type(Path())):
             def __new__(cls, intended: Path, redirect: Path):

@@ -20,6 +20,7 @@ from modlab.platform.windows_exact_fs import (
     create_pinned_new,
     identity_at_path,
     pin_direct_object,
+    pin_stable_direct_object,
     publish_new_pinned,
     rename_pinned_no_replace,
     resolve_retained_ownership,
@@ -34,6 +35,22 @@ class WindowsExactFsTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_stable_snapshot_pin_denies_write_and_rename_until_close(self) -> None:
+        path = self.root / "snapshot.bin"
+        renamed = self.root / "renamed.bin"
+        path.write_bytes(b"before")
+        pinned = pin_stable_direct_object(path, "file")
+        try:
+            with self.assertRaises(PermissionError):
+                path.write_bytes(b"changed")
+            with self.assertRaises(PermissionError):
+                path.rename(renamed)
+        finally:
+            pinned.close()
+
+        path.write_bytes(b"after")
+        self.assertEqual(b"after", path.read_bytes())
 
     def test_validated_candidate_handle_publishes_original_after_old_path_is_replaced(self) -> None:
         candidate = self.root / "candidate.json"

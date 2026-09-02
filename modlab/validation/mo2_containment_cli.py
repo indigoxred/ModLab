@@ -313,8 +313,6 @@ def _exit_for_operational_error(error: BaseException) -> int:
         if id(current) in seen:
             continue
         seen.add(id(current))
-        if isinstance(current, ContainmentDecisionNotReady):
-            return 3
         if isinstance(current, ContainmentStoreMalformedEvidence):
             return 2
         cause = getattr(current, "cause", None)
@@ -322,6 +320,8 @@ def _exit_for_operational_error(error: BaseException) -> int:
             pending.append(cause)
         if isinstance(current.__cause__, BaseException):
             pending.append(current.__cause__)
+        if isinstance(current.__context__, BaseException):
+            pending.append(current.__context__)
     return 3
 
 
@@ -374,7 +374,13 @@ def _prepare(args: argparse.Namespace, service: _Service) -> tuple[int, dict[str
         )
     )
     run_id = receipt.value
-    _require_run_id(run_id)
+    try:
+        _require_run_id(run_id)
+    except CliInputError as error:
+        raise ContainmentServiceError(
+            f"containment service returned an invalid prepared run ID: {error}",
+            effects=receipt.effects,
+        ) from error
     return 0, _response(
         "prepare",
         run_id=run_id,

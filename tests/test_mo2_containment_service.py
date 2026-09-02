@@ -39,6 +39,7 @@ from modlab.validation.mo2_containment_service import (
 from modlab.validation.mo2_containment_store import (
     ContainmentStore,
     ContainmentStoreError,
+    ContainmentStoreOwnershipError,
 )
 from modlab.validation import mo2_containment_service as service
 from modlab.validation.windows_watch_protocol import (
@@ -1230,10 +1231,11 @@ class ContainmentServiceTests(unittest.TestCase):
             record = records[1]
             observed = []
 
-            def fake_start(request):
+            def fake_start(request, *, on_created):
                 observed.append(store.load_protected_state(RUN_ID, record.scenario, "before"))
                 request.evidence_root.mkdir(parents=True, exist_ok=True)
                 (request.evidence_root / "request.json").write_bytes(b"started\n")
+                on_created(42)
                 return 42
 
             with (
@@ -1275,7 +1277,8 @@ class ContainmentServiceTests(unittest.TestCase):
             )[0]
             watch_root = store.watch_path(RUN_ID, record.scenario)
 
-            def refuse_before_mutation(request):
+            def refuse_before_mutation(request, *, on_created):
+                del on_created
                 self.assertEqual(watch_root, request.evidence_root)
                 self.assertTrue(watch_root.is_dir())
                 self.assertEqual((), tuple(watch_root.iterdir()))
@@ -1323,8 +1326,9 @@ class ContainmentServiceTests(unittest.TestCase):
             )[0]
             watch_root = store.watch_path(RUN_ID, record.scenario)
 
-            def start_successfully(request):
+            def start_successfully(request, *, on_created):
                 (request.evidence_root / "request.json").write_bytes(b"started\n")
+                on_created(73)
                 return 73
 
             with (
@@ -1351,7 +1355,7 @@ class ContainmentServiceTests(unittest.TestCase):
 
             self.assertTrue((watch_root / "request.json").is_file())
             self.assertIn("effect observation is unavailable", str(raised.exception))
-            self.assertIsNone(raised.exception.effects.watcher_pid)
+            self.assertEqual(73, raised.exception.effects.watcher_pid)
             self.assertNotIn(watch_root, raised.exception.effects.written_paths)
 
     def test_arm_nests_watch_failure_when_post_effects_cannot_be_observed(self):
@@ -1367,7 +1371,8 @@ class ContainmentServiceTests(unittest.TestCase):
             )[0]
             watch_root = store.watch_path(RUN_ID, record.scenario)
 
-            def fail_after_entering(request):
+            def fail_after_entering(request, *, on_created):
+                del on_created
                 (request.evidence_root / "partial.json").write_bytes(b"partial\n")
                 raise RuntimeError("watch delegate boom")
 
@@ -1444,12 +1449,15 @@ class ContainmentServiceTests(unittest.TestCase):
                 complete=True,
                 relevant=(SimpleNamespace(pid=51, executable_path=record.executable),),
             )
+            def launch_for_test(*_args, on_created, **_kwargs):
+                on_created(native_launch.pid)
+                return native_launch
             with (
                 patch.object(service, "_load_fixture_record", return_value=record),
                 patch.object(service, "_watcher_live", return_value=True),
                 patch.object(service, "_capture_protected", return_value=protected()),
                 patch.object(service, "read_windows_file_version", return_value="2.5.2.0"),
-                patch.object(service, "launch_low_integrity_process", return_value=native_launch),
+                patch.object(service, "launch_low_integrity_process", side_effect=launch_for_test),
                 patch.object(service, "inspect_process_integrity", return_value=service.IntegrityLevel.LOW),
                 patch.object(service, "inspect_mo2_processes", return_value=observation),
                 patch.object(service, "_reprove_retry_absence") as reprove,
@@ -1560,9 +1568,10 @@ class ContainmentServiceTests(unittest.TestCase):
                     raise ContainmentStoreError("injected post-arm failure")
                 return transitioned
 
-            def fake_start(request):
+            def fake_start(request, *, on_created):
                 request.evidence_root.mkdir(parents=True, exist_ok=True)
                 (request.evidence_root / "request.json").write_bytes(b"started\n")
+                on_created(4242)
                 return 4242
 
             with (
@@ -1646,12 +1655,16 @@ class ContainmentServiceTests(unittest.TestCase):
                     raise ContainmentStoreError("injected post-launch failure")
                 return transitioned
 
+            def launch_for_test(*_args, on_created, **_kwargs):
+                on_created(native_launch.pid)
+                return native_launch
+
             with (
                 patch.object(service, "_load_fixture_record", return_value=record),
                 patch.object(service, "_watcher_live", return_value=True),
                 patch.object(service, "_capture_protected", return_value=protected()),
                 patch.object(service, "read_windows_file_version", return_value="2.5.2.0"),
-                patch.object(service, "launch_low_integrity_process", return_value=native_launch),
+                patch.object(service, "launch_low_integrity_process", side_effect=launch_for_test),
                 patch.object(service, "inspect_process_integrity", return_value=service.IntegrityLevel.LOW),
                 patch.object(service, "inspect_mo2_processes", return_value=observation),
                 patch.object(ContainmentStore, "transition", new=fail_after_launched),
@@ -3367,6 +3380,444 @@ class ContainmentServiceTests(unittest.TestCase):
         )
         self.assertEqual(CapabilityVerdict.REJECTED, decision.verdict)
         self.assertIn("containment-breach", decision.reasons)
+
+
+class Task4ExactEffectsFixTests(unittest.TestCase):
+    @staticmethod
+    def _create_junction(link: Path, target: Path) -> None:
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise OSError(completed.stderr or completed.stdout)
+
+    @staticmethod
+    def _delegated_receipt(root: Path, operation):
+        @service._receipted
+        def invoke():
+            return service._delegated_mutation(root, operation)
+
+        return invoke()
+
+    def test_delegated_mutation_rejects_root_junction_before_delegate(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-root-junction-") as directory:
+            base = Path(directory)
+            outside = base / "outside"
+            root = base / "redirected-root"
+            outside.mkdir()
+            try:
+                self._create_junction(root, outside)
+            except OSError as error:
+                self.skipTest(f"junction creation unavailable: {error}")
+            invoked = False
+
+            def mutate():
+                nonlocal invoked
+                invoked = True
+                (root / "escaped.txt").write_bytes(b"escaped\n")
+
+            with self.assertRaisesRegex(
+                service.ContainmentOperationError,
+                "reparse|redirect|direct directory",
+            ):
+                self._delegated_receipt(root, mutate)
+
+            self.assertFalse(invoked)
+            self.assertFalse((outside / "escaped.txt").exists())
+
+    def test_delegated_mutation_rejects_ancestor_junction_before_delegate(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-ancestor-junction-") as directory:
+            base = Path(directory)
+            outside = base / "outside"
+            ancestor = base / "redirected-ancestor"
+            root = ancestor / "root"
+            (outside / "root").mkdir(parents=True)
+            try:
+                self._create_junction(ancestor, outside)
+            except OSError as error:
+                self.skipTest(f"junction creation unavailable: {error}")
+            invoked = False
+
+            def mutate():
+                nonlocal invoked
+                invoked = True
+                (root / "escaped.txt").write_bytes(b"escaped\n")
+
+            with self.assertRaisesRegex(
+                service.ContainmentOperationError,
+                "reparse|redirect|direct directory",
+            ):
+                self._delegated_receipt(root, mutate)
+
+            self.assertFalse(invoked)
+            self.assertFalse((outside / "root" / "escaped.txt").exists())
+
+    def test_delegated_mutation_rejects_nested_junction_before_delegate(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-nested-junction-") as directory:
+            base = Path(directory)
+            root = base / "root"
+            outside = base / "outside"
+            nested = root / "redirect"
+            root.mkdir()
+            outside.mkdir()
+            try:
+                self._create_junction(nested, outside)
+            except OSError as error:
+                self.skipTest(f"junction creation unavailable: {error}")
+            invoked = False
+
+            def mutate():
+                nonlocal invoked
+                invoked = True
+                (nested / "escaped.txt").write_bytes(b"escaped\n")
+
+            with self.assertRaisesRegex(
+                service.ContainmentOperationError,
+                "reparse|redirect|direct directory",
+            ):
+                self._delegated_receipt(root, mutate)
+
+            self.assertFalse(invoked)
+            self.assertFalse((outside / "escaped.txt").exists())
+
+    def test_mutation_observation_rejects_directory_swap_during_enumeration(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-directory-swap-") as directory:
+            base = Path(directory)
+            root = base / "root"
+            displaced = base / "displaced"
+            root.mkdir()
+            (root / "before.txt").write_bytes(b"before\n")
+            real_scandir = service.os.scandir
+            swapped = False
+            attempted = False
+
+            def swap_then_scan(path):
+                nonlocal attempted, swapped
+                if not swapped and Path(path) == root:
+                    attempted = True
+                    root.rename(displaced)
+                    swapped = True
+                    root.mkdir()
+                    (root / "after.txt").write_bytes(b"after\n")
+                return real_scandir(path)
+
+            with patch.object(service.os, "scandir", side_effect=swap_then_scan):
+                observation = service._mutation_root_observation(root)
+
+            self.assertTrue(attempted)
+            self.assertIsNone(observation)
+
+    def test_delegated_mutation_reports_root_then_fails_if_delegate_creates_reparse(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-created-junction-") as directory:
+            base = Path(directory)
+            root = base / "root"
+            outside = base / "outside"
+            root.mkdir()
+            outside.mkdir()
+
+            def mutate():
+                self._create_junction(root / "redirect", outside)
+                return "created"
+
+            try:
+                with self.assertRaisesRegex(
+                    service.ContainmentOperationError,
+                    "reparse|redirect|effect observation",
+                ) as raised:
+                    self._delegated_receipt(root, mutate)
+            except OSError as error:
+                self.skipTest(f"junction creation unavailable: {error}")
+
+            self.assertEqual((root,), raised.exception.effects.child_mutation_roots)
+            self.assertEqual((root,), raised.exception.effects.written_paths)
+
+    def test_delegated_root_cannot_be_swapped_in_pre_delegate_gap(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-gap-swap-") as directory:
+            base = Path(directory)
+            root = base / "root"
+            displaced = base / "displaced"
+            outside = base / "outside"
+            root.mkdir()
+            outside.mkdir()
+            swap_succeeded = False
+
+            def mutate():
+                nonlocal swap_succeeded
+                try:
+                    root.rename(displaced)
+                    self._create_junction(root, outside)
+                except OSError:
+                    (root / "direct.txt").write_bytes(b"direct\n")
+                    return
+                swap_succeeded = True
+                (root / "escaped.txt").write_bytes(b"escaped\n")
+
+            receipt = self._delegated_receipt(root, mutate)
+
+            self.assertFalse(swap_succeeded)
+            self.assertFalse((outside / "escaped.txt").exists())
+            self.assertEqual((root,), receipt.effects.child_mutation_roots)
+
+    def test_delegated_root_ancestor_cannot_be_swapped_during_delegate(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-ancestor-swap-") as directory:
+            base = Path(directory)
+            parent = base / "parent"
+            root = parent / "root"
+            displaced = base / "displaced-parent"
+            outside = base / "outside"
+            root.mkdir(parents=True)
+            outside.mkdir()
+            swap_succeeded = False
+
+            def mutate():
+                nonlocal swap_succeeded
+                try:
+                    parent.rename(displaced)
+                    parent.mkdir()
+                    self._create_junction(parent / "root", outside)
+                except OSError:
+                    (root / "direct.txt").write_bytes(b"direct\n")
+                    return
+                swap_succeeded = True
+                (parent / "root" / "escaped.txt").write_bytes(b"escaped\n")
+
+            receipt = self._delegated_receipt(root, mutate)
+
+            self.assertFalse(swap_succeeded)
+            self.assertFalse((outside / "escaped.txt").exists())
+            self.assertEqual((root,), receipt.effects.child_mutation_roots)
+
+    def test_delegated_guard_rejects_ancestor_swap_during_root_acquisition(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-acquire-swap-") as directory:
+            base = Path(directory)
+            parent = base / "parent"
+            root = parent / "root"
+            displaced = base / "displaced-parent"
+            alternate = base / "alternate-parent"
+            alternate_root = alternate / "root"
+            root.mkdir(parents=True)
+            alternate_root.mkdir(parents=True)
+            real_pin = service.pin_stable_direct_object
+            swapped = False
+            invoked = False
+
+            def swap_then_pin(path, kind, **kwargs):
+                nonlocal swapped
+                if not swapped and Path(path) == root:
+                    parent.rename(displaced)
+                    alternate.rename(parent)
+                    swapped = True
+                return real_pin(path, kind, **kwargs)
+
+            def mutate():
+                nonlocal invoked
+                invoked = True
+                (root / "escaped.txt").write_bytes(b"escaped\n")
+
+            with (
+                patch.object(
+                    service,
+                    "pin_stable_direct_object",
+                    side_effect=swap_then_pin,
+                ),
+                self.assertRaisesRegex(
+                    service.ContainmentOperationError,
+                    "identity|changed|observation",
+                ),
+            ):
+                self._delegated_receipt(root, mutate)
+
+            self.assertTrue(swapped)
+            self.assertFalse(invoked)
+            self.assertFalse((parent / "root" / "escaped.txt").exists())
+
+    def test_delegated_observation_failure_preserves_store_ownership_type(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-ownership-") as directory:
+            root = Path(directory)
+            ownership = ContainmentStoreOwnershipError(
+                "retained exact ownership",
+                object(),
+            )
+            with (
+                patch.object(
+                    service,
+                    "_mutation_root_observation",
+                    side_effect=((('before',),), None),
+                ),
+                self.assertRaises(ContainmentStoreOwnershipError) as raised,
+            ):
+                self._delegated_receipt(root, lambda: (_ for _ in ()).throw(ownership))
+
+            self.assertIs(ownership, raised.exception)
+            self.assertTrue(
+                any("effect observation" in note for note in getattr(ownership, "__notes__", ()))
+            )
+
+    def test_effect_receipt_rejects_relative_paths(self):
+        cases = (
+            {"written_paths": (Path("relative.json"),)},
+            {
+                "written_paths": (Path("relative-root"),),
+                "child_mutation_roots": (Path("relative-root"),),
+            },
+        )
+        for supplied in cases:
+            with self.subTest(supplied=supplied), self.assertRaisesRegex(
+                ValueError,
+                "absolute",
+            ):
+                service.ContainmentEffects(**supplied)
+
+    def test_launch_helper_failure_after_creation_preserves_mo2_pid(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-launch-created-failure-") as directory:
+            root = Path(directory)
+            store = ContainmentStore(root / "validation")
+            record = write_run_identity(
+                store,
+                RUN_ID,
+                root / "source-workspace",
+                root / "steam",
+                "artifact:created-failure",
+            )[0]
+            armed = store.create(
+                ScenarioJournal(
+                    1,
+                    RUN_ID,
+                    record.scenario,
+                    ScenarioState.ARMED,
+                    str(record.source_root),
+                    str(record.stage_root),
+                    str(record.archive_path),
+                    "Protected Existing",
+                    "ModLab Spike New",
+                    protected(),
+                    42,
+                    None,
+                    None,
+                )
+            )
+
+            def fail_after_creation(*_args, on_created, **_kwargs):
+                on_created(6060)
+                raise OSError("injected post-create helper failure")
+
+            with (
+                patch.object(service, "_load_fixture_record", return_value=record),
+                patch.object(service, "_watcher_live", return_value=True),
+                patch.object(service, "_capture_protected", return_value=protected()),
+                patch.object(service, "read_windows_file_version", return_value="2.5.2.0"),
+                patch.object(
+                    service,
+                    "launch_low_integrity_process",
+                    side_effect=fail_after_creation,
+                ),
+                self.assertRaises(service.ContainmentOperationError) as raised,
+            ):
+                service.launch_scenario(store.root, RUN_ID, armed.scenario)
+
+            self.assertEqual(6060, raised.exception.effects.mo2_pid)
+            self.assertEqual(
+                (store.journal_path(RUN_ID, record.scenario),),
+                raised.exception.effects.written_paths,
+            )
+            self.assertEqual(
+                6060,
+                store.load_journal(RUN_ID, record.scenario).mo2_pid,
+            )
+
+    def test_launch_evidence_ownership_failure_is_not_flattened_or_transitioned(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-launch-evidence-ownership-") as directory:
+            root = Path(directory)
+            store = ContainmentStore(root / "validation")
+            record = write_run_identity(
+                store,
+                RUN_ID,
+                root / "source-workspace",
+                root / "steam",
+                "artifact:launch-ownership",
+            )[0]
+            armed = store.create(
+                ScenarioJournal(
+                    1,
+                    RUN_ID,
+                    record.scenario,
+                    ScenarioState.ARMED,
+                    str(record.source_root),
+                    str(record.stage_root),
+                    str(record.archive_path),
+                    "Protected Existing",
+                    "ModLab Spike New",
+                    protected(),
+                    42,
+                    None,
+                    None,
+                )
+            )
+            native_launch = SimpleNamespace(
+                pid=7070,
+                executable=str(record.executable),
+                arguments=("--profile", "ModLab - Lab"),
+                working_directory=str(record.stage_app),
+                integrity=service.IntegrityLevel.LOW,
+                creation_time=987654321,
+            )
+            process_observation = SimpleNamespace(
+                complete=True,
+                relevant=(
+                    SimpleNamespace(pid=7070, executable_path=record.executable),
+                ),
+            )
+            ownership = ContainmentStoreOwnershipError(
+                "injected launch evidence ownership",
+                object(),
+            )
+
+            def launch_for_test(*_args, on_created, **_kwargs):
+                on_created(native_launch.pid)
+                return native_launch
+
+            with (
+                patch.object(service, "_load_fixture_record", return_value=record),
+                patch.object(service, "_watcher_live", return_value=True),
+                patch.object(service, "_capture_protected", return_value=protected()),
+                patch.object(service, "read_windows_file_version", return_value="2.5.2.0"),
+                patch.object(
+                    service,
+                    "launch_low_integrity_process",
+                    side_effect=launch_for_test,
+                ),
+                patch.object(
+                    service,
+                    "inspect_process_integrity",
+                    return_value=service.IntegrityLevel.LOW,
+                ),
+                patch.object(
+                    service,
+                    "inspect_mo2_processes",
+                    return_value=process_observation,
+                ),
+                patch.object(
+                    ContainmentStore,
+                    "write_launch_evidence",
+                    side_effect=ownership,
+                ),
+                self.assertRaises(ContainmentStoreOwnershipError) as raised,
+            ):
+                service.launch_scenario(store.root, RUN_ID, armed.scenario)
+
+            self.assertIs(ownership, raised.exception)
+            self.assertEqual(7070, ownership.effects.mo2_pid)
+            self.assertEqual(
+                (store.journal_path(RUN_ID, record.scenario),),
+                ownership.effects.written_paths,
+            )
+            self.assertIs(
+                ScenarioState.SCENARIO_STARTED,
+                store.load_journal(RUN_ID, record.scenario).state,
+            )
 
 
 class ContainmentRecoveryTests(unittest.TestCase):

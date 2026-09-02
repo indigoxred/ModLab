@@ -1141,6 +1141,57 @@ class MutationWatchTests(unittest.TestCase):
             windows_watch._LOCAL_SESSIONS[request_path.absolute()].worker_pid,
         )
 
+    def test_start_notifies_exact_pid_before_post_spawn_publication_failure(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        fake_process = mock.Mock(pid=9182)
+        created: list[int] = []
+        real_publish = windows_watch.publish_new_verified
+
+        def fail_launch_record(path: Path, data: bytes, parse):
+            if path.name == "worker-launch.json":
+                raise OSError("injected post-spawn publication failure")
+            return real_publish(path, data, parse)
+
+        try:
+            with (
+                mock.patch.object(windows_watch.subprocess, "Popen", return_value=fake_process),
+                mock.patch.object(windows_watch, "_popen_process_handle", return_value=77),
+                mock.patch.object(windows_watch, "_process_handle_creation_time", return_value=88),
+                mock.patch.object(
+                    windows_watch,
+                    "publish_new_verified",
+                    side_effect=fail_launch_record,
+                ),
+                mock.patch.object(
+                    windows_watch,
+                    "_stop_local_session",
+                    return_value=mock.Mock(error="cleanup complete"),
+                ),
+                self.assertRaisesRegex(WatchProtocolError, "publication failed"),
+            ):
+                start_watch(request, on_created=created.append)
+        finally:
+            with windows_watch._LOCAL_SESSIONS_LOCK:
+                windows_watch._LOCAL_SESSIONS.pop(request_path.absolute(), None)
+
+        self.assertEqual([9182], created)
+
+    def test_start_does_not_notify_pid_when_spawn_fails(self):
+        request = self._request()
+        created: list[int] = []
+        with (
+            mock.patch.object(
+                windows_watch.subprocess,
+                "Popen",
+                side_effect=OSError("injected pre-spawn failure"),
+            ),
+            self.assertRaisesRegex(WatchProtocolError, "launch failed"),
+        ):
+            start_watch(request, on_created=created.append)
+
+        self.assertEqual([], created)
+
     def test_launch_publication_failure_uses_owned_incomplete_cleanup(self):
         request = self._request()
         request_path = self.evidence / "request.json"

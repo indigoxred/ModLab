@@ -19,6 +19,14 @@ import uuid
 from modlab.adapters.mo2.processes import inspect_mo2_processes
 from modlab.adapters.mo2.release import bundled_mo2_252_path, load_mo2_release
 from modlab.adapters.skyrim.windows_version import read_windows_file_version
+from modlab.platform.windows_exact_fs import (
+    ExactObjectError,
+    ExactObjectOwnershipError,
+    RetainedObjectOwner,
+    RetainedObjectRole,
+    pin_stable_direct_object,
+    read_pinned_file,
+)
 from modlab.workspace import workspace_layout
 
 from .mo2_containment_fixtures import (
@@ -157,6 +165,8 @@ class ContainmentEffects:
     def __post_init__(self) -> None:
         written = _unique_paths(tuple(self.written_paths))
         roots = _unique_paths(tuple(self.child_mutation_roots))
+        if any(not path.is_absolute() for path in (*written, *roots)):
+            raise ValueError("containment effect paths must be absolute")
         if any(root not in written for root in roots):
             raise ValueError("child mutation roots must be included in written paths")
         for label, pid in (("watcher", self.watcher_pid), ("MO2", self.mo2_pid)):
@@ -314,6 +324,10 @@ _ACTIVE_EFFECTS: ContextVar[_EffectLedger | None] = ContextVar(
     "mo2_containment_effects",
     default=None,
 )
+_ACTIVE_GUARDED_MUTATION_ROOTS: ContextVar[tuple[Path, ...]] = ContextVar(
+    "mo2_containment_guarded_mutation_roots",
+    default=(),
+)
 
 
 def _current_effects() -> _EffectLedger:
@@ -330,23 +344,316 @@ def _effect_store(validation_root: Path) -> ContainmentStore:
     )
 
 
+class _MutationObservationError(ContainmentServiceError):
+    """A delegated root is proven unsafe rather than merely unavailable."""
+
+
+def _mutation_root_guard(
+    supplied_root: Path,
+    existing_guards: tuple[object, ...] = (),
+) -> object | None:
+    """Pin the nearest existing object and prove its entire pathname chain.
+
+    The retained descendant denies rename/delete for itself and, on Windows,
+    consequently denies replacing any ancestor through which that open handle
+    was resolved.  Comparing every component on both sides of acquisition
+    closes the only gap before that denial is in force without requiring
+    DELETE access to protected ancestors such as ``C:\\Users``.
+    """
+    root = Path(supplied_root)
+    if os.name != "nt":
+        return None
+    if not root.is_absolute():
+        raise _MutationObservationError(
+            f"delegated mutation root must be absolute: {root}"
+        )
+
+    def identity(metadata: os.stat_result) -> tuple[int, ...]:
+        return (
+            int(metadata.st_mode),
+            int(metadata.st_dev),
+            int(metadata.st_ino),
+            int(metadata.st_size),
+            int(metadata.st_mtime_ns),
+            int(metadata.st_ctime_ns),
+            int(getattr(metadata, "st_file_attributes", 0)),
+        )
+
+    current = Path(root.anchor)
+    path_chain = [current]
+    for part in root.parts[1:]:
+        current /= part
+        path_chain.append(current)
+    observed_chain: list[tuple[Path, tuple[int, ...], os.stat_result]] = []
+    for current in path_chain:
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(metadata.st_mode) or bool(
+            getattr(metadata, "st_file_attributes", 0) & 0x400
+        ):
+            raise _MutationObservationError(
+                f"delegated mutation path is redirected or reparse: {current}"
+            )
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise _MutationObservationError(
+                f"delegated mutation path is not a direct directory: {current}"
+            )
+        observed_chain.append((current, identity(metadata), metadata))
+    if not observed_chain:
+        raise _MutationObservationError(
+            f"delegated mutation path has no observable direct ancestor: {root}"
+        )
+    existing, _existing_identity, existing_metadata = observed_chain[-1]
+    pinned = next(
+        (
+            held
+            for held in existing_guards
+            if os.path.normcase(os.path.normpath(str(held.path)))
+            == os.path.normcase(os.path.normpath(str(existing)))
+        ),
+        None,
+    )
+    acquired = pinned is None
+    if acquired:
+        try:
+            pinned = pin_stable_direct_object(
+                existing,
+                "directory",
+                allow_writes=True,
+            )
+        except ExactObjectOwnershipError as error:
+            raise ContainmentStoreOwnershipError(
+                "delegated mutation guard retained exact ownership",
+                error,
+            ) from error
+        except (ExactObjectError, OSError) as error:
+            raise _MutationObservationError(
+                f"delegated mutation guard rejected {existing}: {error}"
+            ) from error
+    assert pinned is not None
+    try:
+        if (
+            pinned.identity is None
+            or int(existing_metadata.st_ino) != pinned.identity.file_id
+        ):
+            raise _MutationObservationError(
+                f"delegated mutation guard pinned a changed identity at {existing}"
+            )
+        for component, expected_identity, _metadata in observed_chain:
+            metadata = component.lstat()
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
+                or not stat.S_ISDIR(metadata.st_mode)
+                or identity(metadata) != expected_identity
+            ):
+                raise _MutationObservationError(
+                    "delegated mutation guard path changed during acquisition at "
+                    f"{component}"
+                )
+    except BaseException as error:
+        if acquired:
+            try:
+                pinned.close()
+            except BaseException as close_error:
+                if pinned.handle:
+                    ownership = ExactObjectOwnershipError(
+                        "delegated mutation guard validation retained a live handle: "
+                        f"{close_error}",
+                        verification=(pinned,),
+                    )
+                    raise ContainmentStoreOwnershipError(
+                        "delegated mutation guard requires retained-handle resolution",
+                        ownership,
+                    ) from error
+        raise
+    return pinned if acquired else None
+
+
+def _close_mutation_root_guards(
+    guards: tuple[object, ...],
+    primary: BaseException | None,
+) -> None:
+    unresolved = []
+    close_errors: list[BaseException] = []
+    for pinned in reversed(guards):
+        try:
+            pinned.close()
+        except BaseException as error:
+            close_errors.append(error)
+            if getattr(pinned, "handle", 0):
+                unresolved.append(pinned)
+    if not unresolved:
+        if close_errors and primary is not None and hasattr(primary, "add_note"):
+            primary.add_note(
+                "delegated mutation guard cleanup completed with errors: "
+                + "; ".join(str(error) for error in close_errors)
+            )
+        elif close_errors:
+            raise ContainmentServiceError(
+                "delegated mutation guard cleanup failed: "
+                + "; ".join(str(error) for error in close_errors)
+            ) from close_errors[0]
+        return
+    prior_owners = (
+        primary.ownership.owners
+        if isinstance(primary, ContainmentStoreOwnershipError)
+        else ()
+    )
+    ownership = ExactObjectOwnershipError(
+        "delegated mutation guard retained live ownership after cleanup failure",
+        owners=(
+            *prior_owners,
+            *(
+                RetainedObjectOwner(RetainedObjectRole.VERIFICATION, pinned)
+                for pinned in unresolved
+            ),
+        ),
+    )
+    if isinstance(primary, ContainmentStoreOwnershipError):
+        primary.ownership = ownership
+        if hasattr(primary, "add_note"):
+            primary.add_note("delegated mutation guard cleanup retained live ownership")
+        raise primary
+    raise ContainmentStoreOwnershipError(
+        "delegated mutation guard requires retained-handle resolution",
+        ownership,
+    ) from primary
+
+
 def _mutation_root_observation(
     supplied_root: Path,
 ) -> tuple[tuple[object, ...], ...] | None:
-    """Take one non-following inventory used only to prove delegated mutation."""
+    """Take one stable, non-following inventory used to prove delegated mutation."""
     root = Path(supplied_root)
-    try:
-        root_metadata = root.lstat()
-    except FileNotFoundError:
-        return (("absent",),)
-    except OSError:
-        return None
+    if not root.is_absolute():
+        raise _MutationObservationError(
+            f"delegated mutation root must be absolute: {root}"
+        )
 
     rows: list[tuple[object, ...]] = []
+    retained: list[object] = []
+
+    def redirected(metadata: os.stat_result) -> bool:
+        return stat.S_ISLNK(metadata.st_mode) or bool(
+            getattr(metadata, "st_file_attributes", 0) & 0x400
+        )
+
+    def identity(metadata: os.stat_result) -> tuple[int, ...]:
+        return (
+            int(metadata.st_mode),
+            int(metadata.st_dev),
+            int(metadata.st_ino),
+            int(metadata.st_size),
+            int(metadata.st_mtime_ns),
+            int(metadata.st_ctime_ns),
+            int(getattr(metadata, "st_file_attributes", 0)),
+        )
+
+    def close_retained(primary: BaseException | None = None) -> None:
+        unresolved = []
+        close_errors: list[BaseException] = []
+        for pinned in reversed(retained):
+            try:
+                pinned.close()
+            except BaseException as error:
+                close_errors.append(error)
+                if getattr(pinned, "handle", 0):
+                    unresolved.append(pinned)
+        if unresolved:
+            ownership = ExactObjectOwnershipError(
+                "stable delegated-effect observation retained live handles: "
+                + "; ".join(str(error) for error in close_errors),
+                verification=tuple(unresolved),
+            )
+            raise ContainmentStoreOwnershipError(
+                "stable delegated-effect observation requires retained-handle resolution",
+                ownership,
+            ) from primary
+        if close_errors and primary is None:
+            raise ContainmentServiceError(
+                "stable delegated-effect observation handle cleanup failed: "
+                + "; ".join(str(error) for error in close_errors)
+            ) from close_errors[0]
+
+    def stable_pin(path: Path, kind: str) -> object | None:
+        if os.name != "nt":
+            return None
+        pinned = pin_stable_direct_object(path, kind)
+        retained.append(pinned)
+        return pinned
+
+    def require_direct_directory(
+        path: Path,
+        metadata: os.stat_result,
+        *,
+        retain: bool = False,
+    ) -> object | None:
+        if redirected(metadata):
+            raise _MutationObservationError(
+                f"delegated mutation path is redirected or reparse: {path}"
+            )
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise _MutationObservationError(
+                f"delegated mutation path is not a direct directory: {path}"
+            )
+        return stable_pin(path, "directory") if retain else None
+
+    current = Path(root.anchor)
+    path_identities: list[tuple[Path, tuple[int, ...]]] = []
+    try:
+        path_chain: list[Path] = [current]
+        for part in root.parts[1:]:
+            current /= part
+            path_chain.append(current)
+        for index, component in enumerate(path_chain):
+            try:
+                metadata = component.lstat()
+            except FileNotFoundError:
+                close_retained()
+                return (("absent",),)
+            require_direct_directory(
+                component,
+                metadata,
+                retain=(
+                    index == len(path_chain) - 1
+                    and root not in _ACTIVE_GUARDED_MUTATION_ROOTS.get()
+                ),
+            )
+            path_identities.append((component, identity(metadata)))
+        root_metadata = root.lstat()
+    except _MutationObservationError as error:
+        close_retained(error)
+        raise
+    except ExactObjectOwnershipError as error:
+        close_retained(error)
+        raise ContainmentStoreOwnershipError(
+            "stable delegated-effect observation retained exact ownership",
+            error,
+        ) from error
+    except (ExactObjectError, OSError):
+        close_retained()
+        return None
 
     def file_digest(path: Path, metadata: os.stat_result) -> str | None:
         if not stat.S_ISREG(metadata.st_mode):
             return None
+        if redirected(metadata):
+            raise _MutationObservationError(
+                f"delegated mutation entry is redirected or reparse: {path}"
+            )
+        if os.name == "nt":
+            pinned = stable_pin(path, "file")
+            assert pinned is not None
+            data = read_pinned_file(pinned)
+            after = path.lstat()
+            if identity(after) != identity(metadata):
+                raise OSError(
+                    f"delegated mutation entry changed while hashing: {path}"
+                )
+            return hashlib.sha256(data).hexdigest()
         flags = (
             os.O_RDONLY
             | getattr(os, "O_BINARY", 0)
@@ -398,33 +705,26 @@ def _mutation_root_observation(
     ) -> tuple[object, ...]:
         return (
             relative,
-            int(metadata.st_mode),
-            int(metadata.st_dev),
-            int(metadata.st_ino),
-            int(metadata.st_size),
-            int(metadata.st_mtime_ns),
-            int(metadata.st_ctime_ns),
-            int(getattr(metadata, "st_file_attributes", 0)),
+            *identity(metadata),
             file_digest(path, metadata),
         )
 
     try:
         rows.append(metadata_row(".", root, root_metadata))
-    except OSError:
+    except _MutationObservationError as error:
+        close_retained(error)
+        raise
+    except (ExactObjectError, OSError):
+        close_retained()
         return None
-    root_redirected = stat.S_ISLNK(root_metadata.st_mode) or bool(
-        getattr(root_metadata, "st_file_attributes", 0) & 0x400
-    )
-    if not stat.S_ISDIR(root_metadata.st_mode) or root_redirected:
-        return tuple(rows)
 
-    def visit(current: Path, relative: Path) -> None:
+    def scan(current: Path) -> tuple[tuple[str, Path, os.stat_result], ...]:
         with os.scandir(current) as found:
             ordered = sorted(
                 found,
                 key=lambda entry: (entry.name.casefold(), entry.name),
             )
-            entries = tuple(
+            return tuple(
                 (
                     entry.name,
                     Path(entry.path),
@@ -432,29 +732,79 @@ def _mutation_root_observation(
                 )
                 for entry in ordered
             )
+
+    def visit(
+        current: Path,
+        relative: Path,
+        expected: os.stat_result,
+    ) -> None:
+        entered = current.lstat()
+        if identity(entered) != identity(expected):
+            raise OSError(f"delegated mutation directory changed before scan: {current}")
+        require_direct_directory(current, entered) if os.name != "nt" else None
+        entries = scan(current)
         for name, child_path, metadata in entries:
             child_relative = relative / name
+            if redirected(metadata):
+                raise _MutationObservationError(
+                    f"delegated mutation entry is redirected or reparse: {child_path}"
+                )
+            if not stat.S_ISDIR(metadata.st_mode) and not stat.S_ISREG(metadata.st_mode):
+                raise _MutationObservationError(
+                    f"delegated mutation entry is not direct: {child_path}"
+                )
+            if stat.S_ISDIR(metadata.st_mode) and os.name == "nt":
+                stable_pin(child_path, "directory")
             rows.append(metadata_row(child_relative.as_posix(), child_path, metadata))
-            redirected = stat.S_ISLNK(metadata.st_mode) or bool(
-                getattr(metadata, "st_file_attributes", 0) & 0x400
+            if stat.S_ISDIR(metadata.st_mode):
+                visit(child_path, child_relative, metadata)
+        rescanned = scan(current)
+        before_rows = tuple((name, identity(metadata)) for name, _path, metadata in entries)
+        after_rows = tuple((name, identity(metadata)) for name, _path, metadata in rescanned)
+        if any(redirected(metadata) for _name, _path, metadata in rescanned):
+            raise _MutationObservationError(
+                f"delegated mutation directory gained a reparse entry: {current}"
             )
-            if stat.S_ISDIR(metadata.st_mode) and not redirected:
-                visit(child_path, child_relative)
+        if before_rows != after_rows or identity(current.lstat()) != identity(expected):
+            raise OSError(f"delegated mutation directory changed during scan: {current}")
 
     try:
-        visit(root, Path())
-    except OSError:
+        visit(root, Path(), root_metadata)
+        for component, expected_identity in path_identities:
+            metadata = component.lstat()
+            if redirected(metadata):
+                raise _MutationObservationError(
+                    f"delegated mutation path became redirected or reparse: {component}"
+                )
+            if identity(metadata) != expected_identity:
+                raise OSError(
+                    f"delegated mutation path changed during observation: {component}"
+                )
+    except _MutationObservationError as error:
+        close_retained(error)
+        raise
+    except (ExactObjectError, OSError):
+        close_retained()
         return None
+    close_retained()
     return tuple(rows)
 
 
-def _delegated_mutations(
+def _delegated_mutations_guarded(
     roots: tuple[Path, ...],
     operation: Callable[[], _V],
 ) -> _V:
     """Record delegated roots iff pre/post inventories prove they changed."""
     exact_roots = _unique_paths(roots)
-    before = tuple(_mutation_root_observation(root) for root in exact_roots)
+    before_rows: list[tuple[tuple[object, ...], ...] | None] = []
+    try:
+        for root in exact_roots:
+            before_rows.append(_mutation_root_observation(root))
+    except _MutationObservationError as error:
+        raise ContainmentServiceError(
+            f"delegated mutation effect observation rejected before operation: {error}"
+        ) from error
+    before = tuple(before_rows)
     unavailable_before = tuple(
         root for root, observation in zip(exact_roots, before, strict=True)
         if observation is None
@@ -466,14 +816,30 @@ def _delegated_mutations(
         )
 
     def record_observed_changes() -> None:
-        after = tuple(_mutation_root_observation(root) for root in exact_roots)
-        for root, prior, current in zip(exact_roots, before, after, strict=True):
-            if current is not None and prior != current:
+        unavailable_after: list[Path] = []
+        rejected_after: list[tuple[Path, BaseException]] = []
+        for root, prior in zip(exact_roots, before, strict=True):
+            try:
+                current = _mutation_root_observation(root)
+            except _MutationObservationError as error:
+                # A safe pre-observation cannot contain a reparse/non-direct
+                # entry.  Seeing one afterwards proves the delegate changed
+                # this mutation root even though the resulting tree is unsafe.
                 _current_effects().child_mutation_root(root)
-        unavailable_after = tuple(
-            root for root, observation in zip(exact_roots, after, strict=True)
-            if observation is None
-        )
+                rejected_after.append((root, error))
+                continue
+            if current is None:
+                unavailable_after.append(root)
+            elif prior != current:
+                _current_effects().child_mutation_root(root)
+        if rejected_after:
+            joined = ", ".join(
+                f"{root} ({error})" for root, error in rejected_after
+            )
+            raise ContainmentServiceError(
+                "delegated mutation effect observation rejected after operation: "
+                + joined
+            ) from rejected_after[0][1]
         if unavailable_after:
             joined = ", ".join(str(root) for root in unavailable_after)
             raise ContainmentServiceError(
@@ -489,6 +855,8 @@ def _delegated_mutations(
             detail = str(observation_error).replace("after operation", "after failure")
             if hasattr(operation_error, "add_note"):
                 operation_error.add_note(detail)
+            if isinstance(operation_error, ContainmentStoreOwnershipError):
+                raise operation_error
             if not isinstance(operation_error, Exception):
                 raise
             raise ContainmentServiceError(
@@ -497,6 +865,30 @@ def _delegated_mutations(
         raise
     record_observed_changes()
     return value
+
+
+def _delegated_mutations(
+    roots: tuple[Path, ...],
+    operation: Callable[[], _V],
+) -> _V:
+    exact_roots = _unique_paths(roots)
+    guards: list[object] = []
+    primary: BaseException | None = None
+    try:
+        for root in exact_roots:
+            guard = _mutation_root_guard(root, tuple(guards))
+            if guard is not None:
+                guards.append(guard)
+        token = _ACTIVE_GUARDED_MUTATION_ROOTS.set(exact_roots)
+        try:
+            return _delegated_mutations_guarded(exact_roots, operation)
+        finally:
+            _ACTIVE_GUARDED_MUTATION_ROOTS.reset(token)
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        _close_mutation_root_guards(tuple(guards), primary)
 
 
 def _delegated_mutation(
@@ -1114,11 +1506,15 @@ def arm_scenario(
     try:
         worker_pid = _delegated_mutation(
             evidence_root,
-            lambda: start_watch(request),
+            lambda: start_watch(
+                request,
+                on_created=_current_effects().watcher,
+            ),
         )
         if type(worker_pid) is not int or worker_pid <= 0:
             raise ContainmentServiceError("watch startup returned an invalid worker PID")
-        _current_effects().watcher(worker_pid)
+    except ContainmentStoreOwnershipError:
+        raise
     except (OSError, RuntimeError) as error:
         store.transition(
             journal,
@@ -1173,20 +1569,27 @@ def launch_scenario(
             error="post-ScenarioStarted: stage MO2 executable version is not 2.5.2.0",
         )
         raise ContainmentServiceError("stage MO2 executable version is not 2.5.2.0")
+    created_pid: int | None = None
+
+    def record_created_pid(pid: int) -> None:
+        nonlocal created_pid
+        created_pid = pid
+        _current_effects().mo2(pid)
+
     try:
         launch = launch_low_integrity_process(
             record.executable,
             ("--profile", "ModLab - Lab"),
             record.stage_app,
             record.stage_environment,
+            on_created=record_created_pid,
         )
-        if type(launch.pid) is int and launch.pid > 0:
-            _current_effects().mo2(launch.pid)
         observed_integrity = inspect_process_integrity(launch.pid)
         observation = inspect_mo2_processes(record.stage_root)
         exact = tuple(item for item in observation.relevant if item.pid == launch.pid)
         if (
-            launch.integrity is not IntegrityLevel.LOW
+            created_pid != launch.pid
+            or launch.integrity is not IntegrityLevel.LOW
             or observed_integrity is not IntegrityLevel.LOW
             or not observation.complete
             or len(exact) != 1
@@ -1197,7 +1600,7 @@ def launch_scenario(
         ):
             raise ContainmentServiceError("launched MO2 identity/integrity proof failed")
     except BaseException as error:
-        mo2_pid = getattr(locals().get("launch"), "pid", None)
+        mo2_pid = created_pid
         store.transition(
             started,
             ScenarioState.RECOVERY_REQUIRED,
@@ -1231,6 +1634,8 @@ def launch_scenario(
     try:
         store.write_launch_evidence(run_id, scenario, launch_document)
         return store.transition(started, ScenarioState.LAUNCHED, mo2_pid=launch.pid)
+    except ContainmentStoreOwnershipError:
+        raise
     except (ContainmentStoreError, OSError) as error:
         store.transition(
             started,

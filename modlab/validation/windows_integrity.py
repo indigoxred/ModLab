@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
-from typing import Mapping
+from typing import Callable, Mapping
 
 from modlab.validation.mo2_containment_model import IntegrityObservation
 
@@ -725,8 +725,12 @@ def launch_low_integrity_process(
     args: tuple[str, ...],
     cwd: Path,
     environment: Mapping[str, str],
+    *,
+    on_created: Callable[[int], None] | None = None,
 ) -> ProcessLaunch:
     _require_windows()
+    if on_created is not None and not callable(on_created):
+        raise TypeError("process creation callback must be callable")
     executable_path = Path(executable)
     working_directory = Path(cwd)
     if not executable_path.is_absolute() or not executable_path.is_file():
@@ -761,6 +765,11 @@ def launch_low_integrity_process(
     child_token = wintypes.HANDLE()
     resumed = False
     try:
+        created_pid = int(process_information.dwProcessId)
+        if created_pid <= 0:
+            raise OSError("CreateProcessW returned an invalid process ID")
+        if on_created is not None:
+            on_created(created_pid)
         try:
             if not _advapi32.OpenProcessToken(
                 process_information.hProcess,
@@ -772,32 +781,39 @@ def launch_low_integrity_process(
         finally:
             _close_handle(child_token.value)
 
-        observed = inspect_process_integrity(process_information.dwProcessId)
+        observed = inspect_process_integrity(created_pid)
         if observed is not IntegrityLevel.LOW:
             raise OSError(
-                f"suspended process {process_information.dwProcessId} was {observed.name}, not LOW"
+                f"suspended process {created_pid} was {observed.name}, not LOW"
             )
         creation_time = _process_creation_time(
             process_information.hProcess,
-            process_information.dwProcessId,
+            created_pid,
         )
         _resume_verified_child(
             process_information.hProcess,
             process_information.hThread,
-            process_information.dwProcessId,
+            created_pid,
         )
         resumed = True
         return ProcessLaunch(
-            pid=process_information.dwProcessId,
+            pid=created_pid,
             executable=str(executable_path),
             arguments=args,
             working_directory=str(working_directory),
             integrity=observed,
             creation_time=creation_time,
         )
-    except BaseException:
+    except BaseException as error:
         if not resumed:
-            _terminate_created_process(process_information.hProcess)
+            try:
+                _terminate_created_process(process_information.hProcess)
+            except BaseException as cleanup_error:
+                if hasattr(error, "add_note"):
+                    error.add_note(
+                        "created-process termination cleanup failed: "
+                        f"{cleanup_error}"
+                    )
         raise
     finally:
         _close_handle(process_information.hThread)
