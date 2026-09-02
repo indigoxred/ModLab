@@ -7,7 +7,7 @@ All host publication uses the shared native retained-handle no-replace primitive
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import hashlib
 import json
 import os
@@ -295,25 +295,43 @@ def _entry(path, relative, kind):
 
 
 def snapshot_tree(root):
-    """Read-only complete tree, retaining ancestors and every traversed directory."""
+    """Retain all descendants and bracket every directory's exact membership."""
     result = []
     root = Path(root).absolute()
+    members = {}
 
-    def walk(directory):
-        for path in sorted(directory.iterdir(), key=lambda p: (p.name.casefold(), p.name)):
+    def walk(directory, stack):
+        paths = sorted(directory.iterdir(), key=lambda p: (p.name.casefold(), p.name))
+        _require(len({p.name.casefold() for p in paths}) == len(paths), "case-insensitive inventory collision")
+        children = []
+        members[directory] = []
+        for path in paths:
             metadata = path.lstat()
             _require(not stat.S_ISLNK(metadata.st_mode) and not getattr(metadata, "st_file_attributes", 0) & 0x400, "redirected inventory entry")
             kind = "directory" if stat.S_ISDIR(metadata.st_mode) else "file"
             _require(kind == "directory" or stat.S_ISREG(metadata.st_mode), "unsupported inventory entry")
             relative = path.relative_to(root).as_posix()
             _relative(relative)
-            result.append(_entry(path, relative, kind))
+            expected = identity_at_path(path)
+            pinned = stack.enter_context(_pinned(path, kind))
+            _require(expected == pinned.identity, "inventory member changed during acquisition")
+            members[directory].append((path, pinned.identity))
+            data = read_pinned_file(pinned) if kind == "file" else b""
+            result.append({"path": relative, "kind": kind,
+                "sha256": hashlib.sha256(data).hexdigest() if kind == "file" else None,
+                "size": len(data), "volume": pinned.identity.volume_serial, "fileId": pinned.identity.file_id})
             if kind == "directory":
-                with _pinned(path, kind):
-                    walk(path)
+                children.append(path)
+        for child in children:
+            walk(child, stack)
 
-    with _parents(root):
-        walk(root)
+    with _parents(root), ExitStack() as stack:
+        walk(root, stack)
+        for directory, expected in members.items():
+            actual = sorted(directory.iterdir(), key=lambda p: (p.name.casefold(), p.name))
+            _require(actual == [path for path, _identity in expected], "inventory directory membership changed")
+            for path, identity in expected:
+                _require(identity_at_path(path) == identity, "inventory member identity changed")
     return sorted(result, key=lambda item: (item["path"].casefold(), item["path"]))
 
 

@@ -252,6 +252,42 @@ class CapabilityFilesystemTests(unittest.TestCase):
         with patch.object(Path, "lstat", substitute), self.assertRaises(cap.CapabilityError):
             cap.snapshot_tree(self.root)
 
+    def test_snapshot_rejects_membership_added_after_initial_enumeration(self):
+        (self.root / "first.py").write_bytes(b"first")
+        original = Path.iterdir
+        raced = False
+        def add_after_enumeration(path):
+            nonlocal raced
+            entries = list(original(path))
+            if path == self.root and not raced:
+                raced = True
+                (path / "late.py").write_bytes(b"late")
+            return iter(entries)
+        with patch.object(Path, "iterdir", add_after_enumeration), self.assertRaises(cap.CapabilityError):
+            cap.snapshot_tree(self.root)
+        self.assertTrue(raced)
+
+    def test_snapshot_keeps_earlier_file_pinned_until_all_content_is_read(self):
+        earlier = self.root / "a.py"
+        earlier.write_bytes(b"before")
+        (self.root / "z.py").write_bytes(b"last")
+        original = cap.read_pinned_file
+        attempted = False
+        blocked = False
+        def change_earlier(pinned):
+            nonlocal attempted, blocked
+            if pinned.path.name == "z.py":
+                attempted = True
+                try:
+                    earlier.write_bytes(b"after")
+                except OSError:
+                    blocked = True
+            return original(pinned)
+        with patch.object(cap, "read_pinned_file", change_earlier):
+            cap.snapshot_tree(self.root)
+        self.assertTrue(attempted)
+        self.assertTrue(blocked, "earlier content became mutable before snapshot completion")
+
 
 class CandidateTests(unittest.TestCase):
     def setUp(self):
