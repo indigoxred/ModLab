@@ -679,6 +679,10 @@ class ContainmentStore:
         expected_id: str | None = None,
     ) -> CapabilityDecision:
         with self._run_lock(run_id):
+            self._require_existing_direct_directory(
+                self.run_path(run_id),
+                "containment run",
+            )
             raw = self._read(self.decision_path(run_id), "capability decision")
             probe = self._decision_probe(raw, run_id)
             results, outcomes = self._resolve_decision_evidence_unlocked(probe)
@@ -1277,9 +1281,25 @@ class ContainmentStore:
     ) -> tuple[tuple[ScenarioResult, ...], tuple[WatchOutcome, ...]]:
         if not decision.scenario_result_ids:
             return (), ()
+        self._require_existing_direct_directory(
+            self.run_path(decision.run_id) / "scenarios",
+            "scenario collection",
+        )
         wanted = set(decision.scenario_result_ids)
         found: dict[str, tuple[ScenarioResult, WatchOutcome]] = {}
         for scenario in ContainmentScenario:
+            if not self._require_existing_direct_directory(
+                self.scenario_path(decision.run_id, scenario),
+                f"{scenario.value} scenario",
+                required=False,
+            ):
+                continue
+            if not self._require_existing_direct_directory(
+                self.watch_path(decision.run_id, scenario),
+                f"{scenario.value} watch evidence",
+                required=False,
+            ):
+                continue
             try:
                 result = self._load_result_unlocked(decision.run_id, scenario)
             except ContainmentStoreError:
@@ -1559,6 +1579,38 @@ class ContainmentStore:
             if not stat.S_ISDIR(metadata.st_mode):
                 raise ContainmentStoreError(f"containment path is not a directory: {current}")
             self._reject_redirect(current)
+
+    def _require_existing_direct_directory(
+        self,
+        path: Path,
+        label: str,
+        *,
+        required: bool = True,
+    ) -> bool:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError as error:
+            if not required:
+                return False
+            raise ContainmentStoreNotFound(
+                f"{label} directory is missing: {path}"
+            ) from error
+        except OSError as error:
+            raise ContainmentStoreError(
+                f"cannot inspect {label} directory: {error}"
+            ) from error
+        if stat.S_ISLNK(metadata.st_mode) or bool(
+            getattr(metadata, "st_file_attributes", 0)
+            & _FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise ContainmentStoreError(
+                f"{label} directory is redirected or reparse: {path}"
+            )
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ContainmentStoreError(
+                f"{label} path is not a direct directory: {path}"
+            )
+        return True
 
     @staticmethod
     def _reject_redirect(path: Path) -> None:

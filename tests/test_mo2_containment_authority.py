@@ -4,8 +4,10 @@ import os
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from modlab.validation.mo2_containment_authority import (
     HISTORICAL_CONTAINMENT_DECISION_ID,
@@ -44,12 +46,43 @@ def _canonical(value: object) -> bytes:
     ).encode("utf-8")
 
 
+@contextmanager
+def _redirect_directory(path: Path):
+    target = path.with_name(path.name + "-direct-target")
+    path.rename(target)
+    redirected = False
+    try:
+        if os.name == "nt":
+            created = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(path), str(target)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if created.returncode != 0:
+                raise AssertionError(created.stdout + created.stderr)
+        else:
+            os.symlink(target, path, target_is_directory=True)
+        redirected = True
+        yield
+    finally:
+        if redirected and (path.exists() or path.is_symlink()):
+            if os.name == "nt":
+                path.rmdir()
+            else:
+                path.unlink()
+        if target.exists():
+            target.rename(path)
+
+
 class AuthorityFixture:
     def __init__(self, root: Path, slot: int = 0) -> None:
         self.root = root
         self.store = ContainmentStore(root)
         digits = ("1", "2", "3", "4") if slot == 0 else ("5", "6", "7", "8")
-        self.historical_run_id = "containment-run:" + digits[0] * 32
+        self.historical_run_id = HISTORICAL_CONTAINMENT_RUN_ID
+        self.historical_decision_id = HISTORICAL_CONTAINMENT_DECISION_ID
+        self.arbitrary_retired_run_id = "containment-run:" + digits[0] * 32
         self.replacement_run_id = "containment-run:" + digits[1] * 32
         self.alternate_run_id = "containment-run:" + digits[2] * 32
         self.source_seed = "a" if slot == 0 else "d"
@@ -117,8 +150,14 @@ class AuthorityFixture:
                 source_seed=self.source_seed,
             )
             self.historical_decision = self.historical_decision_write.value
-            self.historical_decision_id = self.historical_decision_write.content_id
         return self.historical_decision_write
+
+    def write_arbitrary_retired_decision(self):
+        return self._write_decision(
+            self.arbitrary_retired_run_id,
+            bound=False,
+            source_seed=self.source_seed,
+        )
 
     def write_retirement(
         self,
@@ -127,13 +166,21 @@ class AuthorityFixture:
         decision_write=None,
         reason_codes: tuple[str, ...] = HISTORICAL_RETIREMENT_REASON_CODES,
     ):
-        decision_write = decision_write or self.write_historical_decision()
+        if decision_write is None:
+            self.write_historical_decision()
+            decision_id = HISTORICAL_CONTAINMENT_DECISION_ID
+            run_id = HISTORICAL_CONTAINMENT_RUN_ID
+            mechanism = HISTORICAL_CONTAINMENT_MECHANISM
+        else:
+            decision_id = decision_write.content_id
+            run_id = decision_write.value.run_id
+            mechanism = decision_write.value.mechanism
         retirement = CapabilityRetirement(
             schema_version=1,
             authority_policy_version=1,
-            decision_id=decision_write.content_id,
-            run_id=decision_write.value.run_id,
-            mechanism=decision_write.value.mechanism,
+            decision_id=decision_id,
+            run_id=run_id,
+            mechanism=mechanism,
             status=status,
             reason_codes=reason_codes,
         )
@@ -253,10 +300,33 @@ class AuthorityFixture:
         return self
 
     def resolve_current(self):
-        return resolve_current_eligible_decision(self.root)
+        real_load_decision = ContainmentStore.load_decision
+        fixture = self
 
-    def resolve_specific(self, _decision_id: str):
-        return self.resolve_current()
+        def load_with_materialized_historical_identity(
+            store: ContainmentStore,
+            run_id: str,
+            expected_id: str | None = None,
+        ):
+            if (
+                store.root == fixture.root
+                and run_id == HISTORICAL_CONTAINMENT_RUN_ID
+                and expected_id == HISTORICAL_CONTAINMENT_DECISION_ID
+            ):
+                loaded = real_load_decision(store, run_id)
+                if loaded != fixture.historical_decision:
+                    raise AssertionError(
+                        "test historical identity shim loaded unexpected bytes"
+                    )
+                return loaded
+            return real_load_decision(store, run_id, expected_id)
+
+        with mock.patch.object(
+            ContainmentStore,
+            "load_decision",
+            new=load_with_materialized_historical_identity,
+        ):
+            return resolve_current_eligible_decision(self.root)
 
 
 class Mo2ContainmentAuthorityTests(unittest.TestCase):
@@ -267,18 +337,26 @@ class Mo2ContainmentAuthorityTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_historical_decision_is_rejected_even_when_bytes_still_exist(self):
+    def test_exact_historical_policy_root_is_retired_even_when_fixture_bytes_exist(self):
         fixture = AuthorityFixture(self.root)
         historical = fixture.write_historical_decision()
-        fixture.write_retirement(status="RetiredInvalidated")
+        retirement = fixture.write_retirement(status="RetiredInvalidated")
 
         self.assertTrue(historical.path.is_file())
         self.assertEqual(
             fixture.historical_decision,
             fixture.store.load_decision(fixture.historical_run_id),
         )
+        self.assertEqual(HISTORICAL_CONTAINMENT_DECISION_ID, retirement.value.decision_id)
+        self.assertEqual(HISTORICAL_CONTAINMENT_RUN_ID, retirement.value.run_id)
+        self.assertEqual(HISTORICAL_RETIREMENT_REASON_CODES, retirement.value.reason_codes)
+        with self.assertRaisesRegex(ContainmentStoreError, "content ID mismatch"):
+            fixture.store.load_decision(
+                HISTORICAL_CONTAINMENT_RUN_ID,
+                HISTORICAL_CONTAINMENT_DECISION_ID,
+            )
         with self.assertRaisesRegex(ContainmentAuthorityError, "retired"):
-            fixture.resolve_specific(fixture.historical_decision_id)
+            fixture.resolve_current()
 
     def test_only_independently_reviewed_replacement_is_eligible(self):
         fixture = AuthorityFixture(self.root)
@@ -292,8 +370,132 @@ class Mo2ContainmentAuthorityTests(unittest.TestCase):
         fixture.write_supersession()
         fixture.write_eligibility()
         resolved = fixture.resolve_current()
+        self.assertEqual(
+            HISTORICAL_CONTAINMENT_DECISION_ID,
+            resolved.retirement.decision_id,
+        )
+        self.assertEqual(
+            HISTORICAL_CONTAINMENT_DECISION_ID,
+            resolved.supersession.retired_decision_id,
+        )
         self.assertEqual(fixture.replacement_decision, resolved.decision)
         self.assertEqual(fixture.replacement_decision_id, resolved.decision_id)
+
+    def test_complete_chain_rooted_in_arbitrary_retirement_is_rejected(self):
+        fixture = AuthorityFixture(self.root)
+        arbitrary = fixture.write_arbitrary_retired_decision()
+        fixture.write_retirement(decision_write=arbitrary)
+        fixture.write_replacement_decision()
+        fixture.write_passing_review()
+        fixture.write_supersession()
+        fixture.write_eligibility()
+
+        with self.assertRaisesRegex(
+            ContainmentAuthorityError,
+            "exact historical|historical policy root",
+        ):
+            fixture.resolve_current()
+
+    def test_unreferenced_retirement_with_dangling_decision_is_rejected(self):
+        fixture = AuthorityFixture(self.root).complete()
+        fixture.store.write_retirement(
+            CapabilityRetirement(
+                schema_version=1,
+                authority_policy_version=1,
+                decision_id="containment-decision-sha256:" + "9" * 64,
+                run_id="containment-run:" + "9" * 32,
+                mechanism=HISTORICAL_CONTAINMENT_MECHANISM,
+                status="RetiredInvalidated",
+                reason_codes=("unreferenced-retirement",),
+            )
+        )
+
+        with self.assertRaisesRegex(ContainmentAuthorityError, "retirement.*missing"):
+            fixture.resolve_current()
+
+    def test_unreferenced_review_with_dangling_decision_is_rejected(self):
+        fixture = AuthorityFixture(self.root).complete()
+        fixture.store.write_review(
+            CapabilityReview(
+                schema_version=1,
+                authority_policy_version=1,
+                decision_id="containment-decision-sha256:" + "8" * 64,
+                run_id="containment-run:" + "8" * 32,
+                mechanism=HISTORICAL_CONTAINMENT_MECHANISM,
+                scenario_result_ids=fixture.replacement_decision.scenario_result_ids,
+                bindings=fixture.replacement_decision.bindings,
+                reviewer_id="containment-reviewer:unreferenced",
+                independent=True,
+                status="Passed",
+                reason_codes=(),
+            )
+        )
+
+        with self.assertRaisesRegex(ContainmentAuthorityError, "review.*missing"):
+            fixture.resolve_current()
+
+    def test_unreferenced_supersession_with_dangling_retirement_is_rejected(self):
+        fixture = AuthorityFixture(self.root).complete()
+        fixture.store.write_supersession(
+            CapabilitySupersession(
+                schema_version=1,
+                authority_policy_version=1,
+                retirement_id="containment-retirement-sha256:" + "7" * 64,
+                retired_decision_id="containment-decision-sha256:" + "7" * 64,
+                replacement_decision_id="containment-decision-sha256:" + "6" * 64,
+                replacement_run_id="containment-run:" + "6" * 32,
+                replacement_mechanism=HISTORICAL_CONTAINMENT_MECHANISM,
+                replacement_scenario_result_ids=(
+                    fixture.replacement_decision.scenario_result_ids
+                ),
+                replacement_bindings=fixture.replacement_decision.bindings,
+                review_id=fixture.review_id,
+            )
+        )
+
+        with self.assertRaisesRegex(ContainmentAuthorityError, "supersession.*retirement"):
+            fixture.resolve_current()
+
+    def test_unselected_review_with_inconsistent_result_binding_is_rejected(self):
+        fixture = AuthorityFixture(self.root).complete()
+        alternate = fixture.write_replacement_decision(alternate=True)
+        fixture.store.write_review(
+            CapabilityReview(
+                schema_version=1,
+                authority_policy_version=1,
+                decision_id=alternate.content_id,
+                run_id=alternate.value.run_id,
+                mechanism=alternate.value.mechanism,
+                scenario_result_ids=fixture.replacement_decision.scenario_result_ids,
+                bindings=alternate.value.bindings,
+                reviewer_id="containment-reviewer:inconsistent-unselected",
+                independent=True,
+                status="Passed",
+                reason_codes=(),
+            )
+        )
+
+        with self.assertRaisesRegex(ContainmentAuthorityError, "review.*binding"):
+            fixture.resolve_current()
+
+    def test_two_replacements_for_historical_retirement_are_conflicting(self):
+        fixture = AuthorityFixture(self.root).complete()
+        alternate = fixture.write_replacement_decision(alternate=True)
+        alternate_review = fixture.write_passing_review(
+            decision_write=alternate,
+            reviewer_id="containment-reviewer:independent-alternate",
+        )
+        fixture.write_supersession(
+            retirement_write=fixture.retirement_write,
+            decision_write=alternate,
+            review_write=alternate_review,
+        )
+
+        with self.assertRaisesRegex(
+            ContainmentAuthorityError,
+            "conflicting supersession",
+        ):
+            fixture.resolve_current()
 
     def test_two_eligible_records_are_rejected_as_ambiguous(self):
         first = AuthorityFixture(self.root, slot=0)
@@ -301,8 +503,8 @@ class Mo2ContainmentAuthorityTests(unittest.TestCase):
         second = AuthorityFixture(self.root, slot=1)
         second.complete()
 
-        with self.assertRaisesRegex(ContainmentAuthorityError, "multiple"):
-            resolve_current_eligible_decision(self.root)
+        with self.assertRaisesRegex(ContainmentAuthorityError, "multiple|conflicting"):
+            first.resolve_current()
 
     def test_eligibility_without_supersession_is_rejected(self):
         store = ContainmentStore(self.root)
@@ -430,6 +632,31 @@ class Mo2ContainmentAuthorityTests(unittest.TestCase):
                 else:
                     authority.rmdir()
             target.rename(authority)
+
+    def test_nested_scenario_or_watch_reparse_ancestor_fails_closed(self):
+        for ancestor in ("scenarios", "scenario", "watch"):
+            with self.subTest(ancestor=ancestor):
+                with tempfile.TemporaryDirectory(
+                    prefix=f"modlab-authority-{ancestor}-reparse-"
+                ) as root:
+                    fixture = AuthorityFixture(Path(root)).complete()
+                    scenario = ContainmentScenario.NEW_FOLDER
+                    redirected = fixture.store.run_path(
+                        fixture.replacement_run_id
+                    ) / "scenarios"
+                    if ancestor != "scenarios":
+                        redirected = fixture.store.scenario_path(
+                            fixture.replacement_run_id,
+                            scenario,
+                        )
+                    if ancestor == "watch":
+                        redirected = redirected / "watch"
+                    with _redirect_directory(redirected):
+                        with self.assertRaisesRegex(
+                            ContainmentAuthorityError,
+                            "redirected|reparse|direct",
+                        ):
+                            fixture.resolve_current()
 
     def test_caller_cannot_select_the_historical_run_or_decision(self):
         fixture = AuthorityFixture(self.root)

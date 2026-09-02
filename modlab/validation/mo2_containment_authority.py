@@ -132,6 +132,221 @@ def resolve_current_eligible_decision(
             f"containment authority graph is malformed or redirected: {error}"
         ) from error
 
+    decision_cache: dict[tuple[str, str], CapabilityDecision] = {}
+
+    def load_bound_decision(
+        run_id: str,
+        decision_id: str,
+        record_label: str,
+    ) -> CapabilityDecision:
+        if run_id not in run_ids:
+            raise ContainmentAuthorityError(
+                f"{record_label} references a missing or non-direct run"
+            )
+        key = (run_id, decision_id)
+        if key not in decision_cache:
+            try:
+                decision_cache[key] = store.load_decision(run_id, decision_id)
+            except ContainmentStoreError as error:
+                raise ContainmentAuthorityError(
+                    f"{record_label} decision or binding evidence is invalid: {error}"
+                ) from error
+        return decision_cache[key]
+
+    def require_replacement_decision(
+        decision: CapabilityDecision,
+        record_label: str,
+    ) -> None:
+        if decision.schema_version != 2 or decision.bindings is None:
+            raise ContainmentAuthorityError(
+                f"{record_label} must bind a source-bound version-2 decision"
+            )
+        if decision.verdict is not CapabilityVerdict.SUPPORTED:
+            raise ContainmentAuthorityError(
+                f"{record_label} must bind a Supported replacement decision"
+            )
+
+    for retirement_id, retirement in retirements.items():
+        retired_decision = load_bound_decision(
+            retirement.run_id,
+            retirement.decision_id,
+            f"retirement {retirement_id}",
+        )
+        if (
+            retired_decision.run_id != retirement.run_id
+            or retired_decision.mechanism != retirement.mechanism
+        ):
+            raise ContainmentAuthorityError(
+                f"retirement {retirement_id} does not bind its exact decision"
+            )
+
+    for review_id, review in reviews.items():
+        reviewed_decision = load_bound_decision(
+            review.run_id,
+            review.decision_id,
+            f"review {review_id}",
+        )
+        require_replacement_decision(reviewed_decision, f"review {review_id}")
+        if (
+            review.run_id != reviewed_decision.run_id
+            or review.mechanism != reviewed_decision.mechanism
+            or review.scenario_result_ids != reviewed_decision.scenario_result_ids
+            or review.bindings != reviewed_decision.bindings
+        ):
+            raise ContainmentAuthorityError(
+                f"review {review_id} source, version, result, or mechanism "
+                "binding differs from its decision"
+            )
+
+    for supersession_id, supersession in supersessions.items():
+        retirement = retirements.get(supersession.retirement_id)
+        if retirement is None:
+            raise ContainmentAuthorityError(
+                f"supersession {supersession_id} references a missing retirement"
+            )
+        if supersession.retired_decision_id != retirement.decision_id:
+            raise ContainmentAuthorityError(
+                f"supersession {supersession_id} retired-decision binding differs "
+                "from its retirement"
+            )
+        review = reviews.get(supersession.review_id)
+        if review is None:
+            raise ContainmentAuthorityError(
+                f"supersession {supersession_id} references a missing review"
+            )
+        replacement = load_bound_decision(
+            supersession.replacement_run_id,
+            supersession.replacement_decision_id,
+            f"supersession {supersession_id}",
+        )
+        require_replacement_decision(replacement, f"supersession {supersession_id}")
+        if (
+            supersession.replacement_run_id != replacement.run_id
+            or supersession.replacement_mechanism != replacement.mechanism
+            or supersession.replacement_scenario_result_ids
+            != replacement.scenario_result_ids
+            or supersession.replacement_bindings != replacement.bindings
+        ):
+            raise ContainmentAuthorityError(
+                f"supersession {supersession_id} source, version, result, or "
+                "mechanism binding differs from its replacement decision"
+            )
+        if (
+            review.decision_id != supersession.replacement_decision_id
+            or review.run_id != supersession.replacement_run_id
+        ):
+            raise ContainmentAuthorityError(
+                f"supersession {supersession_id} review decision binding differs "
+                "from its replacement decision"
+            )
+
+    eligibility_contexts: dict[
+        str,
+        tuple[
+            CapabilityEligibility,
+            CapabilityRetirement,
+            CapabilitySupersession,
+            CapabilityReview,
+            CapabilityDecision,
+        ],
+    ] = {}
+    for eligibility_id, eligibility in eligibilities.items():
+        if (
+            eligibility.decision_id == HISTORICAL_CONTAINMENT_DECISION_ID
+            or eligibility.run_id == HISTORICAL_CONTAINMENT_RUN_ID
+        ):
+            raise ContainmentAuthorityError(
+                "the historical containment run and decision are retired"
+            )
+        supersession = supersessions.get(eligibility.supersession_id)
+        if supersession is None:
+            raise ContainmentAuthorityError(
+                f"eligibility {eligibility_id} references a missing supersession"
+            )
+        review = reviews.get(eligibility.review_id)
+        if review is None:
+            raise ContainmentAuthorityError(
+                f"eligibility {eligibility_id} references a missing review"
+            )
+        retirement = retirements.get(supersession.retirement_id)
+        if retirement is None:
+            raise ContainmentAuthorityError(
+                f"eligibility {eligibility_id} resolves to a missing retirement"
+            )
+        if supersession.review_id != eligibility.review_id:
+            raise ContainmentAuthorityError(
+                f"eligibility {eligibility_id} and supersession review bindings differ"
+            )
+        if (
+            supersession.replacement_decision_id != eligibility.decision_id
+            or supersession.replacement_run_id != eligibility.run_id
+        ):
+            raise ContainmentAuthorityError(
+                f"eligibility {eligibility_id} replacement decision binding differs "
+                "from its supersession"
+            )
+        if (
+            review.decision_id != eligibility.decision_id
+            or review.run_id != eligibility.run_id
+        ):
+            raise ContainmentAuthorityError(
+                f"eligibility {eligibility_id} decision binding differs from its review"
+            )
+        if (
+            retirement.decision_id != HISTORICAL_CONTAINMENT_DECISION_ID
+            or retirement.run_id != HISTORICAL_CONTAINMENT_RUN_ID
+            or retirement.mechanism != HISTORICAL_CONTAINMENT_MECHANISM
+            or retirement.status != "RetiredInvalidated"
+            or retirement.reason_codes != HISTORICAL_RETIREMENT_REASON_CODES
+            or supersession.retired_decision_id
+            != HISTORICAL_CONTAINMENT_DECISION_ID
+        ):
+            raise ContainmentAuthorityError(
+                "eligible chain is not rooted in the exact historical policy root"
+            )
+        if review.status != "Passed":
+            raise ContainmentAuthorityError(
+                "independent review failed; zero decisions are eligible"
+            )
+        if not review.independent:
+            raise ContainmentAuthorityError(
+                "a passing independent review is required for eligibility"
+            )
+        decision = load_bound_decision(
+            eligibility.run_id,
+            eligibility.decision_id,
+            f"eligibility {eligibility_id}",
+        )
+        require_replacement_decision(decision, f"eligibility {eligibility_id}")
+        eligibility_contexts[eligibility_id] = (
+            eligibility,
+            retirement,
+            supersession,
+            review,
+            decision,
+        )
+
+    retirement_groups: dict[str, list[str]] = {}
+    for identifier, value in retirements.items():
+        retirement_groups.setdefault(value.decision_id, []).append(identifier)
+    if any(len(identifiers) != 1 for identifiers in retirement_groups.values()):
+        raise ContainmentAuthorityError(
+            "conflicting retirement records make containment authority ambiguous"
+        )
+
+    for binding_name, binding in (
+        ("retirement", lambda value: value.retirement_id),
+        ("retired decision", lambda value: value.retired_decision_id),
+        ("replacement decision", lambda value: value.replacement_decision_id),
+    ):
+        groups: dict[str, list[str]] = {}
+        for identifier, value in supersessions.items():
+            groups.setdefault(binding(value), []).append(identifier)
+        if any(len(identifiers) != 1 for identifiers in groups.values()):
+            raise ContainmentAuthorityError(
+                "conflicting supersession records share the same " + binding_name
+            )
+
     if not eligibilities:
         if retirements:
             raise ContainmentAuthorityError(
@@ -146,62 +361,8 @@ def resolve_current_eligible_decision(
             "multiple current eligibility records make containment authority ambiguous"
         )
 
-    eligibility_id, eligibility = next(iter(eligibilities.items()))
-    if (
-        eligibility.decision_id == HISTORICAL_CONTAINMENT_DECISION_ID
-        or eligibility.run_id == HISTORICAL_CONTAINMENT_RUN_ID
-    ):
-        raise ContainmentAuthorityError(
-            "the historical containment run and decision are retired"
-        )
-    supersession = supersessions.get(eligibility.supersession_id)
-    if supersession is None:
-        raise ContainmentAuthorityError(
-            "eligibility references a missing supersession record"
-        )
-    review = reviews.get(eligibility.review_id)
-    if review is None:
-        raise ContainmentAuthorityError(
-            "eligibility references a missing independent review record"
-        )
-    retirement = retirements.get(supersession.retirement_id)
-    if retirement is None:
-        raise ContainmentAuthorityError(
-            "supersession references a missing retirement record"
-        )
-
-    if supersession.review_id != eligibility.review_id:
-        raise ContainmentAuthorityError(
-            "eligibility and supersession review bindings differ"
-        )
-    if supersession.retired_decision_id != retirement.decision_id:
-        raise ContainmentAuthorityError(
-            "supersession retired-decision binding differs from retirement"
-        )
-    if supersession.replacement_decision_id != eligibility.decision_id:
-        raise ContainmentAuthorityError(
-            "eligibility and supersession replacement decision bindings differ"
-        )
-    if supersession.replacement_run_id != eligibility.run_id:
-        raise ContainmentAuthorityError(
-            "eligibility and supersession replacement run bindings differ"
-        )
-    if review.decision_id != eligibility.decision_id:
-        raise ContainmentAuthorityError(
-            "review decision binding differs from eligibility decision"
-        )
-    if review.run_id != eligibility.run_id:
-        raise ContainmentAuthorityError(
-            "review run binding differs from eligibility decision"
-        )
-
-    retirement_groups: dict[str, list[str]] = {}
-    for identifier, value in retirements.items():
-        retirement_groups.setdefault(value.decision_id, []).append(identifier)
-    if any(len(identifiers) != 1 for identifiers in retirement_groups.values()):
-        raise ContainmentAuthorityError(
-            "conflicting retirement records make containment authority ambiguous"
-        )
+    eligibility_id, context = next(iter(eligibility_contexts.items()))
+    eligibility, retirement, supersession, review, decision = context
     if eligibility.decision_id in retirement_groups:
         raise ContainmentAuthorityError(
             "the otherwise eligible containment decision is retired"
@@ -233,73 +394,6 @@ def resolve_current_eligible_decision(
     if matching_supersessions[0] != eligibility.supersession_id:
         raise ContainmentAuthorityError(
             "eligibility does not bind the unique supersession for its decision"
-        )
-
-    if review.status != "Passed":
-        raise ContainmentAuthorityError(
-            "independent review failed; zero decisions are eligible"
-        )
-    if not review.independent:
-        raise ContainmentAuthorityError(
-            "a passing independent review is required for eligibility"
-        )
-
-    if retirement.run_id not in run_ids:
-        raise ContainmentAuthorityError(
-            "retirement references a missing or non-direct historical run"
-        )
-    if eligibility.run_id not in run_ids:
-        raise ContainmentAuthorityError(
-            "eligibility references a missing or non-direct replacement run"
-        )
-    try:
-        retired_decision = store.load_decision(
-            retirement.run_id,
-            retirement.decision_id,
-        )
-        decision = store.load_decision(
-            eligibility.run_id,
-            eligibility.decision_id,
-        )
-    except ContainmentStoreError as error:
-        raise ContainmentAuthorityError(
-            f"decision or binding evidence is invalid: {error}"
-        ) from error
-
-    if (
-        retired_decision.run_id != retirement.run_id
-        or retired_decision.mechanism != retirement.mechanism
-    ):
-        raise ContainmentAuthorityError(
-            "retirement does not bind the exact historical decision"
-        )
-    if decision.schema_version != 2 or decision.bindings is None:
-        raise ContainmentAuthorityError(
-            "eligible replacement must be a source-bound version-2 decision"
-        )
-    if decision.verdict is not CapabilityVerdict.SUPPORTED:
-        raise ContainmentAuthorityError(
-            "eligible replacement decision must have a Supported verdict"
-        )
-    if (
-        supersession.replacement_run_id != decision.run_id
-        or supersession.replacement_mechanism != decision.mechanism
-        or supersession.replacement_scenario_result_ids
-        != decision.scenario_result_ids
-        or supersession.replacement_bindings != decision.bindings
-    ):
-        raise ContainmentAuthorityError(
-            "supersession source, version, result, or mechanism binding differs "
-            "from replacement decision"
-        )
-    if (
-        review.run_id != decision.run_id
-        or review.mechanism != decision.mechanism
-        or review.scenario_result_ids != decision.scenario_result_ids
-        or review.bindings != decision.bindings
-    ):
-        raise ContainmentAuthorityError(
-            "review source, version, result, or mechanism binding differs from decision"
         )
 
     return ResolvedCapabilityDecision(
