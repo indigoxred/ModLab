@@ -1026,11 +1026,16 @@ class ContainmentStore:
         }
         if type(document) is dict and "bindings" in document:
             try:
-                return capability_decision_from_bytes(data)
+                decision = capability_decision_from_bytes(data, probe=True)
             except ContainmentFormatError as error:
                 raise ContainmentStoreMalformedEvidence(
                     f"capability decision is malformed: {error}"
                 ) from error
+            if _canonical(document) != data or decision.run_id != run_id:
+                raise ContainmentStoreMalformedEvidence(
+                    "capability decision binding is malformed"
+                )
+            return decision
         if type(document) is not dict or set(document) != fields or _canonical(document) != data:
             raise ContainmentStoreMalformedEvidence(
                 "capability decision bytes are not canonical"

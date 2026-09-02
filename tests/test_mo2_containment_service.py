@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -2251,16 +2252,105 @@ class ContainmentServiceTests(unittest.TestCase):
             result_ids = write_cohort_run(store, run_id, source, steam, "artifact:bound")
 
             decision = service.adjudicate_run(store.root, run_id)
+            source_root = Path(service.__file__).resolve().parents[2]
+            commit = subprocess.run(
+                ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            tree_id = subprocess.run(
+                ["git", "-C", str(source_root), "rev-parse", f"{commit}^{{tree}}"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            release = service.load_mo2_release(service.bundled_mo2_252_path())
 
             self.assertEqual(2, decision.binding_version)
-            self.assertRegex(decision.source_commit_id or "", r"^[0-9a-f]{40}$")
-            self.assertRegex(decision.source_tree_id or "", r"^[0-9a-f]{40}$")
-            self.assertRegex(
-                decision.source_artifact_id or "",
-                r"^containment-source-artifact-sha256:[0-9a-f]{64}$",
+            self.assertEqual(commit, decision.source_commit_id)
+            self.assertEqual(tree_id, decision.source_tree_id)
+            self.assertEqual(
+                service.source_artifact_id_for(
+                    {
+                        "schemaVersion": 1,
+                        "sourceCommitId": commit,
+                        "sourceTreeId": tree_id,
+                        "mo2ArtifactId": "artifact:bound",
+                        "releaseDescriptorSha256": release.sha256,
+                        "archiveSha256": release.descriptor.archive_sha256,
+                    }
+                ),
+                decision.source_artifact_id,
             )
+            self.assertEqual(2, decision.bindings.protocol_version)
+            self.assertEqual(2, decision.bindings.binding_version)
             self.assertEqual("handle-pinned-no-replace-v2", decision.publication_policy_version)
+            self.assertEqual(2, decision.bindings.fixture_version)
+            self.assertEqual(1, decision.bindings.effect_receipt_version)
+            self.assertEqual(1, decision.bindings.authority_policy_version)
+            self.assertEqual("2.5.2.0", decision.bindings.mo2_version)
+            self.assertEqual(
+                release.descriptor.executable.sha256,
+                decision.bindings.mo2_executable_sha256,
+            )
+            self.assertEqual(run_id, decision.run_id)
+            self.assertEqual("isolated-low-integrity-junction-projection-v1", decision.mechanism)
             self.assertEqual(result_ids, decision.scenario_result_ids)
+
+    def test_decision_bindings_use_tree_of_the_observed_commit(self):
+        commit = "1" * 40
+        tree_for_commit = "2" * 40
+        tree_after_head_moves = "3" * 40
+        release = service.load_mo2_release(service.bundled_mo2_252_path())
+
+        def git_result(command, **_kwargs):
+            revision = command[-1]
+            output = {
+                "HEAD": commit,
+                f"{commit}^{{tree}}": tree_for_commit,
+                "HEAD^{tree}": tree_after_head_moves,
+            }[revision]
+            return subprocess.CompletedProcess(command, 0, stdout=output + "\n")
+
+        with patch.object(service.subprocess, "run", side_effect=git_result) as run:
+            bindings = service._decision_bindings({"mo2ArtifactId": "artifact:stable"})
+
+        self.assertEqual(commit, bindings.source_commit_id)
+        self.assertEqual(tree_for_commit, bindings.source_tree_id)
+        self.assertEqual(
+            service.source_artifact_id_for(
+                {
+                    "schemaVersion": 1,
+                    "sourceCommitId": commit,
+                    "sourceTreeId": tree_for_commit,
+                    "mo2ArtifactId": "artifact:stable",
+                    "releaseDescriptorSha256": release.sha256,
+                    "archiveSha256": release.descriptor.archive_sha256,
+                }
+            ),
+            bindings.source_artifact_id,
+        )
+        self.assertEqual(f"{commit}^{{tree}}", run.call_args_list[1].args[0][-1])
+
+    def test_nonterminal_journal_refuses_complete_decision_without_writing(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-nonterminal-decision-") as directory:
+            store = ContainmentStore(Path(directory))
+            run_id = "containment-run:" + "c" * 32
+            source = store.root / "source"
+            steam = store.root / "steam"
+            write_cohort_run(store, run_id, source, steam, "artifact:nonterminal")
+            scenario = ContainmentScenario.NEW_FOLDER
+            store.create(
+                ScenarioJournal(
+                    1, run_id, scenario, ScenarioState.PREPARED,
+                    str((store.root / "source").absolute()),
+                    str((store.root / "stage").absolute()),
+                    str((store.root / "archive.zip").absolute()),
+                    "Protected Existing", "ModLab Spike New", protected(), None, None, None,
+                )
+            )
+
+            with self.assertRaises(service.ContainmentDecisionNotReady):
+                service.adjudicate_run(store.root, run_id)
+
+            self.assertFalse(store.decision_path(run_id).exists())
 
     def test_adjudicate_run_requires_intact_current_intent_request_binding(self):
         for damage in ("intent", "request"):

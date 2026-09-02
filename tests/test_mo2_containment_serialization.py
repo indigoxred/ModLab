@@ -700,10 +700,51 @@ class Mo2ContainmentSerializationTests(unittest.TestCase):
         encoded = capability_decision_to_bytes(decision, results, outcomes)
         self.assertEqual(decision, capability_decision_from_bytes(encoded, results, outcomes))
 
+        for malformed in (
+            replace(decision, scenario_result_ids=identifiers[:3]),
+            replace(decision, scenario_result_ids=(identifiers[0],) * 4),
+        ):
+            with self.subTest(malformed=malformed):
+                with self.assertRaises(ContainmentFormatError):
+                    capability_decision_to_bytes(malformed)
+        with self.assertRaises(ContainmentFormatError):
+            capability_decision_to_bytes(decision)
+        duplicate_document = json.loads(encoded)
+        duplicate_document["scenarioResultIds"] = {
+            scenario.value: identifiers[0] for scenario in ContainmentScenario
+        }
+        with self.assertRaises(ContainmentFormatError):
+            capability_decision_from_bytes(
+                json.dumps(duplicate_document, sort_keys=True, separators=(",", ":")).encode(),
+            )
+
         mutations = (
+            replace(decision, schema_version=True),
+            replace(decision, run_id="containment-run:" + "d" * 32),
+            replace(decision, mechanism="different-mechanism"),
+            replace(decision, bindings=replace(bindings, binding_version=True)),
             replace(decision, bindings=replace(bindings, protocol_version=True)),
+            replace(
+                decision,
+                bindings=replace(bindings, publication_policy_version="unsafe-publish"),
+            ),
+            replace(decision, bindings=replace(bindings, fixture_version=True)),
+            replace(decision, bindings=replace(bindings, effect_receipt_version=True)),
+            replace(decision, bindings=replace(bindings, authority_policy_version=True)),
+            replace(decision, bindings=replace(bindings, mo2_version="2.5.3.0")),
             replace(decision, bindings=replace(bindings, mo2_executable_sha256="bad")),
+            replace(
+                decision,
+                bindings=replace(bindings, source_artifact_id="containment-source-artifact-sha256:bad"),
+            ),
             replace(decision, scenario_result_ids=identifiers[::-1]),
+            replace(
+                decision,
+                scenario_result_ids=(
+                    "containment-result-sha256:" + "d" * 64,
+                    *identifiers[1:],
+                ),
+            ),
         )
         for mutated in mutations:
             with self.subTest(mutated=mutated):

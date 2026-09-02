@@ -1221,7 +1221,7 @@ def _decision_bindings(intent: Mapping[str, object]) -> DecisionBindings:
             check=True, capture_output=True, text=True,
         ).stdout.strip()
         tree = subprocess.run(
-            ["git", "-C", str(source_root), "rev-parse", "HEAD^{tree}"],
+            ["git", "-C", str(source_root), "rev-parse", f"{commit}^{{tree}}"],
             check=True, capture_output=True, text=True,
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError) as error:

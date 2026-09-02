@@ -17,6 +17,7 @@ from modlab.platform.windows_exact_fs import (
 )
 from modlab.validation.mo2_containment_model import (
     CapabilityDecision,
+    DecisionBindings,
     CapabilityVerdict,
     ContainmentScenario,
     IntegrityObservation,
@@ -34,6 +35,7 @@ from modlab.validation.mo2_containment_model import (
 )
 from modlab.validation.mo2_containment_serialization import (
     scenario_result_id_for,
+    source_artifact_id_for,
     watch_outcome_id_for,
 )
 from modlab.validation.mo2_containment_store import (
@@ -139,7 +141,7 @@ def valid_scenario_result(
         result = ScenarioResult(
             **common,
             staging_new_names=("ModLab Spike New",),
-            staging_output_names=("meshes/new-folder.bin",),
+            staging_output_names=("meshes/new-folder.bin", "meta.ini"),
             adopted_name="ModLab Spike New",
             adopted_tree=tree("b"),
             adopted_integrity=IntegrityObservation.MEDIUM,
@@ -148,10 +150,19 @@ def valid_scenario_result(
         result = ScenarioResult(
             **common,
             staging_new_names=("ModLab Spike FOMOD",),
-            staging_output_names=("always.txt", "dependency-seen.txt"),
+            staging_output_names=("always.txt", "dependency-seen.txt", "meta.ini"),
             adopted_name="ModLab Spike FOMOD",
             adopted_tree=tree("b"),
             adopted_integrity=IntegrityObservation.MEDIUM,
+        )
+    elif scenario is ContainmentScenario.REPLACE_EXISTING:
+        result = ScenarioResult(
+            **common,
+            staging_new_names=(),
+            staging_output_names=("meshes/canary.bin", "meshes/new.bin", "meta.ini"),
+            adopted_name=None,
+            adopted_tree=None,
+            adopted_integrity=None,
         )
     else:
         result = ScenarioResult(
@@ -163,6 +174,26 @@ def valid_scenario_result(
             adopted_integrity=None,
         )
     return result, outcome
+
+
+def valid_bound_decision(store: ContainmentStore) -> CapabilityDecision:
+    pairs = tuple(valid_scenario_result(scenario) for scenario in ContainmentScenario)
+    for result, outcome in pairs:
+        store.write_watch_outcome(outcome)
+        store.write_result(result)
+    return CapabilityDecision(
+        2,
+        RUN_ID,
+        "isolated-low-integrity-junction-projection-v1",
+        CapabilityVerdict.SUPPORTED,
+        tuple(scenario_result_id_for(result, outcome) for result, outcome in pairs),
+        (),
+        DecisionBindings(
+            2, "a" * 40, "b" * 40,
+            source_artifact_id_for({"schemaVersion": 1, "artifact": "store"}),
+            2, "handle-pinned-no-replace-v2", 2, 1, 1, "2.5.2.0", "c" * 64,
+        ),
+    )
 
 
 def valid_prepared_journal(root: Path) -> ScenarioJournal:
@@ -235,6 +266,36 @@ class ContainmentStoreTests(unittest.TestCase):
         self.assertFalse(first_decision.existed)
         self.assertTrue(second_decision.existed)
         self.assertEqual(decision, store.load_decision(RUN_ID))
+
+    def test_bound_decision_probe_rejects_wrong_run_and_noncanonical_bytes(self):
+        store = ContainmentStore(self.root)
+        decision = valid_bound_decision(store)
+        store.write_decision(decision)
+        data = store.decision_path(RUN_ID).read_bytes()
+        with self.assertRaises(containment_store.ContainmentStoreMalformedEvidence):
+            ContainmentStore._decision_probe(data, "containment-run:" + "f" * 32)
+        with self.assertRaises(containment_store.ContainmentStoreMalformedEvidence):
+            ContainmentStore._decision_probe(data.replace(b"{", b"{ ", 1), RUN_ID)
+
+    def test_bound_decision_is_immutable_for_identical_and_changed_bytes(self):
+        store = ContainmentStore(self.root)
+        decision = valid_bound_decision(store)
+        first = store.write_decision(decision)
+        second = store.write_decision(decision)
+        self.assertFalse(first.existed)
+        self.assertTrue(second.existed)
+        changed_bindings = (
+            replace(decision.bindings, source_commit_id="d" * 40),
+            replace(decision.bindings, source_tree_id="e" * 40),
+            replace(
+                decision.bindings,
+                source_artifact_id="containment-source-artifact-sha256:" + "f" * 64,
+            ),
+        )
+        for bindings in changed_bindings:
+            with self.subTest(bindings=bindings):
+                with self.assertRaisesRegex(ContainmentStoreError, "different bytes"):
+                    store.write_decision(replace(decision, bindings=bindings))
 
     def test_store_uses_exact_confined_layout_and_rejects_tampered_readback(self):
         store = ContainmentStore(self.root)

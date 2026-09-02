@@ -253,11 +253,14 @@ def capability_decision_from_bytes(
     data: bytes,
     scenario_results: tuple[ScenarioResult, ...] | None = None,
     watch_outcomes: tuple[WatchOutcome, ...] | None = None,
+    *,
+    probe: bool = False,
 ) -> CapabilityDecision:
     return capability_decision_from_dict(
         _decode(data, "capability decision"),
         scenario_results,
         watch_outcomes,
+        probe=probe,
     )
 
 
@@ -593,6 +596,8 @@ def capability_decision_from_dict(
     value: Any,
     scenario_results: tuple[ScenarioResult, ...] | None = None,
     watch_outcomes: tuple[WatchOutcome, ...] | None = None,
+    *,
+    probe: bool = False,
 ) -> CapabilityDecision:
     if type(value) is not dict:
         raise ContainmentFormatError("capability decision must be an object")
@@ -626,7 +631,7 @@ def capability_decision_from_dict(
         raise ContainmentFormatError(
             f"{decision.verdict.value} decision requires reasons"
         )
-    _check_decision_results(decision, scenario_results, watch_outcomes)
+    _check_decision_results(decision, scenario_results, watch_outcomes, probe=probe)
     return decision
 
 
@@ -953,9 +958,11 @@ def _check_decision_results(
     decision: CapabilityDecision,
     scenario_results: tuple[ScenarioResult, ...] | None,
     watch_outcomes: tuple[WatchOutcome, ...] | None,
+    *,
+    probe: bool = False,
 ) -> None:
     if scenario_results is None and watch_outcomes is None:
-        if decision.bindings is not None:
+        if decision.bindings is not None and probe:
             return
         if decision.scenario_result_ids:
             raise ContainmentFormatError(
@@ -1156,6 +1163,7 @@ def _result_dict(value: ScenarioResult) -> dict[str, Any]:
 
 def _decision_dict(value: CapabilityDecision) -> dict[str, Any]:
     if value.bindings is not None:
+        identifiers = _bound_decision_ids(value.scenario_result_ids)
         return {
             "schemaVersion": value.schema_version,
             "runId": value.run_id,
@@ -1163,9 +1171,7 @@ def _decision_dict(value: CapabilityDecision) -> dict[str, Any]:
             "verdict": value.verdict.value,
             "scenarioResultIds": {
                 scenario.value: identifier
-                for scenario, identifier in zip(
-                    ContainmentScenario, value.scenario_result_ids, strict=True
-                )
+                for scenario, identifier in zip(ContainmentScenario, identifiers, strict=True)
             },
             "reasons": list(value.reasons),
             "bindings": _bindings_dict(value.bindings),
@@ -1231,10 +1237,21 @@ def _bindings_dict(value: DecisionBindings) -> dict[str, Any]:
 def _decision_ids(value: Any) -> tuple[str, ...]:
     if type(value) is not dict or set(value) != {scenario.value for scenario in ContainmentScenario}:
         raise ContainmentFormatError("decision scenario result IDs must be a complete scenario mapping")
-    return tuple(
+    return _bound_decision_ids(tuple(
         _pattern(value[scenario.value], _RESULT_ID, f"scenarioResultIds.{scenario.value}")
         for scenario in ContainmentScenario
+    ))
+
+
+def _bound_decision_ids(value: Any) -> tuple[str, ...]:
+    if type(value) is not tuple or len(value) != len(ContainmentScenario):
+        raise ContainmentFormatError("bound decision requires exactly four scenario result IDs")
+    identifiers = tuple(
+        _pattern(item, _RESULT_ID, "scenarioResultIds") for item in value
     )
+    if len(set(identifiers)) != len(identifiers):
+        raise ContainmentFormatError("bound decision scenario result IDs must be unique")
+    return identifiers
 
 
 def _tree_dict(value: TreeIdentity) -> dict[str, Any]:
