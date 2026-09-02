@@ -24,6 +24,7 @@ from modlab.platform.windows_exact_fs import (
     ExactObjectOwnershipError,
     RetainedObjectOwner,
     RetainedObjectRole,
+    create_pinned_directory_child,
     identity_at_path,
     pin_stable_direct_object,
     read_pinned_file,
@@ -351,6 +352,19 @@ class _MutationObservationError(ContainmentServiceError):
     """A delegated root is proven unsafe rather than merely unavailable."""
 
 
+class _MutationObservationOwnershipError(ContainmentStoreOwnershipError):
+    """A complete inventory whose final handle close retained ownership."""
+
+    def __init__(
+        self,
+        message: str,
+        ownership: ExactObjectOwnershipError,
+        completed_observation: tuple[tuple[object, ...], ...],
+    ) -> None:
+        super().__init__(message, ownership)
+        self.completed_observation = completed_observation
+
+
 def _mutation_root_guard(
     supplied_root: Path,
     existing_guards: tuple[object, ...] = (),
@@ -590,7 +604,11 @@ def _mutation_root_observation(
             int(getattr(metadata, "st_file_attributes", 0)),
         )
 
-    def close_retained(primary: BaseException | None = None) -> None:
+    def close_retained(
+        primary: BaseException | None = None,
+        *,
+        completed_observation: tuple[tuple[object, ...], ...] | None = None,
+    ) -> None:
         unresolved = []
         close_errors: list[BaseException] = []
         for pinned in reversed(retained):
@@ -601,15 +619,37 @@ def _mutation_root_observation(
                 if getattr(pinned, "handle", 0):
                     unresolved.append(pinned)
         if unresolved:
+            prior_owners = (
+                primary.owners
+                if isinstance(primary, ExactObjectOwnershipError)
+                else primary.ownership.owners
+                if isinstance(primary, ContainmentStoreOwnershipError)
+                else ()
+            )
             ownership = ExactObjectOwnershipError(
                 "stable delegated-effect observation retained live handles: "
                 + "; ".join(str(error) for error in close_errors),
-                verification=tuple(unresolved),
+                owners=(
+                    *prior_owners,
+                    *(
+                        RetainedObjectOwner(
+                            RetainedObjectRole.VERIFICATION,
+                            pinned,
+                        )
+                        for pinned in unresolved
+                    ),
+                ),
             )
-            raise ContainmentStoreOwnershipError(
-                "stable delegated-effect observation requires retained-handle resolution",
-                ownership,
-            ) from primary
+            message = (
+                "stable delegated-effect observation requires retained-handle resolution"
+            )
+            if completed_observation is not None and primary is None:
+                raise _MutationObservationOwnershipError(
+                    message,
+                    ownership,
+                    completed_observation,
+                )
+            raise ContainmentStoreOwnershipError(message, ownership) from primary
         if close_errors and primary is None:
             raise ContainmentServiceError(
                 "stable delegated-effect observation handle cleanup failed: "
@@ -824,8 +864,9 @@ def _mutation_root_observation(
     except (ExactObjectError, OSError):
         close_retained()
         return None
-    close_retained()
-    return tuple(rows)
+    completed = tuple(rows)
+    close_retained(completed_observation=completed)
+    return completed
 
 
 def _delegated_mutations_guarded(
@@ -856,9 +897,20 @@ def _delegated_mutations_guarded(
     def record_observed_changes() -> None:
         unavailable_after: list[Path] = []
         rejected_after: list[tuple[Path, BaseException]] = []
+        ownership_after: list[tuple[Path, ContainmentStoreOwnershipError]] = []
         for root, prior in zip(exact_roots, before, strict=True):
             try:
                 current = _mutation_root_observation(root)
+            except ContainmentStoreOwnershipError as error:
+                completed = (
+                    error.completed_observation
+                    if isinstance(error, _MutationObservationOwnershipError)
+                    else None
+                )
+                if completed is not None and prior != completed:
+                    _current_effects().child_mutation_root(root)
+                ownership_after.append((root, error))
+                continue
             except _MutationObservationError as error:
                 # A safe pre-observation cannot contain a reparse/non-direct
                 # entry.  Seeing one afterwards proves the delegate changed
@@ -870,6 +922,37 @@ def _delegated_mutations_guarded(
                 unavailable_after.append(root)
             elif prior != current:
                 _current_effects().child_mutation_root(root)
+        if ownership_after:
+            primary_root, primary = ownership_after[0]
+            primary.ownership = ExactObjectOwnershipError(
+                "delegated mutation observations retained live ownership",
+                owners=tuple(
+                    owner
+                    for _root, error in ownership_after
+                    for owner in error.ownership.owners
+                ),
+            )
+            if hasattr(primary, "add_note"):
+                for root, error in ownership_after[1:]:
+                    primary.add_note(
+                        f"additional post-observation ownership at {root}: {error}"
+                    )
+                if rejected_after:
+                    primary.add_note(
+                        "additional delegated mutation observation rejection: "
+                        + ", ".join(
+                            f"{root} ({error})" for root, error in rejected_after
+                        )
+                    )
+                if unavailable_after:
+                    primary.add_note(
+                        "additional delegated mutation observation unavailable: "
+                        + ", ".join(str(root) for root in unavailable_after)
+                    )
+                primary.add_note(
+                    f"primary post-observation ownership occurred at {primary_root}"
+                )
+            raise primary
         if rejected_after:
             joined = ", ".join(
                 f"{root} ({error})" for root, error in rejected_after
@@ -904,6 +987,8 @@ def _delegated_mutations_guarded(
                 )
                 if hasattr(operation_error, "add_note"):
                     operation_error.add_note(detail)
+                    for note in getattr(observation_error, "__notes__", ()):
+                        operation_error.add_note(note)
                 raise operation_error
             if not isinstance(operation_error, Exception):
                 raise
@@ -1008,13 +1093,7 @@ def _delegated_mutations_with_created_root(
     *,
     require_absent: bool = False,
 ) -> _V:
-    """Create a missing direct root under retained ancestors before delegating.
-
-    Directory creation and stable-pin acquisition are deliberately distinct
-    operations.  The safety boundary is that trusted, read-only ``preflight``
-    runs first and no delegated mutation runs until every newly present path
-    component has been validated and retained against rename/delete.
-    """
+    """Create and retain each missing direct root component before delegating."""
     target = Path(created_root)
     exact_roots = _unique_paths((*other_roots, target))
     if not target.is_absolute():
@@ -1071,30 +1150,38 @@ def _delegated_mutations_with_created_root(
             raise _MutationObservationError(
                 f"service-controlled mutation root escapes its retained ancestor: {target}"
             ) from error
+        if os.name != "nt" or not guards:
+            raise _MutationObservationError(
+                "exact service-controlled directory creation is unavailable "
+                "outside the Windows retained-handle authority path"
+            )
         current = ancestor
+        creation_parent = guards[0]
         for part in relative.parts:
             current /= part
             try:
-                current.mkdir(exist_ok=False)
+                guard = create_pinned_directory_child(current, creation_parent)
             except FileExistsError as error:
                 raise _MutationObservationError(
                     "service-controlled mutation root appeared before exact "
                     f"creation: {current}"
                 ) from error
+            except ExactObjectOwnershipError as error:
+                raise ContainmentStoreOwnershipError(
+                    "service-controlled directory creation retained exact ownership",
+                    error,
+                ) from error
+            except ExactObjectError as error:
+                raise _MutationObservationError(
+                    f"service-controlled mutation root creation was rejected: {current}"
+                ) from error
             except OSError as error:
-                if _direct_directory_present(current):
-                    _current_effects().child_mutation_root(current)
                 raise _MutationObservationError(
                     f"service-controlled mutation root creation failed: {current}"
                 ) from error
+            guards.append(guard)
             _current_effects().child_mutation_root(current)
-            guard = _mutation_root_guard(
-                current,
-                tuple(guards),
-                require_target_existing=True,
-            )
-            if guard is not None:
-                guards.append(guard)
+            creation_parent = guard
 
         token = _ACTIVE_GUARDED_MUTATION_ROOTS.set(exact_roots)
         try:

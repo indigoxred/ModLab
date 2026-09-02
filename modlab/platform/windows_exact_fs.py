@@ -1,8 +1,8 @@
 """Retained-handle Windows operations for authority-bearing filesystem objects.
 
-The functions in this module deliberately never fall back to a pathname rename.
-An object is opened without following a final reparse point, validated while its
-handle is retained, then renamed through that same handle into a retained parent.
+The functions in this module deliberately never fall back to a pathname mutation.
+Objects are validated while retained, then renamed through their own handles or
+created directly relative to an already-retained parent handle.
 """
 
 from __future__ import annotations
@@ -44,6 +44,10 @@ _ERROR_ALREADY_EXISTS = 183
 _STATUS_OBJECT_NAME_COLLISION = 0xC0000035
 _STATUS_OBJECT_NAME_EXISTS = 0x40000000
 _FILE_RENAME_INFORMATION_CLASS = 10
+_FILE_CREATE_DISPOSITION = 2
+_FILE_DIRECTORY_FILE = 0x00000001
+_FILE_CREATED_INFORMATION = 2
+_OBJ_CASE_INSENSITIVE = 0x00000040
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 
@@ -248,6 +252,25 @@ class _IO_STATUS_BLOCK(ctypes.Structure):
     _fields_ = [("Status", ctypes.c_long), ("Information", ctypes.c_size_t)]
 
 
+class _UNICODE_STRING(ctypes.Structure):
+    _fields_ = [
+        ("Length", wintypes.USHORT),
+        ("MaximumLength", wintypes.USHORT),
+        ("Buffer", wintypes.LPWSTR),
+    ]
+
+
+class _OBJECT_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [
+        ("Length", wintypes.ULONG),
+        ("RootDirectory", wintypes.HANDLE),
+        ("ObjectName", ctypes.POINTER(_UNICODE_STRING)),
+        ("Attributes", wintypes.ULONG),
+        ("SecurityDescriptor", ctypes.c_void_p),
+        ("SecurityQualityOfService", ctypes.c_void_p),
+    ]
+
+
 if os.name == "nt":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _kernel32.CreateFileW.argtypes = [
@@ -284,6 +307,20 @@ if os.name == "nt":
         ctypes.c_int,
     ]
     _ntdll.NtSetInformationFile.restype = ctypes.c_long
+    _ntdll.NtCreateFile.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        ctypes.POINTER(_OBJECT_ATTRIBUTES),
+        ctypes.POINTER(_IO_STATUS_BLOCK),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        ctypes.c_void_p,
+        wintypes.ULONG,
+    ]
+    _ntdll.NtCreateFile.restype = ctypes.c_long
     _ntdll.RtlNtStatusToDosError.argtypes = [ctypes.c_long]
     _ntdll.RtlNtStatusToDosError.restype = wintypes.ULONG
 else:
@@ -529,6 +566,163 @@ def create_pinned_new(path: Path, destination_parent: PinnedObject) -> PinnedObj
                 prior=error,
                 candidate=candidate,
             ) from error
+        raise
+
+
+def create_pinned_directory_child(
+    path: Path,
+    destination_parent: PinnedObject,
+    *,
+    identity_at_path_fn: Callable[[Path], PinnedIdentity] | None = None,
+) -> PinnedObject:
+    """Create one direct directory relative to a retained parent handle.
+
+    The native create returns the first handle to the new object.  That handle
+    denies rename/delete from the instant the directory exists, so validation
+    never crosses a pathname-only ownership gap.
+    """
+    _require_windows()
+    if identity_at_path_fn is None:
+        identity_at_path_fn = identity_at_path
+    if not isinstance(destination_parent, PinnedObject):
+        raise ExactObjectError(
+            "pinned directory creation requires a PinnedObject parent"
+        )
+    if not destination_parent.handle or destination_parent.identity is None:
+        raise ExactObjectError(
+            "pinned directory creation requires a live parent handle"
+        )
+    target = _absolute(path)
+    name = _safe_destination_name(target, destination_parent)
+
+    parent_identity = _handle_identity(
+        destination_parent.handle,
+        destination_parent.path,
+    )
+    if parent_identity != destination_parent.identity:
+        raise ExactObjectError(
+            "pinned directory creation parent handle identity changed"
+        )
+    if (
+        _is_reparse(parent_identity.attributes)
+        or not parent_identity.attributes & _FILE_ATTRIBUTE_DIRECTORY
+    ):
+        raise ExactObjectError("pinned directory creation requires a direct parent")
+    if identity_at_path_fn(destination_parent.path) != destination_parent.identity:
+        raise ExactObjectError("pinned directory creation parent path changed")
+
+    name_buffer = ctypes.create_unicode_buffer(name)
+    encoded_length = len(name.encode("utf-16-le"))
+    object_name = _UNICODE_STRING(
+        encoded_length,
+        encoded_length + ctypes.sizeof(ctypes.c_wchar),
+        ctypes.cast(name_buffer, wintypes.LPWSTR),
+    )
+    object_attributes = _OBJECT_ATTRIBUTES(
+        ctypes.sizeof(_OBJECT_ATTRIBUTES),
+        destination_parent.handle,
+        ctypes.pointer(object_name),
+        _OBJ_CASE_INSENSITIVE,
+        None,
+        None,
+    )
+    io_status = _IO_STATUS_BLOCK()
+    output_handle = wintypes.HANDLE()
+    status = int(
+        _ntdll.NtCreateFile(
+            ctypes.byref(output_handle),
+            _DELETE
+            | _FILE_READ_ATTRIBUTES
+            | _FILE_LIST_DIRECTORY
+            | _FILE_ADD_FILE
+            | _FILE_ADD_SUBDIRECTORY,
+            ctypes.byref(object_attributes),
+            ctypes.byref(io_status),
+            None,
+            _FILE_ATTRIBUTE_DIRECTORY,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            _FILE_CREATE_DISPOSITION,
+            _FILE_DIRECTORY_FILE | _FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+            0,
+        )
+    )
+    if status != 0:
+        unsigned_status = status & 0xFFFFFFFF
+        if unsigned_status in {_STATUS_OBJECT_NAME_COLLISION, _STATUS_OBJECT_NAME_EXISTS}:
+            raise FileExistsError(
+                _ERROR_FILE_EXISTS,
+                "destination already exists",
+                str(target),
+            )
+        error = int(_ntdll.RtlNtStatusToDosError(status))
+        raise _winerror(f"rooted directory creation failed for {target}", error)
+    handle = output_handle.value
+    if not handle or handle == _INVALID_HANDLE_VALUE:
+        raise ExactObjectError("rooted directory creation returned no ownership handle")
+
+    candidate = PinnedObject(target, int(handle), None)
+    if int(io_status.Information) != _FILE_CREATED_INFORMATION:
+        try:
+            candidate.identity = _handle_identity(candidate.handle, target)
+        except BaseException as error:
+            raise ExactObjectOwnershipError(
+                "rooted directory creation returned an uncertain live object",
+                verification=(candidate,),
+            ) from error
+        raise ExactObjectOwnershipError(
+            "rooted directory creation did not prove a newly created object",
+            verification=(candidate,),
+        )
+    try:
+        child_identity = _handle_identity(candidate.handle, target)
+        candidate.identity = child_identity
+        if (
+            _is_reparse(child_identity.attributes)
+            or not child_identity.attributes & _FILE_ATTRIBUTE_DIRECTORY
+        ):
+            raise ExactObjectError(
+                f"new child is not a direct regular directory: {target}"
+            )
+        if child_identity.volume_serial != parent_identity.volume_serial:
+            raise ExactObjectError(
+                "pinned directory creation requires parent and child on the same volume"
+            )
+        if (
+            _handle_identity(
+                destination_parent.handle,
+                destination_parent.path,
+            )
+            != destination_parent.identity
+            or identity_at_path_fn(destination_parent.path)
+            != destination_parent.identity
+        ):
+            raise ExactObjectError(
+                "pinned directory creation parent changed during creation"
+            )
+        if identity_at_path_fn(target) != child_identity:
+            raise ExactObjectError(
+                "created directory pathname is not the retained child object"
+            )
+        return candidate
+    except BaseException as error:
+        cleanup_error: BaseException | None = None
+        try:
+            delete_pinned_object(candidate)
+        except BaseException as candidate_cleanup_error:
+            cleanup_error = candidate_cleanup_error
+        if candidate.handle:
+            raise _union_ownership(
+                "new-directory validation retained live ownership after exact "
+                f"cleanup failed: {cleanup_error}",
+                prior=error,
+                candidate=candidate,
+            ) from error
+        if cleanup_error is not None and hasattr(error, "add_note"):
+            error.add_note(
+                "new-directory exact cleanup completed with an error: "
+                f"{cleanup_error}"
+            )
         raise
 
 

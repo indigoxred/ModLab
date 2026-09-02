@@ -3516,12 +3516,12 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
             base = Path(directory)
             parent = base / "new-parent"
             root = parent / "root"
-            real_mkdir = Path.mkdir
+            real_create = service.create_pinned_directory_child
 
-            def fail_final(candidate, *args, **kwargs):
+            def fail_final(candidate, retained_parent):
                 if Path(candidate) == root:
                     raise OSError("injected final-directory refusal")
-                return real_mkdir(candidate, *args, **kwargs)
+                return real_create(candidate, retained_parent)
 
             @service._receipted
             def invoke():
@@ -3534,7 +3534,11 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
                 )
 
             with (
-                patch.object(Path, "mkdir", autospec=True, side_effect=fail_final),
+                patch.object(
+                    service,
+                    "create_pinned_directory_child",
+                    side_effect=fail_final,
+                ),
                 self.assertRaises(service.ContainmentOperationError) as raised,
             ):
                 invoke()
@@ -3546,6 +3550,239 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
                 raised.exception.effects.child_mutation_roots,
             )
             self.assertEqual((parent,), raised.exception.effects.written_paths)
+
+    @unittest.skipUnless(os.name == "nt", "Windows exact-root creation is required")
+    def test_controlled_creation_cannot_substitute_new_object_before_it_is_pinned(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-created-substitution-") as directory:
+            base = Path(directory)
+            root = base / "root"
+            displaced = base / "displaced"
+            real_mkdir = Path.mkdir
+            substitution_attempted = False
+
+            def substitute_created_object(candidate, *args, **kwargs):
+                nonlocal substitution_attempted
+                real_mkdir(candidate, *args, **kwargs)
+                if Path(candidate) == root:
+                    substitution_attempted = True
+                    Path(candidate).rename(displaced)
+                    real_mkdir(candidate, *args, **kwargs)
+
+            @service._receipted
+            def invoke():
+                return service._delegated_mutations_with_created_root(
+                    root,
+                    (),
+                    lambda: None,
+                    lambda _prepared: (root / "direct.txt").write_bytes(b"direct\n"),
+                    require_absent=True,
+                )
+
+            with patch.object(
+                Path,
+                "mkdir",
+                autospec=True,
+                side_effect=substitute_created_object,
+            ):
+                receipt = invoke()
+
+            self.assertFalse(substitution_attempted)
+            self.assertFalse(displaced.exists())
+            self.assertEqual(b"direct\n", (root / "direct.txt").read_bytes())
+            self.assertEqual((root,), receipt.effects.child_mutation_roots)
+            self.assertEqual((root,), receipt.effects.written_paths)
+
+    def test_completed_mutation_snapshot_survives_close_only_ownership(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-completed-snapshot-") as directory:
+            root = Path(directory)
+            expected = service._mutation_root_observation(root)
+            retained = PinnedObject(
+                root,
+                7201,
+                PinnedIdentity(1, 1, 0x10),
+            )
+
+            with (
+                patch.object(
+                    service,
+                    "pin_stable_direct_object",
+                    return_value=retained,
+                ),
+                patch.object(
+                    retained,
+                    "close",
+                    side_effect=OSError("injected observation close failure"),
+                ),
+                self.assertRaises(ContainmentStoreOwnershipError) as raised,
+            ):
+                service._mutation_root_observation(root)
+
+            self.assertEqual(
+                expected,
+                getattr(raised.exception, "completed_observation", None),
+            )
+            self.assertIsInstance(
+                raised.exception,
+                service._MutationObservationOwnershipError,
+            )
+            with patch(
+                "modlab.platform.windows_exact_fs._close_handle"
+            ) as close_handle:
+                raised.exception.resolve()
+            close_handle.assert_called_once_with(7201)
+            self.assertEqual(0, retained.handle)
+
+    def test_multi_root_post_observation_collects_every_position_and_change(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-multi-root-owner-") as directory:
+            roots = tuple(Path(directory) / name for name in ("first", "middle", "last"))
+            for root in roots:
+                root.mkdir()
+
+            for owner_index in range(len(roots)):
+                with self.subTest(owner_index=owner_index):
+                    retained = PinnedObject(
+                        roots[owner_index],
+                        7300 + owner_index,
+                        PinnedIdentity(1, 100 + owner_index, 0x10),
+                    )
+                    ownership = service._MutationObservationOwnershipError(
+                        f"position-{owner_index} close ownership",
+                        ExactObjectOwnershipError(
+                            f"position-{owner_index} owner",
+                            verification=(retained,),
+                        ),
+                        ((f"after-{owner_index}",),),
+                    )
+                    before = tuple(((f"before-{index}",),) for index in range(3))
+                    after = [((f"after-{index}",),) for index in range(3)]
+                    after[owner_index] = ownership
+
+                    @service._receipted
+                    def invoke():
+                        return service._delegated_mutations_guarded(
+                            roots,
+                            lambda: "mutated",
+                        )
+
+                    with (
+                        patch.object(
+                            service,
+                            "_mutation_root_observation",
+                            side_effect=(*before, *after),
+                        ) as observe,
+                        self.assertRaises(ContainmentStoreOwnershipError) as raised,
+                    ):
+                        invoke()
+
+                    self.assertIs(ownership, raised.exception)
+                    self.assertEqual(6, observe.call_count)
+                    self.assertEqual(roots, raised.exception.effects.child_mutation_roots)
+                    with patch(
+                        "modlab.platform.windows_exact_fs._close_handle"
+                    ):
+                        raised.exception.resolve()
+                    self.assertEqual(0, retained.handle)
+
+    def test_multi_root_unions_all_observers_and_dual_operation_owner(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-multi-owner-union-") as directory:
+            roots = tuple(Path(directory) / name for name in ("first", "middle", "last"))
+            for root in roots:
+                root.mkdir()
+            operation_pin = PinnedObject(
+                roots[0] / "operation",
+                7401,
+                PinnedIdentity(1, 201, 0),
+            )
+            first_pin = PinnedObject(
+                roots[0] / "first-observer",
+                7402,
+                PinnedIdentity(1, 202, 0),
+            )
+            last_pin = PinnedObject(
+                roots[2] / "last-observer",
+                7403,
+                PinnedIdentity(1, 203, 0),
+            )
+            operation = ContainmentStoreOwnershipError(
+                "operation ownership",
+                ExactObjectOwnershipError(
+                    "operation owner",
+                    verification=(operation_pin,),
+                ),
+            )
+            operation.add_note("primary operation context")
+            first = service._MutationObservationOwnershipError(
+                "first observer ownership",
+                ExactObjectOwnershipError(
+                    "first observer owner",
+                    verification=(first_pin,),
+                ),
+                (("after-first",),),
+            )
+            last = ContainmentStoreOwnershipError(
+                "last observer ownership",
+                ExactObjectOwnershipError(
+                    "last observer owner",
+                    verification=(last_pin,),
+                ),
+            )
+
+            @service._receipted
+            def invoke():
+                return service._delegated_mutations_guarded(
+                    roots,
+                    lambda: (_ for _ in ()).throw(operation),
+                )
+
+            before = (
+                (("before-first",),),
+                (("before-middle",),),
+                (("before-last",),),
+            )
+            after = (
+                first,
+                (("after-middle",),),
+                last,
+            )
+            with (
+                patch.object(
+                    service,
+                    "_mutation_root_observation",
+                    side_effect=(*before, *after),
+                ) as observe,
+                self.assertRaises(ContainmentStoreOwnershipError) as raised,
+            ):
+                invoke()
+
+            self.assertIs(operation, raised.exception)
+            self.assertEqual(6, observe.call_count)
+            self.assertEqual(
+                (operation_pin, first_pin, last_pin),
+                tuple(owner.pinned for owner in raised.exception.owners),
+            )
+            self.assertEqual(
+                (roots[0], roots[1]),
+                raised.exception.effects.child_mutation_roots,
+            )
+            self.assertIn(
+                "primary operation context",
+                getattr(raised.exception, "__notes__", ()),
+            )
+            self.assertTrue(
+                any(
+                    "additional post-observation ownership" in note
+                    and str(roots[2]) in note
+                    for note in getattr(raised.exception, "__notes__", ())
+                )
+            )
+            with patch(
+                "modlab.platform.windows_exact_fs._close_handle"
+            ) as close_handle:
+                raised.exception.resolve()
+            self.assertEqual(3, close_handle.call_count)
+            self.assertTrue(
+                all(pin.handle == 0 for pin in (operation_pin, first_pin, last_pin))
+            )
 
     @unittest.skipUnless(os.name == "nt", "Windows stable-root guards are required")
     def test_mutation_guard_rejects_same_file_id_from_foreign_volume(self):

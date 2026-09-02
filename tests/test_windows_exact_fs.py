@@ -659,6 +659,345 @@ class WindowsExactFsTests(unittest.TestCase):
         finally:
             parent.close()
 
+    def test_rooted_directory_creation_returns_the_exact_unreplaceable_child(self) -> None:
+        creator = getattr(windows_exact_fs, "create_pinned_directory_child", None)
+        self.assertIsNotNone(
+            creator,
+            "the retained-parent native directory creation primitive is missing",
+        )
+        child_path = self.root / "created-child"
+        displaced = self.root / "displaced-child"
+        parent = pin_stable_direct_object(
+            self.root,
+            kind="directory",
+            allow_writes=True,
+        )
+        observed: dict[str, object] = {}
+        real_create = windows_exact_fs._ntdll.NtCreateFile
+
+        def inspect_create(
+            output_handle,
+            desired_access,
+            object_attributes,
+            io_status,
+            allocation_size,
+            file_attributes,
+            share_access,
+            create_disposition,
+            create_options,
+            ea_buffer,
+            ea_length,
+        ):
+            attributes = ctypes.cast(
+                object_attributes,
+                ctypes.POINTER(windows_exact_fs._OBJECT_ATTRIBUTES),
+            ).contents
+            name = attributes.ObjectName.contents
+            observed["root"] = attributes.RootDirectory
+            observed["name"] = ctypes.wstring_at(
+                name.Buffer,
+                name.Length // ctypes.sizeof(ctypes.c_wchar),
+            )
+            return real_create(
+                output_handle,
+                desired_access,
+                object_attributes,
+                io_status,
+                allocation_size,
+                file_attributes,
+                share_access,
+                create_disposition,
+                create_options,
+                ea_buffer,
+                ea_length,
+            )
+
+        child = None
+        try:
+            with mock.patch.object(
+                windows_exact_fs._ntdll,
+                "NtCreateFile",
+                side_effect=inspect_create,
+            ):
+                child = creator(child_path, parent)
+            self.assertEqual(parent.handle, observed["root"])
+            self.assertEqual("created-child", observed["name"])
+            self.assertEqual(child.identity, identity_at_path(child_path))
+            self.assertTrue(
+                child.identity.attributes & windows_exact_fs._FILE_ATTRIBUTE_DIRECTORY
+            )
+            self.assertFalse(
+                child.identity.attributes & windows_exact_fs._FILE_ATTRIBUTE_REPARSE_POINT
+            )
+            with self.assertRaises(OSError):
+                child_path.rename(displaced)
+        finally:
+            if child is not None and child.handle:
+                child.close()
+            parent.close()
+
+        child_path.rename(displaced)
+        self.assertTrue(displaced.is_dir())
+
+    def test_rooted_directory_creation_refuses_collision_without_mutation(self) -> None:
+        creator = getattr(windows_exact_fs, "create_pinned_directory_child", None)
+        self.assertIsNotNone(creator)
+        child_path = self.root / "existing-child"
+        child_path.mkdir()
+        marker = child_path / "marker.txt"
+        marker.write_bytes(b"original\n")
+        before = identity_at_path(child_path)
+        parent = pin_stable_direct_object(
+            self.root,
+            kind="directory",
+            allow_writes=True,
+        )
+        try:
+            with self.assertRaises(FileExistsError):
+                creator(child_path, parent)
+        finally:
+            parent.close()
+
+        self.assertEqual(before, identity_at_path(child_path))
+        self.assertEqual(b"original\n", marker.read_bytes())
+
+    def test_rooted_directory_creation_requires_native_created_disposition(self) -> None:
+        creator = getattr(windows_exact_fs, "create_pinned_directory_child", None)
+        self.assertIsNotNone(creator)
+        child_path = self.root / "uncertain-disposition-child"
+        parent = pin_stable_direct_object(
+            self.root,
+            kind="directory",
+            allow_writes=True,
+        )
+        real_create = windows_exact_fs._ntdll.NtCreateFile
+        raw_handle = 0
+
+        def report_opened_instead_of_created(
+            output_handle,
+            desired_access,
+            object_attributes,
+            io_status,
+            allocation_size,
+            file_attributes,
+            share_access,
+            create_disposition,
+            create_options,
+            ea_buffer,
+            ea_length,
+        ):
+            nonlocal raw_handle
+            status = real_create(
+                output_handle,
+                desired_access,
+                object_attributes,
+                io_status,
+                allocation_size,
+                file_attributes,
+                share_access,
+                create_disposition,
+                create_options,
+                ea_buffer,
+                ea_length,
+            )
+            raw_handle = ctypes.cast(
+                output_handle,
+                ctypes.POINTER(windows_exact_fs.wintypes.HANDLE),
+            ).contents.value
+            ctypes.cast(
+                io_status,
+                ctypes.POINTER(windows_exact_fs._IO_STATUS_BLOCK),
+            ).contents.Information = 1  # FILE_OPENED, never valid for FILE_CREATE
+            return status
+
+        ownership = None
+        try:
+            with (
+                mock.patch.object(
+                    windows_exact_fs._ntdll,
+                    "NtCreateFile",
+                    side_effect=report_opened_instead_of_created,
+                ),
+                self.assertRaises(ExactObjectOwnershipError) as raised,
+            ):
+                creator(child_path, parent)
+            ownership = raised.exception
+            self.assertEqual((), ownership.candidates)
+            self.assertEqual(1, len(ownership.verification))
+            self.assertEqual(child_path, ownership.verification[0].path)
+            self.assertEqual(raw_handle, ownership.verification[0].handle)
+            ownership.resolve()
+            self.assertEqual(0, ownership.verification[0].handle)
+            self.assertTrue(child_path.is_dir())
+        finally:
+            if ownership is None and raw_handle:
+                windows_exact_fs._close_handle(raw_handle)
+            parent.close()
+
+    def test_rooted_directory_creation_blocks_substitution_during_validation(self) -> None:
+        creator = getattr(windows_exact_fs, "create_pinned_directory_child", None)
+        self.assertIsNotNone(creator)
+        child_path = self.root / "created-child"
+        displaced = self.root / "displaced-child"
+        parent = pin_stable_direct_object(
+            self.root,
+            kind="directory",
+            allow_writes=True,
+        )
+        real_identity = windows_exact_fs._handle_identity
+        substitution_attempted = False
+        substitution_succeeded = False
+
+        def inspect_identity(handle: int, path: Path) -> PinnedIdentity:
+            nonlocal substitution_attempted, substitution_succeeded
+            if path == child_path and not substitution_attempted:
+                substitution_attempted = True
+                try:
+                    child_path.rename(displaced)
+                except OSError:
+                    pass
+                else:
+                    substitution_succeeded = True
+                    child_path.mkdir()
+            return real_identity(handle, path)
+
+        child = None
+        try:
+            with mock.patch.object(
+                windows_exact_fs,
+                "_handle_identity",
+                side_effect=inspect_identity,
+            ):
+                child = creator(child_path, parent)
+            self.assertTrue(substitution_attempted)
+            self.assertFalse(substitution_succeeded)
+            self.assertFalse(displaced.exists())
+            self.assertEqual(child.identity, identity_at_path(child_path))
+        finally:
+            if child is not None and child.handle:
+                child.close()
+            parent.close()
+
+    def test_rooted_directory_creation_rejects_foreign_volume_child_identity(self) -> None:
+        creator = getattr(windows_exact_fs, "create_pinned_directory_child", None)
+        self.assertIsNotNone(creator)
+        child_path = self.root / "foreign-volume-child"
+        parent = pin_stable_direct_object(
+            self.root,
+            kind="directory",
+            allow_writes=True,
+        )
+        real_identity = windows_exact_fs._handle_identity
+
+        def foreign_child_identity(handle: int, path: Path) -> PinnedIdentity:
+            identity = real_identity(handle, path)
+            if path == child_path:
+                return replace(identity, volume_serial=identity.volume_serial + 1)
+            return identity
+
+        try:
+            with (
+                mock.patch.object(
+                    windows_exact_fs,
+                    "_handle_identity",
+                    side_effect=foreign_child_identity,
+                ),
+                self.assertRaisesRegex(ExactObjectError, "same volume"),
+            ):
+                creator(child_path, parent)
+        finally:
+            parent.close()
+        self.assertFalse(child_path.exists())
+
+    def test_rooted_directory_creation_validates_parent_path_and_direct_child(self) -> None:
+        creator = getattr(windows_exact_fs, "create_pinned_directory_child", None)
+        self.assertIsNotNone(creator)
+        parent = pin_stable_direct_object(
+            self.root,
+            kind="directory",
+            allow_writes=True,
+        )
+        wrong_parent = replace(
+            parent.identity,
+            volume_serial=parent.identity.volume_serial + 1,
+        )
+        try:
+            with (
+                mock.patch.object(windows_exact_fs._ntdll, "NtCreateFile") as native,
+                self.assertRaisesRegex(ExactObjectError, "parent path changed"),
+            ):
+                creator(
+                    self.root / "child",
+                    parent,
+                    identity_at_path_fn=lambda _path: wrong_parent,
+                )
+            native.assert_not_called()
+            with (
+                mock.patch.object(windows_exact_fs._ntdll, "NtCreateFile") as native,
+                self.assertRaisesRegex(ExactObjectError, "parent mismatch"),
+            ):
+                creator(self.root.parent / "escaped-child", parent)
+            native.assert_not_called()
+        finally:
+            parent.close()
+
+    def test_rooted_directory_creation_cleanup_failure_returns_exact_owner(self) -> None:
+        creator = getattr(windows_exact_fs, "create_pinned_directory_child", None)
+        self.assertIsNotNone(creator)
+        child_path = self.root / "invalid-created-child"
+        parent = pin_stable_direct_object(
+            self.root,
+            kind="directory",
+            allow_writes=True,
+        )
+        real_identity = windows_exact_fs._handle_identity
+        real_delete = windows_exact_fs.delete_pinned_object
+
+        def invalid_child_identity(handle: int, path: Path) -> PinnedIdentity:
+            identity = real_identity(handle, path)
+            if path == child_path:
+                return replace(
+                    identity,
+                    attributes=identity.attributes
+                    | windows_exact_fs._FILE_ATTRIBUTE_REPARSE_POINT,
+                )
+            return identity
+
+        ownership = None
+        try:
+            with (
+                mock.patch.object(
+                    windows_exact_fs,
+                    "_handle_identity",
+                    side_effect=invalid_child_identity,
+                ),
+                mock.patch.object(
+                    windows_exact_fs,
+                    "delete_pinned_object",
+                    side_effect=OSError("injected exact cleanup failure"),
+                ),
+                self.assertRaises(ExactObjectOwnershipError) as raised,
+            ):
+                creator(child_path, parent)
+            ownership = raised.exception
+            self.assertIsNotNone(ownership.candidate)
+            self.assertEqual(child_path, ownership.candidate.path)
+            self.assertNotEqual(0, ownership.candidate.handle)
+            with mock.patch.object(
+                windows_exact_fs,
+                "delete_pinned_object",
+                side_effect=real_delete,
+            ):
+                ownership.resolve()
+            self.assertEqual(0, ownership.candidate.handle)
+        finally:
+            if ownership is not None:
+                for retained in ownership.retained_objects:
+                    if retained.handle:
+                        real_delete(retained)
+            parent.close()
+        self.assertFalse(child_path.exists())
+
     def test_post_rename_validator_failure_deletes_the_moved_exact_candidate(self) -> None:
         destination = self.root / "outcome.json"
         validations = 0
