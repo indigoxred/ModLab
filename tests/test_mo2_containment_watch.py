@@ -1,4 +1,5 @@
 import ctypes
+from contextlib import contextmanager
 from ctypes import wintypes
 from dataclasses import dataclass, replace
 import hashlib
@@ -803,6 +804,333 @@ class MutationWatchTests(unittest.TestCase):
                         route, persistent=True, wrapper_fault=wrapper_fault
                     )
 
+    @contextmanager
+    def _controller_close_fault(self, *labels, interrupt=False, persistent=True):
+        """Fail real closes without closing; independently own RED cleanup."""
+        state = {"live": set(), "persistent": persistent, "attempts": 0}
+        real_watch_close = windows_watch._close_handle
+        real_exact_close = windows_exact_fs._close_handle
+
+        def watch_close(handle, label):
+            if any(label.startswith(prefix) for prefix in labels):
+                state["live"].add(handle)
+                state["attempts"] += 1
+                if interrupt:
+                    raise KeyboardInterrupt("injected controller close interruption")
+                return "injected live controller close failure"
+            return real_watch_close(handle, label)
+
+        def exact_close(handle):
+            if handle in state["live"]:
+                if state["persistent"]:
+                    raise OSError("injected retained controller close failure")
+                real_exact_close(handle)
+                state["live"].remove(handle)
+                return
+            real_exact_close(handle)
+
+        try:
+            with (
+                mock.patch.object(windows_watch, "_close_handle", new=watch_close),
+                mock.patch.object(windows_exact_fs, "_close_handle", new=exact_close),
+            ):
+                yield state
+        finally:
+            for handle in tuple(state["live"]):
+                self.assertIsNone(real_watch_close(handle, "independent test cleanup"))
+                state["live"].remove(handle)
+
+    def _assert_controller_ownership(self, action, state, *, count=1):
+        observed = None
+        try:
+            action()
+        except BaseException as error:
+            observed = error
+        self.assertIsInstance(
+            observed, (ExactObjectOwnershipError, windows_watch.WatchProtocolOwnershipError),
+            f"controller discarded {len(state['live'])} live owners: {observed!r}",
+        )
+        self.assertEqual(count, len(observed.verification))
+        self.assertEqual((), observed.candidates)
+        owners = observed.verification
+        self.assertEqual(state["live"], {owner.handle for owner in owners})
+        for _ in range(2):
+            with self.assertRaises(type(observed)) as retry:
+                observed.resolve()
+            observed = retry.exception
+            self.assertEqual(owners, observed.verification)
+            for original, retained in zip(owners, observed.verification, strict=True):
+                self.assertIs(original, retained)
+        state["persistent"] = False
+        observed.resolve()
+        self.assertEqual(set(), state["live"])
+        self.assertTrue(all(owner.handle == 0 for owner in owners))
+        with mock.patch.object(
+            windows_exact_fs, "_close_handle", side_effect=AssertionError("double close")
+        ):
+            observed.resolve()
+        return observed
+
+    def test_controller_capture_public_stop_retains_each_read_owner(self):
+        for route in ("local", "non-owner"):
+            for label in ("event journal readback", "terminal record readback", "ready record readback"):
+                with self.subTest(route=route, label=label):
+                    external = None
+                    if route == "local":
+                        request_path, _ = self._start_case(f"capture-owner-{route}-{label}")
+                    else:
+                        external = self._external_controller_fixture(f"capture-owner-{route}-{label}")
+                        controller, _, request_path, _, _ = external
+                        controller.terminate()
+                        controller.wait(timeout=10)
+                    try:
+                        with self._controller_close_fault(label) as state:
+                            self._assert_controller_ownership(lambda: stop_watch(request_path), state)
+                        self.assertFalse((request_path.parent / "outcome.json").exists())
+                        stop_watch(request_path)
+                    finally:
+                        if external:
+                            self._finish_external_fixture(external[0], external[3], external[4])
+
+    def test_controller_process_status_retains_failed_and_interrupted_cleanup(self):
+        pid, creation = windows_watch._current_controller_identity()
+        real_metadata = windows_watch._process_handle_creation_time
+        real_wait = windows_watch._kernel32.WaitForSingleObject
+        for fault in ("metadata", "mismatch", "wait", "wait-interrupt"):
+            for interrupt_close in (False, True):
+                with self.subTest(fault=fault, interrupt_close=interrupt_close):
+                    def metadata(handle, observed_pid):
+                        state["live"].add(handle)
+                        if fault == "metadata":
+                            raise OSError("injected metadata failure")
+                        return real_metadata(handle, observed_pid)
+
+                    def wait(handle, timeout):
+                        if fault == "wait-interrupt":
+                            raise KeyboardInterrupt("injected wait interruption")
+                        if fault == "wait":
+                            return windows_watch._WAIT_FAILED
+                        return real_wait(handle, timeout)
+
+                    with (
+                        self._controller_close_fault(
+                            "worker process", "mismatched process", "uncertain process",
+                            interrupt=interrupt_close,
+                        ) as state,
+                        mock.patch.object(windows_watch, "_process_handle_creation_time", new=metadata),
+                        mock.patch.object(windows_watch._kernel32, "WaitForSingleObject", new=wait),
+                    ):
+                        self._assert_controller_ownership(
+                            lambda: windows_watch._exact_process_status(
+                                pid, creation + (fault == "mismatch")
+                            ), state,
+                        )
+
+    def test_non_owner_public_stop_retains_controller_and_worker_query_closes(self):
+        for target in ("controller", "worker"):
+            with self.subTest(target=target):
+                fixture = self._external_controller_fixture(f"query-close-{target}")
+                controller, evidence, request_path, worker_pid, worker_handle = fixture
+                try:
+                    if target == "worker":
+                        controller.terminate()
+                        controller.wait(timeout=10)
+                    before = self._protocol_bytes(evidence)
+                    label = "claimed controller process" if target == "controller" else "cleanup worker process"
+                    with self._controller_close_fault(label) as state:
+                        self._assert_controller_ownership(lambda: stop_watch(request_path), state)
+                    if target == "controller":
+                        self.assertEqual(before, self._protocol_bytes(evidence))
+                    self.assertFalse((evidence / "outcome.json").exists())
+                finally:
+                    self._finish_external_fixture(controller, worker_pid, worker_handle)
+
+    def test_reporting_retains_true_read_owner_without_reversing_stored_completion(self):
+        for complete in (True, False):
+            for persistent in (True, False):
+                with self.subTest(complete=complete, persistent=persistent):
+                    request_path, pid = self._start_case(f"report-owner-{complete}-{persistent}")
+                    if complete:
+                        expected = stop_watch(request_path)
+                    else:
+                        with mock.patch.object(windows_watch, "_get_process_exit_code", return_value=73):
+                            expected = stop_watch(request_path)
+                    request = windows_watch._load_request_path(request_path)
+                    outcome_path = request_path.parent / "outcome.json"
+                    original = outcome_path.read_bytes()
+                    identity = windows_exact_fs.identity_at_path(outcome_path)
+                    def report():
+                        return watch_receipt_from_files(
+                            request, pid, request_path.parent / "ready.json",
+                            request_path.parent / "events.ndjson", request_path.parent / "terminal.json",
+                        )
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error", RuntimeWarning)
+                        with self._controller_close_fault(
+                            "watch outcome readback", persistent=persistent,
+                        ) as state:
+                            if persistent:
+                                self._assert_controller_ownership(report, state)
+                            else:
+                                self.assertEqual(expected, report())
+                                self.assertEqual(set(), state["live"])
+                    self.assertEqual(original, outcome_path.read_bytes())
+                    self.assertEqual(identity, windows_exact_fs.identity_at_path(outcome_path))
+                    self.assertEqual(expected, report())
+
+    def test_non_owner_preserves_publication_owner_when_worker_close_is_interrupted(self):
+        fixture = self._external_controller_fixture("pending-publication-query-owner")
+        controller, evidence, request_path, worker_pid, worker_handle = fixture
+        owner_path = self.root / "pending-publication-verification.txt"
+        owner_path.write_bytes(b"pending verification")
+        owner = windows_exact_fs.pin_direct_object(owner_path, kind="file")
+        pending = windows_watch.WatchProtocolOwnershipError(
+            "injected pending stop publication",
+            ExactObjectOwnershipError("pending", verification=(owner,)),
+        )
+        real_write = windows_watch._write_new
+        real_wait = windows_watch._kernel32.WaitForSingleObject
+        real_metadata = windows_watch._process_handle_creation_time
+        def metadata(handle, pid):
+            if pid == worker_pid:
+                state["live"].add(handle)
+            return real_metadata(handle, pid)
+        def write(path, data):
+            if path == evidence / "stop.token":
+                raise pending
+            return real_write(path, data)
+        def wait(handle, timeout):
+            # Deterministically enter cleanup of this fixture's already-opened
+            # worker handle even if its controller-loss exit has just completed.
+            if timeout == 0 and windows_watch._kernel32.GetProcessId(handle) == worker_pid:
+                return windows_watch._WAIT_TIMEOUT
+            return real_wait(handle, timeout)
+        try:
+            controller.terminate()
+            controller.wait(timeout=10)
+            with self._controller_close_fault("cleanup worker process", interrupt=True) as state:
+                state["live"].add(owner.handle)
+                with (
+                    mock.patch.object(windows_watch, "_write_new", new=write),
+                    mock.patch.object(windows_watch._kernel32, "WaitForSingleObject", new=wait),
+                    mock.patch.object(windows_watch, "_process_handle_creation_time", new=metadata),
+                ):
+                    self._assert_controller_ownership(lambda: stop_watch(request_path), state, count=2)
+            self.assertEqual(b"pending verification", owner_path.read_bytes())
+            self.assertFalse((evidence / "outcome.json").exists())
+        finally:
+            owner.handle = 0  # independent fixture cleanup owns RED failure too
+            self._finish_external_fixture(controller, worker_pid, worker_handle)
+
+    def test_registered_popen_close_failure_retains_session_until_exact_retry(self):
+        request_path, pid = self._start_case("registered-popen-close-retry")
+        session = windows_watch._LOCAL_SESSIONS[request_path.absolute()]
+        native = windows_watch._popen_process_handle(session.process)
+        with self._controller_close_fault("local Popen process") as state:
+            state["live"].add(native)
+            first = stop_watch(request_path)
+            self.assertFalse(first.complete)
+            self.assertIs(session, windows_watch._LOCAL_SESSIONS[request_path.absolute()])
+            self.assertEqual(pid, windows_watch._kernel32.GetProcessId(native))
+            state["persistent"] = False
+            stop_watch(request_path)
+            self.assertEqual(set(), state["live"])
+            self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_SESSIONS)
+        self.assertTrue(session.process._handle.closed)
+
+    def test_startup_ready_owner_survives_a_second_capture_cleanup_failure(self):
+        request = self._request()
+        request_path = self.evidence / "request.json"
+        self.active_requests.append(request_path)
+        with self._controller_close_fault(
+            "ready record readback", "terminal record readback",
+        ) as state:
+            self._assert_controller_ownership(lambda: start_watch(request), state, count=2)
+        self.assertTrue(request.stop_token_path.is_file())
+        self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_SESSIONS)
+
+    def test_start_callback_failure_retains_popen_owner_through_detach_interruption(self):
+        for detach_fault in ("before", "after"):
+            with self.subTest(detach_fault=detach_fault):
+                case = self.root / f"callback-{detach_fault}"
+                case.mkdir()
+                request = replace(self._request(), evidence_root=case, stop_token_path=case / "stop.token")
+                launched = []
+                real_popen = subprocess.Popen
+                callback_error = ValueError("injected callback failure")
+
+                def spawn(*args, **kwargs):
+                    process = real_popen(*args, **kwargs)
+                    launched.append(process)
+                    state["live"].add(int(process._handle))
+                    return process
+
+                def callback(_pid):
+                    raise callback_error
+
+                original_detach = subprocess.Handle.Detach
+                def interrupted_detach(value):
+                    if detach_fault == "after":
+                        original_detach(value)
+                    raise KeyboardInterrupt("injected Popen detachment interruption")
+
+                with self._controller_close_fault("local Popen process") as state:
+                    try:
+                        with (
+                            mock.patch.object(windows_watch.subprocess, "Popen", new=spawn),
+                            mock.patch.object(subprocess.Handle, "Detach", new=interrupted_detach),
+                        ):
+                            observed = None
+                            try:
+                                start_watch(request, on_created=callback)
+                            except BaseException as error:
+                                observed = error
+                        self.assertIsInstance(
+                            observed, (ExactObjectOwnershipError, windows_watch.WatchProtocolOwnershipError),
+                        )
+                        chain = [observed]
+                        seen = set()
+                        while chain:
+                            error = chain.pop()
+                            if error is None or id(error) in seen:
+                                continue
+                            seen.add(id(error))
+                            chain.extend((error.__cause__, error.__context__))
+                        self.assertIn(id(callback_error), seen)
+                        self.assertEqual(1, len(launched))
+                        process = launched[0]
+                        native = next(iter(state["live"]))
+                        self.assertEqual(windows_watch._WAIT_OBJECT_0, windows_watch._kernel32.WaitForSingleObject(native, 0))
+                        self.assertEqual({native}, {owner.handle for owner in observed.verification})
+                        handle_object = process._handle
+                        with mock.patch.object(type(handle_object), "Detach", new=interrupted_detach):
+                            with self.assertRaises(type(observed)) as retained:
+                                observed.resolve()
+                            observed = retained.exception
+                        self.assertEqual({native}, {owner.handle for owner in observed.verification})
+                        self.assertEqual(windows_watch._WAIT_OBJECT_0, windows_watch._kernel32.WaitForSingleObject(native, 0))
+                        state["persistent"] = False
+                        observed.resolve()
+                        self.assertEqual(set(), state["live"])
+                        self.assertTrue(handle_object.closed)
+                        with mock.patch.object(windows_exact_fs, "_close_handle", side_effect=AssertionError("Popen double close")):
+                            observed.resolve()
+                        self.assertEqual((), observed.retained_objects)
+                    finally:
+                        # Preserve independent native cleanup on RED; suppress only
+                        # the fixture Popen object's automatic duplicate close.
+                        for process in launched:
+                            handle_object = process._handle
+                            if not handle_object.closed:
+                                if process.poll() is None:
+                                    process.terminate()
+                                    process.wait(timeout=10)
+                                if int(handle_object) in state["live"]:
+                                    handle_object.Detach()
+                                    process._child_created = False
+                                else:
+                                    windows_watch._close_popen_process_handle(process)
+
     def test_public_non_owner_stop_never_flattens_live_ownership_into_a_receipt(self):
         request = self._request()
         request_path = self.evidence / "request.json"
@@ -1213,72 +1541,6 @@ class MutationWatchTests(unittest.TestCase):
 
         outcome_path.write_bytes(canonical)
 
-    def test_outcome_reporting_close_warning_does_not_reverse_completion(self):
-        request_path, worker_pid = self._start_case("outcome-reporting-close-warning")
-        expected = stop_watch(request_path)
-        request = windows_watch._load_request_path(request_path)
-        real_close = windows_watch._close_handle
-
-        def reporting_close_warning(handle: int, label: str) -> str | None:
-            if label == "watch outcome readback":
-                self.assertIsNone(real_close(handle, label))
-                return "injected outcome reporting close warning"
-            return real_close(handle, label)
-
-        with self.assertWarnsRegex(RuntimeWarning, "outcome reporting close warning"):
-            with mock.patch.object(
-                windows_watch,
-                "_close_handle",
-                side_effect=reporting_close_warning,
-            ):
-                receipt = watch_receipt_from_files(
-                    request,
-                    worker_pid,
-                    request.evidence_root / "ready.json",
-                    request.evidence_root / "events.ndjson",
-                    request.evidence_root / "terminal.json",
-                )
-
-        self.assertEqual(expected, receipt)
-
-    def test_outcome_reporting_warning_filter_preserves_captured_outcomes(self):
-        completed_path, completed_pid = self._start_case("reporting-filter-completed")
-        completed = stop_watch(completed_path)
-        incomplete_path, incomplete_pid = self._start_case("reporting-filter-incomplete")
-        with mock.patch.object(windows_watch, "_get_process_exit_code", return_value=73):
-            incomplete = stop_watch(incomplete_path)
-
-        for request_path, worker_pid, expected in (
-            (completed_path, completed_pid, completed),
-            (incomplete_path, incomplete_pid, incomplete),
-        ):
-            with self.subTest(completion=expected.evidence_completion.value):
-                request = windows_watch._load_request_path(request_path)
-                real_close = windows_watch._close_handle
-
-                def reporting_close_warning(handle: int, label: str) -> str | None:
-                    if label == "watch outcome readback":
-                        self.assertIsNone(real_close(handle, label))
-                        return "injected outcome reporting close warning"
-                    return real_close(handle, label)
-
-                with warnings.catch_warnings():
-                    warnings.simplefilter("error", RuntimeWarning)
-                    with mock.patch.object(
-                        windows_watch,
-                        "_close_handle",
-                        side_effect=reporting_close_warning,
-                    ):
-                        receipt = watch_receipt_from_files(
-                            request,
-                            worker_pid,
-                            request.evidence_root / "ready.json",
-                            request.evidence_root / "events.ndjson",
-                            request.evidence_root / "terminal.json",
-                        )
-
-                self.assertEqual(expected, receipt)
-
     def test_start_publishes_command_bound_claim_before_exact_spawn(self):
         request = self._request()
         request_path = self.evidence / "request.json"
@@ -1428,85 +1690,34 @@ class MutationWatchTests(unittest.TestCase):
                     process.wait(timeout=10)
                 windows_watch._close_popen_process_handle(process)
 
-    def test_start_launch_boundary_rethrows_same_unresolved_ownership(self):
+    def test_start_launch_owner_is_surfaced_only_after_owned_worker_cleanup(self):
         request = self._request()
         request_path = self.evidence / "request.json"
-        owner_path = self.root / "launch-publication-owner.txt"
-        owner_path.write_bytes(b"owner")
+        self.active_requests.append(request_path)
+        owner_path = self.root / "launch-owner.txt"
+        owner_path.write_bytes(b"preserved verification")
         owner = windows_exact_fs.pin_direct_object(owner_path, kind="file")
         protocol_error = windows_watch.WatchProtocolOwnershipError(
-            "injected launch publication ownership",
-            ExactObjectOwnershipError("launch", verification=(owner,)),
+            "injected launch ownership", ExactObjectOwnershipError("launch", verification=(owner,))
         )
         real_publish = windows_watch.publish_new_verified
-        real_close = PinnedObject.close
-        close_failures = 0
-
-        def fail_launch_record(path: Path, data: bytes, parse):
+        def publish(path, data, parse):
             if path.name == "worker-launch.json":
                 raise protocol_error
             return real_publish(path, data, parse)
-
-        def fail_owner_close_twice(pinned) -> None:
-            nonlocal close_failures
-            if pinned is owner and close_failures < 2:
-                close_failures += 1
-                raise OSError("injected launch owner close failure")
-            real_close(pinned)
-
-        fake_process = mock.Mock(pid=123)
         try:
-            with (
-                mock.patch.object(
-                    windows_watch.subprocess,
-                    "Popen",
-                    return_value=fake_process,
-                ),
-                mock.patch.object(
-                    windows_watch,
-                    "_popen_process_handle",
-                    return_value=77,
-                ),
-                mock.patch.object(
-                    windows_watch,
-                    "_process_handle_creation_time",
-                    return_value=88,
-                ),
-                mock.patch.object(
-                    windows_watch,
-                    "publish_new_verified",
-                    side_effect=fail_launch_record,
-                ),
-                mock.patch.object(windows_watch, "_stop_local_session") as cleanup,
-                mock.patch.object(
-                    PinnedObject,
-                    "close",
-                    new=fail_owner_close_twice,
-                ),
-            ):
-                cleanup.return_value = mock.Mock(error="injected cleanup")
-                observed_error = None
-                try:
-                    start_watch(request)
-                except BaseException as error:
-                    observed_error = error
-
-                self.assertIs(protocol_error, observed_error)
-                self.assertEqual(1, close_failures)
-                cleanup.assert_not_called()
-                with self.assertRaises(windows_watch.WatchProtocolOwnershipError) as retry:
-                    observed_error.resolve()
-                self.assertIs(protocol_error, retry.exception)
-                retry.exception.resolve()
-
-            self.assertEqual(2, close_failures)
-            self.assertEqual(0, owner.handle)
-            self.assertEqual(b"owner", owner_path.read_bytes())
+            with self._controller_close_fault("unused") as state:
+                state["live"].add(owner.handle)
+                with mock.patch.object(windows_watch, "publish_new_verified", new=publish):
+                    observed = self._assert_controller_ownership(lambda: start_watch(request), state)
+                self.assertIs(protocol_error, observed)
+            self.assertTrue(request.stop_token_path.exists())
+            self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_SESSIONS)
+            self.assertEqual(b"preserved verification", owner_path.read_bytes())
         finally:
-            with windows_watch._LOCAL_SESSIONS_LOCK:
-                windows_watch._LOCAL_SESSIONS.pop(request_path.absolute(), None)
             if owner.handle:
-                real_close(owner)
+                # The independent fault fixture already closed its tracked handle.
+                owner.handle = 0
 
     def test_startup_ready_exact_read_failure_aborts_incomplete(self):
         request = self._request()
@@ -1948,30 +2159,14 @@ class MutationWatchTests(unittest.TestCase):
                 request_path, _ = self._start_case(
                     f"exact-close-failure-{authority_name.removesuffix('.json')}"
                 )
-                real_close = windows_watch._close_handle
-                injected = False
-
-                def fail_first_close(handle: int, label: str) -> str | None:
-                    nonlocal injected
-                    if label == close_label:
-                        if not injected:
-                            self.assertIsNone(real_close(handle, label))
-                            injected = True
-                            return f"unclosed handle: injected {close_label}"
-                        return None
-                    return real_close(handle, label)
-
-                with mock.patch.object(
-                    windows_watch,
-                    "_close_handle",
-                    side_effect=fail_first_close,
-                ):
+                with self._controller_close_fault(close_label, persistent=False) as state:
                     receipt = stop_watch(request_path)
+                    self.assertGreater(state["attempts"], 0)
+                    self.assertEqual(set(), state["live"])
 
                 outcome = watch_outcome_from_bytes(
                     (request_path.parent / "outcome.json").read_bytes()
                 )
-                self.assertTrue(injected)
                 self.assertFalse(receipt.complete)
                 self.assertEqual(
                     WatchEvidenceCompletion.INCOMPLETE,
@@ -2738,7 +2933,6 @@ class MutationWatchTests(unittest.TestCase):
                 )
                 real_open = windows_watch._open_process_identity
                 real_wait = windows_watch._kernel32.WaitForSingleObject
-                real_close = windows_watch._close_handle
 
                 def inspect_process(pid: int):
                     handle, creation_time = real_open(pid)
@@ -2750,15 +2944,6 @@ class MutationWatchTests(unittest.TestCase):
                     if fault == "worker-wait-timeout" and timeout == 15_000:
                         return windows_watch._WAIT_TIMEOUT
                     return real_wait(handle, timeout)
-
-                def close_process(handle: int, label: str) -> str | None:
-                    if (
-                        fault == "worker-handle-close-failure"
-                        and label.startswith("cleanup worker process")
-                    ):
-                        self.assertIsNone(real_close(handle, label))
-                        return "unclosed handle: injected cleanup worker process"
-                    return real_close(handle, label)
 
                 try:
                     controller.terminate()
@@ -2774,13 +2959,13 @@ class MutationWatchTests(unittest.TestCase):
                             "WaitForSingleObject",
                             side_effect=wait_for_process,
                         ),
-                        mock.patch.object(
-                            windows_watch,
-                            "_close_handle",
-                            side_effect=close_process,
-                        ),
+                        self._controller_close_fault(
+                            "cleanup worker process" if fault == "worker-handle-close-failure" else "unused",
+                            persistent=False,
+                        ) as state,
                     ):
                         receipt = stop_watch(request_path)
+                        self.assertEqual(set(), state["live"])
 
                     outcome = watch_outcome_from_bytes(
                         (evidence / "outcome.json").read_bytes()

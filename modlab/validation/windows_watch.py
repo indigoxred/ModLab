@@ -17,7 +17,6 @@ import sys
 import threading
 import time
 from typing import Callable
-import warnings
 
 from modlab.platform.windows_exact_fs import (
     ExactObjectError,
@@ -25,6 +24,7 @@ from modlab.platform.windows_exact_fs import (
     PinnedObject,
     publish_new_pinned,
     resolve_retained_ownership,
+    union_retained_ownership,
 )
 from modlab.validation.mo2_containment_model import (
     ContainmentScenario,
@@ -145,6 +145,86 @@ class _HandleOwnershipError(WatchProtocolError):
         super().__init__(message)
         self.handle = handle
         self.label = label
+
+
+def _close_or_retain_raw(handle: int, label: str) -> None:
+    try:
+        close_error = _close_handle(handle, label)
+    except BaseException as error:
+        raise _HandleOwnershipError(str(error), handle, label) from error
+    if close_error is not None:
+        raise _HandleOwnershipError(close_error, handle, label)
+
+
+def _protocol_owner(
+    ownership: ExactObjectOwnershipError, cause: BaseException,
+) -> WatchProtocolOwnershipError | ExactObjectOwnershipError:
+    try:
+        error = WatchProtocolOwnershipError(str(cause), ownership)
+    except BaseException as wrapping_error:
+        ownership.__cause__ = wrapping_error
+        return ownership
+    error.__cause__ = cause
+    return error
+
+
+def _controller_owner(error: BaseException, path: Path) -> BaseException:
+    """Adapt only a controller's raw owner; never add deletion authority."""
+    if not isinstance(error, _HandleOwnershipError):
+        return error
+    retained = PinnedObject(path, error.handle, None)
+    ownership = ExactObjectOwnershipError(str(error), verification=(retained,))
+    error.handle = 0
+    return _protocol_owner(ownership, error)
+
+
+def _merge_controller_errors(primary: BaseException, cleanup: BaseException) -> BaseException:
+    first = primary.ownership if isinstance(primary, WatchProtocolOwnershipError) else primary
+    second = cleanup.ownership if isinstance(cleanup, WatchProtocolOwnershipError) else cleanup
+    if isinstance(first, ExactObjectOwnershipError):
+        if isinstance(second, ExactObjectOwnershipError):
+            combined = union_retained_ownership(str(cleanup), prior=first, owners=second.owners)
+            return _protocol_owner(combined, primary)
+        primary.add_note(f"additional controller cleanup failure: {cleanup!r}")
+        return primary
+    if cleanup is not primary:
+        cleanup.__cause__ = primary
+    return cleanup
+
+
+def _close_controller_handle(handle: int, label: str, path: Path) -> str | None:
+    try:
+        _close_or_retain_raw(handle, label)
+    except _HandleOwnershipError as error:
+        owner = _controller_owner(error, path)
+        owner.resolve()
+        return str(error)
+    return None
+
+
+class _PopenVerificationOwner(PinnedObject):
+    """Close-only adapter for Popen's one handle, including interrupted Detach."""
+
+    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+        self.process = process
+        self.handle_object = process._handle
+        self.detached = False
+        super().__init__(Path(f"Popen process {process.pid}"), int(self.handle_object), None)
+
+    def close(self) -> None:
+        if not self.handle:
+            return
+        if not self.detached:
+            try:
+                self.handle_object.Detach()
+            finally:
+                # Detach can change this flag before an interruption. It is
+                # transfer evidence only, never proof of native close success.
+                self.detached = self.handle_object.closed
+            if not self.detached:
+                raise WatchProtocolError("Popen handle detachment did not complete")
+        super().close()
+        self.process._child_created = False
 
 
 @dataclass
@@ -536,9 +616,7 @@ def _read_exact_journal(path: Path) -> _JournalEvidence:
         data = b"".join(data_parts)
         return _JournalEvidence(volume_serial, file_id, data, 0, 0)
     finally:
-        close_error = _close_handle(handle, "event journal readback")
-        if close_error is not None:
-            raise _HandleOwnershipError(close_error, handle, "event journal readback")
+        _close_or_retain_raw(handle, "event journal readback")
 
 
 def _read_exact_regular_file(
@@ -587,18 +665,12 @@ def _read_exact_regular_file(
             remaining -= transferred.value
         return b"".join(data_parts)
     finally:
-        close_error = _close_handle(handle, f"{label} readback")
-        if close_error is not None:
+        try:
+            _close_or_retain_raw(handle, f"{label} readback")
+        except _HandleOwnershipError as error:
             if close_failure_is_fatal:
-                raise _HandleOwnershipError(close_error, handle, f"{label} readback")
-            try:
-                warnings.warn(
-                    f"{label} readback handle close warning: {close_error}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-            except Exception:
-                pass
+                raise
+            _controller_owner(error, path).resolve()
 
 
 def _require_windows() -> None:
@@ -880,14 +952,8 @@ def _open_process_identity(pid: int) -> tuple[int, int]:
         raise _winerror(f"could not open watch worker process {pid}")
     try:
         return handle, _process_handle_creation_time(handle, pid)
-    except BaseException as error:
-        close_error = _close_handle(handle, f"worker process {pid}")
-        if close_error is not None:
-            raise _HandleOwnershipError(
-                f"{error}; {close_error}",
-                handle,
-                f"worker process {pid}",
-            ) from error
+    except BaseException:
+        _close_or_retain_raw(handle, f"worker process {pid}")
         raise
 
 
@@ -988,6 +1054,9 @@ def _parse_ready(
 
 
 def _popen_process_handle(process: subprocess.Popen[bytes]) -> int:
+    retained = getattr(process, "_modlab_close_owner", None)
+    if isinstance(retained, _PopenVerificationOwner) and retained.handle:
+        return retained.handle
     handle = getattr(process, "_handle", None)
     if not isinstance(handle, int) or getattr(handle, "closed", False):
         raise WatchProtocolError("worker Popen process handle is unavailable")
@@ -1002,15 +1071,20 @@ def _get_process_exit_code(handle: int) -> int:
 
 
 def _close_popen_process_handle(process: subprocess.Popen[bytes]) -> str | None:
+    retained = getattr(process, "_modlab_close_owner", None)
+    if isinstance(retained, _PopenVerificationOwner):
+        try:
+            retained.close()
+        except BaseException as error:
+            return str(error)
+        return None
     handle_object = getattr(process, "_handle", None)
     if not isinstance(handle_object, int) or getattr(handle_object, "closed", False):
         return None
-    handle = int(handle_object)
-    close_error = _close_handle(handle, f"local Popen process {process.pid}")
-    if close_error is None and hasattr(handle_object, "Detach"):
-        handle_object.Detach()
-        process._child_created = False
-    return close_error
+    # Register the adapter before any transfer; a local session continues to
+    # own it, while pre-registration startup failures expose this same object.
+    process._modlab_close_owner = _PopenVerificationOwner(process)
+    return _close_popen_process_handle(process)
 
 
 def _load_controller_claim(request: WatchRequest) -> ControllerClaim:
@@ -1025,6 +1099,44 @@ def _load_worker_launch(request: WatchRequest) -> WorkerLaunch:
         (request.evidence_root / _LAUNCH_NAME).read_bytes(),
         request,
     )
+
+
+def _cleanup_start_failure(
+    error: BaseException,
+    request_path: Path,
+    process: subprocess.Popen[bytes],
+    session: _LocalWatchSession | None = None,
+    *,
+    reason: str = "watch-startup-failed",
+) -> BaseException:
+    """Finish owned-worker cleanup before resolving or exposing startup owners."""
+    pending = _controller_owner(error, request_path.parent)
+    if session is not None:
+        try:
+            receipt = _stop_local_session(request_path, session, forced_reason=reason)
+            if receipt.error:
+                pending.add_note(receipt.error)
+        except BaseException as cleanup_error:
+            pending = _merge_controller_errors(
+                pending, _controller_owner(cleanup_error, request_path.parent),
+            )
+    else:
+        try:
+            process.terminate()
+            process.wait(timeout=15)
+        except BaseException as cleanup_error:
+            pending = _merge_controller_errors(pending, cleanup_error)
+        close_error = _close_popen_process_handle(process)
+        if close_error is not None:
+            retained = process._modlab_close_owner
+            owner = _protocol_owner(
+                ExactObjectOwnershipError(close_error, verification=(retained,)), pending,
+            )
+            pending = _merge_controller_errors(pending, owner)
+    if isinstance(pending, (WatchProtocolOwnershipError, ExactObjectOwnershipError)):
+        pending.resolve()
+        return error
+    return pending
 
 
 def start_watch(
@@ -1095,37 +1207,17 @@ def start_watch(
         raise WatchProtocolError(f"watch worker launch failed: {error}") from error
     worker_pid = process.pid
     if type(worker_pid) is not int or worker_pid <= 0:
-        try:
-            process.terminate()
-            process.wait(timeout=15)
-        except (OSError, subprocess.TimeoutExpired) as cleanup_error:
-            raise WatchProtocolError(
-                "watch worker returned an invalid PID and cleanup failed: "
-                f"{cleanup_error}"
-            ) from cleanup_error
-        raise WatchProtocolError("watch worker returned an invalid PID")
+        error = WatchProtocolError("watch worker returned an invalid PID")
+        raise _cleanup_start_failure(error, request_path, process)
     if on_created is not None:
         try:
             on_created(worker_pid)
         except BaseException as callback_error:
-            cleanup_error: BaseException | None = None
-            try:
-                process.terminate()
-                process.wait(timeout=15)
-            except (OSError, subprocess.TimeoutExpired) as error:
-                cleanup_error = error
-            close_error = _close_popen_process_handle(process)
-            if cleanup_error is not None and hasattr(callback_error, "add_note"):
-                callback_error.add_note(
-                    f"watch creation callback cleanup failed: {cleanup_error}"
-                )
-            if close_error is not None and hasattr(callback_error, "add_note"):
-                callback_error.add_note(close_error)
-            raise
+            raise _cleanup_start_failure(callback_error, request_path, process)
     request_key = request_path.absolute()
     session: _LocalWatchSession | None = None
     session_registered = False
-    startup_error: OSError | WatchProtocolError | None = None
+    startup_error: BaseException | None = None
     try:
         process_handle = _popen_process_handle(process)
         worker_creation_time = _process_handle_creation_time(
@@ -1165,32 +1257,17 @@ def start_watch(
             launch_bytes,
             lambda data: worker_launch_from_bytes(data, normalized),
         )
-    except WatchProtocolOwnershipError as error:
-        _resolve_watch_protocol_ownership(error)
-        startup_error = error
-    except (OSError, WatchProtocolError) as error:
+    except BaseException as error:
         startup_error = error
     if startup_error is not None:
-        cleanup_error = "watch startup cleanup was incomplete"
-        if session is not None and session_registered:
-            receipt = _stop_local_session(
-                request_path,
-                session,
-                forced_reason="worker-launch-publication-failed",
-            )
-            cleanup_error = receipt.error or cleanup_error
-        else:
-            try:
-                process.terminate()
-                process.wait(timeout=15)
-            except (OSError, subprocess.TimeoutExpired) as abort_error:
-                cleanup_error = f"worker abort failed: {abort_error}"
-            close_error = _close_popen_process_handle(process)
-            if close_error is not None:
-                cleanup_error = f"{cleanup_error}; {close_error}"
+        pending = _cleanup_start_failure(
+            startup_error, request_path, process, session if session_registered else None,
+            reason="worker-launch-publication-failed",
+        )
+        if not isinstance(startup_error, (OSError, WatchProtocolError)):
+            raise pending
         raise WatchProtocolError(
-            f"watch worker identity/launch publication failed: {startup_error}; "
-            f"{cleanup_error}"
+            f"watch worker identity/launch publication failed: {startup_error}"
         ) from startup_error
     assert session is not None
     deadline = time.monotonic() + 15.0
@@ -1231,14 +1308,12 @@ def start_watch(
                 )
                 return worker_pid
         raise WatchProtocolError("watch worker did not become ready")
-    except (OSError, WatchProtocolError) as error:
-        receipt = _stop_local_session(
-            request_path,
-            session,
-            forced_reason="watch-startup-failed",
-        )
+    except BaseException as error:
+        pending = _cleanup_start_failure(error, request_path, process, session)
+        if not isinstance(error, (OSError, WatchProtocolError)):
+            raise pending
         raise WatchProtocolError(
-            f"{error}; {receipt.error or 'watch startup cleanup was incomplete'}"
+            f"{error}; watch startup cleanup was incomplete"
         ) from error
 
 
@@ -2218,6 +2293,8 @@ def watch_receipt_from_files(
                 "watch outcome binding mismatch",
             )
         return _receipt_from_outcome(outcome)
+    except (WatchProtocolOwnershipError, ExactObjectOwnershipError):
+        raise
     except FileNotFoundError:
         return _incomplete_without_outcome(
             request,
@@ -2332,9 +2409,7 @@ def _capture_worker_evidence(
         ready_record_valid = True
     except _HandleOwnershipError as error:
         completion_reasons.append("evidence-handle-close-failed")
-        retry_error = _close_handle(error.handle, error.label)
-        if retry_error is not None:
-            raise
+        _controller_owner(error, ready_path).resolve()
     except (OSError, WatchProtocolError):
         completion_reasons.append("worker-ready-invalid")
 
@@ -2516,22 +2591,7 @@ def _load_published_outcome(
             )
             break
         except _HandleOwnershipError as error:
-            # This acquired reader owns only CloseHandle authority, never
-            # deletion. Transfer it once into the shared retryable owner model.
-            retained = PinnedObject(
-                request.evidence_root / _OUTCOME_NAME, error.handle, None
-            )
-            ownership = ExactObjectOwnershipError(str(error), verification=(retained,))
-            error.handle = 0
-            try:
-                protocol_error = WatchProtocolOwnershipError(
-                    f"exact outcome read retained ownership: {error}", ownership
-                )
-            except BaseException as wrapping_error:
-                # The exact owner already exists: surface it unchanged rather
-                # than retrying a failed wrapper or leaving ownership in context.
-                raise ownership from wrapping_error
-            raise protocol_error from error
+            raise _controller_owner(error, request.evidence_root / _OUTCOME_NAME)
         except OSError as error:
             error_code = getattr(error, "winerror", None)
             if error_code is None:
@@ -2665,6 +2725,7 @@ def _stop_local_session(
         worker_signalled = False
         worker_exit_code: int | None = None
         captured: _CapturedWatchEvidence | None = None
+        pending_ownership: BaseException | None = None
         try:
             process_handle = _popen_process_handle(session.process)
             _verify_retained_process_handle(
@@ -2696,11 +2757,17 @@ def _stop_local_session(
                     reasons.extend(captured.completion_reasons)
                 except _HandleOwnershipError as error:
                     reasons.append("evidence-handle-close-failed")
-                    _close_handle(error.handle, error.label)
+                    pending_ownership = _controller_owner(error, request.evidence_root)
+                except (WatchProtocolOwnershipError, ExactObjectOwnershipError) as error:
+                    pending_ownership = error
                 except (OSError, WatchProtocolError) as error:
                     reasons.append(_worker_evidence_reason(error))
+        except (WatchProtocolOwnershipError, ExactObjectOwnershipError) as error:
+            pending_ownership = error
         except (OSError, WatchProtocolError):
             reasons.append("worker-process-observation-failed")
+        except BaseException as error:
+            pending_ownership = error
         if process_handle and worker_signalled:
             close_error = _close_popen_process_handle(session.process)
             if close_error is not None:
@@ -2708,6 +2775,12 @@ def _stop_local_session(
             else:
                 with _LOCAL_SESSIONS_LOCK:
                     _LOCAL_SESSIONS.pop(request_path.absolute(), None)
+        if pending_ownership is not None:
+            if isinstance(pending_ownership, (WatchProtocolOwnershipError, ExactObjectOwnershipError)):
+                pending_ownership.resolve()
+                reasons.append("evidence-handle-close-failed")
+            else:
+                raise pending_ownership
         completion = (
             WatchEvidenceCompletion.COMPLETED
             if not reasons and worker_exit_code == 0 and captured is not None
@@ -2772,10 +2845,8 @@ def _exact_process_status(
     try:
         handle, observed_creation = _open_process_identity(pid)
     except _HandleOwnershipError as error:
-        retry_error = _close_handle(error.handle, error.label)
         detail = str(error)
-        if retry_error is not None:
-            detail = f"{detail}; {retry_error}"
+        _controller_owner(error, Path(f"process {pid}")).resolve()
         return "uncertain", 0, detail
     except OSError as error:
         if getattr(error, "winerror", None) == _ERROR_INVALID_PARAMETER:
@@ -2784,20 +2855,22 @@ def _exact_process_status(
     except WatchProtocolError as error:
         return "uncertain", 0, str(error)
     if observed_creation != creation_time:
-        close_error = _close_handle(handle, f"mismatched process {pid}")
-        detail = "process creation-time mismatch"
-        if close_error is not None:
-            detail = f"{detail}; {close_error}"
-        return "uncertain", 0, detail
-    wait_result = _kernel32.WaitForSingleObject(handle, 0)
+        _close_controller_handle(handle, f"mismatched process {pid}", Path(f"process {pid}"))
+        return "uncertain", 0, "process creation-time mismatch"
+    try:
+        wait_result = _kernel32.WaitForSingleObject(handle, 0)
+    except BaseException as error:
+        try:
+            _close_controller_handle(handle, f"uncertain process {pid}", Path(f"process {pid}"))
+        except BaseException as cleanup_error:
+            raise _merge_controller_errors(error, cleanup_error)
+        raise
     if wait_result == _WAIT_TIMEOUT:
         return "live", handle, None
     if wait_result == _WAIT_OBJECT_0:
         return "dead", handle, None
-    close_error = _close_handle(handle, f"uncertain process {pid}")
+    _close_controller_handle(handle, f"uncertain process {pid}", Path(f"process {pid}"))
     detail = f"process liveness wait failed: {wait_result}"
-    if close_error is not None:
-        detail = f"{detail}; {close_error}"
     return "uncertain", 0, detail
 
 
@@ -2830,16 +2903,13 @@ def _stop_non_owner(
         claim.controller_creation_time,
     )
     if controller_handle:
-        close_error = _close_handle(
+        close_error = _close_controller_handle(
             controller_handle,
             f"claimed controller process {claim.controller_pid}",
+            request.evidence_root,
         )
         if close_error is not None:
-            return _incomplete_without_outcome(
-                request,
-                launch.worker_pid,
-                close_error,
-            )
+            return _incomplete_without_outcome(request, launch.worker_pid, close_error)
     if controller_status == "live":
         if existing_outcome is not None:
             return _receipt_from_outcome(existing_outcome)
@@ -2862,48 +2932,59 @@ def _stop_non_owner(
         launch.worker_pid,
         launch.worker_creation_time,
     )
-    if worker_status == "uncertain":
-        reasons.append("worker-identity-uncertain")
-    elif worker_status == "live" and worker_handle:
-        try:
-            _write_new(request.stop_token_path, b"stop\n")
-        except FileExistsError:
-            pass
-        except WatchProtocolOwnershipError as error:
-            _resolve_watch_protocol_ownership(error)
-            reasons.append("worker-cleanup-refused")
-        except (OSError, WatchProtocolError):
-            reasons.append("worker-cleanup-refused")
-        wait_result = _kernel32.WaitForSingleObject(worker_handle, 15_000)
-        if wait_result == _WAIT_OBJECT_0:
+    pending_error: BaseException | None = None
+    try:
+        if worker_status == "uncertain":
+            reasons.append("worker-identity-uncertain")
+        elif worker_status == "live" and worker_handle:
             try:
-                _verify_retained_process_handle(
-                    worker_handle,
-                    launch.worker_pid,
-                    launch.worker_creation_time,
-                )
-                worker_quiescent = True
-                worker_exit_code = _get_process_exit_code(worker_handle)
-                if worker_exit_code == _STILL_ACTIVE:
-                    reasons.append("worker-cleanup-refused")
-                    worker_quiescent = False
+                _write_new(request.stop_token_path, b"stop\n")
+            except FileExistsError:
+                pass
+            except WatchProtocolOwnershipError as error:
+                _resolve_watch_protocol_ownership(error)
+                reasons.append("worker-cleanup-refused")
             except (OSError, WatchProtocolError):
                 reasons.append("worker-cleanup-refused")
-        else:
-            reasons.append("worker-cleanup-refused")
-    elif worker_status == "dead" and worker_handle:
-        worker_quiescent = True
-        try:
-            worker_exit_code = _get_process_exit_code(worker_handle)
-        except OSError:
-            reasons.append("worker-cleanup-refused")
+            wait_result = _kernel32.WaitForSingleObject(worker_handle, 15_000)
+            if wait_result == _WAIT_OBJECT_0:
+                try:
+                    _verify_retained_process_handle(
+                        worker_handle,
+                        launch.worker_pid,
+                        launch.worker_creation_time,
+                    )
+                    worker_quiescent = True
+                    worker_exit_code = _get_process_exit_code(worker_handle)
+                    if worker_exit_code == _STILL_ACTIVE:
+                        reasons.append("worker-cleanup-refused")
+                        worker_quiescent = False
+                except (OSError, WatchProtocolError):
+                    reasons.append("worker-cleanup-refused")
+            else:
+                reasons.append("worker-cleanup-refused")
+        elif worker_status == "dead" and worker_handle:
+            worker_quiescent = True
+            try:
+                worker_exit_code = _get_process_exit_code(worker_handle)
+            except OSError:
+                reasons.append("worker-cleanup-refused")
+    except BaseException as error:
+        pending_error = _controller_owner(error, request.evidence_root)
     if worker_handle:
-        close_error = _close_handle(
-            worker_handle,
-            f"cleanup worker process {launch.worker_pid}",
-        )
-        if close_error is not None:
-            reasons.append("worker-cleanup-refused")
+        try:
+            close_error = _close_controller_handle(
+                worker_handle, f"cleanup worker process {launch.worker_pid}", request.evidence_root,
+            )
+            if close_error is not None:
+                reasons.append("worker-cleanup-refused")
+        except BaseException as cleanup_error:
+            pending_error = (
+                _merge_controller_errors(pending_error, cleanup_error)
+                if pending_error is not None else cleanup_error
+            )
+    if pending_error is not None:
+        raise pending_error
     if worker_error is not None and "worker-identity-uncertain" in reasons:
         reasons.append("worker-cleanup-refused")
     if existing_outcome is not None:
@@ -2915,7 +2996,9 @@ def _stop_non_owner(
                 reasons.extend(captured.completion_reasons)
             except _HandleOwnershipError as error:
                 reasons.append("evidence-handle-close-failed")
-                _close_handle(error.handle, error.label)
+                _controller_owner(error, request.evidence_root).resolve()
+            except (WatchProtocolOwnershipError, ExactObjectOwnershipError):
+                raise
             except (OSError, WatchProtocolError) as error:
                 reasons.append(_worker_evidence_reason(error))
         outcome = _publish_or_load_outcome(
