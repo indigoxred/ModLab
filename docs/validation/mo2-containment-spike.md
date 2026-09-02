@@ -12,7 +12,18 @@
 
 The original result was **historically reported as Supported**, but it is now **Retired/Invalidated**. ModLab bridge and installation workflows must reject its run and decision IDs mechanically through the immutable authority resolver. A replacement may become eligible only after corrected source-bound four-scenario validation and an independent review.
 
-## Decision
+## Offline remediation verification — 2026-09-03
+
+Task 5's corrected offline Windows gate passed outside the restricted sandbox:
+
+- Focused Tasks 1–4: 419 tests, 418 passed and one declared symlink-privilege skip.
+- Complete repository suite: 999 tests, 989 passed and 10 declared skips (eight unavailable symlink-privilege cases and two unsupplied live MO2/Steam prerequisites); zero failures or errors.
+- Exact outcome readers now wait only for a bounded native sharing conflict while retaining no-replace publication, deny-write/delete reads, immutable binding, and fail-closed timeout behavior. Native fault-injection and fixture PID-barrier tests exercise the actual retained-handle boundaries.
+- The historical-ID audit found only retirement enforcement, this retired verdict, the approved remediation plan, and local retirement-review evidence. No bridge API or CLI consumes the historical IDs as capability authority.
+
+This offline gate is not fresh live containment validation and does not reinstate the historical claim. No live MO2/game or production authority operation was performed. Independent review, fresh source-bound four-scenario validation, the production retirement record pending Task 7, and immutable supersession remain required before replacement eligibility or bridge consumption.
+
+## Historical decision (retired)
 
 - Authority status: `RetiredInvalidated`
 - Run ID: `containment-run:2c6220d4ceae48809653c18d5c74562b`
@@ -21,7 +32,7 @@ The original result was **historically reported as Supported**, but it is now **
 - MO2 file version: `2.5.2.0`
 - Operator policy: `foreground-interactive-confirmation-v1`
 
-## Scenario results
+## Historical scenario results (retired)
 
 | Scenario | Outcome | Observed result |
 | --- | --- | --- |
@@ -32,7 +43,7 @@ The original result was **historically reported as Supported**, but it is now **
 
 Every scenario recorded completed watcher evidence, a Low-integrity MO2 process and stage, Medium-or-higher protected source evidence, zero copied projection payload bytes, no production backup, and identical protected before/after evidence.
 
-## Verification
+## Historical verification (retired)
 
 - Full native Windows repository suite before visible validation: 797 tests passed, 10 explicitly opt-in tests skipped.
 - Exact retained MO2/Steam prerequisite: 1 test passed and did not skip.

@@ -2500,6 +2500,32 @@ def _publish_outcome_commit(
     return published
 
 
+def _load_published_outcome(
+    request: WatchRequest,
+    claim: ControllerClaim,
+    launch: WorkerLaunch,
+) -> WatchOutcome:
+    # No-replace publication exposes the name before its retained write/delete
+    # handle closes. Never relax exact-reader sharing to consume that candidate.
+    deadline = time.monotonic() + 1.0
+    while True:
+        try:
+            data = _read_exact_regular_file(
+                request.evidence_root / _OUTCOME_NAME, "watch outcome"
+            )
+            break
+        except OSError as error:
+            error_code = getattr(error, "winerror", None)
+            if error_code is None:
+                error_code = error.errno
+            if error_code != _ERROR_SHARING_VIOLATION or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+    return _validate_outcome_binding(
+        watch_outcome_from_bytes(data), request, claim, launch
+    )
+
+
 def _publish_or_load_outcome(
     outcome: WatchOutcome,
     request: WatchRequest,
@@ -2509,17 +2535,7 @@ def _publish_or_load_outcome(
     try:
         return _publish_outcome_commit(outcome, request, claim, launch)
     except FileExistsError:
-        return _validate_outcome_binding(
-            watch_outcome_from_bytes(
-                _read_exact_regular_file(
-                    request.evidence_root / _OUTCOME_NAME,
-                    "watch outcome",
-                )
-            ),
-            request,
-            claim,
-            launch,
-        )
+        return _load_published_outcome(request, claim, launch)
 
 
 def _receipt_from_outcome(outcome: WatchOutcome) -> WatchReceipt:
@@ -2579,14 +2595,7 @@ def _stop_local_session(
         outcome_path = request.evidence_root / _OUTCOME_NAME
         if outcome_path.exists():
             try:
-                existing_outcome = _validate_outcome_binding(
-                    watch_outcome_from_bytes(
-                        _read_exact_regular_file(outcome_path, "watch outcome")
-                    ),
-                    request,
-                    claim,
-                    launch,
-                )
+                existing_outcome = _load_published_outcome(request, claim, launch)
                 if (
                     existing_outcome.evidence_completion
                     is WatchEvidenceCompletion.COMPLETED
@@ -2779,14 +2788,7 @@ def _stop_non_owner(
     existing_outcome: WatchOutcome | None = None
     if outcome_path.exists():
         try:
-            existing_outcome = _validate_outcome_binding(
-                watch_outcome_from_bytes(
-                    _read_exact_regular_file(outcome_path, "watch outcome")
-                ),
-                request,
-                claim,
-                launch,
-            )
+            existing_outcome = _load_published_outcome(request, claim, launch)
             if (
                 existing_outcome.evidence_completion
                 is WatchEvidenceCompletion.COMPLETED

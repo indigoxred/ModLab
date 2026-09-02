@@ -167,6 +167,18 @@ def _publish_controller_pid_barrier(path: Path, worker_pid: int) -> None:
     windows_watch.publish_new_verified(path, payload, lambda data: int(data))
 
 
+def _read_controller_pid_barrier(path: Path) -> int:
+    deadline = time.monotonic() + 1.0
+    while True:
+        try:
+            data = windows_watch._read_exact_regular_file(path, "controller PID barrier")
+            return int(data)
+        except OSError as error:
+            if error.errno != 32 or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+
+
 @unittest.skipUnless(os.name == "nt", "ReadDirectoryChangesW requires Windows")
 class MutationWatchTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -789,7 +801,7 @@ class MutationWatchTests(unittest.TestCase):
                 self.fail(f"external controller exited before ready: {controller.returncode}")
             time.sleep(0.02)
         self.assertTrue(barrier.is_file(), "external controller did not become ready")
-        worker_pid = int(barrier.read_text(encoding="ascii"))
+        worker_pid = _read_controller_pid_barrier(barrier)
         worker_handle, _ = windows_watch._open_process_identity(worker_pid)
         return controller, evidence, evidence / "request.json", worker_pid, worker_handle
 
@@ -1812,9 +1824,10 @@ class MutationWatchTests(unittest.TestCase):
 
         def fail_first_outcome(source, destination: Path, destination_parent) -> None:
             nonlocal outcome_attempts
-            outcome_attempts += 1
-            if outcome_attempts == 1:
-                raise OSError("injected outcome publication failure")
+            if destination == request_path.parent / "outcome.json":
+                outcome_attempts += 1
+                if outcome_attempts == 1:
+                    raise OSError("injected outcome publication failure")
             real_rename(source, destination, destination_parent)
 
         with mock.patch.object(
@@ -1868,54 +1881,57 @@ class MutationWatchTests(unittest.TestCase):
         for fault in ("write", "flush"):
             with self.subTest(fault=fault):
                 request_path, _ = self._start_case(f"outcome-candidate-{fault}")
-                real_open = windows_watch.os.open
-                real_write = windows_watch.os.write
-                real_fsync = windows_watch.os.fsync
-                candidate_descriptors: set[int] = set()
+                real_create = windows_exact_fs.create_pinned_new
+                native = windows_exact_fs._kernel32
+                real_write = native.WriteFile
+                real_flush = native.FlushFileBuffers
+                candidate_handles: set[int] = set()
                 injected = False
 
-                def track_candidate(path, flags, mode=0o777):
-                    descriptor = real_open(path, flags, mode)
+                def track_candidate(path, parent):
+                    candidate = real_create(path, parent)
                     if Path(path).name.startswith(".outcome.json."):
-                        candidate_descriptors.add(descriptor)
-                    return descriptor
+                        candidate_handles.add(candidate.handle)
+                    return candidate
 
-                def fail_candidate_write(descriptor: int, data) -> int:
+                def fail_candidate_write(handle, *args):
                     nonlocal injected
                     if (
                         fault == "write"
-                        and descriptor in candidate_descriptors
+                        and handle in candidate_handles
                         and not injected
                     ):
                         injected = True
-                        raise OSError("injected outcome candidate write failure")
-                    return real_write(descriptor, data)
+                        ctypes.set_last_error(5)
+                        return False
+                    return real_write(handle, *args)
 
-                def fail_candidate_flush(descriptor: int) -> None:
+                def fail_candidate_flush(handle):
                     nonlocal injected
                     if (
                         fault == "flush"
-                        and descriptor in candidate_descriptors
+                        and handle in candidate_handles
                         and not injected
                     ):
                         injected = True
-                        raise OSError("injected outcome candidate flush failure")
-                    real_fsync(descriptor)
+                        ctypes.set_last_error(5)
+                        return False
+                    return real_flush(handle)
 
                 with (
                     mock.patch.object(
-                        windows_watch.os,
-                        "open",
+                        windows_exact_fs,
+                        "create_pinned_new",
                         side_effect=track_candidate,
                     ),
                     mock.patch.object(
-                        windows_watch.os,
-                        "write",
+                        native,
+                        "WriteFile",
                         side_effect=fail_candidate_write,
                     ),
                     mock.patch.object(
-                        windows_watch.os,
-                        "fsync",
+                        native,
+                        "FlushFileBuffers",
                         side_effect=fail_candidate_flush,
                     ),
                 ):
@@ -2198,7 +2214,7 @@ class MutationWatchTests(unittest.TestCase):
                 self.assertIsNone(controller.poll(), "controller exited before ready")
                 time.sleep(0.02)
             self.assertTrue(ready.is_file())
-            worker_pid = int(ready.read_text(encoding="ascii"))
+            worker_pid = _read_controller_pid_barrier(ready)
             worker_handle, _ = windows_watch._open_process_identity(worker_pid)
             finish.write_text("finish", encoding="ascii")
             deadline = time.monotonic() + 20.0
@@ -2299,7 +2315,7 @@ class MutationWatchTests(unittest.TestCase):
                 )
                 time.sleep(0.02)
             self.assertTrue(barrier.is_file())
-            worker_pid = int(barrier.read_text(encoding="ascii"))
+            worker_pid = _read_controller_pid_barrier(barrier)
             worker_handle, _ = windows_watch._open_process_identity(worker_pid)
             self.assertFalse((evidence / "worker-launch.json").exists())
             self.assertFalse((evidence / "ready.json").exists())
@@ -2382,7 +2398,7 @@ class MutationWatchTests(unittest.TestCase):
                 )
                 time.sleep(0.02)
             self.assertTrue(barrier.is_file())
-            worker_pid = int(barrier.read_text(encoding="ascii"))
+            worker_pid = _read_controller_pid_barrier(barrier)
             worker_handle, _ = windows_watch._open_process_identity(worker_pid)
             self.assertTrue((evidence / "worker-launch.json").is_file())
             self.assertTrue((evidence / "ready.json").is_file())
@@ -2472,7 +2488,7 @@ class MutationWatchTests(unittest.TestCase):
                 self.assertIsNone(controller.poll(), "controller exited before ready")
                 time.sleep(0.02)
             self.assertTrue(ready.is_file())
-            worker_pid = int(ready.read_text(encoding="ascii"))
+            worker_pid = _read_controller_pid_barrier(ready)
             worker_handle, _ = windows_watch._open_process_identity(worker_pid)
             (evidence / "terminal.json").write_bytes(sentinel)
             release.write_text("release", encoding="ascii")
@@ -2770,6 +2786,177 @@ class MutationWatchTests(unittest.TestCase):
         finally:
             self._finish_external_fixture(controller, worker_pid, worker_handle)
 
+    def test_cleanup_waits_for_exact_winner_close_before_loading_outcome(self):
+        # A pathname is visible before the retained publisher handle closes.
+        # Both the collision loser and an already-visible outcome reader must
+        # load the real, bound winner once that handle releases write access.
+        for entry in ("publication-collision", "existing-outcome"):
+            with self.subTest(entry=entry):
+                controller, evidence, request_path, worker_pid, worker_handle = (
+                    self._external_controller_fixture(f"winner-close-{entry}")
+                )
+                published = threading.Event()
+                reader_blocked = threading.Event()
+                loser_at_commit = threading.Event()
+                main_thread = threading.current_thread()
+                winners: list[WatchReceipt] = []
+                failures: list[BaseException] = []
+                read_errors: list[int] = []
+                real_rename = windows_exact_fs.rename_pinned_no_replace
+                real_read = windows_watch._read_exact_regular_file
+                real_commit = windows_watch._publish_outcome_commit
+
+                def hold_published_candidate(source, destination, parent):
+                    real_rename(source, destination, parent)
+                    if destination == evidence / "outcome.json":
+                        published.set()
+                        if not reader_blocked.wait(5):
+                            raise AssertionError("reader never reached retained winner")
+
+                def observe_exact_read(path, label, **kwargs):
+                    try:
+                        return real_read(path, label, **kwargs)
+                    except OSError as error:
+                        if path == evidence / "outcome.json":
+                            read_errors.append(error.errno)
+                            reader_blocked.set()
+                        raise
+
+                def collide_after_winner_publish(*args):
+                    if (
+                        entry == "publication-collision"
+                        and threading.current_thread() is main_thread
+                    ):
+                        loser_at_commit.set()
+                        if not published.wait(5):
+                            raise AssertionError("winner never published")
+                    return real_commit(*args)
+
+                def publish_winner():
+                    try:
+                        if entry == "publication-collision":
+                            if not loser_at_commit.wait(5):
+                                raise AssertionError("loser never reached commit")
+                        winners.append(stop_watch(request_path))
+                    except BaseException as error:
+                        failures.append(error)
+
+                winner = threading.Thread(target=publish_winner)
+                try:
+                    controller.terminate()
+                    controller.wait(timeout=10)
+                    with (
+                        mock.patch.object(
+                            windows_exact_fs, "rename_pinned_no_replace",
+                            side_effect=hold_published_candidate,
+                        ),
+                        mock.patch.object(
+                            windows_watch, "_read_exact_regular_file",
+                            side_effect=observe_exact_read,
+                        ),
+                        mock.patch.object(
+                            windows_watch, "_publish_outcome_commit",
+                            side_effect=collide_after_winner_publish,
+                        ),
+                    ):
+                        winner.start()
+                        try:
+                            if entry == "existing-outcome":
+                                self.assertTrue(published.wait(5))
+                            loser = stop_watch(request_path)
+                        finally:
+                            reader_blocked.set()
+                            winner.join(timeout=10)
+                    self.assertFalse(winner.is_alive())
+                    self.assertEqual([], failures)
+                    self.assertEqual(1, len(winners))
+                    self.assertTrue(read_errors, "native sharing conflict was not observed")
+                    self.assertEqual({32}, set(read_errors))
+                    self.assertFalse(winners[0].complete)
+                    self.assertFalse(loser.complete)
+                    self.assertIsNotNone(winners[0].watch_outcome_id)
+                    self.assertEqual(winners[0].watch_outcome_id, loser.watch_outcome_id, loser)
+                    outcome_bytes = (evidence / "outcome.json").read_bytes()
+                    outcome = watch_outcome_from_bytes(outcome_bytes)
+                    self.assertIn("controller-session-lost", outcome.reason_codes)
+                    self.assertEqual(outcome.terminal_bytes_sha256, hashlib.sha256(
+                        (evidence / "terminal.json").read_bytes()
+                    ).hexdigest())
+                    self.assertEqual(loser.watch_outcome_id, stop_watch(request_path).watch_outcome_id)
+                    self.assertEqual(outcome_bytes, (evidence / "outcome.json").read_bytes())
+                finally:
+                    reader_blocked.set()
+                    if winner.ident is not None:
+                        winner.join(timeout=10)
+                    self._finish_external_fixture(controller, worker_pid, worker_handle)
+
+    def test_outcome_sharing_timeout_is_bounded_and_preserves_the_winner(self):
+        request_path, _ = self._start_case("outcome-sharing-timeout")
+        original = stop_watch(request_path)
+        self.assertTrue(original.complete)
+        outcome_path = request_path.parent / "outcome.json"
+        outcome_bytes = outcome_path.read_bytes()
+        retained = windows_exact_fs.pin_direct_object(outcome_path, kind="file")
+        receipts: list[WatchReceipt] = []
+        failures: list[BaseException] = []
+
+        def read_while_retained():
+            try:
+                receipts.append(stop_watch(request_path))
+            except BaseException as error:
+                failures.append(error)
+
+        reader = threading.Thread(target=read_while_retained)
+        try:
+            reader.start()
+            reader.join(timeout=3)
+            timed_out = reader.is_alive()
+            self.assertTrue(retained.handle, "reader consumed another owner's handle")
+        finally:
+            retained.close()
+            reader.join(timeout=5)
+        self.assertFalse(timed_out, "outcome acquisition exceeded its bounded deadline")
+        self.assertFalse(reader.is_alive())
+        self.assertEqual([], failures)
+        self.assertEqual(1, len(receipts))
+        self.assertFalse(receipts[0].complete)
+        self.assertIsNone(receipts[0].watch_outcome_id)
+        self.assertIn("[Errno 32]", receipts[0].error)
+        self.assertEqual(outcome_bytes, outcome_path.read_bytes())
+        self.assertEqual(original.watch_outcome_id, stop_watch(request_path).watch_outcome_id)
+
+    def test_outcome_non_sharing_open_errors_fail_closed_without_retry(self):
+        request_path, _ = self._start_case("outcome-non-sharing-open-error")
+        original = stop_watch(request_path)
+        self.assertTrue(original.complete)
+        outcome_path = request_path.parent / "outcome.json"
+        outcome_bytes = outcome_path.read_bytes()
+        real_open = windows_watch._kernel32.CreateFileW
+        for error_code in (5, 33):
+            with self.subTest(error_code=error_code):
+                def fail_outcome_open(path, *args):
+                    if Path(path) == outcome_path:
+                        ctypes.set_last_error(error_code)
+                        return windows_watch._INVALID_HANDLE_VALUE
+                    return real_open(path, *args)
+
+                with (
+                    mock.patch.object(
+                        windows_watch._kernel32, "CreateFileW",
+                        side_effect=fail_outcome_open,
+                    ),
+                    mock.patch.object(
+                        windows_watch.time, "sleep",
+                        side_effect=AssertionError("non-sharing failure was retried"),
+                    ),
+                ):
+                    receipt = stop_watch(request_path)
+                self.assertFalse(receipt.complete)
+                self.assertIsNone(receipt.watch_outcome_id)
+                self.assertIn(f"[Errno {error_code}]", receipt.error)
+                self.assertEqual(outcome_bytes, outcome_path.read_bytes())
+        self.assertEqual(original.watch_outcome_id, stop_watch(request_path).watch_outcome_id)
+
     def test_two_cleanup_processes_converge_on_one_incomplete_outcome(self):
         controller, evidence, request_path, worker_pid, worker_handle = (
             self._external_controller_fixture("two-process-dead-owner-cleanup")
@@ -2848,6 +3035,7 @@ class MutationWatchTests(unittest.TestCase):
             self.assertEqual(
                 1,
                 len({result["watchOutcomeId"] for result in results}),
+                results,
             )
             self.assertIsNotNone(results[0]["watchOutcomeId"])
             outcome_bytes = (evidence / "outcome.json").read_bytes()
@@ -3982,7 +4170,7 @@ class MutationWatchTests(unittest.TestCase):
                         self.fail(f"controller exited before ready: {controller.returncode}")
                     time.sleep(0.02)
                 self.assertTrue(barrier.is_file(), "controller did not publish ready barrier")
-                worker_pid = int(barrier.read_text(encoding="ascii"))
+                worker_pid = _read_controller_pid_barrier(barrier)
                 worker_handle, _ = windows_watch._open_process_identity(worker_pid)
                 if terminal_collision:
                     (evidence / "terminal.json").write_bytes(sentinel)
@@ -4298,6 +4486,63 @@ class MutationWatchTests(unittest.TestCase):
                 writer.join()
 
         self.assertEqual(b"ready\n", target.read_bytes())
+
+    def test_controller_pid_barrier_waits_for_retained_publisher_close(self):
+        target = self.root / "controller-pid-close.txt"
+        published = threading.Event()
+        reader_blocked = threading.Event()
+        read_errors: list[int] = []
+        failures: list[BaseException] = []
+        real_rename = windows_exact_fs.rename_pinned_no_replace
+        real_read = windows_watch._read_exact_regular_file
+
+        def hold_published_candidate(source, destination, parent):
+            real_rename(source, destination, parent)
+            if destination == target:
+                published.set()
+                if not reader_blocked.wait(5):
+                    raise AssertionError("PID reader did not reach retained publisher")
+
+        def observe_exact_read(*args, **kwargs):
+            try:
+                return real_read(*args, **kwargs)
+            except OSError as error:
+                read_errors.append(error.errno)
+                reader_blocked.set()
+                raise
+
+        def publish_pid():
+            try:
+                _publish_controller_pid_barrier(target, 4242)
+            except BaseException as error:
+                failures.append(error)
+
+        writer = threading.Thread(target=publish_pid)
+        observed_pid = None
+        read_error = None
+        with (
+            mock.patch.object(windows_exact_fs, "rename_pinned_no_replace", side_effect=hold_published_candidate),
+            mock.patch.object(windows_watch, "_read_exact_regular_file", side_effect=observe_exact_read),
+        ):
+            writer.start()
+            try:
+                self.assertTrue(published.wait(5))
+                # Reproduce the original fixture's raw-read PermissionError.
+                with self.assertRaises(PermissionError):
+                    target.read_text(encoding="ascii")
+                try:
+                    observed_pid = _read_controller_pid_barrier(target)
+                except OSError as error:
+                    read_error = error
+            finally:
+                reader_blocked.set()
+                writer.join(timeout=5)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual([], failures)
+        self.assertTrue(read_errors)
+        self.assertEqual({32}, set(read_errors))
+        self.assertEqual(4242, observed_pid, repr(read_error))
+        self.assertEqual(b"4242", target.read_bytes())
 
     def test_controller_pid_barrier_is_nonempty_before_visibility(self):
         target = self.root / "controller-pid.txt"
