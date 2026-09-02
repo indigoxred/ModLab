@@ -1022,6 +1022,10 @@ git commit -m "feat: expose opt-in containment validation workflow"
 **Interfaces:**
 - Consumes: `MODLAB_MO2_ARCHIVE`, `MODLAB_STEAM_ROOT`, the validation CLI, computer control, and exact retained MO2 2.5.2.
 - Produces: one immutable workspace `CapabilityDecision` and one sanitized repository verdict document.
+- The opt-in prerequisite's `production_paths_written` field is scoped to the
+  observed Skyrim production inputs only: the exact Steam appmanifest for app
+  `489830` and the resolved direct Skyrim game-root tree. It makes no claim
+  about unrelated live Steam client cache, log, userdata, or client-root paths.
 
 - [ ] **Step 1: Write the opt-in prerequisite/invariant test**
 
@@ -1061,7 +1065,7 @@ Remove-Item Env:MODLAB_STEAM_ROOT
 if ($integrationExit -ne 0) { throw "containment integration prerequisite failed with exit $integrationExit" }
 ```
 
-Expected: the real integration prerequisite runs rather than skips, reports MO2 `2.5.2.0`, observes a Low stage and Medium-or-higher disposable source, copies zero projection payload bytes, and reports no production writes.
+Expected: the real integration prerequisite runs rather than skips, reports MO2 `2.5.2.0`, observes a Low stage and Medium-or-higher disposable source, copies zero projection payload bytes, and reports that the observed Skyrim production inputs (the exact Steam manifest and game-root tree) were unchanged. This is not a broad whole-Steam-root claim.
 
 - [ ] **Step 3: Prepare the real disposable run**
 
@@ -1123,7 +1127,7 @@ Any positively proved source mutation or deterministic safety violation produces
 
 - [ ] **Step 6: Write the sanitized verdict document**
 
-Write exactly one of these evidence-backed conclusions, followed by the run/decision IDs, MO2 version, four scenario outcomes, tests run, and confirmation that production paths were untouched:
+Write exactly one of these evidence-backed conclusions, followed by the run/decision IDs, MO2 version, four scenario outcomes, tests run, and confirmation that the observed Skyrim production inputs (the exact Steam manifest and game-root tree) were unchanged. State explicitly that unrelated live Steam client cache, log, userdata, and client-root paths are excluded from attribution; do not make a broad whole-Steam-root claim.
 
 ```text
 SUPPORTED — isolated low-integrity staging with verified junction projection satisfied the approved pre-write containment gate in the disposable MO2 2.5.2 validation run. Production use still requires the reviewed bridge/lifecycle implementation plan.

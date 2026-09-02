@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from modlab.adapters.mo2.ini import decode_qsettings_path, parse_ini_bytes
+from modlab.adapters.skyrim.scanner import discover_skyrim_steam
 from modlab.artifacts.vault import ArchiveVault
 from modlab.validation import mo2_containment_fixtures as fixtures
 from modlab.validation.mo2_containment_fixtures import write_scenario_archives
@@ -15,11 +16,13 @@ from modlab.validation.windows_integrity import IntegrityLevel
 from modlab.validation.windows_junction import inspect_junction
 from modlab.workspace import initialize_workspace
 from tests.support.mo2_containment import (
+    ProductionPathSnapshot,
     capture_production_path_snapshots,
     capture_skyrim_production_path_snapshots,
     import_curated_mo2_archive,
     measure_real_fixture_evidence,
     prepare_fixture_with_fake_bootstrap,
+    prepare_real_containment_fixture,
 )
 from tests.support.skyrim_workflow import create_skyrim_workflow_fixture
 
@@ -286,7 +289,8 @@ class ContainmentFixtureTests(unittest.TestCase):
             "tests.support.mo2_containment.read_windows_file_version",
             side_effect=read_staged_version,
         ):
-            evidence = measure_real_fixture_evidence(fixture, before)
+            after = capture_skyrim_production_path_snapshots(skyrim.steam_root)
+            evidence = measure_real_fixture_evidence(fixture, before, after)
 
         self.assertEqual("9.8.7.6", evidence.executable_version)
         self.assertEqual(0, evidence.payload_bytes_copied_for_projection)
@@ -299,6 +303,7 @@ class ContainmentFixtureTests(unittest.TestCase):
         projection.rmdir()
         projection.mkdir()
         before = capture_production_path_snapshots((self.root / "Steam",))
+        after = capture_production_path_snapshots((self.root / "Steam",))
 
         with (
             patch(
@@ -307,7 +312,7 @@ class ContainmentFixtureTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(RuntimeError, "junction"),
         ):
-            measure_real_fixture_evidence(fixture, before)
+            measure_real_fixture_evidence(fixture, before, after)
 
     def test_production_snapshot_records_reparse_without_following_it(self):
         # Catches snapshot traversal into a Steam-root reparse target.
@@ -404,6 +409,119 @@ class ContainmentFixtureTests(unittest.TestCase):
             with self.subTest(steam_root=steam_root.name):
                 with self.assertRaisesRegex(RuntimeError, "Skyrim discovery"):
                     capture_skyrim_production_path_snapshots(steam_root)
+
+    def test_skyrim_production_snapshot_refuses_discovery_path_change_during_capture(
+        self,
+    ):
+        # Catches snapshots accepted after discovery resolves a different Skyrim root.
+        skyrim = create_skyrim_workflow_fixture(self.root)
+        alternate = skyrim.steam_root / "steamapps" / "common" / "Skyrim Alternate"
+        (alternate / "Data").mkdir(parents=True)
+        (alternate / "SkyrimSE.exe").write_bytes(b"alternate Skyrim executable")
+        manifest = skyrim.steam_root / "steamapps" / "appmanifest_489830.acf"
+        original_discover = discover_skyrim_steam
+        calls = 0
+
+        def discovery_that_changes_root(steam_root):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                manifest.write_text(
+                    '"AppState"\n{\n'
+                    '    "appid" "489830"\n'
+                    '    "name" "The Elder Scrolls V: Skyrim Special Edition"\n'
+                    '    "StateFlags" "4"\n'
+                    '    "installdir" "Skyrim Alternate"\n'
+                    "}\n",
+                    encoding="utf-8",
+                )
+            return original_discover(steam_root)
+
+        with (
+            patch(
+                "tests.support.mo2_containment.discover_skyrim_steam",
+                side_effect=discovery_that_changes_root,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "changed during production observation"
+            ),
+        ):
+            capture_skyrim_production_path_snapshots(skyrim.steam_root)
+
+    def test_skyrim_production_snapshot_refuses_discovery_report_change_during_capture(
+        self,
+    ):
+        # Catches accepting a snapshot after discovery changed without moving its paths.
+        skyrim = create_skyrim_workflow_fixture(self.root)
+        manifest = skyrim.steam_root / "steamapps" / "appmanifest_489830.acf"
+        original_discover = discover_skyrim_steam
+        calls = 0
+
+        def discovery_that_changes_report(steam_root):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                manifest.write_text(
+                    manifest.read_text(encoding="utf-8").replace(
+                        '"StateFlags" "4"', '"StateFlags" "3"'
+                    ),
+                    encoding="utf-8",
+                )
+            return original_discover(steam_root)
+
+        with (
+            patch(
+                "tests.support.mo2_containment.discover_skyrim_steam",
+                side_effect=discovery_that_changes_report,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "changed during production observation"
+            ),
+        ):
+            capture_skyrim_production_path_snapshots(skyrim.steam_root)
+
+    def test_real_fixture_refuses_bound_snapshot_path_change_after_preparation(
+        self,
+    ):
+        # Catches final evidence comparing a different discovery path tuple than preflight.
+        manifest = self.root / "Steam" / "steamapps" / "appmanifest_489830.acf"
+        first_game_root = self.root / "Steam" / "steamapps" / "common" / "Skyrim"
+        second_game_root = self.root / "Steam" / "steamapps" / "common" / "Skyrim Alt"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_bytes(b"manifest")
+        first_game_root.mkdir(parents=True)
+        second_game_root.mkdir(parents=True)
+        fixture = prepare_fixture_with_fake_bootstrap(self.root / "fixture")
+        before = (
+            ProductionPathSnapshot(manifest, ()),
+            ProductionPathSnapshot(first_game_root, ()),
+        )
+        after = (
+            ProductionPathSnapshot(manifest, ()),
+            ProductionPathSnapshot(second_game_root, ()),
+        )
+
+        with (
+            patch(
+                "tests.support.mo2_containment.capture_skyrim_production_path_snapshots",
+                side_effect=(before, after),
+            ),
+            patch(
+                "tests.support.mo2_containment.import_curated_mo2_archive",
+                return_value=SimpleNamespace(
+                    artifact_id="archive-sha256:" + "a" * 64
+                ),
+            ),
+            patch(
+                "modlab.validation.mo2_containment_fixtures.prepare_containment_fixture",
+                return_value=fixture,
+            ),
+            self.assertRaisesRegex(RuntimeError, "production observation paths changed"),
+        ):
+            with prepare_real_containment_fixture(
+                self.root / "payload.7z", self.root / "Steam"
+            ):
+                self.fail("mismatched bound observation must refuse before yielding")
 
     def test_fixture_parent_override_is_exact_and_confined_below_validation_root(self):
         from tests.support.mo2_containment import prepare_fixture_with_fake_bootstrap

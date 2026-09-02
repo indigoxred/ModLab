@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from modlab.adapters.mo2.bootstrap_model import BootstrapReceiptMode
 from modlab.adapters.mo2.release import bundled_mo2_252_path, load_mo2_release
+from modlab.adapters.skyrim.model import SkyrimDiscoveryReport
 from modlab.adapters.skyrim.scanner import discover_skyrim_steam
 from modlab.adapters.skyrim.windows_version import read_windows_file_version
 from modlab.artifacts.vault import ArchiveVault
@@ -168,6 +169,19 @@ def capture_skyrim_production_path_snapshots(
     steam_root: Path,
 ) -> tuple[ProductionPathSnapshot, ...]:
     """Observe only the Steam inputs used to discover and prepare Skyrim."""
+    discovery, paths = _usable_skyrim_production_paths(Path(steam_root))
+    snapshots = capture_production_path_snapshots(paths)
+    rediscovery, rediscovered_paths = _usable_skyrim_production_paths(
+        Path(steam_root)
+    )
+    if rediscovery != discovery or rediscovered_paths != paths:
+        raise RuntimeError("Skyrim discovery changed during production observation")
+    return snapshots
+
+
+def _usable_skyrim_production_paths(
+    steam_root: Path,
+) -> tuple[SkyrimDiscoveryReport, tuple[Path, Path]]:
     discovery = discover_skyrim_steam(Path(steam_root))
     required_findings = {"manifest-observed", "game-root-observed"}
     passed_findings = {
@@ -191,16 +205,16 @@ def capture_skyrim_production_path_snapshots(
     game_root = _require_direct_production_directory(
         Path(discovery.game_root), "Skyrim game root"
     )
-    return capture_production_path_snapshots((manifest, game_root))
+    return discovery, (manifest, game_root)
 
 
 def measure_real_fixture_evidence(
     fixture: ContainmentFixture,
     production_before: tuple[ProductionPathSnapshot, ...],
+    production_after: tuple[ProductionPathSnapshot, ...],
 ) -> RealContainmentFixtureEvidence:
-    production_after = capture_production_path_snapshots(
-        tuple(snapshot.path for snapshot in production_before)
-    )
+    if _snapshot_paths(production_before) != _snapshot_paths(production_after):
+        raise RuntimeError("production observation paths changed")
     production_paths_written = tuple(
         before.path
         for before, after in zip(production_before, production_after, strict=True)
@@ -214,6 +228,12 @@ def measure_real_fixture_evidence(
         payload_bytes_copied_for_projection=_projection_payload_bytes_copied(fixture),
         production_paths_written=production_paths_written,
     )
+
+
+def _snapshot_paths(
+    snapshots: tuple[ProductionPathSnapshot, ...],
+) -> tuple[Path, ...]:
+    return tuple(snapshot.path for snapshot in snapshots)
 
 
 def _projection_payload_bytes_copied(fixture: ContainmentFixture) -> int:
@@ -331,7 +351,12 @@ def prepare_real_containment_fixture(archive_path: Path, steam_root: Path):
             layout.mo2_containment_validation,
             ContainmentScenario.NEW_FOLDER,
         )
-        yield measure_real_fixture_evidence(fixture, production_before)
+        production_after = capture_skyrim_production_path_snapshots(Path(steam_root))
+        if _snapshot_paths(production_before) != _snapshot_paths(production_after):
+            raise RuntimeError("production observation paths changed")
+        yield measure_real_fixture_evidence(
+            fixture, production_before, production_after
+        )
 
 
 __all__ = [
