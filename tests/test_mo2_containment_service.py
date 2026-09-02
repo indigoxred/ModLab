@@ -1375,10 +1375,9 @@ class ContainmentServiceTests(unittest.TestCase):
                 recovery_write.content_id,
                 service._command_fingerprint(source, artifact, steam),
             )
-            self.assertEqual(
-                CapabilityVerdict.INCOMPLETE,
-                service.adjudicate_run(store.root, RUN_ID).verdict,
-            )
+            with self.assertRaises(service.ContainmentDecisionNotReady):
+                service.adjudicate_run(store.root, RUN_ID)
+            self.assertFalse(store.decision_path(RUN_ID).exists())
             fixture_calls = []
             with (
                 patch.object(
@@ -2219,9 +2218,49 @@ class ContainmentServiceTests(unittest.TestCase):
                 store.write_watch_outcome(observed)
                 store.write_result(result)
             store.result_path(run_id, ContainmentScenario.REPLACE_EXISTING).write_bytes(b"damaged\n")
+            with self.assertRaises(service.ContainmentDecisionNotReady):
+                service.adjudicate_run(store.root, run_id)
+            self.assertFalse(store.decision_path(run_id).exists())
+
+    def test_early_adjudication_refuses_without_freezing_decision(self):
+        """Missing terminal evidence must not become an immutable authority record."""
+        with tempfile.TemporaryDirectory(prefix="modlab-early-adjudication-") as directory:
+            store = ContainmentStore(Path(directory))
+            run_id = "containment-run:" + "a" * 32
+            source = store.root / "source"
+            steam = store.root / "steam"
+            write_run_identity(store, run_id, source, steam, "artifact:partial")
+            scenario = ContainmentScenario.NEW_FOLDER
+            observed = replace(watch_outcome(scenario), run_id=run_id)
+            result = evaluate_scenario(
+                replace(evidence(scenario), run_id=run_id, watch_outcome=observed)
+            )
+            store.write_watch_outcome(observed)
+            store.write_result(result)
+
+            with self.assertRaises(service.ContainmentDecisionNotReady):
+                service.adjudicate_run(store.root, run_id)
+            self.assertFalse(store.decision_path(run_id).exists())
+
+    def test_decision_binds_complete_corrected_authority(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-bound-decision-") as directory:
+            store = ContainmentStore(Path(directory))
+            run_id = "containment-run:" + "b" * 32
+            source = store.root / "source"
+            steam = store.root / "steam"
+            result_ids = write_cohort_run(store, run_id, source, steam, "artifact:bound")
+
             decision = service.adjudicate_run(store.root, run_id)
-            self.assertEqual(CapabilityVerdict.INCOMPLETE, decision.verdict)
-            self.assertTrue(any("ReplaceExisting" in reason for reason in decision.reasons))
+
+            self.assertEqual(2, decision.binding_version)
+            self.assertRegex(decision.source_commit_id or "", r"^[0-9a-f]{40}$")
+            self.assertRegex(decision.source_tree_id or "", r"^[0-9a-f]{40}$")
+            self.assertRegex(
+                decision.source_artifact_id or "",
+                r"^containment-source-artifact-sha256:[0-9a-f]{64}$",
+            )
+            self.assertEqual("handle-pinned-no-replace-v2", decision.publication_policy_version)
+            self.assertEqual(result_ids, decision.scenario_result_ids)
 
     def test_adjudicate_run_requires_intact_current_intent_request_binding(self):
         for damage in ("intent", "request"):
@@ -2240,12 +2279,9 @@ class ContainmentServiceTests(unittest.TestCase):
                 )
                 target.write_bytes(b"damaged\n")
 
-                decision = service.adjudicate_run(store.root, run_id)
-
-                self.assertEqual(CapabilityVerdict.INCOMPLETE, decision.verdict)
-                self.assertTrue(
-                    any("current-cohort" in reason for reason in decision.reasons)
-                )
+                with self.assertRaises(service.ContainmentDecisionNotReady):
+                    service.adjudicate_run(store.root, run_id)
+                self.assertFalse(store.decision_path(run_id).exists())
 
     def test_adjudicate_run_requires_every_listed_predecessor_evidence(self):
         damage_cases = ("intent", "request", "result", "outcome")
@@ -2455,10 +2491,9 @@ class ContainmentServiceTests(unittest.TestCase):
             store.result_path(
                 run_id, ContainmentScenario.REPLACE_EXISTING
             ).write_bytes(b"damaged\n")
-            self.assertEqual(
-                CapabilityVerdict.REJECTED,
-                service.adjudicate_run(store.root, run_id).verdict,
-            )
+            with self.assertRaises(service.ContainmentDecisionNotReady):
+                service.adjudicate_run(store.root, run_id)
+            self.assertFalse(store.decision_path(run_id).exists())
 
     def test_adjudicate_run_preserves_historical_failed_over_predecessor_damage(self):
         for damage in ("request", "result", "outcome"):

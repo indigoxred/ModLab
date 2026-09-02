@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from modlab.validation.mo2_containment_model import (
     CapabilityDecision,
+    DecisionBindings,
     CapabilityVerdict,
     ContainmentScenario,
     IntegrityObservation,
@@ -33,6 +34,7 @@ from modlab.validation.mo2_containment_serialization import (
     scenario_result_from_bytes,
     scenario_result_id_for,
     scenario_result_to_bytes,
+    source_artifact_id_for,
     watch_outcome_from_bytes,
     watch_outcome_id_for,
     watch_outcome_to_bytes,
@@ -675,6 +677,46 @@ class Mo2ContainmentSerializationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ContainmentFormatError, "root kind"):
             watch_outcome_to_bytes(value)
+
+    def test_version_two_decision_rejects_mutated_authority_bindings(self):
+        outcomes = tuple(valid_watch_outcome(scenario=scenario) for scenario in ContainmentScenario)
+        results = tuple(
+            valid_scenario_result(scenario, outcome)
+            for scenario, outcome in zip(ContainmentScenario, outcomes, strict=True)
+        )
+        identifiers = tuple(
+            scenario_result_id_for(result, outcome)
+            for result, outcome in zip(results, outcomes, strict=True)
+        )
+        bindings = DecisionBindings(
+            2, "a" * 40, "b" * 40,
+            source_artifact_id_for({"schemaVersion": 1, "artifact": "fixture"}),
+            2, "handle-pinned-no-replace-v2", 2, 1, 1, "2.5.2.0", "c" * 64,
+        )
+        decision = CapabilityDecision(
+            2, results[0].run_id, "isolated-low-integrity-junction-projection-v1",
+            CapabilityVerdict.SUPPORTED, identifiers, (), bindings,
+        )
+        encoded = capability_decision_to_bytes(decision, results, outcomes)
+        self.assertEqual(decision, capability_decision_from_bytes(encoded, results, outcomes))
+
+        mutations = (
+            replace(decision, bindings=replace(bindings, protocol_version=True)),
+            replace(decision, bindings=replace(bindings, mo2_executable_sha256="bad")),
+            replace(decision, scenario_result_ids=identifiers[::-1]),
+        )
+        for mutated in mutations:
+            with self.subTest(mutated=mutated):
+                with self.assertRaises(ContainmentFormatError):
+                    capability_decision_to_bytes(mutated, results, outcomes)
+        document = json.loads(encoded)
+        document["unexpected"] = True
+        with self.assertRaises(ContainmentFormatError):
+            capability_decision_from_bytes(
+                json.dumps(document, sort_keys=True, separators=(",", ":")).encode(),
+                results,
+                outcomes,
+            )
 
     def test_result_rejects_replay_copied_completion_and_extra_fields(self):
         outcome = valid_watch_outcome()

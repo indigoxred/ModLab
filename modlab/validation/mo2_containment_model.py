@@ -178,6 +178,21 @@ class ScenarioRecovery:
 
 
 @dataclass(frozen=True)
+class DecisionBindings:
+    binding_version: int
+    source_commit_id: str
+    source_tree_id: str
+    source_artifact_id: str
+    protocol_version: int
+    publication_policy_version: str
+    fixture_version: int
+    effect_receipt_version: int
+    authority_policy_version: int
+    mo2_version: str
+    mo2_executable_sha256: str
+
+
+@dataclass(frozen=True)
 class CapabilityDecision:
     schema_version: int
     run_id: str
@@ -185,3 +200,24 @@ class CapabilityDecision:
     verdict: CapabilityVerdict
     scenario_result_ids: tuple[str, ...]
     reasons: tuple[str, ...]
+    bindings: DecisionBindings | None = None
+
+    @property
+    def binding_version(self) -> int | None:
+        return None if self.bindings is None else self.bindings.binding_version
+
+    @property
+    def source_commit_id(self) -> str | None:
+        return None if self.bindings is None else self.bindings.source_commit_id
+
+    @property
+    def source_tree_id(self) -> str | None:
+        return None if self.bindings is None else self.bindings.source_tree_id
+
+    @property
+    def source_artifact_id(self) -> str | None:
+        return None if self.bindings is None else self.bindings.source_artifact_id
+
+    @property
+    def publication_policy_version(self) -> str | None:
+        return None if self.bindings is None else self.bindings.publication_policy_version

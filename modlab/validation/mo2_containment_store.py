@@ -1024,6 +1024,13 @@ class ContainmentStore:
             "scenarioResultIds",
             "reasons",
         }
+        if type(document) is dict and "bindings" in document:
+            try:
+                return capability_decision_from_bytes(data)
+            except ContainmentFormatError as error:
+                raise ContainmentStoreMalformedEvidence(
+                    f"capability decision is malformed: {error}"
+                ) from error
         if type(document) is not dict or set(document) != fields or _canonical(document) != data:
             raise ContainmentStoreMalformedEvidence(
                 "capability decision bytes are not canonical"

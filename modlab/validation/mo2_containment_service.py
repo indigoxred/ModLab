@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -10,10 +10,12 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import subprocess
 from typing import Mapping
 import uuid
 
 from modlab.adapters.mo2.processes import inspect_mo2_processes
+from modlab.adapters.mo2.release import bundled_mo2_252_path, load_mo2_release
 from modlab.adapters.skyrim.windows_version import read_windows_file_version
 from modlab.workspace import workspace_layout
 
@@ -23,6 +25,7 @@ from .mo2_containment_fixtures import (
 )
 from .mo2_containment_model import (
     CapabilityDecision,
+    DecisionBindings,
     CapabilityVerdict,
     ContainmentScenario,
     IntegrityObservation,
@@ -44,6 +47,7 @@ from .mo2_containment_serialization import (
     deterministic_policy_violations,
     scenario_result_id_for,
     scenario_result_to_bytes,
+    source_artifact_id_for,
     watch_outcome_id_for,
 )
 from .mo2_containment_store import (
@@ -117,6 +121,10 @@ _EXPECTED_REPLACEMENT_OUTPUTS = (
 
 class ContainmentServiceError(RuntimeError):
     """The scenario cannot advance without weakening its evidence boundary."""
+
+
+class ContainmentDecisionNotReady(ContainmentServiceError):
+    """Current-run evidence is not complete enough to freeze a decision."""
 
 
 @dataclass(frozen=True)
@@ -1011,30 +1019,31 @@ def adjudicate_run(validation_root: Path, run_id: str) -> CapabilityDecision:
     store = ContainmentStore(validation_root)
     results: list[ScenarioResult] = []
     outcomes: list[WatchOutcome] = []
-    evidence_reasons: list[str] = []
     for scenario in ContainmentScenario:
         try:
             result = store.load_result(run_id, scenario)
             outcome = store.load_watch_outcome(run_id, scenario, result.watch_outcome_id)
             scenario_result_id_for(result, outcome)
-        except ContainmentStoreError:
-            evidence_reasons.append(
-                f"current-evidence-unresolvable:{scenario.value}"
-            )
-            continue
+            journal_path = store.journal_path(run_id, scenario)
+            if journal_path.exists():
+                journal = store.load_journal(run_id, scenario)
+                if journal.state not in {
+                    ScenarioState.CAPTURED,
+                    ScenarioState.RECOVERY_REQUIRED,
+                }:
+                    raise ContainmentDecisionNotReady(
+                        f"current evidence is nonterminal: {scenario.value}"
+                    )
+        except ContainmentDecisionNotReady:
+            raise
+        except (ContainmentStoreError, ContainmentFormatError) as error:
+            raise ContainmentDecisionNotReady(
+                f"current evidence is unresolvable: {scenario.value}"
+            ) from error
         results.append(result)
         outcomes.append(outcome)
-    if not results:
-        decision = CapabilityDecision(
-            _SCHEMA_VERSION,
-            run_id,
-            _MECHANISM,
-            CapabilityVerdict.INCOMPLETE,
-            (),
-            ("scenario-evidence-unavailable",),
-        )
-    else:
-        decision = adjudicate_results(tuple(results), tuple(outcomes))
+    decision = adjudicate_results(tuple(results), tuple(outcomes))
+    evidence_reasons: list[str] = []
     cohort_reasons: list[str] = []
     historical_ids: list[str] = []
     historical_failed = False
@@ -1066,19 +1075,9 @@ def adjudicate_run(validation_root: Path, run_id: str) -> CapabilityDecision:
                     )
                     retry_replay = None
     except (ContainmentStoreError, ContainmentServiceError) as error:
-        predecessors = (
-            current_intent.get("predecessorRunIds", [])
-            if current_intent is not None
-            else []
-        )
-        current_fingerprint = (
-            current_intent.get("commandFingerprint")
-            if current_intent is not None
-            else None
-        )
-        evidence_reasons.append(
-            f"current-cohort-unresolvable:{type(error).__name__}"
-        )
+        raise ContainmentDecisionNotReady(
+            f"current source binding is unresolvable: {type(error).__name__}"
+        ) from error
 
     if _valid_predecessor_run_ids(predecessors, run_id):
         for historical_run_id in predecessors:
@@ -1197,8 +1196,57 @@ def adjudicate_run(validation_root: Path, run_id: str) -> CapabilityDecision:
                 )
             ),
         )
-    store.write_decision(decision)
+    if current_intent is None:
+        raise ContainmentDecisionNotReady("current run identity is unavailable")
+    decision = replace(
+        decision,
+        schema_version=2,
+        bindings=_decision_bindings(current_intent),
+    )
+    written = store.write_decision(decision)
+    if written.value != decision or store.load_decision(run_id) != decision:
+        raise ContainmentServiceError("stored capability decision differs after exact reload")
     return decision
+
+
+def _decision_bindings(intent: Mapping[str, object]) -> DecisionBindings:
+    artifact = intent.get("mo2ArtifactId")
+    if type(artifact) is not str or not artifact:
+        raise ContainmentDecisionNotReady("current source artifact is unavailable")
+    release = load_mo2_release(bundled_mo2_252_path())
+    source_root = Path(__file__).resolve().parents[2]
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        tree = subprocess.run(
+            ["git", "-C", str(source_root), "rev-parse", "HEAD^{tree}"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ContainmentDecisionNotReady("source Git identity is unavailable") from error
+    manifest = {
+        "schemaVersion": 1,
+        "sourceCommitId": commit,
+        "sourceTreeId": tree,
+        "mo2ArtifactId": artifact,
+        "releaseDescriptorSha256": release.sha256,
+        "archiveSha256": release.descriptor.archive_sha256,
+    }
+    return DecisionBindings(
+        binding_version=2,
+        source_commit_id=commit,
+        source_tree_id=tree,
+        source_artifact_id=source_artifact_id_for(manifest),
+        protocol_version=2,
+        publication_policy_version="handle-pinned-no-replace-v2",
+        fixture_version=2,
+        effect_receipt_version=1,
+        authority_policy_version=1,
+        mo2_version=release.descriptor.executable.file_version or "",
+        mo2_executable_sha256=release.descriptor.executable.sha256,
+    )
 
 
 def _load_bound_request(
@@ -2615,6 +2663,7 @@ def _valid_retry_binding(value: object, command_fingerprint: object) -> bool:
 
 
 __all__ = [
+    "ContainmentDecisionNotReady",
     "ContainmentServiceError",
     "FixtureRecord",
     "RecoveryCleanupEvidence",

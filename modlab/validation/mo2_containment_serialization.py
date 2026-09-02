@@ -30,6 +30,8 @@ WATCH_ROOT_KINDS = (
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _RUN = re.compile(r"^containment-run:[0-9a-f]{32}$")
 _RESULT_ID = re.compile(r"^containment-result-sha256:[0-9a-f]{64}$")
+_SOURCE_ARTIFACT_ID = re.compile(r"^containment-source-artifact-sha256:[0-9a-f]{64}$")
+_GIT_ID = re.compile(r"^[0-9a-f]{40}$")
 _WATCH_OUTCOME_ID = re.compile(r"^watch-outcome-sha256:[0-9a-f]{64}$")
 _WATCH_REQUEST_ID = re.compile(r"^watch-request:[0-9a-f]{64}$")
 _WATCH_SESSION_ID = re.compile(r"^watch-session:[0-9a-f]{64}$")
@@ -132,6 +134,13 @@ _DECISION = {
     "verdict",
     "scenarioResultIds",
     "reasons",
+}
+_DECISION_V2 = _DECISION | {"bindings"}
+_BINDINGS = {
+    "bindingVersion", "sourceCommitId", "sourceTreeId", "sourceArtifactId",
+    "protocolVersion", "publicationPolicyVersion", "fixtureVersion",
+    "effectReceiptVersion", "authorityPolicyVersion", "mo2Version",
+    "mo2ExecutableSha256",
 }
 _TREE = {"sha256", "regularFileCount", "directoryCount", "totalSize"}
 _PROTECTED = {
@@ -260,6 +269,19 @@ def capability_decision_id_for(
     return "containment-decision-sha256:" + hashlib.sha256(
         capability_decision_to_bytes(value, scenario_results, watch_outcomes)
     ).hexdigest()
+
+
+def source_artifact_id_for(manifest: Mapping[str, Any]) -> str:
+    """Return the content address of an exact canonical source-artifact manifest."""
+    if type(manifest) is not dict:
+        raise ContainmentFormatError("source artifact manifest must be an object")
+    try:
+        data = _bytes(manifest)
+        if _decode(data, "source artifact manifest") != manifest:
+            raise ContainmentFormatError("source artifact manifest is not canonical")
+    except (TypeError, ValueError) as error:
+        raise ContainmentFormatError("source artifact manifest is not canonical") from error
+    return "containment-source-artifact-sha256:" + hashlib.sha256(data).hexdigest()
 
 
 def scenario_journal_to_dict(value: ScenarioJournal) -> dict[str, Any]:
@@ -572,15 +594,24 @@ def capability_decision_from_dict(
     scenario_results: tuple[ScenarioResult, ...] | None = None,
     watch_outcomes: tuple[WatchOutcome, ...] | None = None,
 ) -> CapabilityDecision:
-    data = _map(value, _DECISION, "capability decision")
-    identifiers = _ids(data["scenarioResultIds"])
+    if type(value) is not dict:
+        raise ContainmentFormatError("capability decision must be an object")
+    is_v2 = set(value) == _DECISION_V2
+    data = _map(value, _DECISION_V2 if is_v2 else _DECISION, "capability decision")
+    if is_v2:
+        identifiers = _decision_ids(data["scenarioResultIds"])
+        bindings = _bindings(data["bindings"])
+    else:
+        identifiers = _ids(data["scenarioResultIds"])
+        bindings = None
     decision = CapabilityDecision(
-        schema_version=_schema(data["schemaVersion"]),
+        schema_version=_decision_schema(data["schemaVersion"], is_v2),
         run_id=_run(data["runId"]),
         mechanism=_fixed(data["mechanism"], _MECHANISM, "mechanism"),
         verdict=_enum(CapabilityVerdict, data["verdict"], "verdict"),
         scenario_result_ids=identifiers,
         reasons=_sorted_text(data["reasons"], "reasons"),
+        bindings=bindings,
     )
     if decision.verdict is CapabilityVerdict.SUPPORTED:
         if len(identifiers) != len(ContainmentScenario):
@@ -924,6 +955,8 @@ def _check_decision_results(
     watch_outcomes: tuple[WatchOutcome, ...] | None,
 ) -> None:
     if scenario_results is None and watch_outcomes is None:
+        if decision.bindings is not None:
+            return
         if decision.scenario_result_ids:
             raise ContainmentFormatError(
                 "decision result IDs require corresponding result/outcome pairs"
@@ -1122,6 +1155,21 @@ def _result_dict(value: ScenarioResult) -> dict[str, Any]:
 
 
 def _decision_dict(value: CapabilityDecision) -> dict[str, Any]:
+    if value.bindings is not None:
+        return {
+            "schemaVersion": value.schema_version,
+            "runId": value.run_id,
+            "mechanism": value.mechanism,
+            "verdict": value.verdict.value,
+            "scenarioResultIds": {
+                scenario.value: identifier
+                for scenario, identifier in zip(
+                    ContainmentScenario, value.scenario_result_ids, strict=True
+                )
+            },
+            "reasons": list(value.reasons),
+            "bindings": _bindings_dict(value.bindings),
+        }
     return {
         "schemaVersion": value.schema_version,
         "runId": value.run_id,
@@ -1130,6 +1178,63 @@ def _decision_dict(value: CapabilityDecision) -> dict[str, Any]:
         "scenarioResultIds": list(value.scenario_result_ids),
         "reasons": list(value.reasons),
     }
+
+
+def _bindings(value: Any) -> DecisionBindings:
+    data = _map(value, _BINDINGS, "decision bindings")
+    return DecisionBindings(
+        binding_version=_fixed_int(data["bindingVersion"], 2, "bindingVersion"),
+        source_commit_id=_pattern(data["sourceCommitId"], _GIT_ID, "sourceCommitId"),
+        source_tree_id=_pattern(data["sourceTreeId"], _GIT_ID, "sourceTreeId"),
+        source_artifact_id=_pattern(data["sourceArtifactId"], _SOURCE_ARTIFACT_ID, "sourceArtifactId"),
+        protocol_version=_fixed_int(data["protocolVersion"], 2, "protocolVersion"),
+        publication_policy_version=_fixed(
+            data["publicationPolicyVersion"], "handle-pinned-no-replace-v2", "publicationPolicyVersion"
+        ),
+        fixture_version=_fixed_int(data["fixtureVersion"], 2, "fixtureVersion"),
+        effect_receipt_version=_fixed_int(data["effectReceiptVersion"], 1, "effectReceiptVersion"),
+        authority_policy_version=_fixed_int(data["authorityPolicyVersion"], 1, "authorityPolicyVersion"),
+        mo2_version=_fixed(data["mo2Version"], "2.5.2.0", "mo2Version"),
+        mo2_executable_sha256=_sha(data["mo2ExecutableSha256"], "mo2ExecutableSha256"),
+    )
+
+
+def _bindings_dict(value: DecisionBindings) -> dict[str, Any]:
+    checked = _bindings({
+        "bindingVersion": value.binding_version,
+        "sourceCommitId": value.source_commit_id,
+        "sourceTreeId": value.source_tree_id,
+        "sourceArtifactId": value.source_artifact_id,
+        "protocolVersion": value.protocol_version,
+        "publicationPolicyVersion": value.publication_policy_version,
+        "fixtureVersion": value.fixture_version,
+        "effectReceiptVersion": value.effect_receipt_version,
+        "authorityPolicyVersion": value.authority_policy_version,
+        "mo2Version": value.mo2_version,
+        "mo2ExecutableSha256": value.mo2_executable_sha256,
+    })
+    return {
+        "bindingVersion": checked.binding_version,
+        "sourceCommitId": checked.source_commit_id,
+        "sourceTreeId": checked.source_tree_id,
+        "sourceArtifactId": checked.source_artifact_id,
+        "protocolVersion": checked.protocol_version,
+        "publicationPolicyVersion": checked.publication_policy_version,
+        "fixtureVersion": checked.fixture_version,
+        "effectReceiptVersion": checked.effect_receipt_version,
+        "authorityPolicyVersion": checked.authority_policy_version,
+        "mo2Version": checked.mo2_version,
+        "mo2ExecutableSha256": checked.mo2_executable_sha256,
+    }
+
+
+def _decision_ids(value: Any) -> tuple[str, ...]:
+    if type(value) is not dict or set(value) != {scenario.value for scenario in ContainmentScenario}:
+        raise ContainmentFormatError("decision scenario result IDs must be a complete scenario mapping")
+    return tuple(
+        _pattern(value[scenario.value], _RESULT_ID, f"scenarioResultIds.{scenario.value}")
+        for scenario in ContainmentScenario
+    )
 
 
 def _tree_dict(value: TreeIdentity) -> dict[str, Any]:
@@ -1303,6 +1408,19 @@ def _schema(value: Any) -> int:
     if type(value) is not int or value != 1:
         raise ContainmentFormatError("schemaVersion must be integer 1")
     return value
+
+
+def _decision_schema(value: Any, v2: bool) -> int:
+    expected = 2 if v2 else 1
+    if type(value) is not int or value != expected:
+        raise ContainmentFormatError(f"decision schemaVersion must be integer {expected}")
+    return value
+
+
+def _fixed_int(value: Any, expected: int, label: str) -> int:
+    if type(value) is not int or value != expected:
+        raise ContainmentFormatError(f"{label} must be integer {expected}")
+    return expected
 
 
 def _bool(value: Any, label: str) -> bool:
