@@ -20,7 +20,10 @@ from modlab.validation.windows_junction import (
     adopt_unique_staged_mod,
     build_projection,
     create_mod_projection,
+    ensure_direct_subdirectory,
     inspect_junction,
+    quarantine_exact_object,
+    quarantine_replacement_tree,
 )
 
 
@@ -438,6 +441,199 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
         self.assertFalse(result.final_is_reparse)
         self.assertFalse(candidate.exists())
         self.assertEqual(b"new", (result.destination_path / "meshes" / "new.bin").read_bytes())
+
+    def test_replacement_quarantine_binds_outputs_and_move_to_one_pinned_tree(self):
+        stage, _source, quarantine = self._adoption_roots()
+        candidate = stage / "Protected Existing"
+        (candidate / "meshes").mkdir(parents=True)
+        (candidate / "meshes" / "canary.bin").write_bytes(b"replacement")
+        (candidate / "meshes" / "new.bin").write_bytes(b"new")
+        (candidate / "meta.ini").write_bytes(b"[General]\n")
+
+        result = quarantine_replacement_tree(
+            stage_mods=stage,
+            expected_name="Protected Existing",
+            quarantine_root=quarantine,
+        )
+
+        self.assertEqual(
+            ("meshes/canary.bin", "meshes/new.bin", "meta.ini"),
+            result.output_names,
+        )
+        self.assertEqual(result.before_tree, result.after_tree)
+        self.assertFalse(candidate.exists())
+        self.assertEqual(
+            b"replacement",
+            (result.destination_path / "meshes" / "canary.bin").read_bytes(),
+        )
+
+    def test_replacement_quarantine_blocks_root_swap_at_rename_boundary(self):
+        stage, _source, quarantine = self._adoption_roots()
+        candidate = stage / "Protected Existing"
+        held = self.root / "held-root"
+        candidate.mkdir()
+        (candidate / "marker.txt").write_bytes(b"original")
+        real_set_information = windows_junction._kernel32.SetFileInformationByHandle
+        race = {"attempted": False, "blocked": False}
+
+        def set_information_with_root_swap(handle, information_class, information, size):
+            if information_class == windows_junction._FILE_RENAME_INFO_CLASS:
+                race["attempted"] = True
+                try:
+                    candidate.rename(held)
+                    candidate.mkdir()
+                    (candidate / "marker.txt").write_bytes(b"replacement")
+                except PermissionError:
+                    race["blocked"] = True
+            return real_set_information(handle, information_class, information, size)
+
+        with mock.patch.object(
+            windows_junction._kernel32,
+            "SetFileInformationByHandle",
+            side_effect=set_information_with_root_swap,
+        ):
+            result = quarantine_replacement_tree(
+                stage_mods=stage,
+                expected_name="Protected Existing",
+                quarantine_root=quarantine,
+            )
+
+        self.assertTrue(race["attempted"])
+        self.assertTrue(race["blocked"])
+        self.assertFalse(held.exists())
+        self.assertFalse(candidate.exists())
+        self.assertEqual(b"original", (result.destination_path / "marker.txt").read_bytes())
+
+    def test_replacement_quarantine_detects_descendant_swap_across_root_move(self):
+        stage, _source, quarantine = self._adoption_roots()
+        candidate = stage / "Protected Existing"
+        child = candidate / "meshes"
+        held = self.root / "held-child"
+        child.mkdir(parents=True)
+        (child / "canary.bin").write_bytes(b"original")
+        real_quarantine = windows_junction._quarantine_pinned_tree
+        race = {"attempted": False, "blocked": False}
+
+        def quarantine_with_descendant_swap(tree, quarantine_root):
+            race["attempted"] = True
+            try:
+                child.rename(held)
+                child.mkdir()
+                (child / "canary.bin").write_bytes(b"replacement")
+            except PermissionError:
+                race["blocked"] = True
+            return real_quarantine(tree, quarantine_root)
+
+        with mock.patch.object(
+            windows_junction,
+            "_quarantine_pinned_tree",
+            side_effect=quarantine_with_descendant_swap,
+        ):
+            with self.assertRaisesRegex(
+                ContainmentSafetyError,
+                "member identity changed|membership changed",
+            ):
+                quarantine_replacement_tree(
+                    stage_mods=stage,
+                    expected_name="Protected Existing",
+                    quarantine_root=quarantine,
+                )
+
+        self.assertTrue(race["attempted"])
+        self.assertFalse(race["blocked"])
+        self.assertEqual(
+            b"original",
+            (held / "canary.bin").read_bytes(),
+        )
+        self.assertEqual(
+            b"replacement",
+            (
+                quarantine
+                / "Protected Existing"
+                / "meshes"
+                / "canary.bin"
+            ).read_bytes(),
+        )
+
+    def test_redirected_scenario_quarantine_is_rejected_without_moving_candidate(self):
+        stage, _source, quarantine_parent = self._adoption_roots()
+        candidate = stage / "Protected Existing"
+        external = self.root / "external-quarantine"
+        candidate.mkdir()
+        (candidate / "marker.txt").write_bytes(b"candidate")
+        external.mkdir()
+        scenario_quarantine = quarantine_parent / "ReplaceExisting"
+        create_mod_projection(external, scenario_quarantine)
+
+        with self.assertRaisesRegex(ContainmentSafetyError, "reparse"):
+            ensure_direct_subdirectory(quarantine_parent, "ReplaceExisting")
+        with self.assertRaisesRegex(ContainmentSafetyError, "reparse"):
+            quarantine_replacement_tree(
+                stage_mods=stage,
+                expected_name="Protected Existing",
+                quarantine_root=scenario_quarantine,
+            )
+
+        self.assertEqual(b"candidate", (candidate / "marker.txt").read_bytes())
+        self.assertEqual([], list(external.iterdir()))
+
+    def test_replacement_reparse_rejection_quarantines_and_releases_all_handles(self):
+        stage, _source, quarantine = self._adoption_roots()
+        candidate = stage / "Protected Existing"
+        external = self.root / "external-payload"
+        candidate.mkdir()
+        external.mkdir()
+        (candidate / "marker.txt").write_bytes(b"candidate")
+        (external / "outside.txt").write_bytes(b"outside")
+        create_mod_projection(external, candidate / "redirect")
+
+        with self.assertRaisesRegex(ContainmentSafetyError, "reparse descendant"):
+            quarantine_replacement_tree(
+                stage_mods=stage,
+                expected_name="Protected Existing",
+                quarantine_root=quarantine,
+            )
+
+        quarantined = quarantine / "Protected Existing"
+        released = quarantine / "Released Replacement"
+        self.assertFalse(candidate.exists())
+        quarantined.rename(released)
+        self.assertEqual(b"candidate", (released / "marker.txt").read_bytes())
+        self.assertEqual(
+            external.resolve(strict=True),
+            inspect_junction(released / "redirect").target_path,
+        )
+
+    def test_replacement_quarantine_collision_is_no_replace_and_leaves_candidate(self):
+        stage, _source, quarantine = self._adoption_roots()
+        candidate = stage / "Protected Existing"
+        collision = quarantine / "Protected Existing"
+        candidate.mkdir()
+        collision.mkdir()
+        (candidate / "marker.txt").write_bytes(b"candidate")
+        (collision / "marker.txt").write_bytes(b"existing")
+
+        with self.assertRaisesRegex(ContainmentSafetyError, "quarantine collision"):
+            quarantine_replacement_tree(
+                stage_mods=stage,
+                expected_name="Protected Existing",
+                quarantine_root=quarantine,
+            )
+
+        self.assertEqual(b"candidate", (candidate / "marker.txt").read_bytes())
+        self.assertEqual(b"existing", (collision / "marker.txt").read_bytes())
+
+    def test_exact_object_quarantine_uses_pinned_no_replace_move(self):
+        stage, _source, quarantine = self._adoption_roots()
+        candidate = stage / "Unexpected Backup"
+        candidate.mkdir()
+        (candidate / "marker.txt").write_bytes(b"candidate")
+
+        destination = quarantine_exact_object(candidate, quarantine)
+
+        self.assertEqual(quarantine / candidate.name, destination)
+        self.assertFalse(candidate.exists())
+        self.assertEqual(b"candidate", (destination / "marker.txt").read_bytes())
 
     def test_collision_is_quarantined_without_changing_the_existing_source(self):
         stage, source, quarantine = self._adoption_roots()

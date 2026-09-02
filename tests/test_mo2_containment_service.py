@@ -389,7 +389,11 @@ def evidence(
     expected_outputs = (
         ("meshes/new-folder.bin", "meta.ini")
         if scenario is ContainmentScenario.NEW_FOLDER
-        else ("always.txt", "dependency-seen.txt", "meta.ini")
+        else (
+            ("meshes/canary.bin", "meshes/new.bin", "meta.ini")
+            if scenario is ContainmentScenario.REPLACE_EXISTING
+            else ("always.txt", "dependency-seen.txt", "meta.ini")
+        )
     )
     values = dict(
         run_id=RUN_ID,
@@ -410,7 +414,11 @@ def evidence(
         production_observation_complete=True,
         staging_new_names=(expected_name,) if adopted else (),
         staging_observation_complete=True,
-        staging_output_names=expected_outputs if adopted else (),
+        staging_output_names=(
+            expected_outputs
+            if adopted or scenario is ContainmentScenario.REPLACE_EXISTING
+            else ()
+        ),
         output_observation_complete=True,
         adopted_name=expected_name if adopted else None,
         adopted_tree=tree("b") if adopted else None,
@@ -656,6 +664,96 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertFalse(projection.staging_observation_complete)
             self.assertEqual(ScenarioOutcome.INCOMPLETE, evaluated.outcome)
 
+    def test_replace_quarantines_disposable_replacement_and_restores_projection(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-replace-projection-") as directory:
+            root = Path(directory)
+            source = root / "source"
+            stage = root / "stage"
+            protected_mod = source / "Protected Existing"
+            replacement = stage / "Protected Existing"
+            protected_mod.mkdir(parents=True)
+            (protected_mod / "marker.txt").write_bytes(b"protected\n")
+            (replacement / "meshes").mkdir(parents=True)
+            (replacement / "meshes" / "canary.bin").write_bytes(b"replacement\n")
+            (replacement / "meshes" / "new.bin").write_bytes(b"new\n")
+            (replacement / "meta.ini").write_bytes(b"[General]\n")
+            record = service.FixtureRecord(
+                ContainmentScenario.REPLACE_EXISTING,
+                root, root, root, root / "archive.zip", source, stage,
+                root / "lab.txt", root / "play.txt", root, root, root,
+                root, root, root, root, root, root, {}, (),
+                ("Protected Existing",),
+            )
+            store = ContainmentStore(root / "validation")
+            store.prepare_run_root(RUN_ID)
+            restored = False
+
+            def inspect_for_test(_path):
+                if not restored:
+                    raise service.ContainmentSafetyError("direct replacement")
+                return SimpleNamespace(target_path=protected_mod)
+
+            def restore_for_test(source_mod, staging_mod):
+                nonlocal restored
+                self.assertEqual(protected_mod, source_mod)
+                self.assertEqual(replacement, staging_mod)
+                staging_mod.mkdir()
+                restored = True
+                return SimpleNamespace(target_path=source_mod)
+
+            with (
+                patch.object(service, "inspect_junction", side_effect=inspect_for_test),
+                patch.object(
+                    service,
+                    "create_mod_projection",
+                    side_effect=restore_for_test,
+                ),
+                patch.object(service, "_capture_protected", return_value=protected()),
+            ):
+                projection = service._finalize_projection(
+                    store,
+                    RUN_ID,
+                    record,
+                    protected(),
+                    protected(),
+                )
+
+            quarantine = store.quarantine_path(RUN_ID) / record.scenario.value
+            self.assertTrue(restored)
+            self.assertTrue((quarantine / "Protected Existing" / "meshes" / "new.bin").is_file())
+            self.assertTrue(replacement.is_dir())
+            self.assertEqual(1, projection.projection_count)
+            self.assertTrue(projection.projection_targets_verified)
+            self.assertTrue(projection.projection_observation_complete)
+            self.assertEqual(
+                ("meshes/canary.bin", "meshes/new.bin", "meta.ini"),
+                projection.staging_output_names,
+            )
+            self.assertTrue(projection.output_observation_complete)
+            self.assertEqual((), projection.safety_reasons)
+            self.assertEqual((), projection.incomplete_reasons)
+            evaluated = evaluate_scenario(
+                evidence(
+                    record.scenario,
+                    projection_count=projection.projection_count,
+                    projection_targets_verified=projection.projection_targets_verified,
+                    projection_observation_complete=projection.projection_observation_complete,
+                    production_backup_names=projection.production_backup_names,
+                    staging_new_names=projection.staging_new_names,
+                    staging_observation_complete=projection.staging_observation_complete,
+                    staging_output_names=projection.staging_output_names,
+                    output_observation_complete=projection.output_observation_complete,
+                    source_restored_after_quarantine=projection.source_restored_after_quarantine,
+                    safety_reasons=projection.safety_reasons,
+                    incomplete_reasons=projection.incomplete_reasons,
+                )
+            )
+            self.assertEqual(
+                ScenarioOutcome.PASSED,
+                evaluated.outcome,
+                evaluated.reasons,
+            )
+
     def test_protected_delta_before_adoption_never_moves_staging_into_source(self):
         with tempfile.TemporaryDirectory(prefix="modlab-pre-adoption-delta-") as directory:
             root = Path(directory)
@@ -815,6 +913,15 @@ class ContainmentServiceTests(unittest.TestCase):
                 result = evaluate_scenario(evidence(scenario, **changes))
                 self.assertEqual(expected, result.outcome)
                 self.assertFalse(result.fresh_retry_eligible)
+
+        replace_mismatch = evaluate_scenario(
+            evidence(
+                ContainmentScenario.REPLACE_EXISTING,
+                staging_output_names=("meshes/canary.bin", "meta.ini"),
+            )
+        )
+        self.assertEqual(ScenarioOutcome.FAILED, replace_mismatch.outcome)
+        self.assertIn("staging-output-set-invalid", replace_mismatch.reasons)
 
         incomplete_watch = watch_outcome(
             scenario,
@@ -1426,8 +1533,8 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertEqual([], current["predecessorRunIds"])
             self.assertNotEqual(legacy_fingerprint, current["commandFingerprint"])
 
-    def test_pre_v3_nonterminal_runs_do_not_block_current_classification_policy(self):
-        # Catches corrected MO2 metadata policy inheriting either older v2 cohort.
+    def test_pre_v4_nonterminal_runs_do_not_block_current_classification_policy(self):
+        # Corrected replacement policy must not inherit v2 or v3 diagnostics.
         with tempfile.TemporaryDirectory(prefix="modlab-fixture-lineage-") as directory:
             source = Path(directory) / "source"
             layout = initialize_workspace(source)
@@ -1476,12 +1583,34 @@ class ContainmentServiceTests(unittest.TestCase):
                     ).encode()
                 ).hexdigest()
             )
+            v3_fixture_document = {
+                **v2_fixture_document,
+                "classificationPolicy": "scenario-classification-v3",
+            }
+            v3_fixture_fingerprint = (
+                "containment-command-sha256:"
+                + hashlib.sha256(
+                    (
+                        json.dumps(
+                            v3_fixture_document,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode()
+                ).hexdigest()
+            )
             for old_run, document, fingerprint in (
                 (RUN_ID, previous_document, previous_fingerprint),
                 (
                     "containment-run:" + "1" * 32,
                     v2_fixture_document,
                     v2_fixture_fingerprint,
+                ),
+                (
+                    "containment-run:" + "2" * 32,
+                    v3_fixture_document,
+                    v3_fixture_fingerprint,
                 ),
             ):
                 store.write_intent(
@@ -1518,7 +1647,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 new_run = service.prepare_run(source, artifact, steam, store.root)
 
             current_document = {
-                "classificationPolicy": "scenario-classification-v3",
+                "classificationPolicy": "scenario-classification-v4",
                 "fixturePolicy": "disposable-shell-environment-v2",
                 "mechanism": "isolated-low-integrity-junction-projection-v1",
                 "mo2ArtifactId": artifact,
@@ -1544,6 +1673,7 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertEqual(expected_current, current["commandFingerprint"])
             self.assertNotEqual(previous_fingerprint, current["commandFingerprint"])
             self.assertNotEqual(v2_fixture_fingerprint, current["commandFingerprint"])
+            self.assertNotEqual(v3_fixture_fingerprint, current["commandFingerprint"])
 
     def test_same_command_prepare_calls_are_serialized_before_snapshot(self):
         with tempfile.TemporaryDirectory(prefix="modlab-prepare-order-") as directory:

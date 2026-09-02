@@ -64,7 +64,11 @@ from .windows_integrity import (
 from .windows_junction import (
     ContainmentSafetyError,
     adopt_unique_staged_mod,
+    create_mod_projection,
+    ensure_direct_subdirectory,
     inspect_junction,
+    quarantine_exact_object,
+    quarantine_replacement_tree,
     stable_tree_identity,
 )
 from . import windows_watch as _windows_watch
@@ -83,8 +87,9 @@ from .windows_watch_protocol import (
 
 _SCHEMA_VERSION = 1
 _MECHANISM = "isolated-low-integrity-junction-projection-v1"
-_CLASSIFICATION_POLICY = "scenario-classification-v3"
-_PREVIOUS_CLASSIFICATION_POLICY = "scenario-classification-v2"
+_CLASSIFICATION_POLICY = "scenario-classification-v4"
+_PREVIOUS_CLASSIFICATION_POLICY = "scenario-classification-v3"
+_OLDER_CLASSIFICATION_POLICY = "scenario-classification-v2"
 _FIXTURE_POLICY = "disposable-shell-environment-v2"
 _PROTECTED_NAME = "Protected Existing"
 _EXPECTED_NEW = {
@@ -101,6 +106,13 @@ _EXPECTED_OUTPUTS = {
         "meta.ini",
     ),
 }
+_EXPECTED_REPLACEMENT_OUTPUTS = (
+    "meshes/canary.bin",
+    "meshes/new.bin",
+    "meta.ini",
+)
+
+
 class ContainmentServiceError(RuntimeError):
     """The scenario cannot advance without weakening its evidence boundary."""
 
@@ -284,6 +296,20 @@ def evaluate_scenario(value: ScenarioEvidence) -> ScenarioResult:
             or value.adopted_integrity is not IntegrityObservation.MEDIUM
         ):
             violations.add("adoption-proof-invalid")
+    elif value.scenario is ContainmentScenario.REPLACE_EXISTING:
+        if not value.staging_observation_complete:
+            incomplete.add("staging-observation-incomplete")
+        if not value.output_observation_complete:
+            incomplete.add("output-observation-incomplete")
+        elif value.staging_output_names != _EXPECTED_REPLACEMENT_OUTPUTS:
+            violations.add("staging-output-set-invalid")
+        if (
+            value.staging_new_names
+            or value.adopted_name is not None
+            or value.adopted_tree is not None
+            or value.adopted_integrity is not None
+        ):
+            violations.add("unexpected-staging-output")
     elif not value.staging_observation_complete or not value.output_observation_complete:
         incomplete.add("staging-observation-incomplete")
     elif (
@@ -1511,19 +1537,25 @@ def _finalize_projection(
     safety: list[str] = []
     if production_complete and production_backups:
         safety.append("production-backup-created")
-    if not projection_complete:
-        incomplete.append("projection-observation-unavailable")
-    elif not targets_verified:
-        safety.append("projection-target-changed")
+    if record.scenario is not ContainmentScenario.REPLACE_EXISTING:
+        if not projection_complete:
+            incomplete.append("projection-observation-unavailable")
+        elif not targets_verified:
+            safety.append("projection-target-changed")
     adopted_name: str | None = None
     adopted_tree: TreeIdentity | None = None
     adopted_integrity: IntegrityObservation | None = None
     outputs: tuple[str, ...] = ()
-    output_complete = record.scenario not in _EXPECTED_OUTPUTS
+    output_complete = (
+        record.scenario not in _EXPECTED_OUTPUTS
+        and record.scenario is not ContainmentScenario.REPLACE_EXISTING
+    )
     final = post_mo2
     restored = post_mo2 == before
-    quarantine = store.quarantine_path(run_id) / record.scenario.value
-    quarantine.mkdir(exist_ok=True)
+    quarantine = ensure_direct_subdirectory(
+        store.quarantine_path(run_id),
+        record.scenario.value,
+    )
 
     if record.scenario in _EXPECTED_OUTPUTS:
         expected = _EXPECTED_NEW[record.scenario]
@@ -1587,18 +1619,54 @@ def _finalize_projection(
             incomplete.append(
                 f"staging-reobservation-unavailable:{type(error).__name__}"
             )
-        if unexpected or changed:
-            safety.append("unexpected-staging-backup")
-        quarantine_names = (
-            tuple(dict.fromkeys((*changed, *unexpected)))
-            if staging_complete
-            else ()
+        replacement_candidate = (
+            record.scenario is ContainmentScenario.REPLACE_EXISTING
+            and not unexpected
+            and changed == (_PROTECTED_NAME,)
         )
-        for name in quarantine_names:
+        if replacement_candidate:
+            replacement = record.stage_mods / _PROTECTED_NAME
             try:
-                _quarantine_exact(record.stage_mods / name, quarantine)
+                replacement_evidence = quarantine_replacement_tree(
+                    stage_mods=record.stage_mods,
+                    expected_name=_PROTECTED_NAME,
+                    quarantine_root=quarantine,
+                )
+                outputs = replacement_evidence.output_names
+                output_complete = True
             except (OSError, ContainmentSafetyError):
-                incomplete.append("staging-quarantine-failed")
+                output_complete = False
+                incomplete.append("replacement-quarantine-proof-unavailable")
+            else:
+                try:
+                    create_mod_projection(
+                        record.source_mods / _PROTECTED_NAME,
+                        replacement,
+                    )
+                except (OSError, ContainmentSafetyError):
+                    incomplete.append("projection-restoration-failed")
+                else:
+                    projection_count, targets_verified, projection_complete = (
+                        _projection_state(record)
+                    )
+        else:
+            if unexpected or changed:
+                safety.append("unexpected-staging-backup")
+            quarantine_names = (
+                tuple(dict.fromkeys((*changed, *unexpected)))
+                if staging_complete
+                else ()
+            )
+            for name in quarantine_names:
+                try:
+                    _quarantine_exact(record.stage_mods / name, quarantine)
+                except (OSError, ContainmentSafetyError):
+                    incomplete.append("staging-quarantine-failed")
+        if record.scenario is ContainmentScenario.REPLACE_EXISTING:
+            if not projection_complete:
+                incomplete.append("projection-observation-unavailable")
+            elif not targets_verified:
+                safety.append("projection-target-changed")
         final = _capture_protected(record)
         restored = final == before
 
@@ -2084,13 +2152,7 @@ def _relative_files(root: Path) -> tuple[str, ...]:
 
 
 def _quarantine_exact(source: Path, quarantine: Path) -> None:
-    metadata = source.lstat()
-    if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
-        raise ContainmentSafetyError("quarantine source is not an exact filesystem object")
-    destination = quarantine / source.name
-    if destination.exists():
-        raise ContainmentSafetyError("quarantine destination collision")
-    os.rename(source, destination)
+    quarantine_exact_object(source, quarantine)
 
 
 def _exists_no_follow(path: Path) -> bool:
@@ -2203,7 +2265,7 @@ def _pre_fixture_policy_command_fingerprint(
     steam_root: Path,
 ) -> str:
     document = {
-        "classificationPolicy": _PREVIOUS_CLASSIFICATION_POLICY,
+        "classificationPolicy": _OLDER_CLASSIFICATION_POLICY,
         "mechanism": _MECHANISM,
         "mo2ArtifactId": mo2_artifact_id,
         "scenarios": [item.value for item in ContainmentScenario],
@@ -2224,6 +2286,27 @@ def _previous_classification_command_fingerprint(
 ) -> str:
     document = {
         "classificationPolicy": _PREVIOUS_CLASSIFICATION_POLICY,
+        "fixturePolicy": _FIXTURE_POLICY,
+        "mechanism": _MECHANISM,
+        "mo2ArtifactId": mo2_artifact_id,
+        "scenarios": [item.value for item in ContainmentScenario],
+        "sourceWorkspace": os.path.normcase(
+            os.path.normpath(str(Path(source_workspace).expanduser().absolute()))
+        ),
+        "steamRoot": os.path.normcase(
+            os.path.normpath(str(Path(steam_root).expanduser().absolute()))
+        ),
+    }
+    return _command_fingerprint_for(document)
+
+
+def _older_classification_command_fingerprint(
+    source_workspace: Path,
+    mo2_artifact_id: str,
+    steam_root: Path,
+) -> str:
+    document = {
+        "classificationPolicy": _OLDER_CLASSIFICATION_POLICY,
         "fixturePolicy": _FIXTURE_POLICY,
         "mechanism": _MECHANISM,
         "mo2ArtifactId": mo2_artifact_id,
@@ -2261,10 +2344,13 @@ def _known_command_fingerprints(
     source_workspace: Path,
     mo2_artifact_id: str,
     steam_root: Path,
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, str]:
     return (
         _command_fingerprint(source_workspace, mo2_artifact_id, steam_root),
         _previous_classification_command_fingerprint(
+            source_workspace, mo2_artifact_id, steam_root
+        ),
+        _older_classification_command_fingerprint(
             source_workspace, mo2_artifact_id, steam_root
         ),
         _pre_fixture_policy_command_fingerprint(

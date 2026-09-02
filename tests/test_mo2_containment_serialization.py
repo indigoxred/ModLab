@@ -192,6 +192,15 @@ def valid_scenario_result(
             adopted_tree=tree("b"),
             adopted_integrity=IntegrityObservation.MEDIUM,
         )
+    if scenario is ContainmentScenario.REPLACE_EXISTING:
+        return ScenarioResult(
+            **common,
+            staging_new_names=(),
+            staging_output_names=("meshes/canary.bin", "meshes/new.bin", "meta.ini"),
+            adopted_name=None,
+            adopted_tree=None,
+            adopted_integrity=None,
+        )
     return ScenarioResult(
         **common,
         staging_new_names=(),
@@ -716,9 +725,10 @@ class Mo2ContainmentSerializationTests(unittest.TestCase):
                 with self.assertRaises(ContainmentFormatError):
                     scenario_result_to_bytes(result, bound)
 
-    def test_passing_special_scenarios_require_exact_adopted_outputs(self):
+    def test_passing_special_scenarios_require_exact_staging_outputs(self):
         for scenario in (
             ContainmentScenario.NEW_FOLDER,
+            ContainmentScenario.REPLACE_EXISTING,
             ContainmentScenario.FOMOD_DEPENDENCY,
         ):
             with self.subTest(scenario=scenario):

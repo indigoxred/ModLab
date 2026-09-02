@@ -164,6 +164,13 @@ _ADOPTION = {
         ("always.txt", "dependency-seen.txt", "meta.ini"),
     ),
 }
+_REPLACEMENT = {
+    ContainmentScenario.REPLACE_EXISTING: (
+        "meshes/canary.bin",
+        "meshes/new.bin",
+        "meta.ini",
+    ),
+}
 
 
 def scenario_journal_to_bytes(value: ScenarioJournal) -> bytes:
@@ -764,6 +771,17 @@ def deterministic_policy_violations(result: ScenarioResult) -> tuple[str, ...]:
             not in {IntegrityObservation.UNKNOWN, IntegrityObservation.MEDIUM}
         ):
             violations.add("adoption-proof-invalid")
+    elif result.scenario in _REPLACEMENT:
+        if (
+            result.output_observation_complete
+            and result.staging_output_names != _REPLACEMENT[result.scenario]
+        ):
+            violations.add("staging-output-set-invalid")
+        if (
+            (result.staging_observation_complete and result.staging_new_names)
+            or any(item is not None for item in adoption)
+        ):
+            violations.add("unexpected-staging-output")
     elif (
         (result.staging_observation_complete and result.staging_new_names)
         or (result.output_observation_complete and result.staging_output_names)
@@ -876,6 +894,17 @@ def _check_passed_result(
         ):
             raise ContainmentFormatError(
                 f"Passed {result.scenario.value} result requires Medium adopted tree evidence"
+            )
+    elif result.scenario in _REPLACEMENT:
+        if (
+            not result.staging_observation_complete
+            or not result.output_observation_complete
+            or any(item is not None for item in adoption)
+            or result.staging_new_names
+            or result.staging_output_names != _REPLACEMENT[result.scenario]
+        ):
+            raise ContainmentFormatError(
+                "Passed ReplaceExisting result requires exact quarantined replacement output"
             )
     elif (
         not result.staging_observation_complete

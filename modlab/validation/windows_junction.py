@@ -30,7 +30,8 @@ _DELETE = 0x00010000
 _FILE_READ_ATTRIBUTES = 0x00000080
 _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
-_FILE_SHARE_ALL = 0x00000001 | 0x00000002 | 0x00000004
+_FILE_SHARE_DELETE = 0x00000004
+_FILE_SHARE_ALL = _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
 _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
@@ -71,6 +72,14 @@ class AdoptionEvidence:
     after_tree: TreeIdentity
     final_integrity: IntegrityLevel
     final_is_reparse: bool
+
+
+@dataclass(frozen=True)
+class ReplacementQuarantineEvidence:
+    destination_path: Path
+    output_names: tuple[str, ...]
+    before_tree: TreeIdentity
+    after_tree: TreeIdentity
 
 
 @dataclass
@@ -1072,6 +1081,7 @@ def _quarantine_pinned_objects(
     parent_pin = _pin_parent_directory(quarantine)
     try:
         for pinned in pinned_entries:
+            source = pinned.path
             destination = quarantine / pinned.path.name
             try:
                 _rename_pinned_object(pinned, destination, parent_pin)
@@ -1083,6 +1093,10 @@ def _quarantine_pinned_objects(
                 raise ContainmentSafetyError(
                     f"cannot quarantine {pinned.path.name}: {error}"
                 ) from error
+            if _exists_no_follow(source):
+                raise ContainmentSafetyError(
+                    f"quarantined source path is still present: {source}"
+                )
     finally:
         parent_pin.close()
 
@@ -1091,6 +1105,7 @@ def _quarantine_pinned_tree(tree: _PinnedTree, quarantine_root: Path) -> None:
     quarantine = _require_direct_directory(quarantine_root)
     parent_pin = _pin_parent_directory(quarantine)
     try:
+        source = tree.current_path
         destination = quarantine / tree.current_path.name
         try:
             _rename_pinned_object(tree.root, destination, parent_pin)
@@ -1099,9 +1114,172 @@ def _quarantine_pinned_tree(tree: _PinnedTree, quarantine_root: Path) -> None:
                 f"quarantine collision for {tree.current_path.name}"
             ) from error
         tree.current_path = destination
-        _assert_pinned_root_path(tree)
+        if tree.entries:
+            for entry in tree.entries:
+                entry.pinned.path = destination.joinpath(
+                    *entry.relative_path.split("/")
+                )
+            _assert_pinned_tree(tree)
+        else:
+            _assert_pinned_root_path(tree)
+        if _exists_no_follow(source):
+            raise ContainmentSafetyError(
+                f"quarantined source path is still present: {source}"
+            )
     finally:
         parent_pin.close()
+
+
+def ensure_direct_subdirectory(parent: Path, name: str) -> Path:
+    """Create or validate one direct child directory beneath a pinned parent."""
+
+    parent_path = _require_direct_directory(parent)
+    child_name = _safe_name(name, "directory name")
+    parent_pin = _pin_parent_directory(parent_path)
+    child_pin: _PinnedObject | None = None
+    destination = parent_path / child_name
+    try:
+        if _identity_at_path(parent_path) != parent_pin.identity:
+            raise ContainmentSafetyError("direct directory parent changed before creation")
+        try:
+            destination.mkdir()
+        except FileExistsError:
+            pass
+        child_pin = _pin_object(
+            destination,
+            desired_access=_FILE_READ_ATTRIBUTES,
+            allow_reparse=False,
+        )
+        attributes, tag = _attribute_tag_for_handle(child_pin.handle, destination)
+        if _is_reparse(attributes, tag) or not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+            raise ContainmentSafetyError(
+                f"direct regular directory required: {destination}"
+            )
+        if _identity_at_path(parent_path) != parent_pin.identity:
+            raise ContainmentSafetyError("direct directory parent changed after creation")
+        if _identity_at_path(destination) != child_pin.identity:
+            raise ContainmentSafetyError("direct directory changed after creation")
+        return destination
+    except OSError as error:
+        raise ContainmentSafetyError(
+            f"cannot create direct directory {destination}: {error}"
+        ) from error
+    finally:
+        if child_pin is not None:
+            child_pin.close()
+        parent_pin.close()
+
+
+def quarantine_exact_object(source: Path, quarantine_root: Path) -> Path:
+    """Move one exact direct object to a direct quarantine with no replacement."""
+
+    source_path = _absolute(source)
+    _require_direct_components(source_path.parent)
+    quarantine = _require_direct_directory(quarantine_root)
+    pinned = _pin_object(
+        source_path,
+        desired_access=_DELETE | _FILE_READ_ATTRIBUTES,
+        allow_reparse=True,
+    )
+    try:
+        attributes, tag = _attribute_tag_for_handle(pinned.handle, source_path)
+        is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
+        if not is_directory and (
+            _is_reparse(attributes, tag)
+            or _kernel32.GetFileType(pinned.handle) != _FILE_TYPE_DISK
+        ):
+            raise ContainmentSafetyError(
+                "quarantine source is not an exact filesystem object"
+            )
+        _quarantine_pinned_objects((pinned,), quarantine)
+        return pinned.path
+    finally:
+        pinned.close()
+
+
+def quarantine_replacement_tree(
+    *,
+    stage_mods: Path,
+    expected_name: str,
+    quarantine_root: Path,
+) -> ReplacementQuarantineEvidence:
+    """Inventory and quarantine the same stable replacement tree identity."""
+
+    stage = _require_direct_directory(stage_mods)
+    expected = _safe_name(expected_name, "expected name")
+    quarantine = _require_direct_directory(quarantine_root)
+    candidate = stage / expected
+    try:
+        tree = _pin_tree(candidate)
+    except _PinnedTreeRejected as rejection:
+        rejected_tree = rejection.tree
+        try:
+            rejected_tree.close_descendants()
+            _quarantine_pinned_tree(rejected_tree, quarantine)
+        except BaseException as quarantine_error:
+            raise ContainmentSafetyError(
+                "replacement tree rejection and quarantine both failed: "
+                f"{quarantine_error}"
+            ) from rejection
+        finally:
+            rejected_tree.close()
+        raise ContainmentSafetyError(str(rejection)) from rejection
+    try:
+        before_tree = _stable_pinned_tree_identity(
+            tree,
+            required_equal_passes=2,
+        )
+        before_members = tuple(
+            (
+                entry.relative_path,
+                entry.is_directory,
+                entry.pinned.identity,
+            )
+            for entry in tree.entries
+        )
+        output_names = tuple(
+            sorted(
+                entry.relative_path
+                for entry in tree.entries
+                if not entry.is_directory
+            )
+        )
+        _assert_pinned_tree(tree)
+        tree.close_descendants()
+        _quarantine_pinned_tree(tree, quarantine)
+        _pin_descendants(tree)
+        after_members = tuple(
+            (
+                entry.relative_path,
+                entry.is_directory,
+                entry.pinned.identity,
+            )
+            for entry in tree.entries
+        )
+        if after_members != before_members:
+            raise ContainmentSafetyError(
+                "replacement tree member identity changed across quarantine"
+            )
+        after_tree = _stable_pinned_tree_identity(
+            tree,
+            required_equal_passes=2,
+        )
+        if after_tree != before_tree:
+            raise ContainmentSafetyError(
+                "replacement tree identity changed across quarantine"
+            )
+        if _exists_no_follow(candidate):
+            raise ContainmentSafetyError(
+                "replacement source path reappeared after quarantine"
+            )
+        return ReplacementQuarantineEvidence(
+            destination_path=tree.current_path,
+            output_names=output_names,
+            before_tree=before_tree,
+            after_tree=after_tree,
+        )
+    finally:
+        tree.close()
 
 
 def _select_unique_new_directory(
@@ -1338,10 +1516,14 @@ __all__ = [
     "ContainmentSafetyError",
     "IO_REPARSE_TAG_MOUNT_POINT",
     "JunctionEvidence",
+    "ReplacementQuarantineEvidence",
     "adopt_unique_staged_mod",
     "build_projection",
     "create_mod_projection",
+    "ensure_direct_subdirectory",
     "inspect_junction",
+    "quarantine_exact_object",
+    "quarantine_replacement_tree",
     "reject_reparse_tree",
     "require_tree_integrity",
     "stable_tree_identity",

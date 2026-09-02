@@ -392,7 +392,7 @@ git commit -m "feat: add low-integrity validation process boundary"
 
 **Interfaces:**
 - Consumes: one direct source `mods` root and one direct low-integrity staging `mods` root, both beneath the same validation run.
-- Produces: `JunctionEvidence`, `AdoptionEvidence`, `create_mod_projection(source_mod: Path, staging_mod: Path) -> JunctionEvidence`, `inspect_junction(path: Path) -> JunctionEvidence`, `build_projection(source_mods: Path, stage_mods: Path) -> tuple[JunctionEvidence, ...]`, and `adopt_unique_staged_mod(stage_mods: Path, source_mods: Path, expected_name: str, before_names: tuple[str, ...], quarantine_root: Path) -> AdoptionEvidence`.
+- Produces: `JunctionEvidence`, `AdoptionEvidence`, `ReplacementQuarantineEvidence`, `create_mod_projection(source_mod: Path, staging_mod: Path) -> JunctionEvidence`, `inspect_junction(path: Path) -> JunctionEvidence`, `build_projection(source_mods: Path, stage_mods: Path) -> tuple[JunctionEvidence, ...]`, `adopt_unique_staged_mod(stage_mods: Path, source_mods: Path, expected_name: str, before_names: tuple[str, ...], quarantine_root: Path) -> AdoptionEvidence`, `ensure_direct_subdirectory(parent: Path, name: str) -> Path`, `quarantine_exact_object(source: Path, quarantine_root: Path) -> Path`, and `quarantine_replacement_tree(stage_mods: Path, expected_name: str, quarantine_root: Path) -> ReplacementQuarantineEvidence`.
 
 Use these exact evidence values:
 
@@ -875,7 +875,7 @@ deterministic violation.
 
 - `NewFolder`: all pre-existing source evidence unchanged through the MO2 phase; one exact `ModLab Spike New` direct folder containing only `meshes/new-folder.bin` and MO2's generated `meta.ini`; after watchers stop, adopt the collision-free sibling, verify it, move it to quarantine, and prove the source root returned to its original identity; no extra folder.
 - `MergeExisting`: source unchanged with zero events; `Protected Existing` source junction still exact; no production backup; nothing adopted.
-- `ReplaceExisting`: same source guarantees; a replaced staging projection or staging backup is identified and quarantined; nothing adopted.
+- `ReplaceExisting`: same source guarantees; the exact disposable replacement payload (`meshes/canary.bin`, `meshes/new.bin`, and MO2's generated `meta.ini`) is inspected and quarantined; the source junction is recreated from metadata and verified; any staging backup is rejected; nothing is adopted.
 - `FomodDependency`: all pre-existing source evidence unchanged through the MO2 phase; one exact `ModLab Spike FOMOD` folder containing only `always.txt`, `dependency-seen.txt`, and MO2's generated `meta.ini`; after watchers stop, adopt/verify/quarantine it and prove the source root returned to its original identity.
 
 `adjudicate_run()` computes `Supported` only from four immutable passing result IDs. Any safety failure is `Rejected`; missing or incomplete machine evidence is `Incomplete`. Every earlier immutable result remains visible after a later explicit clean run. A prior `Failed` result causes `Rejected` and cannot be hidden by a later `Passed` result within the same exact command-policy fingerprint.
@@ -884,9 +884,17 @@ The command fingerprint also binds the exact scenario-classification policy.
 `scenario-classification-v2` corrected interrupted empty-output handling.
 `scenario-classification-v3` additionally recognizes the exact MO2-generated
 `meta.ini` beside each adoption probe's payload while continuing to reject any
-missing payload or other extra output. The retained legacy and v2 diagnostic
-results remain parseable and visible, but their exact fingerprints are not
-predecessors of the v3 cohort. Therefore an over-conservative older diagnostic
+missing payload or other extra output. `scenario-classification-v4` recognizes
+MO2's exact Replace behavior inside the disposable store. It pins and hashes the
+direct replacement tree, derives output names from that stable identity, moves
+the same pinned root with a no-replace rename into a direct pinned quarantine,
+re-pins and proves every member identity and byte tree unchanged, and proves the
+old staging path absent. Only then does it recreate and verify the source
+junction. Any backup, adoption, unknown output, source event, redirected
+quarantine, identity race, collision, or restoration uncertainty remains
+rejected or incomplete. The retained legacy, v2, and v3 diagnostic results
+remain parseable and visible, but their exact fingerprints are not predecessors
+of the v4 cohort. Therefore an over-conservative older diagnostic
 cannot permanently poison a corrected-policy capability decision, while a
 `Failed` result still cannot be hidden by a later `Passed` result within the
 same exact policy fingerprint.
@@ -1152,8 +1160,11 @@ environment and stopped `Incomplete` when the Windows file picker found no
 disposable Desktop. The third used `scenario-classification-v2` with the v2
 shell environment and safely installed/quarantined the exact NewFolder probe,
 but recorded an over-conservative `Failed` because v2 did not recognize MO2's
-generated `meta.ini`. All three are retained read-only. Prepare the replacement
-run under `scenario-classification-v3` and
+generated `meta.ini`. All three are retained read-only. The replacement v3 run
+passed NewFolder and Merge, then stopped `Incomplete` when MO2 safely
+replaced only the disposable projection but v3 could not re-establish and prove
+that projection. It is also retained read-only. Prepare the replacement run
+under `scenario-classification-v4` and
 `disposable-shell-environment-v2`; do not edit, delete, reuse, or list any
 diagnostic run as predecessor evidence for the corrected-policy decision.
 
