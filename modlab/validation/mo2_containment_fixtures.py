@@ -15,6 +15,7 @@ import uuid
 import zipfile
 
 from modlab.adapters.mo2.bootstrap_model import BootstrapReceiptMode
+from modlab.adapters.mo2.release import bundled_mo2_252_path, load_mo2_release
 from modlab.adapters.mo2.scanner import inspect_skyrim_mo2
 from modlab.artifacts.model import ArtifactHealth
 from modlab.artifacts.vault import ArchiveVault
@@ -306,7 +307,10 @@ def _materialize_verified_bootstrap_archive(
     source_record, payload: Path, run_root: Path
 ) -> Path:
     """Copy the retained MO2 archive into the disposable run under its original name."""
-    name = _require_safe_archive_filename(source_record.original_name)
+    release = load_mo2_release(bundled_mo2_252_path()).descriptor
+    name = _require_curated_archive_filename(
+        source_record.original_name, release.archive_name
+    )
     source = _require_direct_regular_file(Path(payload), "retained MO2 archive")
     destination_root = _require_direct_directory(
         run_root / "bootstrap-archive", create=True
@@ -316,37 +320,74 @@ def _materialize_verified_bootstrap_archive(
 
     digest = hashlib.sha256()
     size = 0
+    destination_created = False
+    destination_identity: tuple[int, int] | None = None
     try:
         with source.open("rb") as reader, destination.open("xb") as writer:
+            destination_created = True
+            destination_identity = _file_identity(os.fstat(writer.fileno()))
             while chunk := reader.read(1024 * 1024):
                 size += len(chunk)
                 digest.update(chunk)
                 writer.write(chunk)
     except OSError as error:
+        if destination_created:
+            try:
+                _cleanup_owned_partial(destination, destination_identity)
+            except ContainmentFixtureError as cleanup_error:
+                raise ContainmentFixtureError(
+                    "could not materialize disposable MO2 archive and could not clean "
+                    "its partial copy"
+                ) from cleanup_error
         raise ContainmentFixtureError(
             "could not materialize disposable MO2 archive"
         ) from error
 
     if size != source_record.size or digest.hexdigest() != source_record.sha256:
-        destination.unlink(missing_ok=True)
+        try:
+            _cleanup_owned_partial(destination, destination_identity)
+        except ContainmentFixtureError as cleanup_error:
+            raise ContainmentFixtureError(
+                "retained MO2 archive changed during materialization and its partial "
+                "copy could not be cleaned"
+            ) from cleanup_error
         raise ContainmentFixtureError(
             "retained MO2 archive changed during materialization"
         )
     return _require_direct_regular_file(destination, "disposable MO2 archive")
 
 
-def _require_safe_archive_filename(name: object) -> str:
-    if (
-        not isinstance(name, str)
-        or name in {"", ".", ".."}
-        or "/" in name
-        or "\\" in name
-        or Path(name).name != name
-        or PurePosixPath(name).name != name
-        or Path(name).suffix.casefold() != ".7z"
-    ):
-        raise ContainmentFixtureError("retained MO2 archive has an unsafe original name")
-    return name
+def _require_curated_archive_filename(name: object, expected_name: str) -> str:
+    if name != expected_name:
+        raise ContainmentFixtureError(
+            "retained MO2 archive does not have the curated original name"
+        )
+    return expected_name
+
+
+def _file_identity(metadata) -> tuple[int, int]:
+    return (metadata.st_dev, metadata.st_ino)
+
+
+def _cleanup_owned_partial(
+    destination: Path, expected_identity: tuple[int, int] | None
+) -> None:
+    if expected_identity is None:
+        raise ContainmentFixtureError("owned partial MO2 archive has no file identity")
+    try:
+        current_identity = _file_identity(destination.lstat())
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise ContainmentFixtureError(
+            "could not inspect owned partial MO2 archive"
+        ) from error
+    if current_identity != expected_identity:
+        raise ContainmentFixtureError("owned partial MO2 archive was replaced")
+    try:
+        destination.unlink()
+    except OSError as error:
+        raise ContainmentFixtureError("could not remove owned partial MO2 archive") from error
 
 
 def _require_direct_regular_file(path: Path, description: str) -> Path:

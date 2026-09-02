@@ -134,7 +134,7 @@ class ContainmentFixtureTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(
-            fixtures.ContainmentFixtureError, "unsafe original name"
+            fixtures.ContainmentFixtureError, "curated original name"
         ):
             fixtures._materialize_verified_bootstrap_archive(
                 record, payload, self.root / "run"
@@ -159,6 +159,110 @@ class ContainmentFixtureTests(unittest.TestCase):
         self.assertFalse(
             (self.root / "run" / "bootstrap-archive" / record.original_name).exists()
         )
+
+    def test_materialized_bootstrap_archive_refuses_noncurated_windows_names_before_creation(
+        self,
+    ):
+        # Catches treating a generic .7z filename as the exact MO2 release identity.
+        payload = self.root / "payload.7z"
+        data = b"trusted payload"
+        payload.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        unsafe_names = (
+            "CON.7z",
+            "file:stream.7z",
+            "trailing.7z.",
+            "trailing.7z ",
+            "control\x01.7z",
+        )
+
+        for original_name in unsafe_names:
+            with self.subTest(original_name=repr(original_name)):
+                run_root = self.root / (
+                    f"run-{len(original_name)}-{ord(original_name[0])}"
+                )
+                record = SimpleNamespace(
+                    original_name=original_name,
+                    sha256=digest,
+                    size=len(data),
+                )
+
+                with self.assertRaisesRegex(
+                    fixtures.ContainmentFixtureError, "curated original name"
+                ):
+                    fixtures._materialize_verified_bootstrap_archive(
+                        record, payload, run_root
+                    )
+                self.assertFalse((run_root / "bootstrap-archive").exists())
+
+    def test_materialized_bootstrap_archive_removes_owned_partial_after_write_error(
+        self,
+    ):
+        # Catches an exclusive destination left behind when copying to it fails.
+        payload = self.root / "payload.7z"
+        data = b"trusted payload"
+        payload.write_bytes(data)
+        record = SimpleNamespace(
+            original_name="Mod.Organizer-2.5.2.7z",
+            sha256=hashlib.sha256(data).hexdigest(),
+            size=len(data),
+        )
+        run_root = self.root / "run"
+        destination = run_root / "bootstrap-archive" / record.original_name
+        original_open = Path.open
+
+        class FailingWriter:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.stream.close()
+                return False
+
+            def fileno(self):
+                return self.stream.fileno()
+
+            def write(self, _data):
+                raise OSError("injected write failure")
+
+        def open_with_write_failure(path, *args, **kwargs):
+            stream = original_open(path, *args, **kwargs)
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if Path(path) == destination and mode == "xb":
+                return FailingWriter(stream)
+            return stream
+
+        with (
+            patch.object(Path, "open", open_with_write_failure),
+            self.assertRaisesRegex(fixtures.ContainmentFixtureError, "materialize"),
+        ):
+            fixtures._materialize_verified_bootstrap_archive(record, payload, run_root)
+        self.assertFalse(destination.exists())
+
+    def test_materialized_bootstrap_archive_preserves_preexisting_destination_after_xb_failure(
+        self,
+    ):
+        # Catches cleanup deleting a destination this invocation did not create.
+        payload = self.root / "payload.7z"
+        data = b"trusted payload"
+        payload.write_bytes(data)
+        record = SimpleNamespace(
+            original_name="Mod.Organizer-2.5.2.7z",
+            sha256=hashlib.sha256(data).hexdigest(),
+            size=len(data),
+        )
+        destination = self.root / "run" / "bootstrap-archive" / record.original_name
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"preexisting bytes")
+
+        with self.assertRaisesRegex(fixtures.ContainmentFixtureError, "materialize"):
+            fixtures._materialize_verified_bootstrap_archive(
+                record, payload, self.root / "run"
+            )
+        self.assertEqual(b"preexisting bytes", destination.read_bytes())
 
     def test_real_fixture_evidence_derives_version_projection_and_steam_mutation(self):
         # Catches evidence that is fabricated instead of read from the prepared fixture.
