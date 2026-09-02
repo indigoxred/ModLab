@@ -84,7 +84,7 @@ class ExactDirectoryCreationOutcome:
     path: Path
     parent_path: Path
     parent_identity: "PinnedIdentity"
-    status: int
+    status: int | None
     information: int
     has_valid_handle: bool
 
@@ -255,6 +255,30 @@ def _normalize_retained_owners(
     return tuple(normalized)
 
 
+def union_retained_ownership(
+    message: str,
+    *,
+    prior: BaseException | None = None,
+    owners: tuple[RetainedObjectOwner, ...] = (),
+) -> ExactObjectOwnershipError:
+    """Extend ownership without discarding native evidence or failure context."""
+    prior_owners = prior.owners if isinstance(prior, ExactObjectOwnershipError) else ()
+    if isinstance(prior, ExactDirectoryCreationOwnershipError):
+        result = ExactDirectoryCreationOwnershipError(
+            message,
+            prior.outcome,
+            owners=(*prior_owners, *owners),
+            candidate=prior.created_candidate,
+        )
+    else:
+        result = ExactObjectOwnershipError(message, owners=(*prior_owners, *owners))
+    if prior is not None:
+        result.__cause__ = prior
+        for note in getattr(prior, "__notes__", ()):
+            result.add_note(note)
+    return result
+
+
 def _union_ownership(
     message: str,
     *,
@@ -265,16 +289,16 @@ def _union_ownership(
     verification: tuple[PinnedObject, ...] = (),
 ) -> ExactObjectOwnershipError:
     """Build one role-preserving union of every still-live exact owner."""
-    prior_owners = prior.owners if isinstance(prior, ExactObjectOwnershipError) else ()
     additional = (
         *owners,
         *((RetainedObjectOwner(RetainedObjectRole.CANDIDATE, candidate),) if candidate is not None else ()),
         *((RetainedObjectOwner(RetainedObjectRole.DESTINATION_PARENT, destination_parent),) if destination_parent is not None else ()),
         *(RetainedObjectOwner(RetainedObjectRole.VERIFICATION, pinned) for pinned in verification),
     )
-    return ExactObjectOwnershipError(
+    return union_retained_ownership(
         message,
-        owners=(*prior_owners, *additional),
+        prior=prior,
+        owners=additional,
     )
 
 
@@ -705,23 +729,28 @@ def create_pinned_directory_child(
     )
     io_status = _IO_STATUS_BLOCK()
     output_handle = wintypes.HANDLE()
-    status = _ntdll.NtCreateFile(
-        ctypes.byref(output_handle),
-        _DELETE
-        | _FILE_READ_ATTRIBUTES
-        | _FILE_LIST_DIRECTORY
-        | _FILE_ADD_FILE
-        | _FILE_ADD_SUBDIRECTORY,
-        ctypes.byref(object_attributes),
-        ctypes.byref(io_status),
-        None,
-        _FILE_ATTRIBUTE_DIRECTORY,
-        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
-        _FILE_CREATE_DISPOSITION,
-        _FILE_DIRECTORY_FILE | _FILE_FLAG_OPEN_REPARSE_POINT,
-        None,
-        0,
-    )
+    native_error: BaseException | None = None
+    status = None
+    try:
+        status = _ntdll.NtCreateFile(
+            ctypes.byref(output_handle),
+            _DELETE
+            | _FILE_READ_ATTRIBUTES
+            | _FILE_LIST_DIRECTORY
+            | _FILE_ADD_FILE
+            | _FILE_ADD_SUBDIRECTORY,
+            ctypes.byref(object_attributes),
+            ctypes.byref(io_status),
+            None,
+            _FILE_ATTRIBUTE_DIRECTORY,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            _FILE_CREATE_DISPOSITION,
+            _FILE_DIRECTORY_FILE | _FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+            0,
+        )
+    except BaseException as error:
+        native_error = error
     handle = output_handle.value
     has_valid_handle = bool(handle and handle != _INVALID_HANDLE_VALUE)
     retained = (
@@ -737,6 +766,29 @@ def create_pinned_directory_child(
         information=int(io_status.Information),
         has_valid_handle=has_valid_handle,
     )
+    if native_error is not None:
+        # Information alone is not a reliable native result.  An interrupted
+        # output handle can only be closed, never treated as a created candidate.
+        native_error.add_note(f"interrupted rooted directory creation: {outcome!r}")
+        cleanup_error: BaseException | None = None
+        if retained is not None:
+            try:
+                retained.close()
+            except BaseException as error:
+                cleanup_error = error
+                native_error.add_note(f"interrupted-create handle close failed: {error!r}")
+        owners = _normalize_retained_owners((
+            *(native_error.owners if isinstance(native_error, ExactObjectOwnershipError) else ()),
+            *(cleanup_error.owners if isinstance(cleanup_error, ExactObjectOwnershipError) else ()),
+            *((RetainedObjectOwner(RetainedObjectRole.VERIFICATION, retained),) if retained is not None else ()),
+        ))
+        if owners:
+            raise _directory_creation_ownership(
+                "interrupted rooted directory creation retained close-only ownership",
+                outcome,
+                owners=owners,
+            ) from native_error
+        raise native_error
     if status != 0:
         unsigned_status = status & 0xFFFFFFFF
         if retained is not None:
@@ -993,25 +1045,20 @@ def resolve_retained_ownership(error: ExactObjectOwnershipError) -> None:
                 pinned.close()
         except BaseException as cleanup_error:
             cleanup_errors.append(cleanup_error)
+            if isinstance(cleanup_error, ExactObjectOwnershipError):
+                unresolved.extend(cleanup_error.owners)
         if pinned.handle:
             unresolved.append(owner)
-    if unresolved:
+    remaining = _normalize_retained_owners(tuple(unresolved))
+    if remaining:
         message = "retained exact-object retry cleanup failed: " + "; ".join(
-            str(cleanup_error) for cleanup_error in cleanup_errors
+            repr(cleanup_error) for cleanup_error in cleanup_errors
         )
-        if isinstance(error, ExactDirectoryCreationOwnershipError):
-            created_candidate = error.created_candidate
-            raise _directory_creation_ownership(
-                message,
-                error.outcome,
-                owners=tuple(unresolved),
-                candidate=(
-                    created_candidate
-                    if created_candidate is not None and created_candidate.handle
-                    else None
-                ),
-            ) from error
-        raise ExactObjectOwnershipError(message, owners=tuple(unresolved)) from error
+        raise union_retained_ownership(
+            message,
+            prior=error,
+            owners=remaining,
+        ) from error
 
 
 def publish_new_pinned(

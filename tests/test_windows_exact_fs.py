@@ -1079,6 +1079,90 @@ class WindowsExactFsTests(unittest.TestCase):
         finally:
             parent.close()
 
+    def test_rooted_directory_native_interrupt_closes_before_preserving_interrupt(self) -> None:
+        parent = PinnedObject(self.root, 8900, PinnedIdentity(1, 1, 0x10))
+        for interruption_type in (KeyboardInterrupt, SystemExit):
+            for handle in (8901, 0, windows_exact_fs._INVALID_HANDLE_VALUE):
+                with self.subTest(interruption=interruption_type, handle=handle):
+                    interruption = interruption_type("native call interrupted")
+
+                    def interrupt_native(*arguments):
+                        ctypes.cast(
+                            arguments[0],
+                            ctypes.POINTER(windows_exact_fs.wintypes.HANDLE),
+                        ).contents.value = handle
+                        ctypes.cast(
+                            arguments[3],
+                            ctypes.POINTER(windows_exact_fs._IO_STATUS_BLOCK),
+                        ).contents.Information = 2
+                        raise interruption
+
+                    with (
+                        mock.patch.object(windows_exact_fs, "_handle_identity", return_value=parent.identity),
+                        mock.patch.object(windows_exact_fs._ntdll, "NtCreateFile", side_effect=interrupt_native),
+                        mock.patch.object(windows_exact_fs, "_close_handle") as close,
+                        mock.patch.object(windows_exact_fs, "delete_pinned_object") as delete,
+                        self.assertRaises(interruption_type) as raised,
+                    ):
+                        windows_exact_fs.create_pinned_directory_child(
+                            self.root / "interrupted", parent,
+                            identity_at_path_fn=lambda _path: parent.identity,
+                        )
+                    self.assertIs(interruption, raised.exception)
+                    self.assertEqual([mock.call(8901)] if handle == 8901 else [], close.call_args_list)
+                    delete.assert_not_called()
+                    self.assertIn("status=None", " ".join(getattr(interruption, "__notes__", ())))
+
+    def test_rooted_directory_native_interrupt_retains_typed_verification_on_close_failure(self) -> None:
+        parent = PinnedObject(self.root, 8910, PinnedIdentity(1, 1, 0x10))
+        for interruption_type in (KeyboardInterrupt, SystemExit):
+            with self.subTest(interruption=interruption_type):
+                interruption = interruption_type("native call interrupted")
+
+                def interrupt_native(*arguments):
+                    ctypes.cast(
+                        arguments[0], ctypes.POINTER(windows_exact_fs.wintypes.HANDLE),
+                    ).contents.value = 8911
+                    ctypes.cast(
+                        arguments[3], ctypes.POINTER(windows_exact_fs._IO_STATUS_BLOCK),
+                    ).contents.Information = 2
+                    raise interruption
+
+                observed = None
+                with (
+                    mock.patch.object(windows_exact_fs, "_handle_identity", return_value=parent.identity),
+                    mock.patch.object(windows_exact_fs._ntdll, "NtCreateFile", side_effect=interrupt_native),
+                    mock.patch.object(windows_exact_fs, "_close_handle", side_effect=OSError("close failed")),
+                ):
+                    try:
+                        windows_exact_fs.create_pinned_directory_child(
+                            self.root / "interrupted", parent,
+                            identity_at_path_fn=lambda _path: parent.identity,
+                        )
+                    except BaseException as error:
+                        observed = error
+                self.assertIsInstance(observed, windows_exact_fs.ExactDirectoryCreationOwnershipError)
+                self.assertIs(interruption, observed.__cause__)
+                self.assertIsNone(observed.outcome.status)
+                self.assertEqual(2, observed.outcome.information)
+                self.assertFalse(observed.outcome.proven_created)
+                self.assertEqual((), observed.candidates)
+                self.assertEqual((8911,), tuple(pin.handle for pin in observed.verification))
+                with (
+                    mock.patch.object(windows_exact_fs, "_close_handle", side_effect=SystemExit("retry interrupted")),
+                    self.assertRaises(windows_exact_fs.ExactDirectoryCreationOwnershipError) as retry,
+                ):
+                    observed.resolve()
+                self.assertIs(observed.outcome, retry.exception.outcome)
+                with (
+                    mock.patch.object(windows_exact_fs, "_close_handle") as close,
+                    mock.patch.object(windows_exact_fs, "delete_pinned_object") as delete,
+                ):
+                    retry.exception.resolve()
+                close.assert_called_once_with(8911)
+                delete.assert_not_called()
+                self.assertEqual(0, observed.verification[0].handle)
+
     def test_rooted_directory_creation_invalid_handle_matrix_is_explicit(self) -> None:
         parent = pin_stable_direct_object(
             self.root,

@@ -3786,6 +3786,242 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
             )
 
     @unittest.skipUnless(os.name == "nt", "Windows stable-root observation is required")
+    def test_interrupted_snapshot_closes_retained_pins_without_completing_observation(self):
+        for position in ("root_pin", "child_pin", "read", "rescan"):
+            with self.subTest(position=position), tempfile.TemporaryDirectory(
+                prefix="modlab-effect-interrupted-snapshot-"
+            ) as directory:
+                root = Path(directory)
+                child = root / "child.bin"
+                child.write_bytes(b"snapshot\n")
+                root_pin = PinnedObject(root, 7801, PinnedIdentity(1, 1, 0x10))
+                child_pin = PinnedObject(child, 7802, PinnedIdentity(1, 2, 0))
+                interruption = KeyboardInterrupt(position)
+                real_scandir = os.scandir
+                scans = 0
+
+                def pin(path, _kind):
+                    if Path(path) == root:
+                        if position == "root_pin":
+                            raise interruption
+                        return root_pin
+                    if position == "child_pin":
+                        raise interruption
+                    return child_pin
+
+                def scan(path):
+                    nonlocal scans
+                    scans += 1
+                    if position == "rescan" and scans == 2:
+                        raise interruption
+                    return real_scandir(path)
+
+                with (
+                    patch.object(service, "pin_stable_direct_object", side_effect=pin),
+                    patch.object(service, "read_pinned_file", side_effect=interruption if position == "read" else None, return_value=b"snapshot\n"),
+                    patch.object(service.os, "scandir", side_effect=scan),
+                    patch.object(windows_exact_fs, "_close_handle") as close,
+                    self.assertRaises(KeyboardInterrupt) as raised,
+                ):
+                    service._mutation_root_observation(root)
+                self.assertIs(interruption, raised.exception)
+                expected = [] if position == "root_pin" else [7801] if position == "child_pin" else [7802, 7801]
+                self.assertEqual(expected, [call.args[0] for call in close.call_args_list])
+                self.assertFalse(hasattr(raised.exception, "completed_observation"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root observation is required")
+    def test_interrupted_snapshot_unions_acquisition_retained_and_close_failure_owners(self):
+        for acquisition_fails in (False, True):
+            with self.subTest(acquisition_fails=acquisition_fails), tempfile.TemporaryDirectory(
+                prefix="modlab-effect-interrupted-snapshot-owners-"
+            ) as directory:
+                root = Path(directory)
+                child = root / "child.bin"
+                child.write_bytes(b"snapshot\n")
+                root_pin = PinnedObject(root, 7811, PinnedIdentity(1, 1, 0x10))
+                child_pin = PinnedObject(child, 7812, PinnedIdentity(1, 2, 0))
+                extra_pin = PinnedObject(root, 7813, PinnedIdentity(1, 1, 0x10))
+                acquisition = ExactObjectOwnershipError("acquisition failed", verification=(child_pin,))
+                interruption = KeyboardInterrupt("read interrupted")
+                close_error = ExactObjectOwnershipError("close retained an additional owner", verification=(extra_pin,))
+
+                def pin(path, _kind):
+                    if Path(path) == root:
+                        return root_pin
+                    if acquisition_fails:
+                        raise acquisition
+                    return child_pin
+
+                @service._receipted
+                def invoke():
+                    return service._mutation_root_observation(root)
+
+                observed = None
+                with (
+                    patch.object(service, "pin_stable_direct_object", side_effect=pin),
+                    patch.object(service, "read_pinned_file", side_effect=interruption),
+                    patch.object(root_pin, "close", side_effect=close_error),
+                    patch.object(child_pin, "close", side_effect=SystemExit("child close interrupted")),
+                ):
+                    try:
+                        invoke()
+                    except BaseException as error:
+                        observed = error
+                self.assertIsInstance(observed, ContainmentStoreOwnershipError)
+                self.assertEqual({7811, 7812, 7813}, {owner.pinned.handle for owner in observed.owners})
+                self.assertIs(acquisition if acquisition_fails else interruption, observed.__cause__)
+                self.assertFalse(hasattr(observed, "completed_observation"))
+                self.assertEqual((), observed.effects.child_mutation_roots)
+                with patch.object(windows_exact_fs, "_close_handle") as close:
+                    observed.resolve()
+                self.assertEqual({7811, 7812, 7813}, {call.args[0] for call in close.call_args_list})
+                self.assertTrue(all(pin.handle == 0 for pin in (root_pin, child_pin, extra_pin)))
+
+    def _assert_creation_failure_survives_outer_cleanup(
+        self, lookup_position=None, *, close_guards=True, additional_retry_owner=False,
+    ):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-typed-outer-union-") as directory:
+            base = Path(directory)
+            parent = base / "proven-parent"
+            root = parent / "created-root"
+            real_create = windows_exact_fs.create_pinned_directory_child
+            real_identity = windows_exact_fs.identity_at_path
+            real_close = windows_exact_fs._close_handle
+            creation_error = None
+            creation_parent = None
+            retry_pin = None
+            interruption = SystemExit("receipt identity interrupted")
+
+            def create(path, retained_parent):
+                nonlocal creation_error, creation_parent
+                if Path(path) != root:
+                    return real_create(path, retained_parent)
+                creation_parent = retained_parent
+                lookups = 0
+
+                def late_mismatch(path):
+                    nonlocal lookups
+                    observed = real_identity(path)
+                    if Path(path) == parent:
+                        lookups += 1
+                        if lookups == 2:
+                            return replace(observed, file_id=observed.file_id + 1)
+                    return observed
+
+                try:
+                    return real_create(path, retained_parent, identity_at_path_fn=late_mismatch)
+                except windows_exact_fs.ExactDirectoryCreationOwnershipError as error:
+                    creation_error = error
+                    raise
+
+            def receipt_identity(path):
+                if creation_error is not None and Path(path) == (parent if lookup_position == "parent" else root) and lookup_position is not None:
+                    raise interruption
+                return real_identity(path)
+
+            def close(handle):
+                if close_guards and creation_parent is not None and handle == creation_parent.handle:
+                    raise KeyboardInterrupt("parent guard close interrupted")
+                real_close(handle)
+
+            @service._receipted
+            def invoke():
+                return service._delegated_mutations_with_created_root(
+                    root, (), lambda: None,
+                    lambda _prepared: self.fail("delegate must not run"),
+                    require_absent=True,
+                )
+
+            observed = None
+            try:
+                with (
+                    patch.object(service, "create_pinned_directory_child", side_effect=create),
+                    patch.object(service, "identity_at_path", side_effect=receipt_identity),
+                    patch.object(windows_exact_fs, "delete_pinned_object", side_effect=OSError("candidate delete failed")),
+                    patch.object(windows_exact_fs, "_close_handle", side_effect=close),
+                ):
+                    try:
+                        invoke()
+                    except BaseException as error:
+                        observed = error
+                self.assertIsInstance(observed, ContainmentStoreOwnershipError)
+                self.assertIsInstance(observed.ownership, windows_exact_fs.ExactDirectoryCreationOwnershipError)
+                self.assertIs(creation_error.outcome, observed.ownership.outcome)
+                self.assertIs(creation_error.created_candidate, observed.ownership.created_candidate)
+                expected_owners = {id(creation_error.created_candidate)}
+                if close_guards:
+                    expected_owners.add(id(creation_parent))
+                self.assertEqual(expected_owners, {id(owner.pinned) for owner in observed.owners})
+                self.assertEqual((parent, root) if lookup_position is None else (parent,), observed.effects.child_mutation_roots)
+                self.assertEqual((creation_error.created_candidate,), observed.candidates)
+                self.assertEqual((creation_parent,) if close_guards else (), observed.verification)
+                if lookup_position is not None:
+                    self.assertIn("SystemExit", " ".join(getattr(observed.ownership, "__notes__", ())))
+                with (
+                    patch.object(windows_exact_fs, "delete_pinned_object", side_effect=OSError("candidate retry failed")),
+                    patch.object(windows_exact_fs, "_close_handle", side_effect=close),
+                    self.assertRaises(ContainmentStoreOwnershipError) as retry,
+                ):
+                    observed.resolve()
+                self.assertIs(observed, retry.exception)
+                self.assertIsInstance(observed.ownership, windows_exact_fs.ExactDirectoryCreationOwnershipError)
+                self.assertIs(creation_error.outcome, observed.ownership.outcome)
+                self.assertIs(creation_error.created_candidate, observed.ownership.created_candidate)
+                self.assertEqual(len(expected_owners), len(observed.owners))
+                self.assertEqual((parent, root) if lookup_position is None else (parent,), observed.effects.child_mutation_roots)
+                if additional_retry_owner:
+                    retry_pin = windows_exact_fs.pin_direct_object(base, kind="directory")
+                    retry_error = ExactObjectOwnershipError(
+                        "guard retry retained another exact owner", verification=(retry_pin,),
+                    )
+
+                    def close_with_additional_owner(handle):
+                        if handle == creation_parent.handle:
+                            raise retry_error
+                        real_close(handle)
+
+                    with (
+                        patch.object(windows_exact_fs, "_close_handle", side_effect=close_with_additional_owner),
+                        self.assertRaises(ContainmentStoreOwnershipError),
+                    ):
+                        observed.resolve()
+                    self.assertIsInstance(observed.ownership, windows_exact_fs.ExactDirectoryCreationOwnershipError)
+                    self.assertIs(creation_error.outcome, observed.ownership.outcome)
+                    self.assertIs(creation_error.created_candidate, observed.ownership.created_candidate)
+                    self.assertEqual(0, creation_error.created_candidate.handle)
+                    self.assertEqual((), observed.candidates)
+                    self.assertEqual({id(creation_parent), id(retry_pin)}, {id(owner.pinned) for owner in observed.owners})
+                observed.resolve()
+                self.assertFalse(root.exists())
+                self.assertEqual(0, creation_parent.handle)
+                self.assertEqual(0, creation_error.created_candidate.handle)
+                if retry_pin is not None:
+                    self.assertEqual(0, retry_pin.handle)
+            finally:
+                # Exact retained-object cleanup also runs when a RED assertion fails.
+                if creation_error is not None:
+                    creation_error.resolve()
+                if creation_parent is not None:
+                    creation_parent.close()
+                if retry_pin is not None:
+                    retry_pin.close()
+
+    @unittest.skipUnless(os.name == "nt", "Windows exact-root creation is required")
+    def test_creation_outcome_survives_service_outer_union_and_failed_retry(self):
+        self._assert_creation_failure_survives_outer_cleanup()
+
+    @unittest.skipUnless(os.name == "nt", "Windows exact-root creation is required")
+    def test_creation_receipt_interrupt_preserves_primary_owners_and_proven_effects(self):
+        for position in ("parent", "candidate"):
+            for close_guards in (False, True):
+                with self.subTest(position=position, close_guards=close_guards):
+                    self._assert_creation_failure_survives_outer_cleanup(position, close_guards=close_guards)
+
+    @unittest.skipUnless(os.name == "nt", "Windows exact-root creation is required")
+    def test_creation_outer_retry_preserves_new_owner_after_candidate_cleanup(self):
+        self._assert_creation_failure_survives_outer_cleanup(additional_retry_owner=True)
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root observation is required")
     def test_child_pin_acquisition_ownership_unions_retained_close_owner(self):
         for kind in ("directory", "file"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory(

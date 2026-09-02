@@ -33,6 +33,7 @@ from modlab.platform.windows_exact_fs import (
     identity_at_path,
     pin_stable_direct_object,
     read_pinned_file,
+    union_retained_ownership,
 )
 from modlab.workspace import workspace_layout
 
@@ -539,9 +540,14 @@ def _close_mutation_root_guards(
             pinned.close()
         except BaseException as error:
             close_errors.append(error)
-            if getattr(pinned, "handle", 0):
-                unresolved.append(pinned)
-    if not unresolved:
+        if getattr(pinned, "handle", 0):
+            unresolved.append(pinned)
+    close_owners = tuple(
+        owner for error in close_errors
+        if isinstance(error, ExactObjectOwnershipError)
+        for owner in error.owners if owner.pinned.handle
+    )
+    if not unresolved and not close_owners:
         if close_errors and primary is not None and hasattr(primary, "add_note"):
             primary.add_note(
                 "delegated mutation guard cleanup completed with errors: "
@@ -553,21 +559,24 @@ def _close_mutation_root_guards(
                 + "; ".join(str(error) for error in close_errors)
             ) from close_errors[0]
         return
-    prior_owners = (
-        primary.ownership.owners
+    prior_ownership = (
+        primary.ownership
         if isinstance(primary, ContainmentStoreOwnershipError)
-        else ()
+        else primary
     )
-    ownership = ExactObjectOwnershipError(
+    ownership = union_retained_ownership(
         "delegated mutation guard retained live ownership after cleanup failure",
+        prior=prior_ownership,
         owners=(
-            *prior_owners,
+            *close_owners,
             *(
                 RetainedObjectOwner(RetainedObjectRole.VERIFICATION, pinned)
                 for pinned in unresolved
             ),
         ),
     )
+    for error in close_errors:
+        ownership.add_note(f"delegated mutation guard close failed: {error!r}")
     if isinstance(primary, ContainmentStoreOwnershipError):
         primary.ownership = ownership
         if hasattr(primary, "add_note"):
@@ -626,21 +635,25 @@ def _mutation_root_observation(
                 pinned.close()
             except BaseException as error:
                 close_errors.append(error)
-                if getattr(pinned, "handle", 0):
-                    unresolved.append(pinned)
-        if unresolved:
-            prior_owners = (
-                primary.owners
-                if isinstance(primary, ExactObjectOwnershipError)
-                else primary.ownership.owners
+            if getattr(pinned, "handle", 0):
+                unresolved.append(pinned)
+        close_owners = tuple(
+            owner for error in close_errors
+            if isinstance(error, ExactObjectOwnershipError)
+            for owner in error.owners if owner.pinned.handle
+        )
+        if unresolved or close_owners:
+            prior_ownership = (
+                primary.ownership
                 if isinstance(primary, ContainmentStoreOwnershipError)
-                else ()
+                else primary
             )
-            ownership = ExactObjectOwnershipError(
+            ownership = union_retained_ownership(
                 "stable delegated-effect observation retained live handles: "
                 + "; ".join(str(error) for error in close_errors),
+                prior=prior_ownership,
                 owners=(
-                    *prior_owners,
+                    *close_owners,
                     *(
                         RetainedObjectOwner(
                             RetainedObjectRole.VERIFICATION,
@@ -650,6 +663,8 @@ def _mutation_root_observation(
                     ),
                 ),
             )
+            for error in close_errors:
+                ownership.add_note(f"observation handle close failed: {error!r}")
             message = (
                 "stable delegated-effect observation requires retained-handle resolution"
             )
@@ -724,6 +739,9 @@ def _mutation_root_observation(
     except (ExactObjectError, OSError):
         close_retained()
         return None
+    except BaseException as error:
+        close_retained(error)
+        raise
 
     def file_digest(path: Path, metadata: os.stat_result) -> str | None:
         if not stat.S_ISREG(metadata.st_mode):
@@ -811,6 +829,9 @@ def _mutation_root_observation(
     except (ExactObjectError, OSError):
         close_retained()
         return None
+    except BaseException as error:
+        close_retained(error)
+        raise
 
     def scan(current: Path) -> tuple[tuple[str, Path, os.stat_result], ...]:
         with os.scandir(current) as found:
@@ -886,6 +907,9 @@ def _mutation_root_observation(
     except (ExactObjectError, OSError):
         close_retained()
         return None
+    except BaseException as error:
+        close_retained(error)
+        raise
     completed = tuple(rows)
     close_retained(completed_observation=completed)
     return completed
@@ -1161,19 +1185,20 @@ def _receipt_exact_directory_creation_failure(
                 "surviving created candidate is not bound to its retained direct child"
             )
     except ExactObjectOwnershipError as observation_error:
-        error.owners = ExactObjectOwnershipError(
+        error.owners = union_retained_ownership(
             "directory-creation and effect observation retained exact ownership",
-            owners=(*error.owners, *observation_error.owners),
+            prior=error,
+            owners=observation_error.owners,
         ).owners
         error.add_note(
             "directory-creation effect observation retained additional ownership: "
             f"{observation_error}"
         )
         return
-    except (ExactObjectError, OSError) as observation_error:
+    except BaseException as observation_error:
         error.add_note(
             "directory-creation effect observation is unavailable: "
-            f"{observation_error}"
+            f"{observation_error!r}"
         )
         return
     _current_effects().child_mutation_root(target)
