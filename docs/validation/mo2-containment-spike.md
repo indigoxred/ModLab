@@ -1,9 +1,12 @@
-# MO2 pre-write containment capability verdict
+# RETIRED / INVALIDATED — MO2 pre-write containment capability verdict
 
-**SUPPORTED — isolated low-integrity staging with verified junction projection satisfied the approved pre-write containment gate in the disposable MO2 2.5.2 validation run. Production use still requires the reviewed bridge/lifecycle implementation plan.**
+> **MUST NOT BE USED AS CURRENT CAPABILITY AUTHORITY.** The historical run and decision below are retained only as evidence. They are invalidated because the implementation allowed a validated outcome candidate to be substituted before pathname-based publication, allowed premature immutable adjudication to freeze an incomplete decision, and reported an inaccurate CLI side-effect contract.
+
+The original result was **historically reported as Supported**, but it is now **Retired/Invalidated**. ModLab bridge and installation workflows must reject its run and decision IDs mechanically through the immutable authority resolver. A replacement may become eligible only after corrected source-bound four-scenario validation and an independent review.
 
 ## Decision
 
+- Authority status: `RetiredInvalidated`
 - Run ID: `containment-run:2c6220d4ceae48809653c18d5c74562b`
 - Decision ID: `containment-decision-sha256:141a46d8a8feb5ccb5ef2353563b3ec9f7aa1cede9f2dab55af23fb923b7a4b7`
 - Mechanism: `isolated-low-integrity-junction-projection-v1`
@@ -33,4 +36,4 @@ The observed Skyrim production inputs—the exact Steam app manifest for app `48
 
 ## Scope
 
-This verdict proves only that the approved disposable pre-write containment mechanism is viable. It does not enable a production mod-install command, certify any mod list, solve conflicts, or prove that Skyrim will run correctly. The next reviewed bridge/lifecycle plan must consume this receipt before production installation can be implemented.
+This retired document proves no current capability and authorizes nothing. It remains useful only as historical evidence about the observed disposable run. Production bridge or installation work requires a new corrected decision, immutable supersession and eligibility records, and a passing independent review.
