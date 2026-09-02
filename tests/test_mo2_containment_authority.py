@@ -337,6 +337,54 @@ class Mo2ContainmentAuthorityTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_resolver_refusal_never_creates_absent_validation_ancestors(self):
+        for relative_root in (Path("absent"), Path("nested") / "absent"):
+            with self.subTest(relative_root=str(relative_root)):
+                absent = self.root / relative_root
+                self.assertFalse(absent.exists())
+
+                with self.assertRaises(ContainmentAuthorityError):
+                    resolve_current_eligible_decision(absent)
+
+                self.assertFalse(absent.exists(), "authority resolution created its root")
+                self.assertEqual((), tuple(self.root.iterdir()), "resolution created ancestors")
+
+    def test_resolver_preserves_existing_graph_bytes_identities_and_write_times(self):
+        def snapshot(root):
+            observed = {}
+            for path in (root, *root.rglob("*")):
+                metadata = path.stat()
+                observed[path.relative_to(root)] = (
+                    metadata.st_mode,
+                    metadata.st_ino,
+                    metadata.st_mtime_ns,
+                    path.read_bytes() if path.is_file() else None,
+                )
+            return observed
+
+        for graph in ("empty", "eligible", "malformed"):
+            with self.subTest(graph=graph):
+                root = self.root / graph
+                root.mkdir()
+                if graph != "empty":
+                    fixture = AuthorityFixture(root)
+                    fixture.complete()
+                    if graph == "malformed":
+                        fixture.eligibility_write.path.write_bytes(b"{}\n")
+                before = snapshot(root)
+
+                if graph == "eligible":
+                    resolved = fixture.resolve_current()
+                    self.assertEqual(fixture.replacement_decision_id, resolved.decision_id)
+                elif graph == "malformed":
+                    with self.assertRaises(ContainmentAuthorityError):
+                        fixture.resolve_current()
+                else:
+                    with self.assertRaises(ContainmentAuthorityError):
+                        resolve_current_eligible_decision(root)
+
+                self.assertEqual(before, snapshot(root))
+
     def test_exact_historical_policy_root_is_retired_even_when_fixture_bytes_exist(self):
         fixture = AuthorityFixture(self.root)
         historical = fixture.write_historical_decision()

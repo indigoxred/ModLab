@@ -106,7 +106,7 @@ def resolve_current_eligible_decision(
     from .mo2_containment_store import ContainmentStore, ContainmentStoreError
 
     try:
-        store = ContainmentStore(Path(validation_root))
+        store = ContainmentStore.open_readonly(Path(validation_root))
         run_ids = set(store.list_run_ids())
         retirement_ids = store.list_retirement_ids()
         supersession_ids = store.list_supersession_ids()
