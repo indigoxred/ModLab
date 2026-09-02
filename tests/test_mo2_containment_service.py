@@ -2352,6 +2352,26 @@ class ContainmentServiceTests(unittest.TestCase):
 
             self.assertFalse(store.decision_path(run_id).exists())
 
+    def test_mismatched_result_outcome_refuses_without_writing_decision(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-mismatched-decision-") as directory:
+            store = ContainmentStore(Path(directory))
+            run_id = "containment-run:" + "d" * 32
+            source = store.root / "source"
+            steam = store.root / "steam"
+            write_cohort_run(store, run_id, source, steam, "artifact:mismatched")
+            source_outcome = store.watch_path(
+                run_id, ContainmentScenario.NEW_FOLDER
+            ) / "outcome.json"
+            target_outcome = store.watch_path(
+                run_id, ContainmentScenario.MERGE_EXISTING
+            ) / "outcome.json"
+            target_outcome.write_bytes(source_outcome.read_bytes())
+
+            with self.assertRaises(service.ContainmentDecisionNotReady):
+                service.adjudicate_run(store.root, run_id)
+
+            self.assertFalse(store.decision_path(run_id).exists())
+
     def test_adjudicate_run_requires_intact_current_intent_request_binding(self):
         for damage in ("intent", "request"):
             with self.subTest(damage=damage), tempfile.TemporaryDirectory(

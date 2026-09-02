@@ -36,6 +36,7 @@ from .mo2_containment_model import (
     WatchOutcome,
 )
 from .mo2_containment_serialization import (
+    _capability_decision_probe_from_bytes,
     ContainmentFormatError,
     capability_decision_from_bytes,
     capability_decision_to_bytes,
@@ -1026,7 +1027,7 @@ class ContainmentStore:
         }
         if type(document) is dict and "bindings" in document:
             try:
-                decision = capability_decision_from_bytes(data, probe=True)
+                decision = _capability_decision_probe_from_bytes(data)
             except ContainmentFormatError as error:
                 raise ContainmentStoreMalformedEvidence(
                     f"capability decision is malformed: {error}"

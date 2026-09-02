@@ -253,14 +253,17 @@ def capability_decision_from_bytes(
     data: bytes,
     scenario_results: tuple[ScenarioResult, ...] | None = None,
     watch_outcomes: tuple[WatchOutcome, ...] | None = None,
-    *,
-    probe: bool = False,
 ) -> CapabilityDecision:
     return capability_decision_from_dict(
         _decode(data, "capability decision"),
         scenario_results,
         watch_outcomes,
-        probe=probe,
+    )
+
+
+def _capability_decision_probe_from_bytes(data: bytes) -> CapabilityDecision:
+    return _capability_decision_from_dict(
+        _decode(data, "capability decision"), None, None, probe=True
     )
 
 
@@ -596,8 +599,18 @@ def capability_decision_from_dict(
     value: Any,
     scenario_results: tuple[ScenarioResult, ...] | None = None,
     watch_outcomes: tuple[WatchOutcome, ...] | None = None,
+) -> CapabilityDecision:
+    return _capability_decision_from_dict(
+        value, scenario_results, watch_outcomes, probe=False
+    )
+
+
+def _capability_decision_from_dict(
+    value: Any,
+    scenario_results: tuple[ScenarioResult, ...] | None,
+    watch_outcomes: tuple[WatchOutcome, ...] | None,
     *,
-    probe: bool = False,
+    probe: bool,
 ) -> CapabilityDecision:
     if type(value) is not dict:
         raise ContainmentFormatError("capability decision must be an object")

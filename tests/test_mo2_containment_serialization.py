@@ -25,6 +25,7 @@ from modlab.validation.mo2_containment_model import (
 from modlab.validation.mo2_containment_serialization import (
     ContainmentFormatError,
     capability_decision_from_bytes,
+    capability_decision_from_dict,
     capability_decision_id_for,
     capability_decision_to_bytes,
     scenario_journal_from_bytes,
@@ -709,6 +710,12 @@ class Mo2ContainmentSerializationTests(unittest.TestCase):
                     capability_decision_to_bytes(malformed)
         with self.assertRaises(ContainmentFormatError):
             capability_decision_to_bytes(decision)
+        with self.assertRaises(ContainmentFormatError):
+            capability_decision_from_bytes(encoded)
+        with self.assertRaises(TypeError):
+            capability_decision_from_bytes(encoded, probe=True)
+        with self.assertRaises(TypeError):
+            capability_decision_from_dict(json.loads(encoded), probe=True)
         duplicate_document = json.loads(encoded)
         duplicate_document["scenarioResultIds"] = {
             scenario.value: identifiers[0] for scenario in ContainmentScenario
@@ -716,6 +723,14 @@ class Mo2ContainmentSerializationTests(unittest.TestCase):
         with self.assertRaises(ContainmentFormatError):
             capability_decision_from_bytes(
                 json.dumps(duplicate_document, sort_keys=True, separators=(",", ":")).encode(),
+            )
+        omitted_document = json.loads(encoded)
+        del omitted_document["scenarioResultIds"][ContainmentScenario.FOMOD_DEPENDENCY.value]
+        with self.assertRaises(ContainmentFormatError):
+            capability_decision_from_bytes(
+                json.dumps(omitted_document, sort_keys=True, separators=(",", ":")).encode(),
+                results,
+                outcomes,
             )
 
         mutations = (
