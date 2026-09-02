@@ -14,8 +14,10 @@ from unittest.mock import patch
 
 from modlab.adapters.mo2.bootstrap_model import BootstrapReceiptMode
 from modlab.adapters.mo2.release import bundled_mo2_252_path, load_mo2_release
+from modlab.adapters.skyrim.scanner import discover_skyrim_steam
 from modlab.adapters.skyrim.windows_version import read_windows_file_version
 from modlab.artifacts.vault import ArchiveVault
+from modlab.recipes.model import CheckState
 from modlab.validation.mo2_containment_fixtures import ContainmentFixture
 from modlab.validation.mo2_containment_model import ContainmentScenario
 from modlab.validation.windows_integrity import IntegrityLevel
@@ -162,6 +164,36 @@ def capture_production_path_snapshots(
     )
 
 
+def capture_skyrim_production_path_snapshots(
+    steam_root: Path,
+) -> tuple[ProductionPathSnapshot, ...]:
+    """Observe only the Steam inputs used to discover and prepare Skyrim."""
+    discovery = discover_skyrim_steam(Path(steam_root))
+    required_findings = {"manifest-observed", "game-root-observed"}
+    passed_findings = {
+        finding.code
+        for finding in discovery.findings
+        if finding.state is CheckState.PASSED
+    }
+    if (
+        discovery.app_id != "489830"
+        or discovery.game_root is None
+        or any(finding.state is CheckState.BLOCKED for finding in discovery.findings)
+        or not required_findings <= passed_findings
+    ):
+        raise RuntimeError(
+            "Skyrim discovery is not usable for production observation"
+        )
+
+    manifest = _require_direct_production_file(
+        Path(discovery.manifest_path), "Skyrim Steam manifest"
+    )
+    game_root = _require_direct_production_directory(
+        Path(discovery.game_root), "Skyrim game root"
+    )
+    return capture_production_path_snapshots((manifest, game_root))
+
+
 def measure_real_fixture_evidence(
     fixture: ContainmentFixture,
     production_before: tuple[ProductionPathSnapshot, ...],
@@ -246,6 +278,36 @@ def _production_metadata_tree(root: Path) -> tuple[ProductionPathEntry, ...]:
     return tuple(entries)
 
 
+def _require_direct_production_file(path: Path, description: str) -> Path:
+    candidate = Path(path).expanduser().absolute()
+    try:
+        metadata = candidate.lstat()
+    except OSError as error:
+        raise RuntimeError(f"{description} is unavailable: {candidate}") from error
+    if (
+        candidate.is_symlink()
+        or bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
+        or not stat.S_ISREG(metadata.st_mode)
+    ):
+        raise RuntimeError(f"{description} must be a direct regular file")
+    return candidate.resolve(strict=True)
+
+
+def _require_direct_production_directory(path: Path, description: str) -> Path:
+    candidate = Path(path).expanduser().absolute()
+    try:
+        metadata = candidate.lstat()
+    except OSError as error:
+        raise RuntimeError(f"{description} is unavailable: {candidate}") from error
+    if (
+        candidate.is_symlink()
+        or bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
+        or not stat.S_ISDIR(metadata.st_mode)
+    ):
+        raise RuntimeError(f"{description} must be a direct directory")
+    return candidate.resolve(strict=True)
+
+
 def _normalized_relative_path(parent: str, name: str) -> str:
     relative = name if parent == "." else f"{parent}/{name}"
     return os.path.normcase(relative).replace("\\", "/")
@@ -256,7 +318,7 @@ def prepare_real_containment_fixture(archive_path: Path, steam_root: Path):
     """Yield a disposable real-archive fixture without touching a managed instance."""
     from modlab.validation.mo2_containment_fixtures import prepare_containment_fixture
 
-    production_before = capture_production_path_snapshots((Path(steam_root),))
+    production_before = capture_skyrim_production_path_snapshots(Path(steam_root))
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         workspace = root / "source-vault"
@@ -276,6 +338,7 @@ __all__ = [
     "prepare_fixture_with_fake_bootstrap",
     "prepare_real_containment_fixture",
     "capture_production_path_snapshots",
+    "capture_skyrim_production_path_snapshots",
     "import_curated_mo2_archive",
     "measure_real_fixture_evidence",
 ]

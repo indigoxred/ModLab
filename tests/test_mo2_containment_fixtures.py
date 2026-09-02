@@ -16,10 +16,12 @@ from modlab.validation.windows_junction import inspect_junction
 from modlab.workspace import initialize_workspace
 from tests.support.mo2_containment import (
     capture_production_path_snapshots,
+    capture_skyrim_production_path_snapshots,
     import_curated_mo2_archive,
     measure_real_fixture_evidence,
     prepare_fixture_with_fake_bootstrap,
 )
+from tests.support.skyrim_workflow import create_skyrim_workflow_fixture
 
 
 def zip_names(path: Path) -> tuple[str, ...]:
@@ -266,10 +268,13 @@ class ContainmentFixtureTests(unittest.TestCase):
 
     def test_real_fixture_evidence_derives_version_projection_and_steam_mutation(self):
         # Catches evidence that is fabricated instead of read from the prepared fixture.
-        fixture = prepare_fixture_with_fake_bootstrap(self.root)
-        steam_root = self.root / "Steam"
-        before = capture_production_path_snapshots((steam_root,))
-        (steam_root / "unexpected-write.txt").write_bytes(b"must be reported")
+        fixture = prepare_fixture_with_fake_bootstrap(self.root / "fixture")
+        skyrim = create_skyrim_workflow_fixture(self.root / "production")
+        before = capture_skyrim_production_path_snapshots(skyrim.steam_root)
+        manifest = skyrim.steam_root / "steamapps" / "appmanifest_489830.acf"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8") + "\n", encoding="utf-8"
+        )
 
         def read_staged_version(path: Path) -> str:
             self.assertEqual(
@@ -285,7 +290,7 @@ class ContainmentFixtureTests(unittest.TestCase):
 
         self.assertEqual("9.8.7.6", evidence.executable_version)
         self.assertEqual(0, evidence.payload_bytes_copied_for_projection)
-        self.assertEqual((steam_root.resolve(),), evidence.production_paths_written)
+        self.assertEqual((manifest,), evidence.production_paths_written)
 
     def test_real_fixture_evidence_refuses_empty_direct_projection_replacement(self):
         # Catches a replaced projection that could otherwise be misreported as zero bytes.
@@ -332,6 +337,73 @@ class ContainmentFixtureTests(unittest.TestCase):
 
         self.assertEqual("file", entries["library.vdf"].kind)
         self.assertEqual(len(b"metadata-only-observation"), entries["library.vdf"].size)
+
+    def test_skyrim_production_snapshot_ignores_unrelated_steam_cache_mutation(
+        self,
+    ):
+        # Catches broad Steam-root observation treating client cache churn as a game write.
+        skyrim = create_skyrim_workflow_fixture(self.root)
+        before = capture_skyrim_production_path_snapshots(skyrim.steam_root)
+        cache = skyrim.steam_root / "appcache" / "assetcache.vdf"
+        cache.parent.mkdir()
+        cache.write_bytes(b"ambient Steam cache churn")
+
+        after = capture_skyrim_production_path_snapshots(skyrim.steam_root)
+
+        self.assertEqual(before, after)
+        self.assertEqual(
+            (
+                skyrim.steam_root / "steamapps" / "appmanifest_489830.acf",
+                skyrim.game_root,
+            ),
+            tuple(snapshot.path for snapshot in before),
+        )
+
+    def test_skyrim_production_snapshot_reports_manifest_mutation(self):
+        # Catches a changed appmanifest_489830.acf disappearing from production evidence.
+        skyrim = create_skyrim_workflow_fixture(self.root)
+        before = capture_skyrim_production_path_snapshots(skyrim.steam_root)
+        manifest = skyrim.steam_root / "steamapps" / "appmanifest_489830.acf"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8") + "\n", encoding="utf-8"
+        )
+
+        after = capture_skyrim_production_path_snapshots(skyrim.steam_root)
+
+        changed = tuple(
+            old.path
+            for old, new in zip(before, after, strict=True)
+            if old.entries != new.entries
+        )
+        self.assertEqual((manifest,), changed)
+
+    def test_skyrim_production_snapshot_reports_game_root_mutation(self):
+        # Catches a changed Skyrim root tree disappearing from production evidence.
+        skyrim = create_skyrim_workflow_fixture(self.root)
+        before = capture_skyrim_production_path_snapshots(skyrim.steam_root)
+        (skyrim.game_root / "Data" / "injected.esp").write_bytes(b"must be reported")
+
+        after = capture_skyrim_production_path_snapshots(skyrim.steam_root)
+
+        changed = tuple(
+            old.path
+            for old, new in zip(before, after, strict=True)
+            if old.entries != new.entries
+        )
+        self.assertEqual((skyrim.game_root,), changed)
+
+    def test_skyrim_production_snapshot_refuses_missing_or_blocked_discovery(self):
+        # Catches preflight observing paths when Skyrim discovery cannot trust them.
+        missing = self.root / "missing-Steam"
+        blocked = self.root / "blocked-Steam"
+        manifest = blocked / "steamapps" / "appmanifest_489830.acf"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text("not a Steam manifest", encoding="utf-8")
+
+        for steam_root in (missing, blocked):
+            with self.subTest(steam_root=steam_root.name):
+                with self.assertRaisesRegex(RuntimeError, "Skyrim discovery"):
+                    capture_skyrim_production_path_snapshots(steam_root)
 
     def test_fixture_parent_override_is_exact_and_confined_below_validation_root(self):
         from tests.support.mo2_containment import prepare_fixture_with_fake_bootstrap
