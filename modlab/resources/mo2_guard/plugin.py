@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-try:  # Host-side inventory tests deliberately do not import MO2's mobase package.
-    import mobase  # type: ignore[import-not-found]
-except ImportError:  # pragma: no cover - exercised by host import safety.
-    class _PluginTool:
-        pass
-else:  # pragma: no cover - exercised only inside the retained MO2 runtime.
-    _PluginTool = mobase.IPluginTool
+import mobase
+from PyQt5.QtGui import QIcon
 
 
-class ModLabGuard(_PluginTool):
+class ModLabGuard(mobase.IPluginTool):
     """A complete passive tool that leaves ordinary MO2 launches unchanged."""
 
     def name(self):
@@ -19,6 +14,18 @@ class ModLabGuard(_PluginTool):
 
     def localizedName(self):
         return self.name()
+
+    def settings(self):
+        return []
+
+    def displayName(self):
+        return self.name()
+
+    def tooltip(self):
+        return self.description()
+
+    def icon(self):
+        return QIcon()
 
     def author(self):
         return "ModLab"

@@ -130,9 +130,82 @@ class Mo2BridgeProtocolTests(unittest.TestCase):
         validate_handshake_evidence(request, events, safe)
         with self.assertRaisesRegex(BridgeProtocolError, "contiguous"):
             validate_handshake_evidence(request, (events[0], replace(events[1], sequence=3)), safe)
-        with self.assertRaisesRegex(BridgeProtocolError, "final SafeToClose"):
+        with self.assertRaisesRegex(BridgeProtocolError, "SafeToClose event"):
             validate_handshake_evidence(request, events[:-1], safe)
         failed = (*events[:-1], valid_event(request, 5, BridgeEventKind.FAILED), events[-1])
         with self.assertRaisesRegex(BridgeProtocolError, "failed identity"):
             validate_handshake_evidence(request, failed, safe)
         self.assertEqual(safe, parse_bridge_document(safe_to_close_to_bytes(safe)))
+
+    def test_passing_evidence_requires_the_complete_exact_identity_lifecycle(self) -> None:
+        request = valid_request()
+        only_safe = valid_event(request, 1, BridgeEventKind.SAFE_TO_CLOSE)
+        safe = SafeToClose(
+            schema_version=1,
+            job_id=request.job_id,
+            request_id=request.request_id,
+            request_sha256=request_sha256(request),
+            safe_event_sha256=hashlib.sha256(event_to_bytes(only_safe)).hexdigest(),
+            safe_sequence=1,
+            outcome="Passed",
+        )
+        with self.assertRaisesRegex(BridgeProtocolError, "lifecycle"):
+            validate_handshake_evidence(request, (only_safe,), safe)
+
+        events = (
+            valid_event(request, 1, BridgeEventKind.REQUEST_CLAIMED),
+            valid_event(request, 2, BridgeEventKind.VETO_REGISTERED),
+            replace(valid_event(request, 3, BridgeEventKind.UI_READY), observed_profile_name=None),
+            valid_event(request, 4, BridgeEventKind.REFRESH_COMPLETED),
+            valid_event(request, 5, BridgeEventKind.SAFE_TO_CLOSE),
+        )
+        safe = replace(
+            safe,
+            safe_event_sha256=hashlib.sha256(event_to_bytes(events[-1])).hexdigest(),
+            safe_sequence=5,
+        )
+        with self.assertRaisesRegex(BridgeProtocolError, "observed identity"):
+            validate_handshake_evidence(request, events, safe)
+        changed = (*events[:2], replace(events[2], observed_profile_name="Other"), *events[3:])
+        with self.assertRaisesRegex(BridgeProtocolError, "observed identity"):
+            validate_handshake_evidence(request, changed, safe)
+
+    def test_request_roots_must_be_exact_and_windows_safe(self) -> None:
+        request = valid_request()
+        with self.assertRaisesRegex(BridgeProtocolError, "basePath"):
+            request_to_bytes(replace(request, base_path=r"C:\Elsewhere\app"))
+        with self.assertRaisesRegex(BridgeProtocolError, "unsafe Windows"):
+            request_to_bytes(replace(request, downloads_path=r"C:\NUL\downloads"))
+
+    def test_evidence_rejects_mismatched_bindings_and_safe_hashes(self) -> None:
+        request = valid_request()
+        events = tuple(
+            valid_event(request, index, kind)
+            for index, kind in enumerate(
+                (
+                    BridgeEventKind.REQUEST_CLAIMED,
+                    BridgeEventKind.VETO_REGISTERED,
+                    BridgeEventKind.UI_READY,
+                    BridgeEventKind.REFRESH_COMPLETED,
+                    BridgeEventKind.SAFE_TO_CLOSE,
+                ),
+                start=1,
+            )
+        )
+        safe = SafeToClose(
+            schema_version=1,
+            job_id=request.job_id,
+            request_id=request.request_id,
+            request_sha256=request_sha256(request),
+            safe_event_sha256=hashlib.sha256(event_to_bytes(events[-1])).hexdigest(),
+            safe_sequence=5,
+            outcome="Passed",
+        )
+        for altered, message in (
+            ((replace(events[0], job_id="bridge-job:" + "8" * 32), *events[1:]), "not bound"),
+            ((events[0], replace(events[1], sequence=1), *events[2:]), "contiguous"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(BridgeProtocolError, message):
+                validate_handshake_evidence(request, altered, safe)
+        with self.assertRaisesRegex(BridgeProtocolError, "exact SafeToClose"):
+            validate_handshake_evidence(request, events, replace(safe, safe_event_sha256="0" * 64))

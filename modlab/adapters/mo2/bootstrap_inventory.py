@@ -50,11 +50,16 @@ def verify_bootstrap_inventory_with_bridge_overlay(
 
 
 def _require_bootstrap_receipt(root: Path, receipt: _BootstrapInventoryReceipt) -> None:
-    required = ("final_root", "package_inventory_sha256", "package_file_count", "package_size")
+    required = ("receipt_id", "final_root", "package_inventory_sha256", "package_file_count", "package_size")
     if any(not hasattr(receipt, name) for name in required):
+        if not hasattr(receipt, "receipt_id"):
+            raise BootstrapInventoryError("bootstrap receipt identity is missing")
         raise BootstrapInventoryError("bootstrap receipt lacks package inventory identity")
     if str(Path(receipt.final_root)).casefold() != str(root).casefold():
         raise BootstrapInventoryError("bootstrap receipt is not bound to this app root")
+    if not isinstance(receipt.receipt_id, str) or not receipt.receipt_id:
+        raise BootstrapInventoryError("bootstrap receipt identity is invalid")
+    _require_direct_chain(root, "app root")
 
 
 def _verify_receipted_overlay(root: Path, overlay: Path, bootstrap_receipt: _BootstrapInventoryReceipt, receipt: BridgeReceipt) -> None:
@@ -64,8 +69,8 @@ def _verify_receipted_overlay(root: Path, overlay: Path, bootstrap_receipt: _Boo
         raise BootstrapInventoryError(f"bridge receipt is not strict: {error}") from error
     if receipt.target_root.casefold() != str(overlay).casefold():
         raise BootstrapInventoryError("bridge receipt target root is not the exact overlay")
-    expected_bootstrap_id = getattr(bootstrap_receipt, "receipt_id", None)
-    if expected_bootstrap_id is not None and receipt.bootstrap_receipt_id != expected_bootstrap_id:
+    expected_bootstrap_id = bootstrap_receipt.receipt_id
+    if receipt.bootstrap_receipt_id != expected_bootstrap_id:
         raise BootstrapInventoryError("bridge receipt is not bound to the bootstrap receipt")
     try:
         verify_guard_bundle(overlay, receipt.files)
@@ -119,11 +124,27 @@ def _direct_entry_exists(path: Path) -> bool:
         return False
     except OSError as error:
         raise BootstrapInventoryError(f"cannot inspect bridge overlay: {error}") from error
+    _require_direct_chain(path.parent, "bridge overlay parent")
     if path.is_symlink() or bool(getattr(metadata, "st_file_attributes", 0) & 0x400):
         raise BootstrapInventoryError("bridge overlay is redirected")
     if not path.is_dir():
         raise BootstrapInventoryError("bridge overlay is not a directory")
     return True
+
+
+def _require_direct_chain(path: Path, label: str) -> None:
+    current = Path(path).absolute()
+    while True:
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise BootstrapInventoryError(f"cannot inspect {label}: {error}") from error
+        if current.is_symlink() or bool(getattr(metadata, "st_file_attributes", 0) & 0x400):
+            raise BootstrapInventoryError(f"{label} is redirected")
+        parent = current.parent
+        if parent == current:
+            return
+        current = parent
 
 
 __all__ = ["BootstrapInventoryError", "verify_bootstrap_inventory_with_bridge_overlay"]

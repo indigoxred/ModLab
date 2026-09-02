@@ -101,6 +101,7 @@ def _validate_expected(value: tuple[BridgeBundleFile, ...]) -> tuple[BridgeBundl
 
 
 def _direct_directory(path: Path, label: str) -> Path:
+    _require_direct_chain(path, label)
     try:
         metadata = path.lstat()
         resolved = path.resolve(strict=True)
@@ -118,6 +119,9 @@ def _hash_stable_file(path: Path) -> tuple[str, int]:
             raise BridgeBundleError(f"bridge target file is not direct: {path.name}")
         digest = hashlib.sha256()
         with path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if not _same_file_identity(before, opened):
+                raise BridgeBundleError(f"bridge target file changed before reading: {path.name}")
             while chunk := stream.read(_HASH_CHUNK):
                 digest.update(chunk)
         after = path.lstat()
@@ -125,9 +129,34 @@ def _hash_stable_file(path: Path) -> tuple[str, int]:
         raise
     except OSError as error:
         raise BridgeBundleError(f"cannot hash bridge target file {path.name}: {error}") from error
-    if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns or _is_reparse(after):
+    if not _same_file_identity(before, after) or _is_reparse(after):
         raise BridgeBundleError(f"bridge target file changed while reading: {path.name}")
     return digest.hexdigest(), before.st_size
+
+
+def _require_direct_chain(path: Path, label: str) -> None:
+    current = Path(path).absolute()
+    while True:
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise BridgeBundleError(f"cannot inspect {label}: {error}") from error
+        if current.is_symlink() or _is_reparse(metadata):
+            raise BridgeBundleError(f"{label} is redirected")
+        parent = current.parent
+        if parent == current:
+            return
+        current = parent
+
+
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev == right.st_dev
+        and left.st_ino == right.st_ino
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and stat.S_IFMT(left.st_mode) == stat.S_IFMT(right.st_mode)
+    )
 
 
 def _is_reparse(metadata: os.stat_result) -> bool:

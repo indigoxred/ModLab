@@ -118,6 +118,11 @@ _CONTAINMENT_DECISION_ID = re.compile(
 )
 _DETAIL_CODE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _BUNDLE_FILES = ("__init__.py", "plugin.py", "protocol.py")
+_RESERVED_WINDOWS_NAMES = {
+    "con", "prn", "aux", "nul",
+    *(f"com{number}" for number in range(1, 10)),
+    *(f"lpt{number}" for number in range(1, 10)),
+}
 
 _REQUEST_FIELDS = {
     "schemaVersion", "requestId", "kind", "nonce", "jobId", "workspaceRoot",
@@ -323,11 +328,39 @@ def validate_handshake_evidence(
         request.job_id, request.request_id, expected_sha,
     ):
         raise BridgeProtocolError("SafeToClose is not bound to the request identity")
-    final = events[-1]
-    if final.kind is not BridgeEventKind.SAFE_TO_CLOSE:
-        raise BridgeProtocolError("SafeToClose must bind the final SafeToClose event")
-    if safe.safe_sequence != final.sequence or safe.safe_event_sha256 != hashlib.sha256(event_to_bytes(final)).hexdigest():
-        raise BridgeProtocolError("SafeToClose is not bound to the final event")
+    matching = next((event for event in events if event.sequence == safe.safe_sequence), None)
+    if matching is None or matching.kind is not BridgeEventKind.SAFE_TO_CLOSE:
+        raise BridgeProtocolError("SafeToClose is not bound to a SafeToClose event")
+    if safe.safe_event_sha256 != hashlib.sha256(event_to_bytes(matching)).hexdigest():
+        raise BridgeProtocolError("SafeToClose is not bound to the exact SafeToClose event")
+    expected_lifecycle = (
+        BridgeEventKind.REQUEST_CLAIMED,
+        BridgeEventKind.VETO_REGISTERED,
+        BridgeEventKind.UI_READY,
+        BridgeEventKind.REFRESH_COMPLETED,
+        BridgeEventKind.SAFE_TO_CLOSE,
+    )
+    if tuple(event.kind for event in events) != expected_lifecycle:
+        raise BridgeProtocolError("passing lifecycle must contain exactly the required event sequence")
+    for event in events[2:4]:
+        if (
+            event.observed_profile_name,
+            event.observed_profile_path,
+            event.observed_base_path,
+            event.observed_downloads_path,
+            event.observed_mods_path,
+            event.observed_overwrite_path,
+            event.observed_mo2_version,
+        ) != (
+            request.profile_name,
+            request.profile_path,
+            request.base_path,
+            request.downloads_path,
+            request.mods_path,
+            request.overwrite_path,
+            request.mo2_version,
+        ):
+            raise BridgeProtocolError("observed identity is incomplete or differs from the request")
 
 
 def _request_dict(value: BridgeRequest) -> dict[str, object]:
@@ -471,6 +504,14 @@ def _require_request_relationships(value: BridgeRequest) -> None:
     workspace = PureWindowsPath(value.workspace_root)
     job_root = workspace / "runtime" / "jobs" / "mo2-bridge" / value.job_id.removeprefix("bridge-job:")
     exact = {
+        "basePath": (value.base_path, workspace / "tools" / "mo2" / "skyrim-se-ae" / "app"),
+        "profilePath": (
+            value.profile_path,
+            workspace / "tools" / "mo2" / "skyrim-se-ae" / "app" / "profiles" / "ModLab - Lab",
+        ),
+        "downloadsPath": (value.downloads_path, workspace / "tools" / "mo2" / "skyrim-se-ae" / "downloads"),
+        "modsPath": (value.mods_path, workspace / "tools" / "mo2" / "skyrim-se-ae" / "mods"),
+        "overwritePath": (value.overwrite_path, workspace / "tools" / "mo2" / "skyrim-se-ae" / "overwrite"),
         "requestPath": (value.request_path, job_root / "request.json"),
         "claimedPath": (value.claimed_path, job_root / "claimed.json"),
         "eventRoot": (value.event_root, job_root / "events"),
@@ -483,7 +524,7 @@ def _require_request_relationships(value: BridgeRequest) -> None:
     }
     for label, (actual, expected) in exact.items():
         if actual.casefold() != str(expected).casefold():
-            raise BridgeProtocolError(f"{label} is outside its exact job containment path")
+            raise BridgeProtocolError(f"{label} is outside its exact required containment path")
 
 
 def _bundle_files(value: object) -> tuple[BridgeBundleFile, ...]:
@@ -633,6 +674,8 @@ def _absolute_path(value: object, label: str) -> str:
         raise BridgeProtocolError(f"{label} must be a direct absolute Windows path")
     for part in path.parts[1:]:
         if part.endswith((" ", ".")) or any(char in '<>:"|?*' or ord(char) < 32 for char in part):
+            raise BridgeProtocolError(f"{label} contains an unsafe Windows path component")
+        if part.split(".", 1)[0].casefold() in _RESERVED_WINDOWS_NAMES:
             raise BridgeProtocolError(f"{label} contains an unsafe Windows path component")
     return text
 
