@@ -640,6 +640,169 @@ class MutationWatchTests(unittest.TestCase):
                 if owner.handle:
                     owner.close()
 
+    def _exercise_existing_outcome_read_ownership(
+        self, route: str, persistent: bool, wrapper_fault=None
+    ):
+        fault_name = wrapper_fault.__name__ if wrapper_fault else "none"
+        request_path, _ = self._start_case(
+            f"existing-read-owner-{route}-{persistent}-{fault_name}"
+        )
+        with windows_watch._LOCAL_SESSIONS_LOCK:
+            session = windows_watch._LOCAL_SESSIONS[request_path.absolute()]
+        completed = stop_watch(request_path)
+        self.assertTrue(completed.complete, completed.error)
+        outcome_path = request_path.parent / "outcome.json"
+        original_bytes = outcome_path.read_bytes()
+        original_identity = windows_exact_fs.identity_at_path(outcome_path)
+        # Model a queued local stop that retained the original session before
+        # the first stop reaped it; both routes still go through public stop.
+        if route == "local":
+            with windows_watch._LOCAL_SESSIONS_LOCK:
+                windows_watch._LOCAL_SESSIONS[request_path.absolute()] = session
+        live_read_handles: set[int] = set()
+        real_watch_close = windows_watch._close_handle
+        real_exact_close = windows_exact_fs._close_handle
+        real_protocol_init = windows_watch.WatchProtocolOwnershipError.__init__
+        wrapping_owners = []
+        read_close_failures = 0
+        retained_close_failures = 0
+
+        def fail_read_close(handle, label):
+            nonlocal read_close_failures
+            if label == "watch outcome readback":
+                live_read_handles.add(handle)
+                read_close_failures += 1
+                return "injected existing-outcome read close failure"
+            return real_watch_close(handle, label)
+
+        def close_retained(handle):
+            nonlocal retained_close_failures
+            if handle in live_read_handles:
+                if persistent:
+                    retained_close_failures += 1
+                    raise OSError("injected retained read close failure")
+                real_exact_close(handle)
+                live_read_handles.remove(handle)
+                return
+            real_exact_close(handle)
+
+        def initialize_protocol_error(protocol_error, message, ownership):
+            if wrapper_fault is not None:
+                wrapping_owners.append(ownership)
+                raise wrapper_fault("injected protocol ownership wrapping failure")
+            real_protocol_init(protocol_error, message, ownership)
+
+        try:
+            with (
+                mock.patch.object(windows_watch, "_close_handle", new=fail_read_close),
+                mock.patch.object(windows_exact_fs, "_close_handle", new=close_retained),
+                mock.patch.object(
+                    windows_watch.WatchProtocolOwnershipError, "__init__",
+                    new=initialize_protocol_error,
+                ),
+            ):
+                observed_error = None
+                receipt = None
+                try:
+                    receipt = stop_watch(request_path)
+                except BaseException as error:
+                    observed_error = error
+                self.assertGreater(read_close_failures, 0)
+                if persistent:
+                    self.assertIsNotNone(
+                        observed_error,
+                        f"public {route} stop lost live owners in receipt {receipt!r}",
+                    )
+                    self.assertIsNone(receipt)
+                    if wrapper_fault is not None:
+                        self.assertEqual(1, len(wrapping_owners))
+                        self.assertIs(wrapping_owners[0], observed_error)
+                        self.assertIsInstance(observed_error.__cause__, wrapper_fault)
+                    else:
+                        self.assertIsInstance(observed_error, windows_watch.WatchProtocolOwnershipError)
+                    self.assertEqual(1, len(live_read_handles))
+                    self.assertEqual((), observed_error.candidates)
+                    self.assertEqual((), observed_error.destination_parents)
+                    self.assertEqual(1, len(observed_error.verification))
+                    owner = observed_error.verification[0]
+                    self.assertEqual(outcome_path, owner.path)
+                    self.assertEqual({owner.handle}, live_read_handles)
+                    self.assertEqual(
+                        {"verification"},
+                        {item.role.value for item in observed_error.owners},
+                    )
+                    for _ in range(2):
+                        with self.assertRaises(type(observed_error)) as retry:
+                            observed_error.resolve()
+                        if wrapper_fault is None:
+                            self.assertIs(observed_error, retry.exception)
+                        observed_error = retry.exception
+                        self.assertIs(owner, retry.exception.verification[0])
+                        self.assertEqual(
+                            (original_identity.volume_serial, original_identity.file_id),
+                            windows_watch._handle_identity(owner.handle, outcome_path)[:2],
+                        )
+                    self.assertGreaterEqual(retained_close_failures, 2)
+                    persistent = False
+                    observed_error.resolve()
+                    self.assertEqual(0, owner.handle)
+                    self.assertEqual((), observed_error.retained_objects)
+                    self.assertEqual(set(), live_read_handles)
+                    # Completed resolution must not close a subsequently reused
+                    # numeric handle or perform any pathname cleanup.
+                    canary_path = self.root / f"post-owner-canary-{route}.txt"
+                    canary_path.write_bytes(b"unrelated retained object")
+                    canary = windows_exact_fs.pin_direct_object(canary_path, kind="file")
+                    try:
+                        with mock.patch.object(
+                            windows_exact_fs, "_close_handle",
+                            side_effect=AssertionError("completed resolution attempted another close"),
+                        ):
+                            observed_error.resolve()
+                            observed_error.resolve()
+                        self.assertEqual(
+                            canary.identity.file_id,
+                            windows_watch._handle_identity(canary.handle, canary_path)[1],
+                        )
+                        self.assertEqual(
+                            b"unrelated retained object", windows_exact_fs.read_pinned_file(canary)
+                        )
+                    finally:
+                        canary.close()
+                else:
+                    self.assertIsNone(observed_error)
+                    self.assertIsNotNone(receipt)
+                    self.assertEqual(set(), live_read_handles, "receipt discarded live read handles")
+            self.assertEqual(original_bytes, outcome_path.read_bytes())
+            self.assertEqual(original_identity, windows_exact_fs.identity_at_path(outcome_path))
+            self.assertEqual(completed, stop_watch(request_path))
+            self.assertEqual(original_bytes, outcome_path.read_bytes())
+        finally:
+            with windows_watch._LOCAL_SESSIONS_LOCK:
+                windows_watch._LOCAL_SESSIONS.pop(request_path.absolute(), None)
+            # Independent cleanup also covers RED, before owners are surfaced.
+            for handle in tuple(live_read_handles):
+                real_exact_close(handle)
+                live_read_handles.remove(handle)
+
+    def test_existing_outcome_public_stop_preserves_persistent_read_ownership(self):
+        for route in ("local", "non-owner"):
+            with self.subTest(route=route):
+                self._exercise_existing_outcome_read_ownership(route, persistent=True)
+
+    def test_existing_outcome_public_stop_resolves_transient_read_ownership(self):
+        for route in ("local", "non-owner"):
+            with self.subTest(route=route):
+                self._exercise_existing_outcome_read_ownership(route, persistent=False)
+
+    def test_existing_outcome_public_stop_preserves_owner_when_protocol_wrapping_fails(self):
+        for route in ("local", "non-owner"):
+            for wrapper_fault in (OSError, KeyboardInterrupt):
+                with self.subTest(route=route, wrapper_fault=wrapper_fault.__name__):
+                    self._exercise_existing_outcome_read_ownership(
+                        route, persistent=True, wrapper_fault=wrapper_fault
+                    )
+
     def test_public_non_owner_stop_never_flattens_live_ownership_into_a_receipt(self):
         request = self._request()
         request_path = self.evidence / "request.json"

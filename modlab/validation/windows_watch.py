@@ -22,6 +22,7 @@ import warnings
 from modlab.platform.windows_exact_fs import (
     ExactObjectError,
     ExactObjectOwnershipError,
+    PinnedObject,
     publish_new_pinned,
     resolve_retained_ownership,
 )
@@ -2514,6 +2515,23 @@ def _load_published_outcome(
                 request.evidence_root / _OUTCOME_NAME, "watch outcome"
             )
             break
+        except _HandleOwnershipError as error:
+            # This acquired reader owns only CloseHandle authority, never
+            # deletion. Transfer it once into the shared retryable owner model.
+            retained = PinnedObject(
+                request.evidence_root / _OUTCOME_NAME, error.handle, None
+            )
+            ownership = ExactObjectOwnershipError(str(error), verification=(retained,))
+            error.handle = 0
+            try:
+                protocol_error = WatchProtocolOwnershipError(
+                    f"exact outcome read retained ownership: {error}", ownership
+                )
+            except BaseException as wrapping_error:
+                # The exact owner already exists: surface it unchanged rather
+                # than retrying a failed wrapper or leaving ownership in context.
+                raise ownership from wrapping_error
+            raise protocol_error from error
         except OSError as error:
             error_code = getattr(error, "winerror", None)
             if error_code is None:
@@ -2603,6 +2621,10 @@ def _stop_local_session(
                     return _receipt_from_outcome(existing_outcome)
                 if "existing-incomplete-outcome" not in session.poison_reasons:
                     session.poison_reasons.append("existing-incomplete-outcome")
+            except WatchProtocolOwnershipError as error:
+                _resolve_watch_protocol_ownership(error)
+                if "existing-outcome-invalid" not in session.poison_reasons:
+                    session.poison_reasons.append("existing-outcome-invalid")
             except (OSError, ContainmentFormatError, WatchProtocolError):
                 if "existing-outcome-invalid" not in session.poison_reasons:
                     session.poison_reasons.append("existing-outcome-invalid")
@@ -2794,6 +2816,9 @@ def _stop_non_owner(
                 is WatchEvidenceCompletion.COMPLETED
             ):
                 return _receipt_from_outcome(existing_outcome)
+        except WatchProtocolOwnershipError:
+            # The public stop boundary resolves or returns this same owner.
+            raise
         except (OSError, ContainmentFormatError, WatchProtocolError) as error:
             return _incomplete_without_outcome(
                 request,
