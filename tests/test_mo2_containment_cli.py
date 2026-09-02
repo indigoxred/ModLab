@@ -272,8 +272,10 @@ class ContainmentCliTests(unittest.TestCase):
             )
 
         document = json.loads(stdout.getvalue())
-        self.assertEqual(2, code)
+        self.assertEqual(3, code)
         self.assertEqual([], service.calls)
+        self.assertEqual("Refused", document["state"])
+        self.assertEqual([], document["writtenPaths"])
         self.assertTrue(
             any("interactive terminal" in reason for reason in document["reasons"])
         )

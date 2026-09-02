@@ -551,6 +551,7 @@ def arm_scenario(
 ) -> ScenarioJournal:
     """Capture stable pre-state and stop only after the watcher is ready."""
     store = ContainmentStore(validation_root)
+    _require_current_execution_policy(store, run_id)
     record = _load_fixture_record(store, run_id, scenario)
     before = _capture_protected(record)
     source_level = inspect_path_integrity(record.source_root)
@@ -612,6 +613,7 @@ def launch_scenario(
 ) -> ScenarioJournal:
     """Persist ScenarioStarted before launching the exact Low-integrity child."""
     store = ContainmentStore(validation_root)
+    _require_current_execution_policy(store, run_id)
     record = _load_fixture_record(store, run_id, scenario)
     journal = store.load_journal(run_id, scenario)
     if journal.state is not ScenarioState.ARMED:
@@ -722,6 +724,7 @@ def capture_scenario(
 ) -> ScenarioResult:
     """Stop the same-controller watcher, bind its outcome, and capture final policy."""
     store = ContainmentStore(validation_root)
+    _require_current_execution_policy(store, run_id)
     record = _load_fixture_record(store, run_id, scenario)
     journal = store.load_journal(run_id, scenario)
     if journal.state is not ScenarioState.LAUNCHED:
@@ -2030,6 +2033,25 @@ def _request_command_fingerprint(store: ContainmentStore, run_id: str) -> str:
     ):
         raise ContainmentServiceError("request command fingerprint does not recompute")
     return value
+
+
+def _require_current_execution_policy(
+    store: ContainmentStore,
+    run_id: str,
+) -> None:
+    observed = _request_command_fingerprint(store, run_id)
+    document = store.load_request(run_id)
+    source = document.get("sourceWorkspace")
+    artifact = document.get("mo2ArtifactId")
+    steam = document.get("steamRoot")
+    if type(source) is not str or type(artifact) is not str or type(steam) is not str:
+        raise ContainmentServiceError("request command fingerprint does not recompute")
+    expected = _command_fingerprint(Path(source), artifact, Path(steam))
+    if observed != expected:
+        raise ContainmentServiceError(
+            "scenario execution requires the current command policy; "
+            "historical runs are read-only"
+        )
 
 
 def _ensure_retry_authority(

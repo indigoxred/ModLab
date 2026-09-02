@@ -375,8 +375,15 @@ def _validate(
         except (AttributeError, OSError):
             interactive = False
         if not interactive:
-            raise CliInputError(
-                "validate requires an interactive terminal before arming or launching MO2"
+            return 3, _response(
+                "validate",
+                run_id=run_id,
+                scenario=scenario,
+                state="Refused",
+                reasons=(
+                    "Safe refusal: validate requires an interactive terminal "
+                    "before arming or launching MO2",
+                ),
             )
     armed = service.arm_scenario(validation, run_id, scenario)
     stage_value = getattr(armed, "stage_root", None)

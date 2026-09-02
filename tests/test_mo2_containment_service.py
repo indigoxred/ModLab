@@ -260,8 +260,11 @@ def write_run_identity(
     *,
     predecessors: tuple[str, ...] = (),
     retry_binding: dict[str, object] | None = None,
+    command_fingerprint: str | None = None,
 ) -> tuple[service.FixtureRecord, ...]:
-    fingerprint = service._command_fingerprint(source, artifact, steam)
+    fingerprint = command_fingerprint or service._command_fingerprint(
+        source, artifact, steam
+    )
     intent = {
         "schemaVersion": 1,
         "runId": run_id,
@@ -1044,14 +1047,14 @@ class ContainmentServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="modlab-arm-workflow-") as directory:
             root = Path(directory)
             store = ContainmentStore(root / "validation")
-            record = service.FixtureRecord(
-                ContainmentScenario.MERGE_EXISTING, root / "fixture", root / "source",
-                root / "stage", root / "archive.zip", root / "source-mods",
-                root / "stage-mods", root / "lab.txt", root / "play.txt",
-                root / "downloads", root / "overwrite", root / "game", root / "app",
-                root / "stage-downloads", root / "profiles", root / "stage-overwrite",
-                root / "cache", root / "logs", {}, (), ("Protected Existing",),
+            records = write_run_identity(
+                store,
+                RUN_ID,
+                root / "source-workspace",
+                root / "steam",
+                "artifact:arm-workflow",
             )
+            record = records[1]
             observed = []
 
             def fake_start(_request):
@@ -1059,7 +1062,6 @@ class ContainmentServiceTests(unittest.TestCase):
                 return 42
 
             with (
-                patch.object(service, "_load_fixture_record", return_value=record),
                 patch.object(service, "_capture_protected", return_value=protected()),
                 patch.object(service, "inspect_path_integrity", side_effect=(service.IntegrityLevel.MEDIUM, service.IntegrityLevel.LOW)),
                 patch.object(service, "_projection_state", return_value=(1, True, True)),
@@ -1074,31 +1076,26 @@ class ContainmentServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="modlab-launch-workflow-") as directory:
             root = Path(directory)
             store = ContainmentStore(root / "validation")
+            source = root / "source-workspace"
+            steam = root / "steam"
+            artifact = "artifact:launch-workflow"
+            fingerprint = service._command_fingerprint(source, artifact, steam)
             retry_binding = {
                 "runId": "containment-run:" + "f" * 32,
                 "scenario": ContainmentScenario.MERGE_EXISTING.value,
                 "recoveryId": "containment-recovery-sha256:" + "a" * 64,
                 "authorityId": "containment-retry-sha256:" + "b" * 64,
-                "commandFingerprint": "containment-command-sha256:" + "c" * 64,
+                "commandFingerprint": fingerprint,
             }
-            store.write_request(
+            records = write_run_identity(
+                store,
                 RUN_ID,
-                {
-                    "runId": RUN_ID,
-                    "commandFingerprint": retry_binding["commandFingerprint"],
-                    "retryOf": retry_binding,
-                },
+                source,
+                steam,
+                artifact,
+                retry_binding=retry_binding,
             )
-            fixture = root / "fixture"
-            fixture.mkdir()
-            record = service.FixtureRecord(
-                ContainmentScenario.MERGE_EXISTING, fixture, fixture / "source", fixture / "stage",
-                fixture / "archive.zip", fixture / "source-mods", fixture / "stage-mods",
-                fixture / "lab.txt", fixture / "play.txt", fixture / "downloads",
-                fixture / "overwrite", fixture / "game", fixture / "app", fixture / "stage-downloads",
-                fixture / "profiles", fixture / "stage-overwrite", fixture / "cache", fixture / "logs",
-                {}, (), ("Protected Existing",),
-            )
+            record = records[1]
             armed = store.create(ScenarioJournal(
                 1, RUN_ID, record.scenario, ScenarioState.ARMED,
                 str(record.source_root), str(record.stage_root), str(record.archive_path),
@@ -1854,6 +1851,165 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertEqual([], current["predecessorRunIds"])
             self.assertEqual(expected_current, current["commandFingerprint"])
             self.assertNotEqual(previous_fingerprint, current["commandFingerprint"])
+
+    def test_previous_operator_protocol_refuses_arm_before_any_scenario_write(self):
+        # Catches current execution mutating a stage retained as read-only history.
+        with tempfile.TemporaryDirectory(prefix="modlab-old-operator-arm-") as directory:
+            root = Path(directory)
+            source = root / "source"
+            steam = root / "steam"
+            store = ContainmentStore(root / "validation")
+            artifact = "artifact:old-operator-arm"
+            fingerprint = service._pre_operator_policy_command_fingerprint(
+                source, artifact, steam
+            )
+            write_run_identity(
+                store,
+                RUN_ID,
+                source,
+                steam,
+                artifact,
+                command_fingerprint=fingerprint,
+            )
+            scenario = ContainmentScenario.NEW_FOLDER
+            self.assertEqual(
+                scenario,
+                service._load_fixture_record(store, RUN_ID, scenario).scenario,
+            )
+
+            with (
+                patch.object(
+                    service, "_capture_protected", return_value=protected()
+                ) as capture,
+                patch.object(
+                    service,
+                    "inspect_path_integrity",
+                    side_effect=(
+                        service.IntegrityLevel.MEDIUM,
+                        service.IntegrityLevel.LOW,
+                    ),
+                ),
+                patch.object(
+                    service, "_projection_state", return_value=(1, True, True)
+                ),
+                patch.object(service, "_watch_roots", return_value=()),
+                patch.object(service, "start_watch", return_value=42) as start_watch,
+            ):
+                with self.assertRaisesRegex(
+                    service.ContainmentServiceError,
+                    "current command policy",
+                ):
+                    service.arm_scenario(store.root, RUN_ID, scenario)
+
+            capture.assert_not_called()
+            start_watch.assert_not_called()
+            self.assertFalse((store.scenario_path(RUN_ID, scenario) / "before.json").exists())
+            self.assertFalse(store.journal_path(RUN_ID, scenario).exists())
+            self.assertFalse(store.watch_path(RUN_ID, scenario).exists())
+
+    def test_previous_operator_protocol_refuses_launch_before_advancing_journal(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-old-operator-launch-") as directory:
+            root = Path(directory)
+            source = root / "source"
+            steam = root / "steam"
+            store = ContainmentStore(root / "validation")
+            artifact = "artifact:old-operator-launch"
+            fingerprint = service._pre_operator_policy_command_fingerprint(
+                source, artifact, steam
+            )
+            records = write_run_identity(
+                store,
+                RUN_ID,
+                source,
+                steam,
+                artifact,
+                command_fingerprint=fingerprint,
+            )
+            record = records[0]
+            journal = store.create(
+                ScenarioJournal(
+                    1,
+                    RUN_ID,
+                    record.scenario,
+                    ScenarioState.ARMED,
+                    str(record.source_root),
+                    str(record.stage_root),
+                    str(record.archive_path),
+                    "Protected Existing",
+                    "ModLab Spike New",
+                    protected(),
+                    42,
+                    None,
+                    None,
+                )
+            )
+
+            with patch.object(service, "_watcher_live", return_value=False) as watcher:
+                with self.assertRaisesRegex(
+                    service.ContainmentServiceError,
+                    "current command policy",
+                ):
+                    service.launch_scenario(store.root, RUN_ID, record.scenario)
+
+            watcher.assert_not_called()
+            self.assertEqual(
+                journal,
+                store.load_journal(RUN_ID, record.scenario),
+            )
+
+    def test_previous_operator_protocol_refuses_capture_before_runtime_inspection(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-old-operator-capture-") as directory:
+            root = Path(directory)
+            source = root / "source"
+            steam = root / "steam"
+            store = ContainmentStore(root / "validation")
+            artifact = "artifact:old-operator-capture"
+            fingerprint = service._pre_operator_policy_command_fingerprint(
+                source, artifact, steam
+            )
+            records = write_run_identity(
+                store,
+                RUN_ID,
+                source,
+                steam,
+                artifact,
+                command_fingerprint=fingerprint,
+            )
+            record = records[0]
+            journal = store.create(
+                ScenarioJournal(
+                    1,
+                    RUN_ID,
+                    record.scenario,
+                    ScenarioState.LAUNCHED,
+                    str(record.source_root),
+                    str(record.stage_root),
+                    str(record.archive_path),
+                    "Protected Existing",
+                    "ModLab Spike New",
+                    protected(),
+                    42,
+                    51,
+                    None,
+                )
+            )
+
+            with patch.object(
+                service,
+                "inspect_mo2_processes",
+                return_value=SimpleNamespace(complete=False, relevant=()),
+            ) as inspect_processes:
+                with self.assertRaisesRegex(
+                    service.ContainmentServiceError,
+                    "current command policy",
+                ):
+                    service.capture_scenario(store.root, RUN_ID, record.scenario)
+
+            inspect_processes.assert_not_called()
+            self.assertEqual(
+                journal,
+                store.load_journal(RUN_ID, record.scenario),
+            )
 
     def test_same_command_prepare_calls_are_serialized_before_snapshot(self):
         with tempfile.TemporaryDirectory(prefix="modlab-prepare-order-") as directory:
