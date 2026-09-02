@@ -571,6 +571,18 @@ class ContainmentFixtureTests(unittest.TestCase):
         self.assertNotIn("MODLAB_MO2_CACHE_DIRECTORY", fixture.stage_environment)
         self.assertNotIn("MODLAB_MO2_LOG_DIRECTORY", fixture.stage_environment)
 
+    def test_fixture_suppresses_nxm_registration_only_in_the_disposable_stage(self):
+        # Catches MO2 opening an OS-association prompt before the operator scenario.
+        fixture = prepare_fixture_with_fake_bootstrap(self.root)
+        stage_settings = parse_ini_bytes(
+            (fixture.stage_layout.skyrim_mo2_app / "nxmhandler.ini").read_bytes()
+        )
+
+        self.assertEqual("true", stage_settings.get("General", "noregister"))
+        self.assertFalse(
+            (fixture.source_layout.skyrim_mo2_app / "nxmhandler.ini").exists()
+        )
+
     def test_external_low_temp_uses_the_exact_low_child_of_the_current_temp_base(self):
         # Catches replacing the actual current-temp Low child with a derived LocalLow path.
         local_low = self.root / "LocalLow"

@@ -224,6 +224,9 @@ def prepare_containment_fixture(
     _require_beneath(run_root, source_layout.root, stage_layout.root)
     _populate_protected_mod(source_layout)
     _copy_profile_bytes(source_layout.skyrim_mo2_profiles, stage_layout.skyrim_mo2_profiles)
+    (stage_layout.skyrim_mo2_app / "nxmhandler.ini").write_bytes(
+        b"[General]\r\nnoregister=true\r\n"
+    )
 
     stage_environment = _prepare_stage_environment(run_root, stage_layout)
     _verify_stage_integrity_before_projection(stage_environment)

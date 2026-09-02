@@ -266,7 +266,9 @@ def evaluate_scenario(value: ScenarioEvidence) -> ScenarioResult:
     if adoption:
         if not value.staging_observation_complete:
             incomplete.add("staging-observation-incomplete")
-        elif value.staging_new_names != (expected_name,):
+        elif value.staging_new_names != (expected_name,) and (
+            value.staging_new_names or value.output_observation_complete
+        ):
             violations.add("staging-new-folder-set-invalid")
         if not value.output_observation_complete:
             incomplete.add("output-observation-incomplete")

@@ -648,6 +648,12 @@ git commit -m "feat: add loss-detecting containment mutation monitor"
 - Consumes: source ModLab workspace, exact MO2 artifact ID, Steam root, validation root, and scenario.
 - Produces: `ContainmentFixture`, `ScenarioArchives`, `prepare_containment_fixture(source_workspace: Path, mo2_artifact_id: str, steam_root: Path, validation_root: Path, scenario: ContainmentScenario) -> ContainmentFixture`, `write_scenario_archives(root: Path) -> ScenarioArchives`, and new `WorkspaceLayout.mo2_containment_validation`.
 
+The disposable stage instance, and only that instance, pre-seeds
+`app/nxmhandler.ini` with `General/noregister=true` before its tree is labeled
+Low. This prevents an unrelated operating-system NXM-association prompt from
+interrupting the operator scenario without registering a handler or changing
+the disposable source instance.
+
 - [ ] **Step 1: Write failing fixture tests**
 
 ```python
@@ -859,6 +865,13 @@ Use a named Windows mutex per run, atomic create/no-replace for immutable docume
 `prepare_run()` creates four independent fixtures. `arm_scenario()` captures the pre-existing source/Play/download/Overwrite/game evidence, verifies Medium-or-higher source and Low stage, starts watchers, and stops at watcher-ready while writing `Armed`. Immediately before `CreateProcess` launches MO2, `launch_scenario()` must durably transition to `ScenarioStarted`; it then launches exact stage `ModOrganizer.exe --profile "ModLab - Lab"` with the low token and contained environment, verifies its PID/path/integrity, and writes `Launched`. A permitted fresh launch must re-prove the absence of the prior exact controller, watcher, and MO2 processes. No retry after this boundary can reuse the prior run.
 
 `capture_scenario()` requires MO2 closed. Its same-controller `stop_watch()` first publishes and returns the immutable watch-outcome content-ID reference; capture then reloads that exact `WatchOutcome` by content ID, verifies its request/session/run/scenario bindings, and only then derives the scenario verdict, captures the stable post-MO2 state, and inspects all stage projection entries. For new-folder and FOMOD, it then performs the isolated adoption/quarantine proof and captures a second stable final protected state; `ScenarioResult.protected_after` is this final state and must equal the pre-MO2 state. Outcome precedence is `Failed`, then `Incomplete`, then `Passed`. A `Failed` result with `Incomplete` watcher evidence is allowed only when the bound watcher outcome records a positive event or the protected state changed; otherwise watcher damage, malformed events, or liveness uncertainty remain `Incomplete` and are never retry-eligible after `ScenarioStarted`. It applies these exact policies:
+
+For an adoption scenario, complete staging observation of a non-empty wrong or
+extra folder set is a deterministic violation. An empty new-folder set while
+output/adoption observation is incomplete is not proof that containment
+failed: it may represent an interrupted operator workflow and remains
+`Incomplete`. If output observation is complete, any mismatch remains a
+deterministic violation.
 
 - `NewFolder`: all pre-existing source evidence unchanged through the MO2 phase; one exact `ModLab Spike New` direct folder; after watchers stop, adopt the collision-free sibling, verify it, move it to quarantine, and prove the source root returned to its original identity; no extra folder.
 - `MergeExisting`: source unchanged with zero events; `Protected Existing` source junction still exact; no production backup; nothing adopted.
@@ -1108,6 +1121,11 @@ if ($LASTEXITCODE -ne 0) { throw "FomodDependency validation ended with exit $LA
 ```
 
 Each command stays foreground and owns its watcher until the result is durably published. Do not start the next scenario while it is running. Exit `1` is a proven containment failure: stop the remaining live scenarios and preserve it for `Rejected` adjudication. Exit `3` is Incomplete or a safe refusal: close MO2 normally if needed, run `recover` for that exact scenario, preserve the Incomplete evidence, and stop the live run. Do not improvise a mod name, backup choice, or installer option. If the UI differs from the printed procedure, do not click through it: close MO2 normally and continue the same foreground command only so it can fail closed, then recover if instructed.
+
+An unexpected NXM-association prompt is one such UI mismatch. If it prevents
+the operator from performing the requested install, the absence of the
+expected staging folder is `Incomplete`, not a proven `Failed`, unless separate
+positive breach evidence exists.
 
 - [ ] **Step 5: Adjudicate and inspect the decision**
 

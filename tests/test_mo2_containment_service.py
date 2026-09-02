@@ -1856,6 +1856,26 @@ class ContainmentServiceTests(unittest.TestCase):
                 self.assertEqual(expected, result.outcome)
                 self.assertTrue(result.reasons)
 
+    def test_missing_adoption_output_after_interrupted_ui_is_incomplete(self):
+        # Catches absent operator output being promoted to a proven containment breach.
+        result = evaluate_scenario(
+            evidence(
+                ContainmentScenario.NEW_FOLDER,
+                staging_new_names=(),
+                output_observation_complete=False,
+                adopted_name=None,
+                adopted_tree=None,
+                adopted_integrity=None,
+                incomplete_reasons=(
+                    "adoption-proof-unavailable:ContainmentSafetyError",
+                ),
+            )
+        )
+
+        self.assertEqual(ScenarioOutcome.INCOMPLETE, result.outcome)
+        self.assertIn("output-observation-incomplete", result.reasons)
+        self.assertNotIn("staging-new-folder-set-invalid", result.reasons)
+
     def test_protected_delta_plus_damaged_terminal_is_failed_but_malformed_only_is_incomplete(self):
         scenario = ContainmentScenario.MERGE_EXISTING
         damaged = watch_outcome(

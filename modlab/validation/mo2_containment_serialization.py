@@ -747,6 +747,7 @@ def deterministic_policy_violations(result: ScenarioResult) -> tuple[str, ...]:
         if (
             result.staging_observation_complete
             and result.staging_new_names != staging_new
+            and (result.staging_new_names or result.output_observation_complete)
         ):
             violations.add("staging-new-folder-set-invalid")
         if (
