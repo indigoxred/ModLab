@@ -1648,7 +1648,7 @@ class ContainmentServiceTests(unittest.TestCase):
 
             current_document = {
                 "classificationPolicy": "scenario-classification-v4",
-                "fixturePolicy": "disposable-shell-environment-v2",
+                "fixturePolicy": "disposable-shell-environment-v3",
                 "mechanism": "isolated-low-integrity-junction-projection-v1",
                 "mo2ArtifactId": artifact,
                 "scenarios": [item.value for item in ContainmentScenario],
@@ -1674,6 +1674,95 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertNotEqual(previous_fingerprint, current["commandFingerprint"])
             self.assertNotEqual(v2_fixture_fingerprint, current["commandFingerprint"])
             self.assertNotEqual(v3_fixture_fingerprint, current["commandFingerprint"])
+
+    def test_previous_fixture_policy_remains_readable_without_blocking_current_cohort(self):
+        # Catches a corrected fixture inheriting an unresolved run from its old protocol.
+        with tempfile.TemporaryDirectory(prefix="modlab-fomod-fixture-lineage-") as directory:
+            source = Path(directory) / "source"
+            layout = initialize_workspace(source)
+            steam = Path(directory) / "steam"
+            store = ContainmentStore(layout.mo2_containment_validation)
+            artifact = "artifact:fomod-fixture-lineage"
+            previous_document = {
+                "classificationPolicy": "scenario-classification-v4",
+                "fixturePolicy": "disposable-shell-environment-v2",
+                "mechanism": "isolated-low-integrity-junction-projection-v1",
+                "mo2ArtifactId": artifact,
+                "scenarios": [item.value for item in ContainmentScenario],
+                "sourceWorkspace": os.path.normcase(
+                    os.path.normpath(str(source.absolute()))
+                ),
+                "steamRoot": os.path.normcase(
+                    os.path.normpath(str(steam.absolute()))
+                ),
+            }
+            previous_fingerprint = (
+                "containment-command-sha256:"
+                + hashlib.sha256(
+                    (
+                        json.dumps(
+                            previous_document,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode()
+                ).hexdigest()
+            )
+            store.write_intent(
+                RUN_ID,
+                {
+                    "schemaVersion": 1,
+                    "runId": RUN_ID,
+                    "mechanism": previous_document["mechanism"],
+                    "sourceWorkspace": previous_document["sourceWorkspace"],
+                    "mo2ArtifactId": artifact,
+                    "steamRoot": previous_document["steamRoot"],
+                    "commandFingerprint": previous_fingerprint,
+                    "predecessorRunIds": [],
+                    "retryOf": None,
+                },
+            )
+
+            with (
+                patch.object(
+                    service,
+                    "prepare_containment_fixture",
+                    side_effect=lambda *_args, **kwargs: SimpleNamespace(
+                        scenario=_args[-1], fixture_parent=kwargs["fixture_parent"]
+                    ),
+                ),
+                patch.object(
+                    service,
+                    "_fixture_record",
+                    side_effect=lambda fixture, _steam: prepared_record(
+                        Path(fixture.fixture_parent), fixture.scenario, steam
+                    ),
+                ),
+            ):
+                new_run = service.prepare_run(source, artifact, steam, store.root)
+
+            current_document = {
+                **previous_document,
+                "fixturePolicy": "disposable-shell-environment-v3",
+            }
+            expected_current = (
+                "containment-command-sha256:"
+                + hashlib.sha256(
+                    (
+                        json.dumps(
+                            current_document,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode()
+                ).hexdigest()
+            )
+            current = store.load_intent(new_run)
+            self.assertEqual([], current["predecessorRunIds"])
+            self.assertEqual(expected_current, current["commandFingerprint"])
+            self.assertNotEqual(previous_fingerprint, current["commandFingerprint"])
 
     def test_same_command_prepare_calls_are_serialized_before_snapshot(self):
         with tempfile.TemporaryDirectory(prefix="modlab-prepare-order-") as directory:

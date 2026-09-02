@@ -90,7 +90,8 @@ _MECHANISM = "isolated-low-integrity-junction-projection-v1"
 _CLASSIFICATION_POLICY = "scenario-classification-v4"
 _PREVIOUS_CLASSIFICATION_POLICY = "scenario-classification-v3"
 _OLDER_CLASSIFICATION_POLICY = "scenario-classification-v2"
-_FIXTURE_POLICY = "disposable-shell-environment-v2"
+_FIXTURE_POLICY = "disposable-shell-environment-v3"
+_PREVIOUS_FIXTURE_POLICY = "disposable-shell-environment-v2"
 _PROTECTED_NAME = "Protected Existing"
 _EXPECTED_NEW = {
     ContainmentScenario.NEW_FOLDER: "ModLab Spike New",
@@ -2286,7 +2287,7 @@ def _previous_classification_command_fingerprint(
 ) -> str:
     document = {
         "classificationPolicy": _PREVIOUS_CLASSIFICATION_POLICY,
-        "fixturePolicy": _FIXTURE_POLICY,
+        "fixturePolicy": _PREVIOUS_FIXTURE_POLICY,
         "mechanism": _MECHANISM,
         "mo2ArtifactId": mo2_artifact_id,
         "scenarios": [item.value for item in ContainmentScenario],
@@ -2307,7 +2308,28 @@ def _older_classification_command_fingerprint(
 ) -> str:
     document = {
         "classificationPolicy": _OLDER_CLASSIFICATION_POLICY,
-        "fixturePolicy": _FIXTURE_POLICY,
+        "fixturePolicy": _PREVIOUS_FIXTURE_POLICY,
+        "mechanism": _MECHANISM,
+        "mo2ArtifactId": mo2_artifact_id,
+        "scenarios": [item.value for item in ContainmentScenario],
+        "sourceWorkspace": os.path.normcase(
+            os.path.normpath(str(Path(source_workspace).expanduser().absolute()))
+        ),
+        "steamRoot": os.path.normcase(
+            os.path.normpath(str(Path(steam_root).expanduser().absolute()))
+        ),
+    }
+    return _command_fingerprint_for(document)
+
+
+def _previous_fixture_policy_command_fingerprint(
+    source_workspace: Path,
+    mo2_artifact_id: str,
+    steam_root: Path,
+) -> str:
+    document = {
+        "classificationPolicy": _CLASSIFICATION_POLICY,
+        "fixturePolicy": _PREVIOUS_FIXTURE_POLICY,
         "mechanism": _MECHANISM,
         "mo2ArtifactId": mo2_artifact_id,
         "scenarios": [item.value for item in ContainmentScenario],
@@ -2344,9 +2366,12 @@ def _known_command_fingerprints(
     source_workspace: Path,
     mo2_artifact_id: str,
     steam_root: Path,
-) -> tuple[str, str, str, str, str]:
+) -> tuple[str, str, str, str, str, str]:
     return (
         _command_fingerprint(source_workspace, mo2_artifact_id, steam_root),
+        _previous_fixture_policy_command_fingerprint(
+            source_workspace, mo2_artifact_id, steam_root
+        ),
         _previous_classification_command_fingerprint(
             source_workspace, mo2_artifact_id, steam_root
         ),
