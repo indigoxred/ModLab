@@ -678,7 +678,7 @@ def _check_result(result: ScenarioResult) -> None:
             and result.protected_before == result.protected_after
             and not (
                 result.watch_evidence_completion is WatchEvidenceCompletion.COMPLETED
-                and deterministic_policy_violations(result)
+                and _failed_policy_violations(result)
             )
         ):
             raise ContainmentFormatError(
@@ -770,6 +770,19 @@ def deterministic_policy_violations(result: ScenarioResult) -> tuple[str, ...]:
         or any(item is not None for item in adoption)
     ):
         violations.add("unexpected-staging-output")
+    return tuple(sorted(violations))
+
+
+def _failed_policy_violations(result: ScenarioResult) -> tuple[str, ...]:
+    """Accept over-conservative immutable v1 failures without producing them."""
+    violations = set(deterministic_policy_violations(result))
+    if result.scenario in _ADOPTION:
+        _name, staging_new, _staging_output = _ADOPTION[result.scenario]
+        if (
+            result.staging_observation_complete
+            and result.staging_new_names != staging_new
+        ):
+            violations.add("staging-new-folder-set-invalid")
     return tuple(sorted(violations))
 
 

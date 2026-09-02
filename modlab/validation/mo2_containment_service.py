@@ -83,6 +83,7 @@ from .windows_watch_protocol import (
 
 _SCHEMA_VERSION = 1
 _MECHANISM = "isolated-low-integrity-junction-projection-v1"
+_CLASSIFICATION_POLICY = "scenario-classification-v2"
 _PROTECTED_NAME = "Protected Existing"
 _EXPECTED_NEW = {
     ContainmentScenario.NEW_FOLDER: "ModLab Spike New",
@@ -1291,12 +1292,12 @@ def _load_fixture_record(
             document["commandFingerprint"],
         )
         is None
-        or _command_fingerprint(
+        or document["commandFingerprint"]
+        not in _known_command_fingerprints(
             Path(document["sourceWorkspace"]),
             document["mo2ArtifactId"],
             Path(document["steamRoot"]),
         )
-        != document["commandFingerprint"]
         or not _valid_predecessor_run_ids(document["predecessorRunIds"], run_id)
         or not _valid_retry_binding(document["retryOf"], document["commandFingerprint"])
     ):
@@ -1950,7 +1951,9 @@ def _request_command_fingerprint(store: ContainmentStore, run_id: str) -> str:
         or type(artifact) is not str
         or not artifact
         or type(steam) is not str
-        or _command_fingerprint(Path(source), artifact, Path(steam)) != value
+        or value not in _known_command_fingerprints(
+            Path(source), artifact, Path(steam)
+        )
     ):
         raise ContainmentServiceError("request command fingerprint does not recompute")
     return value
@@ -2176,6 +2179,7 @@ def _command_fingerprint(
     steam_root: Path,
 ) -> str:
     document = {
+        "classificationPolicy": _CLASSIFICATION_POLICY,
         "mechanism": _MECHANISM,
         "mo2ArtifactId": mo2_artifact_id,
         "scenarios": [item.value for item in ContainmentScenario],
@@ -2186,6 +2190,40 @@ def _command_fingerprint(
             os.path.normpath(str(Path(steam_root).expanduser().absolute()))
         ),
     }
+    return _command_fingerprint_for(document)
+
+
+def _legacy_command_fingerprint(
+    source_workspace: Path,
+    mo2_artifact_id: str,
+    steam_root: Path,
+) -> str:
+    document = {
+        "mechanism": _MECHANISM,
+        "mo2ArtifactId": mo2_artifact_id,
+        "scenarios": [item.value for item in ContainmentScenario],
+        "sourceWorkspace": os.path.normcase(
+            os.path.normpath(str(Path(source_workspace).expanduser().absolute()))
+        ),
+        "steamRoot": os.path.normcase(
+            os.path.normpath(str(Path(steam_root).expanduser().absolute()))
+        ),
+    }
+    return _command_fingerprint_for(document)
+
+
+def _known_command_fingerprints(
+    source_workspace: Path,
+    mo2_artifact_id: str,
+    steam_root: Path,
+) -> tuple[str, str]:
+    return (
+        _command_fingerprint(source_workspace, mo2_artifact_id, steam_root),
+        _legacy_command_fingerprint(source_workspace, mo2_artifact_id, steam_root),
+    )
+
+
+def _command_fingerprint_for(document: dict[str, object]) -> str:
     data = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
     return "containment-command-sha256:" + hashlib.sha256(data).hexdigest()
 
@@ -2304,14 +2342,14 @@ def _intent_command_fingerprint(
         or type(intent.get("commandFingerprint")) is not str
     ):
         raise ContainmentServiceError("run intent command binding is malformed")
-    computed = _command_fingerprint(
+    computed = _known_command_fingerprints(
         Path(intent["sourceWorkspace"]),
         intent["mo2ArtifactId"],
         Path(intent["steamRoot"]),
     )
-    if computed != intent["commandFingerprint"]:
+    if intent["commandFingerprint"] not in computed:
         raise ContainmentServiceError("run intent command fingerprint does not recompute")
-    return computed
+    return intent["commandFingerprint"]
 
 
 def _intent_id_for(intent: dict[str, object]) -> str:

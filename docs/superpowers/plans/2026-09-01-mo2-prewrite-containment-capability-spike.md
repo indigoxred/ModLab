@@ -880,6 +880,14 @@ deterministic violation.
 
 `adjudicate_run()` computes `Supported` only from four immutable passing result IDs. Any safety failure is `Rejected`; missing or incomplete machine evidence is `Incomplete`. Every earlier immutable result remains visible after a later explicit clean run. A prior `Failed` result causes `Rejected` and cannot be hidden by a later `Passed` result.
 
+The command fingerprint also binds the exact scenario-classification policy.
+The corrected empty-output rule is `scenario-classification-v2`. Immutable
+legacy results remain parseable and visible, but a legacy fingerprint is not a
+predecessor of the corrected-policy cohort. Therefore an over-conservative
+legacy diagnostic cannot permanently poison a corrected-policy capability
+decision, while a `Failed` result still cannot be hidden by a later `Passed`
+result within the same exact policy fingerprint.
+
 - [ ] **Step 6: Run focused tests**
 
 Run: `& 'C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m unittest tests.test_mo2_containment_store tests.test_mo2_containment_service -v`
@@ -1126,6 +1134,11 @@ An unexpected NXM-association prompt is one such UI mismatch. If it prevents
 the operator from performing the requested install, the absence of the
 expected staging folder is `Incomplete`, not a proven `Failed`, unless separate
 positive breach evidence exists.
+
+The first diagnostic run used the legacy classification fingerprint and is
+retained read-only. Prepare the replacement run under
+`scenario-classification-v2`; do not edit, delete, reuse, or list the legacy run
+as predecessor evidence for the corrected-policy decision.
 
 - [ ] **Step 5: Adjudicate and inspect the decision**
 

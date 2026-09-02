@@ -366,6 +366,32 @@ class Mo2ContainmentSerializationTests(unittest.TestCase):
         with self.assertRaisesRegex(ContainmentFormatError, "positive breach"):
             scenario_result_to_bytes(result, outcome)
 
+    def test_legacy_empty_adoption_failure_remains_readable(self):
+        # Catches a corrected classifier making an immutable v1 diagnostic unreadable.
+        outcome = valid_watch_outcome(scenario=ContainmentScenario.NEW_FOLDER)
+        result = replace(
+            valid_scenario_result(ContainmentScenario.NEW_FOLDER, outcome),
+            outcome=ScenarioOutcome.FAILED,
+            staging_new_names=(),
+            staging_output_names=(),
+            output_observation_complete=False,
+            adopted_name=None,
+            adopted_tree=None,
+            adopted_integrity=None,
+            reasons=(
+                "adoption-proof-unavailable:ContainmentSafetyError",
+                "output-observation-incomplete",
+                "staging-new-folder-set-invalid",
+            ),
+        )
+
+        self.assertEqual(
+            result,
+            scenario_result_from_bytes(
+                scenario_result_to_bytes(result, outcome), outcome
+            ),
+        )
+
     def test_protected_delta_is_positive_failure_proof_without_complete_watch(self):
         outcome = incomplete_watch_outcome()
         result = replace(

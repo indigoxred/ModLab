@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -1343,6 +1344,77 @@ class ContainmentServiceTests(unittest.TestCase):
             request = store.load_request(new_run)
             self.assertEqual([RUN_ID], request["predecessorRunIds"])
             self.assertIsNone(request["retryOf"])
+
+    def test_legacy_nonterminal_classifier_run_does_not_block_current_policy(self):
+        # Catches a corrected classification policy inheriting a false v1 failure.
+        with tempfile.TemporaryDirectory(prefix="modlab-policy-lineage-") as directory:
+            source = Path(directory) / "source"
+            layout = initialize_workspace(source)
+            steam = Path(directory) / "steam"
+            store = ContainmentStore(layout.mo2_containment_validation)
+            artifact = "artifact:policy-lineage"
+            legacy_document = {
+                "mechanism": "isolated-low-integrity-junction-projection-v1",
+                "mo2ArtifactId": artifact,
+                "scenarios": [item.value for item in ContainmentScenario],
+                "sourceWorkspace": os.path.normcase(
+                    os.path.normpath(str(source.absolute()))
+                ),
+                "steamRoot": os.path.normcase(
+                    os.path.normpath(str(steam.absolute()))
+                ),
+            }
+            legacy_fingerprint = (
+                "containment-command-sha256:"
+                + hashlib.sha256(
+                    (
+                        json.dumps(
+                            legacy_document,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode()
+                ).hexdigest()
+            )
+            store.write_intent(
+                RUN_ID,
+                {
+                    "schemaVersion": 1,
+                    "runId": RUN_ID,
+                    "mechanism": legacy_document["mechanism"],
+                    "sourceWorkspace": legacy_document["sourceWorkspace"],
+                    "mo2ArtifactId": artifact,
+                    "steamRoot": legacy_document["steamRoot"],
+                    "commandFingerprint": legacy_fingerprint,
+                    "predecessorRunIds": [],
+                    "retryOf": None,
+                },
+            )
+
+            with (
+                patch.object(
+                    service,
+                    "prepare_containment_fixture",
+                    side_effect=lambda *_args, **kwargs: SimpleNamespace(
+                        scenario=_args[-1], fixture_parent=kwargs["fixture_parent"]
+                    ),
+                ),
+                patch.object(
+                    service,
+                    "_fixture_record",
+                    side_effect=lambda fixture, _steam: prepared_record(
+                        Path(fixture.fixture_parent), fixture.scenario, steam
+                    ),
+                ),
+            ):
+                new_run = service.prepare_run(
+                    source, artifact, steam, store.root
+                )
+
+            current = store.load_intent(new_run)
+            self.assertEqual([], current["predecessorRunIds"])
+            self.assertNotEqual(legacy_fingerprint, current["commandFingerprint"])
 
     def test_same_command_prepare_calls_are_serialized_before_snapshot(self):
         with tempfile.TemporaryDirectory(prefix="modlab-prepare-order-") as directory:
