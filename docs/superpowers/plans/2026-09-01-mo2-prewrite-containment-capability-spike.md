@@ -902,10 +902,15 @@ same exact policy fingerprint.
 The command fingerprint also binds the disposable shell-environment protocol.
 `disposable-shell-environment-v2` creates a direct `Desktop` directory beneath
 the disposable `USERPROFILE` before the profile tree is labeled Low. This keeps
-the Windows file picker inside a complete disposable shell profile. Immutable
-pre-v2 fixture results remain readable, but are not predecessors of the
-corrected fixture cohort; all results within one exact fixture-policy hash still
-retain normal failed-history precedence.
+the Windows file picker inside a complete disposable shell profile.
+`disposable-shell-environment-v3` additionally writes
+`Fomod%20Installer\use_any_file=true` only to the disposable stage
+`ModOrganizer.ini` before Low labeling. This lets MO2 2.5.2 evaluate the
+fixture's projected non-plugin `marker.txt` dependency while leaving the source
+MO2 configuration absent and unchanged. Immutable pre-v3 fixture results remain
+readable, but are not predecessors of the corrected fixture cohort; all results
+within one exact fixture-policy hash still retain normal failed-history
+precedence.
 
 - [ ] **Step 6: Run focused tests**
 
@@ -1163,10 +1168,18 @@ but recorded an over-conservative `Failed` because v2 did not recognize MO2's
 generated `meta.ini`. All three are retained read-only. The replacement v3 run
 passed NewFolder and Merge, then stopped `Incomplete` when MO2 safely
 replaced only the disposable projection but v3 could not re-establish and prove
-that projection. It is also retained read-only. Prepare the replacement run
-under `scenario-classification-v4` and
-`disposable-shell-environment-v2`; do not edit, delete, reuse, or list any
-diagnostic run as predecessor evidence for the corrected-policy decision.
+that projection. It is also retained read-only. The first v4/v2 run,
+`containment-run:a8131800fb524a6a9aac567c11382a00`, passed NewFolder, Merge,
+and Replace. Its FomodDependency scenario safely produced only `always.txt` and
+MO2's `meta.ini`, then recorded `Failed` because the v2 stage configuration made
+MO2 treat the non-plugin `marker.txt` dependency as missing. It recorded no
+source, game, or production-MO2 changes and remains immutable and read-only.
+
+Prepare the corrected run under `scenario-classification-v4` and
+`disposable-shell-environment-v3`. Verify its command fingerprint differs from
+the retained v4/v2 run and its `predecessorRunIds` is empty. Do not edit, delete,
+reuse, or list any diagnostic run as predecessor evidence for the corrected
+fixture-policy decision.
 
 - [ ] **Step 5: Adjudicate and inspect the decision**
 
