@@ -8,7 +8,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from modlab.adapters.mo2.ini import decode_qsettings_path, parse_ini_bytes
+from modlab.adapters.mo2.ini import (
+    decode_qsettings_path,
+    parse_ini_bytes,
+    parse_qsettings_bool,
+)
 from modlab.adapters.skyrim.scanner import discover_skyrim_steam
 from modlab.artifacts.vault import ArchiveVault
 from modlab.validation import mo2_containment_fixtures as fixtures
@@ -594,6 +598,21 @@ class ContainmentFixtureTests(unittest.TestCase):
         )
         self.assertNotIn("MODLAB_MO2_CACHE_DIRECTORY", fixture.stage_environment)
         self.assertNotIn("MODLAB_MO2_LOG_DIRECTORY", fixture.stage_environment)
+
+    def test_fixture_enables_non_plugin_fomod_dependencies_only_in_stage(self):
+        # Catches marker.txt being treated as unconditionally missing by MO2's
+        # FOMOD plugin.
+        fixture = prepare_fixture_with_fake_bootstrap(self.root)
+        stage = parse_ini_bytes(
+            (fixture.stage_layout.skyrim_mo2_app / "ModOrganizer.ini").read_bytes()
+        )
+        source = parse_ini_bytes(
+            (fixture.source_layout.skyrim_mo2_app / "ModOrganizer.ini").read_bytes()
+        )
+
+        key = "Fomod%20Installer\\use_any_file"
+        self.assertTrue(parse_qsettings_bool(stage.get("Plugins", key)))
+        self.assertIsNone(source.get("Plugins", key))
 
     def test_fixture_suppresses_nxm_registration_only_in_the_disposable_stage(self):
         # Catches MO2 opening an OS-association prompt before the operator scenario.

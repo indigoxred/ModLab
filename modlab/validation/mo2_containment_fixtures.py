@@ -227,6 +227,7 @@ def prepare_containment_fixture(
     (stage_layout.skyrim_mo2_app / "nxmhandler.ini").write_bytes(
         b"[General]\r\nnoregister=true\r\n"
     )
+    _enable_stage_fomod_file_dependencies(stage_layout.skyrim_mo2_app)
 
     stage_environment = _prepare_stage_environment(run_root, stage_layout)
     _verify_stage_integrity_before_projection(stage_environment)
@@ -419,6 +420,18 @@ def _write_documents_root(root: Path) -> Path:
     }.items():
         (ini / name).write_bytes(data)
     return documents
+
+
+def _enable_stage_fomod_file_dependencies(app: Path) -> None:
+    manager_ini = _require_direct_regular_file(
+        Path(app) / "ModOrganizer.ini", "disposable stage ModOrganizer.ini"
+    )
+    content = manager_ini.read_bytes()
+    if content and not content.endswith(b"\n"):
+        content += b"\n"
+    manager_ini.write_bytes(
+        content + b"[Plugins]\nFomod%20Installer\\use_any_file=true\n"
+    )
 
 
 def _require_created_receipt(applied) -> None:
