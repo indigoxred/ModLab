@@ -906,9 +906,10 @@ the Windows file picker inside a complete disposable shell profile.
 `disposable-shell-environment-v3` additionally writes
 `Fomod%20Installer\use_any_file=true` only to the disposable stage
 `ModOrganizer.ini` before Low labeling. This lets MO2 2.5.2 evaluate the
-fixture's projected non-plugin `marker.txt` dependency while leaving the source
-MO2 configuration absent and unchanged. Immutable pre-v3 fixture results remain
-readable, but are not predecessors of the corrected fixture cohort; all results
+fixture's projected non-plugin `marker.txt` dependency while leaving that
+setting absent from, and leaving unchanged, the source `ModOrganizer.ini`.
+Immutable pre-v3 fixture results remain readable, but are not predecessors of
+the corrected fixture cohort; all results
 within one exact fixture-policy hash still retain normal failed-history
 precedence.
 
