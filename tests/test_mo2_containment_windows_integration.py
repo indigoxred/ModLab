@@ -26,6 +26,12 @@ class Mo2ContainmentWindowsIntegrationTests(unittest.TestCase):
                 IntegrityLevel.LOW,
                 inspect_path_integrity(fixture.stage_layout.skyrim_mo2),
             )
+            self.assertEqual(
+                IntegrityLevel.LOW,
+                inspect_path_integrity(
+                    Path(fixture.stage_environment["USERPROFILE"]) / "Desktop"
+                ),
+            )
             self.assertGreaterEqual(
                 inspect_path_integrity(fixture.source_layout.skyrim_mo2),
                 IntegrityLevel.MEDIUM,

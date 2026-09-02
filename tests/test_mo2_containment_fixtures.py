@@ -1,5 +1,6 @@
 import hashlib
 import os
+import stat
 import tempfile
 import unittest
 import zipfile
@@ -550,6 +551,29 @@ class ContainmentFixtureTests(unittest.TestCase):
             fixtures._prepare_stage_environment(self.root, layout)
 
         self.assertIn(layout.skyrim_mo2, labels)
+
+    def test_stage_user_profile_contains_a_direct_desktop_before_launch(self):
+        # Catches the Windows file picker escaping a disposable profile with no Desktop.
+        layout = initialize_workspace(self.root / "stage-workspace")
+        user_profile = self.root / "stage-environment" / "USERPROFILE"
+        desktop = user_profile / "Desktop"
+
+        def observe_label(path: Path) -> None:
+            if Path(path) == user_profile:
+                self.assertTrue(desktop.is_dir())
+
+        with patch.object(
+            fixtures,
+            "set_low_integrity_tree",
+            side_effect=observe_label,
+        ):
+            environment = fixtures._prepare_stage_environment(self.root, layout)
+
+        self.assertEqual(str(user_profile), environment["USERPROFILE"])
+        self.assertTrue(desktop.is_dir())
+        self.assertFalse(desktop.is_symlink())
+        attributes = getattr(desktop.stat(follow_symlinks=False), "st_file_attributes", 0)
+        self.assertFalse(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
     def test_fixture_exposes_portable_cache_and_logs_under_the_stage_base_directory(self):
         # Catches fixture cache/log paths which MO2 portable mode cannot consume.

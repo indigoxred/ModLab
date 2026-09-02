@@ -749,7 +749,7 @@ For each scenario, verify the MO2 artifact in the source vault, import the exact
 
 Populate source `mods/Protected Existing` with `marker.txt`, `meshes/canary.bin`, and deterministic `meta.ini`. Add `+Protected Existing` to source Lab and Play. Copy the exact profile bytes into stage, replace stage's empty mod folder with a verified junction projection, and re-run the existing MO2 scanner against both instances.
 
-Create separate low-integrity scenario-local directories for stage `downloads`, `profiles`, `mods`, `overwrite`, `cache`, `logs`, `TEMP`, `TMP`, `APPDATA`, `LOCALAPPDATA`, `USERPROFILE`, and `HOME`. Pass their paths only in the child environment/configuration; never mutate the parent environment. Resolve `FOLDERID_LocalAppDataLow` and the current Low temporary directory before launch, de-duplicate equal file identities, and watch them as `ExternalLocalLow`/`ExternalTempLow`. A write there is an outside-ModLab containment failure, not an allowlisted MO2 side effect.
+Create separate low-integrity scenario-local directories for stage `downloads`, `profiles`, `mods`, `overwrite`, `cache`, `logs`, `TEMP`, `TMP`, `APPDATA`, `LOCALAPPDATA`, `USERPROFILE`, and `HOME`. Create a direct `Desktop` child beneath the disposable `USERPROFILE` before labeling that profile tree Low. Pass their paths only in the child environment/configuration; never mutate the parent environment. Resolve `FOLDERID_LocalAppDataLow` and the current Low temporary directory before launch, de-duplicate equal file identities, and watch them as `ExternalLocalLow`/`ExternalTempLow`. A write there is an outside-ModLab containment failure, not an allowlisted MO2 side effect.
 
 - [ ] **Step 6: Run focused tests**
 
@@ -887,6 +887,14 @@ predecessor of the corrected-policy cohort. Therefore an over-conservative
 legacy diagnostic cannot permanently poison a corrected-policy capability
 decision, while a `Failed` result still cannot be hidden by a later `Passed`
 result within the same exact policy fingerprint.
+
+The command fingerprint also binds the disposable shell-environment protocol.
+`disposable-shell-environment-v2` creates a direct `Desktop` directory beneath
+the disposable `USERPROFILE` before the profile tree is labeled Low. This keeps
+the Windows file picker inside a complete disposable shell profile. Immutable
+pre-v2 fixture results remain readable, but are not predecessors of the
+corrected fixture cohort; all results within one exact fixture-policy hash still
+retain normal failed-history precedence.
 
 - [ ] **Step 6: Run focused tests**
 
@@ -1135,10 +1143,13 @@ the operator from performing the requested install, the absence of the
 expected staging folder is `Incomplete`, not a proven `Failed`, unless separate
 positive breach evidence exists.
 
-The first diagnostic run used the legacy classification fingerprint and is
-retained read-only. Prepare the replacement run under
-`scenario-classification-v2`; do not edit, delete, reuse, or list the legacy run
-as predecessor evidence for the corrected-policy decision.
+The first diagnostic run used the legacy classification fingerprint. The
+second used `scenario-classification-v2` but the pre-v2 disposable shell
+environment and stopped `Incomplete` when the Windows file picker found no
+disposable Desktop. Both are retained read-only. Prepare the replacement run
+under `scenario-classification-v2` and `disposable-shell-environment-v2`; do not
+edit, delete, reuse, or list either diagnostic run as predecessor evidence for
+the corrected-policy decision.
 
 - [ ] **Step 5: Adjudicate and inspect the decision**
 

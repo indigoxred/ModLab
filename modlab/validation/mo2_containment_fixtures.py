@@ -474,6 +474,8 @@ def _prepare_stage_environment(run_root: Path, layout: WorkspaceLayout) -> dict[
     }
     for path in paths.values():
         _require_direct_directory(path, create=True)
+    _require_direct_directory(paths["USERPROFILE"] / "Desktop", create=True)
+    for path in paths.values():
         set_low_integrity_tree(path)
     environment = dict(os.environ)
     environment.update({name: str(path) for name, path in paths.items() if name.isupper()})
