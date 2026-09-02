@@ -239,10 +239,30 @@ class ContainmentStore:
         ScenarioState.RECOVERY_REQUIRED: set(),
     }
 
-    def __init__(self, validation_root: Path):
+    def __init__(
+        self,
+        validation_root: Path,
+        *,
+        _effect_recorder: Callable[[Path], None] | None = None,
+    ):
+        self._effect_recorder = _effect_recorder
+        self._open_root(validation_root, create=True)
+
+    @classmethod
+    def open_readonly(cls, validation_root: Path) -> "ContainmentStore":
+        """Open one existing direct validation root without preparing any path."""
+        store = cls.__new__(cls)
+        store._effect_recorder = None
+        store._open_root(validation_root, create=False)
+        return store
+
+    def _open_root(self, validation_root: Path, *, create: bool) -> None:
         root = Path(validation_root).expanduser().absolute()
         self.root = root
-        self._ensure_direct_directory(root)
+        if create:
+            self._ensure_direct_directory(root)
+        else:
+            self._require_existing_direct_directory(root, "validation root")
         try:
             resolved = root.resolve(strict=True)
         except OSError as error:
@@ -1437,6 +1457,100 @@ class ContainmentStore:
             raise ContainmentStoreError("run ID is malformed")
         return match.group(1)
 
+    def _effect_target_observation(
+        self,
+        target: Path,
+        label: str,
+    ) -> tuple[tuple[int, ...], bytes] | None:
+        try:
+            before = target.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise ContainmentStoreError(
+                f"direct-write effect observation is unavailable for {label}: {error}"
+            ) from error
+        if not stat.S_ISREG(before.st_mode):
+            raise ContainmentStoreError(
+                f"direct-write effect observation requires a regular {label}"
+            )
+        self._reject_redirect(target)
+        try:
+            data = target.read_bytes()
+            after = target.lstat()
+        except OSError as error:
+            raise ContainmentStoreError(
+                f"direct-write effect observation is unavailable for {label}: {error}"
+            ) from error
+        identity_before = (
+            int(before.st_mode),
+            int(before.st_dev),
+            int(before.st_ino),
+            int(before.st_size),
+            int(before.st_mtime_ns),
+            int(before.st_ctime_ns),
+            int(getattr(before, "st_file_attributes", 0)),
+        )
+        identity_after = (
+            int(after.st_mode),
+            int(after.st_dev),
+            int(after.st_ino),
+            int(after.st_size),
+            int(after.st_mtime_ns),
+            int(after.st_ctime_ns),
+            int(getattr(after, "st_file_attributes", 0)),
+        )
+        if identity_before != identity_after:
+            raise ContainmentStoreError(
+                f"direct-write effect observation changed while reading {label}"
+            )
+        return identity_after, data
+
+    def _observe_failed_immutable_write(
+        self,
+        target: Path,
+        data: bytes,
+        label: str,
+    ) -> tuple[bool, str | None]:
+        try:
+            observed = self._effect_target_observation(target, label)
+        except ContainmentStoreError as error:
+            return False, str(error)
+        if observed is None:
+            return False, None
+        if observed[1] != data:
+            return False, (
+                f"direct-write effect observation found unexpected bytes for {label}"
+            )
+        self._record_written_path(target)
+        return True, None
+
+    def _observe_failed_replacement(
+        self,
+        target: Path,
+        before: tuple[tuple[int, ...], bytes],
+        data: bytes,
+        label: str,
+    ) -> tuple[bool, str | None]:
+        try:
+            observed = self._effect_target_observation(target, label)
+        except ContainmentStoreError as error:
+            return False, str(error)
+        if observed is None:
+            return False, f"direct-write effect observation found missing {label}"
+        if observed == before:
+            return False, None
+        self._record_written_path(target)
+        if observed[1] != data:
+            return True, (
+                f"direct-write effect observation found unexpected bytes for {label}"
+            )
+        return True, None
+
+    @staticmethod
+    def _effect_observation_suffix(detail: str | None) -> str:
+        return "" if detail is None else f"; {detail}"
+
     def _write_immutable(self, target: Path, data: bytes, label: str) -> bool:
         if target.exists():
             existing = self._read(target, label)
@@ -1453,6 +1567,7 @@ class ContainmentStore:
                     return candidate
 
                 publish_new_pinned(target, data, validate)
+                self._record_written_path(target)
                 return False
             except FileExistsError:
                 existing = self._read(target, label)
@@ -1462,26 +1577,47 @@ class ContainmentStore:
                     )
                 return True
             except ExactObjectOwnershipError as error:
+                _observed, effect_detail = self._observe_failed_immutable_write(
+                    target,
+                    data,
+                    label,
+                )
                 try:
                     resolve_retained_ownership(error)
                 except ExactObjectOwnershipError as unresolved:
                     error = unresolved
                 else:
                     raise ContainmentStoreError(
-                        f"exact immutable {label} cleanup completed after publication failure"
+                        "exact immutable "
+                        f"{label} cleanup completed after publication failure"
+                        f"{self._effect_observation_suffix(effect_detail)}"
                     ) from error
                 resolved = ContainmentStoreOwnershipError(
-                    f"cannot exactly create immutable {label}; live retained ownership requires resolution: {error}",
+                    f"cannot exactly create immutable {label}; live retained ownership "
+                    f"requires resolution: {error}"
+                    f"{self._effect_observation_suffix(effect_detail)}",
                     error,
                 )
                 raise resolved from error
             except ExactObjectError as error:
+                _observed, effect_detail = self._observe_failed_immutable_write(
+                    target,
+                    data,
+                    label,
+                )
                 raise ContainmentStoreError(
                     f"cannot exactly create immutable {label}: {error}"
+                    f"{self._effect_observation_suffix(effect_detail)}"
                 ) from error
             except OSError as error:
+                _observed, effect_detail = self._observe_failed_immutable_write(
+                    target,
+                    data,
+                    label,
+                )
                 raise ContainmentStoreError(
                     f"cannot atomically create {label} through retained ownership: {error}"
+                    f"{self._effect_observation_suffix(effect_detail)}"
                 ) from error
         part = target.parent / f".{target.name}.{uuid.uuid4().hex}.part"
         promoted = False
@@ -1493,6 +1629,7 @@ class ContainmentStore:
             self._reject_redirect(part)
             _promote_no_replace_posix(part, target)
             promoted = True
+            self._record_written_path(target)
             if self._read(target, label) != data:
                 raise ContainmentStoreError(f"stored {label} differs after atomic promotion")
             return False
@@ -1504,9 +1641,15 @@ class ContainmentStore:
         except ContainmentStoreError:
             raise
         except OSError as error:
-            phase = "after promotion" if promoted else "before promotion"
+            observed, effect_detail = self._observe_failed_immutable_write(
+                target,
+                data,
+                label,
+            )
+            phase = "after promotion" if promoted or observed else "before promotion"
             raise ContainmentStoreError(
                 f"cannot atomically create {label} {phase}: {error}"
+                f"{self._effect_observation_suffix(effect_detail)}"
             ) from error
         finally:
             try:
@@ -1525,6 +1668,9 @@ class ContainmentStore:
     ) -> None:
         if self._read(target, label) != expected:
             raise ContainmentStoreError(f"{label} changed before atomic replacement")
+        before = self._effect_target_observation(target, label)
+        if before is None or before[1] != expected:
+            raise ContainmentStoreError(f"{label} changed before atomic replacement")
         part = target.parent / f".{target.name}.{uuid.uuid4().hex}.part"
         try:
             with part.open("xb") as handle:
@@ -1535,12 +1681,22 @@ class ContainmentStore:
             if self._read(target, label) != expected:
                 raise ContainmentStoreError(f"{label} changed before atomic replacement")
             _replace_durable(part, target)
+            self._record_written_path(target)
             if self._read(target, label) != data:
                 raise ContainmentStoreError(f"{label} differs after atomic replacement")
         except ContainmentStoreError:
             raise
         except OSError as error:
-            raise ContainmentStoreError(f"cannot atomically replace {label}: {error}") from error
+            _observed, effect_detail = self._observe_failed_replacement(
+                target,
+                before,
+                data,
+                label,
+            )
+            raise ContainmentStoreError(
+                f"cannot atomically replace {label}: {error}"
+                f"{self._effect_observation_suffix(effect_detail)}"
+            ) from error
         finally:
             try:
                 part.unlink()
@@ -1548,6 +1704,10 @@ class ContainmentStore:
                 pass
             except OSError:
                 pass
+
+    def _record_written_path(self, path: Path) -> None:
+        if self._effect_recorder is not None:
+            self._effect_recorder(path)
 
     def _read(self, target: Path, label: str) -> bytes:
         try:

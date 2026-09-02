@@ -36,7 +36,10 @@ from modlab.validation.mo2_containment_service import (
     evaluate_scenario,
     recover_scenario,
 )
-from modlab.validation.mo2_containment_store import ContainmentStore
+from modlab.validation.mo2_containment_store import (
+    ContainmentStore,
+    ContainmentStoreError,
+)
 from modlab.validation import mo2_containment_service as service
 from modlab.validation.windows_watch_protocol import (
     CLAIM_NAME,
@@ -436,6 +439,50 @@ def evidence(
 
 
 class ContainmentServiceTests(unittest.TestCase):
+    def test_historical_result_load_returns_all_changes_without_write_effects(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-result-effects-") as directory:
+            store = ContainmentStore(Path(directory))
+            scenario = ContainmentScenario.MERGE_EXISTING
+            observed = watch_outcome(
+                scenario,
+                events=(
+                    event("SourceMods"),
+                    WatcherEvent(2, "BoundedGame", "Modified", "Skyrim.esm"),
+                ),
+            )
+            evaluated = evaluate_scenario(
+                evidence(
+                    scenario,
+                    watch_outcome=observed,
+                    production_backup_names=("Protected Existing_backup",),
+                )
+            )
+            store.write_watch_outcome(observed)
+            store.write_result(evaluated)
+            before = tuple(sorted(path.relative_to(store.root) for path in store.root.rglob("*")))
+
+            loaded = service.load_result(store.root, RUN_ID, scenario)
+
+            after = tuple(sorted(path.relative_to(store.root) for path in store.root.rglob("*")))
+            self.assertEqual(evaluated, loaded.value)
+            self.assertEqual(before, after)
+            self.assertEqual((), loaded.effects.written_paths)
+            self.assertEqual((), loaded.effects.child_mutation_roots)
+            self.assertIsNone(loaded.effects.watcher_pid)
+            self.assertIsNone(loaded.effects.mo2_pid)
+            self.assertEqual(
+                ("SourceMods: Modified marker.txt",),
+                loaded.effects.source_changes,
+            )
+            self.assertEqual(
+                ("BoundedGame: Modified Skyrim.esm",),
+                loaded.effects.game_changes,
+            )
+            self.assertEqual(
+                ("Observed production backup: Protected Existing_backup",),
+                loaded.effects.production_mo2_changes,
+            )
+
     def test_replaced_baseline_projection_is_classified_for_quarantine(self):
         with tempfile.TemporaryDirectory(prefix="modlab-replaced-projection-") as directory:
             root = Path(directory)
@@ -962,6 +1009,7 @@ class ContainmentServiceTests(unittest.TestCase):
 
             def fake_prepare(_source, _artifact, _steam, _validation, scenario, *, fixture_parent=None):
                 parent = Path(fixture_parent)
+                parent.mkdir(parents=True)
                 calls.append((scenario, parent))
                 run_id = "containment-run:" + parent.parents[1].name
                 observed_intents.append(
@@ -989,9 +1037,32 @@ class ContainmentServiceTests(unittest.TestCase):
                 patch.object(service, "prepare_containment_fixture", side_effect=fake_prepare),
                 patch.object(service, "_fixture_record", side_effect=fake_record),
             ):
-                run_id = service.prepare_run(source, "artifact:abc", steam, validation)
+                prepared = service.prepare_run(
+                    source, "artifact:abc", steam, validation
+                )
+
+            self.assertTrue(hasattr(prepared, "effects"))
+            run_id = prepared.value
 
             run_root = validation / run_id.removeprefix("containment-run:")
+            fixture_roots = tuple(
+                run_root / "fixtures" / item.value
+                for item in ContainmentScenario
+            )
+            self.assertEqual(fixture_roots, prepared.effects.child_mutation_roots)
+            self.assertEqual(
+                (
+                    run_root / "intent.json",
+                    *fixture_roots,
+                    run_root / "request.json",
+                ),
+                prepared.effects.written_paths,
+            )
+            self.assertIsNone(prepared.effects.watcher_pid)
+            self.assertIsNone(prepared.effects.mo2_pid)
+            self.assertEqual((), prepared.effects.source_changes)
+            self.assertEqual((), prepared.effects.game_changes)
+            self.assertEqual((), prepared.effects.production_mo2_changes)
             self.assertEqual(tuple(ContainmentScenario), tuple(item[0] for item in calls))
             self.assertTrue(all(parent.is_relative_to(run_root) for _, parent in calls))
             self.assertEqual(
@@ -1014,6 +1085,107 @@ class ContainmentServiceTests(unittest.TestCase):
                     ).scenario
                     for scenario in ContainmentScenario
                 ),
+            )
+
+    def test_prepare_pre_mutation_refusal_does_not_claim_fixture_root(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-prepare-refusal-effects-") as directory:
+            source = Path(directory) / "source"
+            layout = initialize_workspace(source)
+            steam = Path(directory) / "steam"
+            fixture_root = (
+                layout.mo2_containment_validation
+                / ("d" * 32)
+                / "fixtures"
+                / ContainmentScenario.NEW_FOLDER.value
+            )
+
+            def refuse_before_mutation(*_args, fixture_parent=None, **_kwargs):
+                self.assertEqual(fixture_root, Path(fixture_parent))
+                self.assertFalse(fixture_root.exists())
+                raise RuntimeError("fixture rejected before mutation")
+
+            with (
+                patch.object(
+                    service.uuid,
+                    "uuid4",
+                    return_value=SimpleNamespace(hex="d" * 32),
+                ),
+                patch.object(
+                    service,
+                    "prepare_containment_fixture",
+                    side_effect=refuse_before_mutation,
+                ),
+                self.assertRaises(service.ContainmentOperationError) as raised,
+            ):
+                service.prepare_run(
+                    source,
+                    "artifact:pre-mutation-refusal",
+                    steam,
+                    layout.mo2_containment_validation,
+                )
+
+            self.assertFalse(fixture_root.exists())
+            self.assertEqual((), raised.exception.effects.child_mutation_roots)
+            self.assertEqual(
+                (
+                    layout.mo2_containment_validation
+                    / ("d" * 32)
+                    / "intent.json",
+                ),
+                raised.exception.effects.written_paths,
+            )
+
+    def test_prepare_partial_fixture_failure_reports_only_entered_root(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-prepare-partial-effects-") as directory:
+            source = Path(directory) / "source"
+            layout = initialize_workspace(source)
+            steam = Path(directory) / "steam"
+            fixture_root = (
+                layout.mo2_containment_validation
+                / ("e" * 32)
+                / "fixtures"
+                / ContainmentScenario.NEW_FOLDER.value
+            )
+
+            def fail_after_mutation(*_args, fixture_parent=None, **_kwargs):
+                entered = Path(fixture_parent)
+                entered.mkdir(parents=True)
+                (entered / "partial.marker").write_bytes(b"entered\n")
+                raise RuntimeError("fixture failed after mutation")
+
+            with (
+                patch.object(
+                    service.uuid,
+                    "uuid4",
+                    return_value=SimpleNamespace(hex="e" * 32),
+                ),
+                patch.object(
+                    service,
+                    "prepare_containment_fixture",
+                    side_effect=fail_after_mutation,
+                ),
+                self.assertRaises(service.ContainmentOperationError) as raised,
+            ):
+                service.prepare_run(
+                    source,
+                    "artifact:partial-fixture",
+                    steam,
+                    layout.mo2_containment_validation,
+                )
+
+            self.assertTrue((fixture_root / "partial.marker").is_file())
+            self.assertEqual(
+                (fixture_root,),
+                raised.exception.effects.child_mutation_roots,
+            )
+            self.assertEqual(
+                (
+                    layout.mo2_containment_validation
+                    / ("e" * 32)
+                    / "intent.json",
+                    fixture_root,
+                ),
+                raised.exception.effects.written_paths,
             )
 
     def test_prepare_run_propagates_uncertain_run_enumeration_before_fixtures(self):
@@ -1058,8 +1230,10 @@ class ContainmentServiceTests(unittest.TestCase):
             record = records[1]
             observed = []
 
-            def fake_start(_request):
+            def fake_start(request):
                 observed.append(store.load_protected_state(RUN_ID, record.scenario, "before"))
+                request.evidence_root.mkdir(parents=True, exist_ok=True)
+                (request.evidence_root / "request.json").write_bytes(b"started\n")
                 return 42
 
             with (
@@ -1069,9 +1243,167 @@ class ContainmentServiceTests(unittest.TestCase):
                 patch.object(service, "_watch_roots", return_value=()),
                 patch.object(service, "start_watch", side_effect=fake_start),
             ):
-                armed = service.arm_scenario(store.root, RUN_ID, record.scenario)
+                armed_receipt = service.arm_scenario(
+                    store.root, RUN_ID, record.scenario
+                )
+            armed = armed_receipt.value
+            watch_root = store.watch_path(RUN_ID, record.scenario)
             self.assertEqual(ScenarioState.ARMED, armed.state)
             self.assertEqual([protected()], observed)
+            self.assertEqual(42, armed_receipt.effects.watcher_pid)
+            self.assertIsNone(armed_receipt.effects.mo2_pid)
+            self.assertEqual((watch_root,), armed_receipt.effects.child_mutation_roots)
+            self.assertEqual(
+                (
+                    store.scenario_path(RUN_ID, record.scenario) / "before.json",
+                    store.journal_path(RUN_ID, record.scenario),
+                    watch_root,
+                ),
+                armed_receipt.effects.written_paths,
+            )
+
+    def test_arm_pre_mutation_watch_refusal_does_not_claim_watch_root(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-arm-watch-refusal-") as directory:
+            root = Path(directory)
+            store = ContainmentStore(root / "validation")
+            record = write_run_identity(
+                store,
+                RUN_ID,
+                root / "source-workspace",
+                root / "steam",
+                "artifact:watch-refusal",
+            )[0]
+            watch_root = store.watch_path(RUN_ID, record.scenario)
+
+            def refuse_before_mutation(request):
+                self.assertEqual(watch_root, request.evidence_root)
+                self.assertTrue(watch_root.is_dir())
+                self.assertEqual((), tuple(watch_root.iterdir()))
+                raise RuntimeError("watch request rejected before mutation")
+
+            with (
+                patch.object(service, "_capture_protected", return_value=protected()),
+                patch.object(
+                    service,
+                    "inspect_path_integrity",
+                    side_effect=(
+                        service.IntegrityLevel.MEDIUM,
+                        service.IntegrityLevel.LOW,
+                    ),
+                ),
+                patch.object(service, "_projection_state", return_value=(1, True, True)),
+                patch.object(service, "_watch_roots", return_value=()),
+                patch.object(service, "start_watch", side_effect=refuse_before_mutation),
+                self.assertRaises(service.ContainmentOperationError) as raised,
+            ):
+                service.arm_scenario(store.root, RUN_ID, record.scenario)
+
+            self.assertTrue(watch_root.is_dir())
+            self.assertEqual((), tuple(watch_root.iterdir()))
+            self.assertIsNone(raised.exception.effects.watcher_pid)
+            self.assertEqual((), raised.exception.effects.child_mutation_roots)
+            self.assertEqual(
+                (
+                    store.scenario_path(RUN_ID, record.scenario) / "before.json",
+                    store.journal_path(RUN_ID, record.scenario),
+                ),
+                raised.exception.effects.written_paths,
+            )
+
+    def test_arm_fails_closed_when_successful_watch_effects_cannot_be_observed(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-arm-watch-observation-") as directory:
+            root = Path(directory)
+            store = ContainmentStore(root / "validation")
+            record = write_run_identity(
+                store,
+                RUN_ID,
+                root / "source-workspace",
+                root / "steam",
+                "artifact:watch-observation",
+            )[0]
+            watch_root = store.watch_path(RUN_ID, record.scenario)
+
+            def start_successfully(request):
+                (request.evidence_root / "request.json").write_bytes(b"started\n")
+                return 73
+
+            with (
+                patch.object(service, "_capture_protected", return_value=protected()),
+                patch.object(
+                    service,
+                    "inspect_path_integrity",
+                    side_effect=(
+                        service.IntegrityLevel.MEDIUM,
+                        service.IntegrityLevel.LOW,
+                    ),
+                ),
+                patch.object(service, "_projection_state", return_value=(1, True, True)),
+                patch.object(service, "_watch_roots", return_value=()),
+                patch.object(service, "start_watch", side_effect=start_successfully),
+                patch.object(
+                    service,
+                    "_mutation_root_observation",
+                    side_effect=((("before",),), None),
+                ),
+                self.assertRaises(service.ContainmentOperationError) as raised,
+            ):
+                service.arm_scenario(store.root, RUN_ID, record.scenario)
+
+            self.assertTrue((watch_root / "request.json").is_file())
+            self.assertIn("effect observation is unavailable", str(raised.exception))
+            self.assertIsNone(raised.exception.effects.watcher_pid)
+            self.assertNotIn(watch_root, raised.exception.effects.written_paths)
+
+    def test_arm_nests_watch_failure_when_post_effects_cannot_be_observed(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-arm-watch-failure-observation-") as directory:
+            root = Path(directory)
+            store = ContainmentStore(root / "validation")
+            record = write_run_identity(
+                store,
+                RUN_ID,
+                root / "source-workspace",
+                root / "steam",
+                "artifact:watch-failure-observation",
+            )[0]
+            watch_root = store.watch_path(RUN_ID, record.scenario)
+
+            def fail_after_entering(request):
+                (request.evidence_root / "partial.json").write_bytes(b"partial\n")
+                raise RuntimeError("watch delegate boom")
+
+            with (
+                patch.object(service, "_capture_protected", return_value=protected()),
+                patch.object(
+                    service,
+                    "inspect_path_integrity",
+                    side_effect=(
+                        service.IntegrityLevel.MEDIUM,
+                        service.IntegrityLevel.LOW,
+                    ),
+                ),
+                patch.object(service, "_projection_state", return_value=(1, True, True)),
+                patch.object(service, "_watch_roots", return_value=()),
+                patch.object(service, "start_watch", side_effect=fail_after_entering),
+                patch.object(
+                    service,
+                    "_mutation_root_observation",
+                    side_effect=((("before",),), None),
+                ),
+                self.assertRaises(service.ContainmentOperationError) as raised,
+            ):
+                service.arm_scenario(store.root, RUN_ID, record.scenario)
+
+            chain = []
+            current = raised.exception
+            while current is not None:
+                chain.append(str(current))
+                current = current.__cause__
+            self.assertTrue((watch_root / "partial.json").is_file())
+            self.assertTrue(
+                any("effect observation is unavailable" in item for item in chain)
+            )
+            self.assertTrue(any("watch delegate boom" in item for item in chain))
+            self.assertNotIn(watch_root, raised.exception.effects.written_paths)
 
     def test_launch_and_capture_reload_exact_durable_launch_after_restart(self):
         with tempfile.TemporaryDirectory(prefix="modlab-launch-workflow-") as directory:
@@ -1122,11 +1454,23 @@ class ContainmentServiceTests(unittest.TestCase):
                 patch.object(service, "inspect_mo2_processes", return_value=observation),
                 patch.object(service, "_reprove_retry_absence") as reprove,
             ):
-                launched = service.launch_scenario(store.root, RUN_ID, record.scenario)
+                launch_receipt = service.launch_scenario(
+                    store.root, RUN_ID, record.scenario
+                )
+            launched = launch_receipt.value
             reprove.assert_called_once()
             self.assertEqual(store.root, reprove.call_args.args[0].root)
             self.assertEqual((RUN_ID, retry_binding), reprove.call_args.args[1:])
             self.assertEqual(ScenarioState.LAUNCHED, launched.state)
+            self.assertEqual(51, launch_receipt.effects.mo2_pid)
+            self.assertIsNone(launch_receipt.effects.watcher_pid)
+            self.assertEqual(
+                (
+                    store.journal_path(RUN_ID, record.scenario),
+                    store.launch_path(RUN_ID, record.scenario),
+                ),
+                launch_receipt.effects.written_paths,
+            )
             durable = store.load_launch_evidence(RUN_ID, record.scenario)
             self.assertEqual(987654321, durable["creationTime"])
             self.assertFalse(hasattr(service, "_LAUNCH_EVIDENCE"))
@@ -1139,6 +1483,13 @@ class ContainmentServiceTests(unittest.TestCase):
                 session_id=outcome.session_id, worker_pid=outcome.worker_pid,
                 request_bytes_sha256=outcome.request_sha256,
             )
+
+            def fake_stop(_request_path):
+                (store.watch_path(RUN_ID, record.scenario) / "terminal.json").write_bytes(
+                    b"terminal\n"
+                )
+                return receipt
+
             projection = service._ProjectionEvidence(
                 protected_after=protected(),
                 projection_count=1,
@@ -1160,14 +1511,274 @@ class ContainmentServiceTests(unittest.TestCase):
             with (
                 patch.object(service, "_load_fixture_record", return_value=record),
                 patch.object(service, "inspect_mo2_processes", return_value=SimpleNamespace(complete=True, relevant=())),
-                patch.object(service, "stop_watch", return_value=receipt),
+                patch.object(service, "stop_watch", side_effect=fake_stop),
                 patch.object(service, "_capture_protected", return_value=protected()),
                 patch.object(service, "_finalize_projection", return_value=projection),
                 patch.object(service, "_integrity_observation", side_effect=(IntegrityObservation.MEDIUM, IntegrityObservation.LOW)),
                 patch.object(service, "_exact_process_absent", return_value=True),
             ):
-                result = service.capture_scenario(store.root, RUN_ID, record.scenario)
+                capture_receipt = service.capture_scenario(
+                    store.root, RUN_ID, record.scenario
+                )
+            result = capture_receipt.value
             self.assertEqual(51, result.mo2_process.pid)
+            self.assertEqual(
+                (store.watch_path(RUN_ID, record.scenario),),
+                capture_receipt.effects.child_mutation_roots,
+            )
+            self.assertEqual(
+                (
+                    store.watch_path(RUN_ID, record.scenario),
+                    store.scenario_path(RUN_ID, record.scenario) / "after.json",
+                    store.result_path(RUN_ID, record.scenario),
+                    store.journal_path(RUN_ID, record.scenario),
+                ),
+                capture_receipt.effects.written_paths,
+            )
+            self.assertEqual((), capture_receipt.effects.source_changes)
+            self.assertEqual((), capture_receipt.effects.game_changes)
+            self.assertEqual((), capture_receipt.effects.production_mo2_changes)
+
+    def test_arm_failure_after_watcher_launch_preserves_exact_partial_effects(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-arm-effects-failure-") as directory:
+            root = Path(directory)
+            store = ContainmentStore(root / "validation")
+            record = write_run_identity(
+                store,
+                RUN_ID,
+                root / "source-workspace",
+                root / "steam",
+                "artifact:arm-effect-failure",
+            )[0]
+            real_transition = ContainmentStore.transition
+
+            def fail_after_armed(self, observed, new_state, **kwargs):
+                transitioned = real_transition(
+                    self, observed, new_state, **kwargs
+                )
+                if new_state is ScenarioState.ARMED:
+                    raise ContainmentStoreError("injected post-arm failure")
+                return transitioned
+
+            def fake_start(request):
+                request.evidence_root.mkdir(parents=True, exist_ok=True)
+                (request.evidence_root / "request.json").write_bytes(b"started\n")
+                return 4242
+
+            with (
+                patch.object(service, "_capture_protected", return_value=protected()),
+                patch.object(
+                    service,
+                    "inspect_path_integrity",
+                    side_effect=(
+                        service.IntegrityLevel.MEDIUM,
+                        service.IntegrityLevel.LOW,
+                    ),
+                ),
+                patch.object(service, "_projection_state", return_value=(1, True, True)),
+                patch.object(service, "_watch_roots", return_value=()),
+                patch.object(service, "start_watch", side_effect=fake_start),
+                patch.object(ContainmentStore, "transition", new=fail_after_armed),
+                self.assertRaises(service.ContainmentOperationError) as raised,
+            ):
+                service.arm_scenario(store.root, RUN_ID, record.scenario)
+
+            effects = raised.exception.effects
+            self.assertEqual(4242, effects.watcher_pid)
+            self.assertEqual(
+                (
+                    store.scenario_path(RUN_ID, record.scenario) / "before.json",
+                    store.journal_path(RUN_ID, record.scenario),
+                    store.watch_path(RUN_ID, record.scenario),
+                ),
+                effects.written_paths,
+            )
+
+    def test_launch_failure_after_evidence_write_preserves_mo2_and_paths(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-launch-effects-failure-") as directory:
+            root = Path(directory)
+            store = ContainmentStore(root / "validation")
+            record = write_run_identity(
+                store,
+                RUN_ID,
+                root / "source-workspace",
+                root / "steam",
+                "artifact:launch-effect-failure",
+            )[0]
+            armed = store.create(
+                ScenarioJournal(
+                    1,
+                    RUN_ID,
+                    record.scenario,
+                    ScenarioState.ARMED,
+                    str(record.source_root),
+                    str(record.stage_root),
+                    str(record.archive_path),
+                    "Protected Existing",
+                    "ModLab Spike New",
+                    protected(),
+                    42,
+                    None,
+                    None,
+                )
+            )
+            native_launch = SimpleNamespace(
+                pid=5151,
+                executable=str(record.executable),
+                arguments=("--profile", "ModLab - Lab"),
+                working_directory=str(record.stage_app),
+                integrity=service.IntegrityLevel.LOW,
+                creation_time=987654321,
+            )
+            observation = SimpleNamespace(
+                complete=True,
+                relevant=(
+                    SimpleNamespace(pid=5151, executable_path=record.executable),
+                ),
+            )
+            real_transition = ContainmentStore.transition
+
+            def fail_after_launched(self, observed, new_state, **kwargs):
+                transitioned = real_transition(
+                    self, observed, new_state, **kwargs
+                )
+                if new_state is ScenarioState.LAUNCHED:
+                    raise ContainmentStoreError("injected post-launch failure")
+                return transitioned
+
+            with (
+                patch.object(service, "_load_fixture_record", return_value=record),
+                patch.object(service, "_watcher_live", return_value=True),
+                patch.object(service, "_capture_protected", return_value=protected()),
+                patch.object(service, "read_windows_file_version", return_value="2.5.2.0"),
+                patch.object(service, "launch_low_integrity_process", return_value=native_launch),
+                patch.object(service, "inspect_process_integrity", return_value=service.IntegrityLevel.LOW),
+                patch.object(service, "inspect_mo2_processes", return_value=observation),
+                patch.object(ContainmentStore, "transition", new=fail_after_launched),
+                self.assertRaises(service.ContainmentOperationError) as raised,
+            ):
+                service.launch_scenario(store.root, RUN_ID, armed.scenario)
+
+            effects = raised.exception.effects
+            self.assertEqual(5151, effects.mo2_pid)
+            self.assertEqual(
+                (
+                    store.journal_path(RUN_ID, record.scenario),
+                    store.launch_path(RUN_ID, record.scenario),
+                ),
+                effects.written_paths,
+            )
+
+    def test_capture_failure_after_terminal_transition_preserves_all_effects(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-capture-effects-failure-") as directory:
+            root = Path(directory)
+            store = ContainmentStore(root / "validation")
+            record = write_run_identity(
+                store,
+                RUN_ID,
+                root / "source-workspace",
+                root / "steam",
+                "artifact:capture-effect-failure",
+            )[0]
+            journal = store.create(
+                ScenarioJournal(
+                    1,
+                    RUN_ID,
+                    record.scenario,
+                    ScenarioState.LAUNCHED,
+                    str(record.source_root),
+                    str(record.stage_root),
+                    str(record.archive_path),
+                    "Protected Existing",
+                    "ModLab Spike New",
+                    protected(),
+                    42,
+                    51,
+                    None,
+                )
+            )
+            store.write_launch_evidence(
+                RUN_ID,
+                record.scenario,
+                {
+                    "schemaVersion": 1,
+                    "runId": RUN_ID,
+                    "scenario": record.scenario.value,
+                    "purpose": "stage-mo2-scenario",
+                    "pid": 51,
+                    "creationTime": 987654321,
+                    "executable": str(record.executable),
+                    "executableVersion": "2.5.2.0",
+                    "arguments": ["--profile", "ModLab - Lab"],
+                    "workingDirectory": str(record.stage_app),
+                    "integrity": IntegrityObservation.LOW.value,
+                },
+            )
+            outcome = watch_outcome(record.scenario)
+            store.write_watch_outcome(outcome)
+            stop_receipt = SimpleNamespace(
+                watch_outcome_id=watch_outcome_id_for(outcome),
+                run_id=RUN_ID,
+                scenario=record.scenario,
+                request_id=outcome.request_id,
+                session_id=outcome.session_id,
+                worker_pid=outcome.worker_pid,
+                request_bytes_sha256=outcome.request_sha256,
+            )
+
+            def fake_stop(_request_path):
+                (store.watch_path(RUN_ID, record.scenario) / "terminal.json").write_bytes(
+                    b"terminal\n"
+                )
+                return stop_receipt
+
+            projection = service._ProjectionEvidence(
+                protected(), 1, True, True, (), True, (), True, (), True,
+                None, None, None, True, (), (),
+            )
+            real_transition = ContainmentStore.transition
+
+            def fail_after_captured(self, observed, new_state, **kwargs):
+                transitioned = real_transition(
+                    self, observed, new_state, **kwargs
+                )
+                if new_state is ScenarioState.CAPTURED:
+                    raise ContainmentStoreError("injected post-capture failure")
+                return transitioned
+
+            with (
+                patch.object(service, "_load_fixture_record", return_value=record),
+                patch.object(
+                    service,
+                    "inspect_mo2_processes",
+                    return_value=SimpleNamespace(complete=True, relevant=()),
+                ),
+                patch.object(service, "_exact_process_absent", return_value=True),
+                patch.object(service, "stop_watch", side_effect=fake_stop),
+                patch.object(service, "_capture_protected", return_value=protected()),
+                patch.object(service, "_finalize_projection", return_value=projection),
+                patch.object(
+                    service,
+                    "_integrity_observation",
+                    side_effect=(
+                        IntegrityObservation.MEDIUM,
+                        IntegrityObservation.LOW,
+                    ),
+                ),
+                patch.object(ContainmentStore, "transition", new=fail_after_captured),
+                self.assertRaises(service.ContainmentOperationError) as raised,
+            ):
+                service.capture_scenario(store.root, RUN_ID, journal.scenario)
+
+            self.assertEqual(
+                (
+                    store.watch_path(RUN_ID, record.scenario),
+                    store.scenario_path(RUN_ID, record.scenario) / "after.json",
+                    store.result_path(RUN_ID, record.scenario),
+                    store.journal_path(RUN_ID, record.scenario),
+                ),
+                raised.exception.effects.written_paths,
+            )
 
     def test_prepare_run_consumes_retry_before_fixture_work_and_never_refunds_it(self):
         with tempfile.TemporaryDirectory(prefix="modlab-retry-consume-") as directory:
@@ -1415,7 +2026,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     steam,
                     store.root,
                     retry_of=recovery,
-                )
+                ).value
 
             self.assertEqual(4, len(fixture_calls))
             self.assertEqual(RUN_ID, store.load_request(new_run)["retryOf"]["runId"])
@@ -1453,7 +2064,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     artifact,
                     steam,
                     store.root,
-                )
+                ).value
 
             request = store.load_request(new_run)
             self.assertEqual([RUN_ID], request["predecessorRunIds"])
@@ -1524,7 +2135,7 @@ class ContainmentServiceTests(unittest.TestCase):
             ):
                 new_run = service.prepare_run(
                     source, artifact, steam, store.root
-                )
+                ).value
 
             current = store.load_intent(new_run)
             self.assertEqual([], current["predecessorRunIds"])
@@ -1641,7 +2252,9 @@ class ContainmentServiceTests(unittest.TestCase):
                     ),
                 ),
             ):
-                new_run = service.prepare_run(source, artifact, steam, store.root)
+                new_run = service.prepare_run(
+                    source, artifact, steam, store.root
+                ).value
 
             current_document = {
                 "classificationPolicy": "scenario-classification-v4",
@@ -1738,7 +2351,9 @@ class ContainmentServiceTests(unittest.TestCase):
                     ),
                 ),
             ):
-                new_run = service.prepare_run(source, artifact, steam, store.root)
+                new_run = service.prepare_run(
+                    source, artifact, steam, store.root
+                ).value
 
             current_document = {
                 **previous_document,
@@ -1828,7 +2443,9 @@ class ContainmentServiceTests(unittest.TestCase):
                     ),
                 ),
             ):
-                new_run = service.prepare_run(source, artifact, steam, store.root)
+                new_run = service.prepare_run(
+                    source, artifact, steam, store.root
+                ).value
 
             current_document = {
                 **previous_document,
@@ -2141,7 +2758,7 @@ class ContainmentServiceTests(unittest.TestCase):
             ):
                 new_run = service.prepare_run(
                     source, "artifact:abc", steam, store.root, retry_of=recovery
-                )
+                ).value
             request = store.load_request(new_run)
             self.assertEqual(authority.content_id, request["retryOf"]["authorityId"])
             self.assertEqual(RUN_ID, request["retryOf"]["runId"])
@@ -2219,9 +2836,13 @@ class ContainmentServiceTests(unittest.TestCase):
                 store.write_watch_outcome(observed)
                 store.write_result(result)
             store.result_path(run_id, ContainmentScenario.REPLACE_EXISTING).write_bytes(b"damaged\n")
-            with self.assertRaises(service.ContainmentDecisionNotReady):
+            with self.assertRaises(service.ContainmentDecisionNotReady) as raised:
                 service.adjudicate_run(store.root, run_id)
             self.assertFalse(store.decision_path(run_id).exists())
+            self.assertEqual(
+                service.ContainmentEffects(),
+                raised.exception.effects,
+            )
 
     def test_early_adjudication_refuses_without_freezing_decision(self):
         """Missing terminal evidence must not become an immutable authority record."""
@@ -2239,9 +2860,10 @@ class ContainmentServiceTests(unittest.TestCase):
             store.write_watch_outcome(observed)
             store.write_result(result)
 
-            with self.assertRaises(service.ContainmentDecisionNotReady):
+            with self.assertRaises(service.ContainmentDecisionNotReady) as raised:
                 service.adjudicate_run(store.root, run_id)
             self.assertFalse(store.decision_path(run_id).exists())
+            self.assertEqual(service.ContainmentEffects(), raised.exception.effects)
 
     def test_decision_binds_complete_corrected_authority(self):
         with tempfile.TemporaryDirectory(prefix="modlab-bound-decision-") as directory:
@@ -2251,7 +2873,8 @@ class ContainmentServiceTests(unittest.TestCase):
             steam = store.root / "steam"
             result_ids = write_cohort_run(store, run_id, source, steam, "artifact:bound")
 
-            decision = service.adjudicate_run(store.root, run_id)
+            adjudicated = service.adjudicate_run(store.root, run_id)
+            decision = adjudicated.value
             source_root = Path(service.__file__).resolve().parents[2]
             commit = subprocess.run(
                 ["git", "-C", str(source_root), "rev-parse", "HEAD"],
@@ -2293,6 +2916,11 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertEqual(run_id, decision.run_id)
             self.assertEqual("isolated-low-integrity-junction-projection-v1", decision.mechanism)
             self.assertEqual(result_ids, decision.scenario_result_ids)
+            self.assertEqual(
+                (store.decision_path(run_id),),
+                adjudicated.effects.written_paths,
+            )
+            self.assertEqual((), adjudicated.effects.child_mutation_roots)
 
     def test_decision_bindings_use_tree_of_the_observed_commit(self):
         commit = "1" * 40
@@ -2825,7 +3453,8 @@ class ContainmentRecoveryTests(unittest.TestCase):
             "modlab.validation.mo2_containment_service._load_fixture_record",
             return_value=object(),
         ):
-            recovery = recover_scenario(self.root, RUN_ID, self.journal.scenario)
+            recovered = recover_scenario(self.root, RUN_ID, self.journal.scenario)
+        recovery = recovered.value
         self.assertEqual(ScenarioCleanupStatus.SUCCEEDED, recovery.cleanup_status)
         self.assertTrue(recovery.fresh_run_permitted)
         self.assertIsNotNone(recovery.result_id)
@@ -2834,6 +3463,16 @@ class ContainmentRecoveryTests(unittest.TestCase):
         self.assertEqual(
             fingerprint,
             authority["commandFingerprint"],
+        )
+        self.assertEqual(
+            (
+                self.store.journal_path(RUN_ID, self.journal.scenario),
+                self.store.result_path(RUN_ID, self.journal.scenario),
+                self.store.scenario_path(RUN_ID, self.journal.scenario)
+                / "recovery.json",
+                self.store.retry_path(RUN_ID, self.journal.scenario),
+            ),
+            recovered.effects.written_paths,
         )
 
     def test_cleanup_refusal_never_starts_fresh_run(self):
@@ -2884,10 +3523,20 @@ class ContainmentRecoveryTests(unittest.TestCase):
                 side_effect=AssertionError("cleanup mutation must not begin"),
             ) as cleanup,
         ):
-            recovery = recover_scenario(self.root, RUN_ID, self.journal.scenario)
+            recovered = recover_scenario(self.root, RUN_ID, self.journal.scenario)
+        recovery = recovered.value
         self.assertEqual(ScenarioCleanupStatus.REFUSED, recovery.cleanup_status)
         cleanup.assert_not_called()
         self.assertEqual(quarantine_before, tuple(self.store.quarantine_path(RUN_ID).iterdir()))
+        self.assertEqual(
+            (
+                self.store.journal_path(RUN_ID, self.journal.scenario),
+                self.store.scenario_path(RUN_ID, self.journal.scenario)
+                / "recovery.json",
+            ),
+            recovered.effects.written_paths,
+        )
+        self.assertEqual((), recovered.effects.child_mutation_roots)
 
     def test_refused_cleanup_retains_trusted_positive_breach_as_failed_result(self):
         started = self.store.transition(self.journal, ScenarioState.SCENARIO_STARTED)

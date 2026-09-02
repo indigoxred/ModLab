@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import re
 import sys
-from typing import Callable, Protocol, TextIO
+from typing import Callable, Protocol, TextIO, TypeVar
 
 from modlab.workspace import workspace_layout
 
@@ -22,16 +22,20 @@ from .mo2_containment_model import (
     ScenarioResult,
 )
 from .mo2_containment_service import (
+    ContainmentDecisionNotReady,
+    ContainmentEffects,
+    ContainmentServiceResult,
     ContainmentServiceError,
     adjudicate_run,
     arm_scenario,
     capture_scenario,
     launch_scenario,
+    load_decision as load_service_decision,
+    load_result as load_service_result,
     prepare_run,
     recover_scenario,
 )
 from .mo2_containment_store import (
-    ContainmentStore,
     ContainmentStoreError,
     ContainmentStoreMalformedEvidence,
     ContainmentStoreNotFound,
@@ -40,6 +44,7 @@ from .mo2_containment_store import (
 
 _ARTIFACT_ID = re.compile(r"^archive-sha256:[0-9a-f]{64}$")
 _RUN_ID = re.compile(r"^containment-run:([0-9a-f]{32})$")
+_V = TypeVar("_V")
 
 
 class CliInputError(ValueError):
@@ -51,43 +56,53 @@ class _ArgumentParser(argparse.ArgumentParser):
         raise CliInputError(message)
 
 
-@dataclass(frozen=True)
-class _ValidationProgress:
-    run_id: str
-    scenario: ContainmentScenario
-    validation_root: Path
-    stage_root: Path | None
-    written_paths: tuple[Path, ...]
-    launched_processes: tuple[str, ...]
-
-
 class _ValidationControllerRefusal(RuntimeError):
-    def __init__(self, progress: _ValidationProgress, cause: BaseException):
+    def __init__(
+        self,
+        run_id: str,
+        scenario: ContainmentScenario,
+        effects: ContainmentEffects,
+        cause: BaseException,
+    ) -> None:
         super().__init__(str(cause))
-        self.progress = progress
+        self.run_id = run_id
+        self.scenario = scenario
+        self.effects = effects
         self.cause = cause
 
 
 class _Service(Protocol):
-    def prepare_run(self, source: Path, artifact: str, steam: Path, validation: Path) -> str: ...
-    def arm_scenario(self, validation: Path, run_id: str, scenario: ContainmentScenario): ...
-    def launch_scenario(self, validation: Path, run_id: str, scenario: ContainmentScenario): ...
+    def prepare_run(
+        self, source: Path, artifact: str, steam: Path, validation: Path
+    ) -> ContainmentServiceResult[str]: ...
+    def arm_scenario(
+        self, validation: Path, run_id: str, scenario: ContainmentScenario
+    ) -> ContainmentServiceResult[object]: ...
+    def launch_scenario(
+        self, validation: Path, run_id: str, scenario: ContainmentScenario
+    ) -> ContainmentServiceResult[object]: ...
     def capture_scenario(
         self, validation: Path, run_id: str, scenario: ContainmentScenario
-    ) -> ScenarioResult: ...
+    ) -> ContainmentServiceResult[ScenarioResult]: ...
     def recover_scenario(
         self, validation: Path, run_id: str, scenario: ContainmentScenario
-    ) -> ScenarioRecovery: ...
-    def adjudicate_run(self, validation: Path, run_id: str) -> CapabilityDecision: ...
+    ) -> ContainmentServiceResult[ScenarioRecovery]: ...
+    def adjudicate_run(
+        self, validation: Path, run_id: str
+    ) -> ContainmentServiceResult[CapabilityDecision]: ...
     def load_result(
         self, validation: Path, run_id: str, scenario: ContainmentScenario
-    ) -> ScenarioResult: ...
-    def load_decision(self, validation: Path, run_id: str) -> CapabilityDecision: ...
+    ) -> ContainmentServiceResult[ScenarioResult]: ...
+    def load_decision(
+        self, validation: Path, run_id: str
+    ) -> ContainmentServiceResult[CapabilityDecision]: ...
 
 
 @dataclass(frozen=True)
 class _LiveService:
-    def prepare_run(self, source: Path, artifact: str, steam: Path, validation: Path) -> str:
+    def prepare_run(
+        self, source: Path, artifact: str, steam: Path, validation: Path
+    ) -> ContainmentServiceResult[str]:
         return prepare_run(source, artifact, steam, validation)
 
     def arm_scenario(self, validation: Path, run_id: str, scenario: ContainmentScenario):
@@ -98,24 +113,28 @@ class _LiveService:
 
     def capture_scenario(
         self, validation: Path, run_id: str, scenario: ContainmentScenario
-    ) -> ScenarioResult:
+    ) -> ContainmentServiceResult[ScenarioResult]:
         return capture_scenario(validation, run_id, scenario)
 
     def recover_scenario(
         self, validation: Path, run_id: str, scenario: ContainmentScenario
-    ) -> ScenarioRecovery:
+    ) -> ContainmentServiceResult[ScenarioRecovery]:
         return recover_scenario(validation, run_id, scenario)
 
-    def adjudicate_run(self, validation: Path, run_id: str) -> CapabilityDecision:
+    def adjudicate_run(
+        self, validation: Path, run_id: str
+    ) -> ContainmentServiceResult[CapabilityDecision]:
         return adjudicate_run(validation, run_id)
 
     def load_result(
         self, validation: Path, run_id: str, scenario: ContainmentScenario
-    ) -> ScenarioResult:
-        return ContainmentStore(validation).load_result(run_id, scenario)
+    ) -> ContainmentServiceResult[ScenarioResult]:
+        return load_service_result(validation, run_id, scenario)
 
-    def load_decision(self, validation: Path, run_id: str) -> CapabilityDecision:
-        return ContainmentStore(validation).load_decision(run_id)
+    def load_decision(
+        self, validation: Path, run_id: str
+    ) -> ContainmentServiceResult[CapabilityDecision]:
+        return load_service_decision(validation, run_id)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -174,14 +193,6 @@ def _require_scenario(value: str) -> ContainmentScenario:
     except ValueError as error:
         choices = ", ".join(scenario.value for scenario in ContainmentScenario)
         raise CliInputError(f"scenario must be one of: {choices}") from error
-
-
-def _run_root(validation: Path, run_id: str) -> Path:
-    return validation / run_id.split(":", 1)[1]
-
-
-def _scenario_path(validation: Path, run_id: str, scenario: ContainmentScenario) -> Path:
-    return _run_root(validation, run_id) / "scenarios" / scenario.value
 
 
 def _instructions(scenario: ContainmentScenario) -> tuple[str, ...]:
@@ -295,68 +306,81 @@ def _exit_for_verdict(verdict: CapabilityVerdict) -> int:
 
 def _exit_for_operational_error(error: BaseException) -> int:
     """Keep malformed retained evidence distinct from an uncertain live state."""
-    return 2 if isinstance(error, ContainmentStoreMalformedEvidence) else 3
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ContainmentDecisionNotReady):
+            return 3
+        if isinstance(current, ContainmentStoreMalformedEvidence):
+            return 2
+        cause = getattr(current, "cause", None)
+        if isinstance(cause, BaseException):
+            pending.append(cause)
+        if isinstance(current.__cause__, BaseException):
+            pending.append(current.__cause__)
+    return 3
 
 
-def _result_changes(result: ScenarioResult) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-    source_changes: list[str] = []
-    game_changes: list[str] = []
-    source_fields = (
-        ("SourceMods", result.protected_before.source_mods, result.protected_after.source_mods),
-        ("LabProfile", result.protected_before.lab_profile_sha256, result.protected_after.lab_profile_sha256),
-        ("PlayProfile", result.protected_before.play_profile_sha256, result.protected_after.play_profile_sha256),
-        ("Downloads", result.protected_before.downloads, result.protected_after.downloads),
-        ("Overwrite", result.protected_before.overwrite, result.protected_after.overwrite),
-    )
-    for label, before, after in source_fields:
-        if before != after:
-            source_changes.append(f"Protected {label} evidence changed")
-    if result.protected_before.bounded_game != result.protected_after.bounded_game:
-        game_changes.append("Protected BoundedGame evidence changed")
-    for event in result.watcher_events:
-        change = f"{event.root_kind}: {event.action} {event.relative_path}"
-        if event.root_kind == "BoundedGame":
-            game_changes.append(change)
-        elif event.root_kind in {"SourceMods", "LabProfile", "PlayProfile", "Downloads", "Overwrite"}:
-            source_changes.append(change)
-    production_changes = tuple(
-        f"Observed production backup: {name}"
-        for name in result.production_backup_names
-    )
-    return (
-        tuple(dict.fromkeys(source_changes)),
-        tuple(dict.fromkeys(game_changes)),
-        production_changes,
-    )
+def _require_receipt(value: object) -> ContainmentServiceResult[_V]:
+    if not isinstance(value, ContainmentServiceResult) or not isinstance(
+        value.effects,
+        ContainmentEffects,
+    ):
+        raise ContainmentServiceError(
+            "containment service returned a value without an exact effect receipt"
+        )
+    return value
 
 
-def _progress_response(progress: _ValidationProgress, cause: BaseException) -> dict[str, object]:
-    reasons = [f"Safe refusal: {cause}"]
-    if progress.stage_root is not None:
-        reasons.append(f"Contained mutation root: {progress.stage_root}")
+def _error_effects(error: BaseException) -> ContainmentEffects:
+    effects = getattr(error, "effects", None)
+    return effects if isinstance(effects, ContainmentEffects) else ContainmentEffects()
+
+
+def _effect_fields(effects: ContainmentEffects) -> dict[str, tuple[object, ...]]:
+    return {
+        "written_paths": effects.written_paths,
+        "launched_processes": effects.launched_processes,
+        "source_changes": effects.source_changes,
+        "game_changes": effects.game_changes,
+        "production_mo2_changes": effects.production_mo2_changes,
+    }
+
+
+def _progress_response(error: _ValidationControllerRefusal) -> dict[str, object]:
     return _response(
         "validate",
-        run_id=progress.run_id,
-        scenario=progress.scenario,
+        run_id=error.run_id,
+        scenario=error.scenario,
         state="RecoveryRequired",
-        written_paths=progress.written_paths,
-        launched_processes=progress.launched_processes,
-        reasons=tuple(reasons),
+        reasons=(f"Safe refusal: {error.cause}",),
+        **_effect_fields(error.effects),
     )
 
 
 def _prepare(args: argparse.Namespace, service: _Service) -> tuple[int, dict[str, object]]:
     artifact = _require_artifact_id(args.artifact)
     validation = _validation_root(args.workspace)
-    run_id = service.prepare_run(args.source_workspace, artifact, args.steam_root, validation)
+    receipt = _require_receipt(
+        service.prepare_run(
+            args.source_workspace,
+            artifact,
+            args.steam_root,
+            validation,
+        )
+    )
+    run_id = receipt.value
     _require_run_id(run_id)
-    root = _run_root(validation, run_id)
     return 0, _response(
         "prepare",
         run_id=run_id,
         state="Prepared",
-        written_paths=(root / "intent.json", root / "request.json"),
         reasons=("Disposable validation fixtures were prepared; production MO2 changes: none.",),
+        **_effect_fields(receipt.effects),
     )
 
 
@@ -369,6 +393,7 @@ def _validate(
     run_id = _require_run_id(args.run_id)
     scenario = _require_scenario(args.scenario)
     validation = _validation_root(args.workspace)
+    effects = ContainmentEffects()
     if input_func is input:
         try:
             interactive = bool(sys.stdin.isatty())
@@ -385,35 +410,29 @@ def _validate(
                     "before arming or launching MO2",
                 ),
             )
-    armed = service.arm_scenario(validation, run_id, scenario)
-    stage_value = getattr(armed, "stage_root", None)
-    stage_root = Path(stage_value) if isinstance(stage_value, str) and stage_value else None
-    scenario_path = _scenario_path(validation, run_id, scenario)
-    progress = _ValidationProgress(
-        run_id,
-        scenario,
-        validation,
-        stage_root,
-        (scenario_path / "before.json", scenario_path / "journal.json"),
-        (),
-    )
     try:
-        launched = service.launch_scenario(validation, run_id, scenario)
+        armed = _require_receipt(service.arm_scenario(validation, run_id, scenario))
     except (ContainmentServiceError, ContainmentStoreError, OSError, RuntimeError) as error:
-        raise _ValidationControllerRefusal(progress, error) from error
-    pid = getattr(launched, "mo2_pid", None)
-    progress = _ValidationProgress(
-        run_id,
-        scenario,
-        validation,
-        stage_root,
-        (
-            *progress.written_paths,
-            scenario_path / "watch" / "request.json",
-            scenario_path / "launch.json",
-        ),
-        () if not isinstance(pid, int) or pid <= 0 else (f"MO2 PID: {pid}",),
-    )
+        raise _ValidationControllerRefusal(
+            run_id,
+            scenario,
+            ContainmentEffects.merged(effects, _error_effects(error)),
+            error,
+        ) from error
+    effects = ContainmentEffects.merged(effects, armed.effects)
+    try:
+        launched = _require_receipt(
+            service.launch_scenario(validation, run_id, scenario)
+        )
+    except (ContainmentServiceError, ContainmentStoreError, OSError, RuntimeError) as error:
+        raise _ValidationControllerRefusal(
+            run_id,
+            scenario,
+            ContainmentEffects.merged(effects, _error_effects(error)),
+            error,
+        ) from error
+    effects = ContainmentEffects.merged(effects, launched.effects)
+    pid = launched.effects.mo2_pid
     procedure = _instructions(scenario)
     published_instructions = (
         ("Interactive operator procedure was displayed on stderr.",)
@@ -436,42 +455,41 @@ def _validate(
             run_id=run_id,
             scenario=scenario,
             state="Launched",
-            written_paths=progress.written_paths,
-            launched_processes=progress.launched_processes,
             instructions=published_instructions,
             reasons=("Capture was not continued; recover performs cleanup only.",),
+            **_effect_fields(effects),
         )
     try:
-        result = service.capture_scenario(validation, run_id, scenario)
-        if result.run_id != run_id or result.scenario is not scenario:
+        captured = _require_receipt(
+            service.capture_scenario(validation, run_id, scenario)
+        )
+        effects = ContainmentEffects.merged(effects, captured.effects)
+        result = captured.value
+        if (
+            not isinstance(result, ScenarioResult)
+            or result.run_id != run_id
+            or result.scenario is not scenario
+        ):
             raise ContainmentServiceError(
-                "capture returned evidence bound to another scenario"
+                "capture returned evidence bound to another scenario",
+                effects=effects,
             )
-        source_changes, game_changes, production_changes = _result_changes(result)
     except (ContainmentServiceError, ContainmentStoreError, OSError, RuntimeError) as error:
-        raise _ValidationControllerRefusal(progress, error) from error
+        raise _ValidationControllerRefusal(
+            run_id,
+            scenario,
+            ContainmentEffects.merged(effects, _error_effects(error)),
+            error,
+        ) from error
     return _exit_for_outcome(result.outcome), _response(
         "validate",
         run_id=run_id,
         scenario=scenario,
         state="Captured",
         outcome=result.outcome.value,
-        written_paths=(
-            *progress.written_paths,
-            scenario_path / "watch" / "outcome.json",
-            scenario_path / "after.json",
-            scenario_path / "result.json",
-        ),
-        launched_processes=(
-            progress.launched_processes
-            if result.mo2_process is None
-            else (f"MO2 PID: {result.mo2_process.pid}",)
-        ),
-        source_changes=source_changes,
-        game_changes=game_changes,
-        production_mo2_changes=production_changes,
         instructions=published_instructions,
         reasons=result.reasons,
+        **_effect_fields(effects),
     )
 
 
@@ -479,34 +497,71 @@ def _recover(args: argparse.Namespace, service: _Service) -> tuple[int, dict[str
     run_id = _require_run_id(args.run_id)
     scenario = _require_scenario(args.scenario)
     validation = _validation_root(args.workspace)
-    recovery = service.recover_scenario(validation, run_id, scenario)
-    if recovery.run_id != run_id or recovery.scenario is not scenario:
-        raise ContainmentServiceError("recovery returned evidence bound to another scenario")
+    receipt = _require_receipt(
+        service.recover_scenario(validation, run_id, scenario)
+    )
+    recovery = receipt.value
+    if (
+        not isinstance(recovery, ScenarioRecovery)
+        or recovery.run_id != run_id
+        or recovery.scenario is not scenario
+    ):
+        raise ContainmentServiceError(
+            "recovery returned evidence bound to another scenario",
+            effects=receipt.effects,
+        )
     code = 0 if recovery.cleanup_status is ScenarioCleanupStatus.SUCCEEDED else 3
     return code, _response(
         "recover",
         run_id=run_id,
         scenario=scenario,
         state=recovery.cleanup_status.value,
-        written_paths=(_scenario_path(validation, run_id, scenario) / "recovery.json",),
         reasons=recovery.blockers,
+        **_effect_fields(receipt.effects),
     )
 
 
 def _show(args: argparse.Namespace, service: _Service) -> tuple[int, dict[str, object]]:
     run_id = _require_run_id(args.run_id)
     validation = _validation_root(args.workspace)
+    receipts: list[ContainmentEffects] = []
     try:
-        decision = service.load_decision(validation, run_id)
+        decision_receipt = _require_receipt(
+            service.load_decision(validation, run_id)
+        )
     except ContainmentStoreNotFound:
         decision = None
+    else:
+        decision = decision_receipt.value
+        if not isinstance(decision, CapabilityDecision) or decision.run_id != run_id:
+            raise ContainmentServiceError(
+                "loaded decision is bound to another run",
+                effects=decision_receipt.effects,
+            )
+        receipts.append(decision_receipt.effects)
     results: list[ScenarioResult] = []
     for scenario in ContainmentScenario:
         try:
-            result = service.load_result(validation, run_id, scenario)
+            result_receipt = _require_receipt(
+                service.load_result(validation, run_id, scenario)
+            )
         except ContainmentStoreNotFound:
             continue
+        result = result_receipt.value
+        if (
+            not isinstance(result, ScenarioResult)
+            or result.run_id != run_id
+            or result.scenario is not scenario
+        ):
+            raise ContainmentServiceError(
+                "loaded result is bound to another scenario",
+                effects=ContainmentEffects.merged(
+                    *receipts,
+                    result_receipt.effects,
+                ),
+            )
         results.append(result)
+        receipts.append(result_receipt.effects)
     if not results and decision is None:
         raise ContainmentStoreNotFound("no containment result or decision exists for this run")
     rank = {ScenarioOutcome.PASSED: 0, ScenarioOutcome.INCOMPLETE: 1, ScenarioOutcome.FAILED: 2}
@@ -517,6 +572,7 @@ def _show(args: argparse.Namespace, service: _Service) -> tuple[int, dict[str, o
         reasons.extend(f"{result.scenario.value}: {reason}" for reason in result.reasons)
     if decision is not None:
         reasons.extend(f"Decision: {reason}" for reason in decision.reasons)
+    effects = ContainmentEffects.merged(*receipts)
     return 0, _response(
         "show",
         run_id=run_id,
@@ -525,21 +581,26 @@ def _show(args: argparse.Namespace, service: _Service) -> tuple[int, dict[str, o
         outcome=None if selected is None else selected.outcome.value,
         verdict=None if decision is None else decision.verdict.value,
         reasons=tuple(reasons),
+        **_effect_fields(effects),
     )
 
 
 def _adjudicate(args: argparse.Namespace, service: _Service) -> tuple[int, dict[str, object]]:
     run_id = _require_run_id(args.run_id)
     validation = _validation_root(args.workspace)
-    decision = service.adjudicate_run(validation, run_id)
-    if decision.run_id != run_id:
-        raise ContainmentServiceError("adjudication returned a decision bound to another run")
+    receipt = _require_receipt(service.adjudicate_run(validation, run_id))
+    decision = receipt.value
+    if not isinstance(decision, CapabilityDecision) or decision.run_id != run_id:
+        raise ContainmentServiceError(
+            "adjudication returned a decision bound to another run",
+            effects=receipt.effects,
+        )
     return _exit_for_verdict(decision.verdict), _response(
         "adjudicate",
         run_id=run_id,
         verdict=decision.verdict.value,
-        written_paths=(_run_root(validation, run_id) / "decision.json",),
         reasons=decision.reasons,
+        **_effect_fields(receipt.effects),
     )
 
 
@@ -589,14 +650,25 @@ def main(
             print(f"Containment validation argument error: {error}", file=errors)
         return 2
     except _ValidationControllerRefusal as error:
-        _emit(_progress_response(error.progress, error.cause), output, args.format)
+        _emit(_progress_response(error), output, args.format)
         return _exit_for_operational_error(error.cause)
     except (ContainmentServiceError, ContainmentStoreError, OSError, RuntimeError) as error:
+        raw_scenario = getattr(args, "scenario", None)
+        try:
+            error_scenario = (
+                None
+                if raw_scenario is None
+                else ContainmentScenario(raw_scenario)
+            )
+        except (TypeError, ValueError):
+            error_scenario = None
         refusal = _response(
             args.command,
             run_id=getattr(args, "run_id", None),
+            scenario=error_scenario,
             state="RecoveryRequired",
             reasons=(f"Safe refusal: {error}",),
+            **_effect_fields(_error_effects(error)),
         )
         _emit(refusal, output, args.format)
         return _exit_for_operational_error(error)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from functools import partial, wraps
 import hashlib
 import json
 import os
@@ -11,7 +13,7 @@ import re
 import secrets
 import stat
 import subprocess
-from typing import Mapping
+from typing import Callable, Generic, Mapping, TypeVar
 import uuid
 
 from modlab.adapters.mo2.processes import inspect_mo2_processes
@@ -54,8 +56,10 @@ from .mo2_containment_store import (
     ContainmentStore,
     ContainmentStoreError,
     ContainmentStoreNotFound,
+    ContainmentStoreOwnershipError,
 )
 from .windows_integrity import (
+    IntegrityLabelError,
     IntegrityLevel,
     inspect_path_integrity,
     inspect_process_integrity,
@@ -119,12 +123,420 @@ _EXPECTED_REPLACEMENT_OUTPUTS = (
 )
 
 
+_V = TypeVar("_V")
+
+
+def _unique_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    rows: list[Path] = []
+    seen: set[str] = set()
+    for supplied in paths:
+        path = Path(supplied)
+        key = os.path.normcase(os.path.normpath(str(path)))
+        if key not in seen:
+            seen.add(key)
+            rows.append(path)
+    return tuple(rows)
+
+
+def _unique_text(rows: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(rows))
+
+
+@dataclass(frozen=True)
+class ContainmentEffects:
+    """Exact paths, delegated roots, and processes observed for one operation."""
+
+    written_paths: tuple[Path, ...] = ()
+    child_mutation_roots: tuple[Path, ...] = ()
+    watcher_pid: int | None = None
+    mo2_pid: int | None = None
+    source_changes: tuple[str, ...] = ()
+    game_changes: tuple[str, ...] = ()
+    production_mo2_changes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        written = _unique_paths(tuple(self.written_paths))
+        roots = _unique_paths(tuple(self.child_mutation_roots))
+        if any(root not in written for root in roots):
+            raise ValueError("child mutation roots must be included in written paths")
+        for label, pid in (("watcher", self.watcher_pid), ("MO2", self.mo2_pid)):
+            if pid is not None and (type(pid) is not int or pid <= 0):
+                raise ValueError(f"{label} PID must be a positive integer")
+        changes = (
+            ("source", tuple(self.source_changes)),
+            ("game", tuple(self.game_changes)),
+            ("production MO2", tuple(self.production_mo2_changes)),
+        )
+        for label, values in changes:
+            if any(type(value) is not str or not value for value in values):
+                raise ValueError(f"{label} effects must be nonempty text")
+        object.__setattr__(self, "written_paths", written)
+        object.__setattr__(self, "child_mutation_roots", roots)
+        object.__setattr__(self, "source_changes", _unique_text(changes[0][1]))
+        object.__setattr__(self, "game_changes", _unique_text(changes[1][1]))
+        object.__setattr__(
+            self,
+            "production_mo2_changes",
+            _unique_text(changes[2][1]),
+        )
+
+    @property
+    def launched_processes(self) -> tuple[str, ...]:
+        rows: list[str] = []
+        if self.watcher_pid is not None:
+            rows.append(f"Watcher PID: {self.watcher_pid}")
+        if self.mo2_pid is not None:
+            rows.append(f"MO2 PID: {self.mo2_pid}")
+        return tuple(rows)
+
+    @classmethod
+    def merged(cls, *receipts: "ContainmentEffects") -> "ContainmentEffects":
+        values = tuple(receipts)
+        if any(not isinstance(value, cls) for value in values):
+            raise TypeError("containment effects can merge only exact receipts")
+        watcher_pids = {
+            value.watcher_pid for value in values if value.watcher_pid is not None
+        }
+        mo2_pids = {value.mo2_pid for value in values if value.mo2_pid is not None}
+        if len(watcher_pids) > 1 or len(mo2_pids) > 1:
+            raise ValueError("containment effect receipts disagree on a launched PID")
+        return cls(
+            written_paths=tuple(
+                path for value in values for path in value.written_paths
+            ),
+            child_mutation_roots=tuple(
+                path for value in values for path in value.child_mutation_roots
+            ),
+            watcher_pid=next(iter(watcher_pids), None),
+            mo2_pid=next(iter(mo2_pids), None),
+            source_changes=tuple(
+                item for value in values for item in value.source_changes
+            ),
+            game_changes=tuple(
+                item for value in values for item in value.game_changes
+            ),
+            production_mo2_changes=tuple(
+                item for value in values for item in value.production_mo2_changes
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ContainmentServiceResult(Generic[_V]):
+    """Immutable service value paired with its exact operation effects."""
+
+    value: _V
+    effects: ContainmentEffects
+
+    def __getattr__(self, name: str):
+        return getattr(self.value, name)
+
+
 class ContainmentServiceError(RuntimeError):
     """The scenario cannot advance without weakening its evidence boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        effects: ContainmentEffects | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.effects = ContainmentEffects() if effects is None else effects
+
+
+class ContainmentOperationError(ContainmentServiceError):
+    """A mutating service operation failed with an exact partial receipt."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        effects: ContainmentEffects,
+        cause: BaseException | None = None,
+    ) -> None:
+        super().__init__(message, effects=effects)
+        self.cause = cause
 
 
 class ContainmentDecisionNotReady(ContainmentServiceError):
     """Current-run evidence is not complete enough to freeze a decision."""
+
+
+class _EffectLedger:
+    def __init__(self) -> None:
+        self._written_paths: list[Path] = []
+        self._child_mutation_roots: list[Path] = []
+        self._watcher_pid: int | None = None
+        self._mo2_pid: int | None = None
+        self._source_changes: list[str] = []
+        self._game_changes: list[str] = []
+        self._production_mo2_changes: list[str] = []
+
+    def write(self, path: Path) -> None:
+        self._written_paths.append(Path(path))
+
+    def child_mutation_root(self, path: Path) -> None:
+        root = Path(path)
+        self._written_paths.append(root)
+        self._child_mutation_roots.append(root)
+
+    def watcher(self, pid: int) -> None:
+        self._watcher_pid = pid
+
+    def mo2(self, pid: int) -> None:
+        self._mo2_pid = pid
+
+    def changes(
+        self,
+        *,
+        source: tuple[str, ...] = (),
+        game: tuple[str, ...] = (),
+        production_mo2: tuple[str, ...] = (),
+    ) -> None:
+        self._source_changes.extend(source)
+        self._game_changes.extend(game)
+        self._production_mo2_changes.extend(production_mo2)
+
+    def freeze(self) -> ContainmentEffects:
+        return ContainmentEffects(
+            tuple(self._written_paths),
+            tuple(self._child_mutation_roots),
+            self._watcher_pid,
+            self._mo2_pid,
+            tuple(self._source_changes),
+            tuple(self._game_changes),
+            tuple(self._production_mo2_changes),
+        )
+
+
+_ACTIVE_EFFECTS: ContextVar[_EffectLedger | None] = ContextVar(
+    "mo2_containment_effects",
+    default=None,
+)
+
+
+def _current_effects() -> _EffectLedger:
+    ledger = _ACTIVE_EFFECTS.get()
+    if ledger is None:
+        raise RuntimeError("containment effect ledger is unavailable")
+    return ledger
+
+
+def _effect_store(validation_root: Path) -> ContainmentStore:
+    return ContainmentStore(
+        validation_root,
+        _effect_recorder=_current_effects().write,
+    )
+
+
+def _mutation_root_observation(
+    supplied_root: Path,
+) -> tuple[tuple[object, ...], ...] | None:
+    """Take one non-following inventory used only to prove delegated mutation."""
+    root = Path(supplied_root)
+    try:
+        root_metadata = root.lstat()
+    except FileNotFoundError:
+        return (("absent",),)
+    except OSError:
+        return None
+
+    rows: list[tuple[object, ...]] = []
+
+    def file_digest(path: Path, metadata: os.stat_result) -> str | None:
+        if not stat.S_ISREG(metadata.st_mode):
+            return None
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                opened.st_mode,
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+            ) != (
+                metadata.st_mode,
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+            ):
+                raise OSError(f"delegated mutation entry changed while opening: {path}")
+            digest = hashlib.sha256()
+            while block := os.read(descriptor, 1024 * 1024):
+                digest.update(block)
+        finally:
+            os.close(descriptor)
+        after = path.lstat()
+        if (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) != (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        ):
+            raise OSError(f"delegated mutation entry changed while hashing: {path}")
+        return digest.hexdigest()
+
+    def metadata_row(
+        relative: str,
+        path: Path,
+        metadata: os.stat_result,
+    ) -> tuple[object, ...]:
+        return (
+            relative,
+            int(metadata.st_mode),
+            int(metadata.st_dev),
+            int(metadata.st_ino),
+            int(metadata.st_size),
+            int(metadata.st_mtime_ns),
+            int(metadata.st_ctime_ns),
+            int(getattr(metadata, "st_file_attributes", 0)),
+            file_digest(path, metadata),
+        )
+
+    try:
+        rows.append(metadata_row(".", root, root_metadata))
+    except OSError:
+        return None
+    root_redirected = stat.S_ISLNK(root_metadata.st_mode) or bool(
+        getattr(root_metadata, "st_file_attributes", 0) & 0x400
+    )
+    if not stat.S_ISDIR(root_metadata.st_mode) or root_redirected:
+        return tuple(rows)
+
+    def visit(current: Path, relative: Path) -> None:
+        with os.scandir(current) as found:
+            ordered = sorted(
+                found,
+                key=lambda entry: (entry.name.casefold(), entry.name),
+            )
+            entries = tuple(
+                (
+                    entry.name,
+                    Path(entry.path),
+                    Path(entry.path).lstat(),
+                )
+                for entry in ordered
+            )
+        for name, child_path, metadata in entries:
+            child_relative = relative / name
+            rows.append(metadata_row(child_relative.as_posix(), child_path, metadata))
+            redirected = stat.S_ISLNK(metadata.st_mode) or bool(
+                getattr(metadata, "st_file_attributes", 0) & 0x400
+            )
+            if stat.S_ISDIR(metadata.st_mode) and not redirected:
+                visit(child_path, child_relative)
+
+    try:
+        visit(root, Path())
+    except OSError:
+        return None
+    return tuple(rows)
+
+
+def _delegated_mutations(
+    roots: tuple[Path, ...],
+    operation: Callable[[], _V],
+) -> _V:
+    """Record delegated roots iff pre/post inventories prove they changed."""
+    exact_roots = _unique_paths(roots)
+    before = tuple(_mutation_root_observation(root) for root in exact_roots)
+    unavailable_before = tuple(
+        root for root, observation in zip(exact_roots, before, strict=True)
+        if observation is None
+    )
+    if unavailable_before:
+        joined = ", ".join(str(root) for root in unavailable_before)
+        raise ContainmentServiceError(
+            f"delegated mutation effect observation is unavailable before operation: {joined}"
+        )
+
+    def record_observed_changes() -> None:
+        after = tuple(_mutation_root_observation(root) for root in exact_roots)
+        for root, prior, current in zip(exact_roots, before, after, strict=True):
+            if current is not None and prior != current:
+                _current_effects().child_mutation_root(root)
+        unavailable_after = tuple(
+            root for root, observation in zip(exact_roots, after, strict=True)
+            if observation is None
+        )
+        if unavailable_after:
+            joined = ", ".join(str(root) for root in unavailable_after)
+            raise ContainmentServiceError(
+                f"delegated mutation effect observation is unavailable after operation: {joined}"
+            )
+
+    try:
+        value = operation()
+    except BaseException as operation_error:
+        try:
+            record_observed_changes()
+        except ContainmentServiceError as observation_error:
+            detail = str(observation_error).replace("after operation", "after failure")
+            if hasattr(operation_error, "add_note"):
+                operation_error.add_note(detail)
+            if not isinstance(operation_error, Exception):
+                raise
+            raise ContainmentServiceError(
+                f"delegated mutation failed ({operation_error}); {detail}"
+            ) from operation_error
+        raise
+    record_observed_changes()
+    return value
+
+
+def _delegated_mutation(
+    root: Path,
+    operation: Callable[[], _V],
+) -> _V:
+    return _delegated_mutations((root,), operation)
+
+
+def _receipted(
+    operation: Callable[..., _V],
+) -> Callable[..., ContainmentServiceResult[_V]]:
+    @wraps(operation)
+    def invoke(*args, **kwargs):
+        ledger = _EffectLedger()
+        token = _ACTIVE_EFFECTS.set(ledger)
+        try:
+            value = operation(*args, **kwargs)
+        except Exception as error:
+            prior = getattr(error, "effects", ContainmentEffects())
+            effects = ContainmentEffects.merged(ledger.freeze(), prior)
+            if isinstance(error, ContainmentDecisionNotReady):
+                raise ContainmentDecisionNotReady(
+                    str(error),
+                    effects=effects,
+                ) from error
+            if isinstance(error, ContainmentStoreOwnershipError):
+                error.effects = effects
+                raise
+            cause = error.cause if isinstance(error, ContainmentOperationError) else error
+            raise ContainmentOperationError(
+                str(error),
+                effects=effects,
+                cause=cause,
+            ) from error
+        finally:
+            _ACTIVE_EFFECTS.reset(token)
+        return ContainmentServiceResult(value, ledger.freeze())
+
+    return invoke
 
 
 @dataclass(frozen=True)
@@ -479,6 +891,96 @@ def adjudicate_results(
     return decision
 
 
+def _effects_for_result(result: ScenarioResult) -> ContainmentEffects:
+    """Describe protected changes retained in one exact scenario result."""
+    source_changes: list[str] = []
+    game_changes: list[str] = []
+    source_fields = (
+        (
+            "SourceMods",
+            result.protected_before.source_mods,
+            result.protected_after.source_mods,
+        ),
+        (
+            "LabProfile",
+            result.protected_before.lab_profile_sha256,
+            result.protected_after.lab_profile_sha256,
+        ),
+        (
+            "PlayProfile",
+            result.protected_before.play_profile_sha256,
+            result.protected_after.play_profile_sha256,
+        ),
+        (
+            "Downloads",
+            result.protected_before.downloads,
+            result.protected_after.downloads,
+        ),
+        (
+            "Overwrite",
+            result.protected_before.overwrite,
+            result.protected_after.overwrite,
+        ),
+    )
+    for label, before, after in source_fields:
+        if before != after:
+            source_changes.append(f"Protected {label} evidence changed")
+    if result.protected_before.bounded_game != result.protected_after.bounded_game:
+        game_changes.append("Protected BoundedGame evidence changed")
+    for event in result.watcher_events:
+        change = f"{event.root_kind}: {event.action} {event.relative_path}"
+        if event.root_kind == "BoundedGame":
+            game_changes.append(change)
+        elif event.root_kind in {
+            "SourceMods",
+            "LabProfile",
+            "PlayProfile",
+            "Downloads",
+            "Overwrite",
+        }:
+            source_changes.append(change)
+    return ContainmentEffects(
+        source_changes=tuple(source_changes),
+        game_changes=tuple(game_changes),
+        production_mo2_changes=tuple(
+            f"Observed production backup: {name}"
+            for name in result.production_backup_names
+        ),
+    )
+
+
+def _record_result_effects(result: ScenarioResult) -> None:
+    changes = _effects_for_result(result)
+    _current_effects().changes(
+        source=changes.source_changes,
+        game=changes.game_changes,
+        production_mo2=changes.production_mo2_changes,
+    )
+
+
+def load_result(
+    validation_root: Path,
+    run_id: str,
+    scenario: ContainmentScenario,
+) -> ContainmentServiceResult[ScenarioResult]:
+    """Read one result without preparing storage and expose its retained changes."""
+    result = ContainmentStore.open_readonly(validation_root).load_result(
+        run_id,
+        scenario,
+    )
+    return ContainmentServiceResult(result, _effects_for_result(result))
+
+
+def load_decision(
+    validation_root: Path,
+    run_id: str,
+) -> ContainmentServiceResult[CapabilityDecision]:
+    """Read one decision without preparing storage or reporting mutations."""
+    decision = ContainmentStore.open_readonly(validation_root).load_decision(run_id)
+    return ContainmentServiceResult(decision, ContainmentEffects())
+
+
+@_receipted
 def prepare_run(
     source_workspace: Path,
     mo2_artifact_id: str,
@@ -494,7 +996,7 @@ def prepare_run(
     if not _same_path(validation, expected_validation):
         raise ContainmentServiceError("validation root must be the workspace containment root")
     run_id = "containment-run:" + uuid.uuid4().hex
-    store = ContainmentStore(validation)
+    store = _effect_store(validation)
     steam = Path(steam_root).expanduser().absolute()
     command_fingerprint = _command_fingerprint(source, mo2_artifact_id, steam)
     with store.command_lock(command_fingerprint):
@@ -531,17 +1033,23 @@ def prepare_run(
         }
         intent_write = store.write_intent(run_id, intent)
         fixture_root = store.run_path(run_id) / "fixtures"
-        fixtures = tuple(
-            prepare_containment_fixture(
-                source,
-                mo2_artifact_id,
-                steam,
-                validation,
-                scenario,
-                fixture_parent=fixture_root / scenario.value,
+        fixtures: list[ContainmentFixture] = []
+        for scenario in ContainmentScenario:
+            fixture_parent = fixture_root / scenario.value
+            fixtures.append(
+                _delegated_mutation(
+                    fixture_parent,
+                    partial(
+                        prepare_containment_fixture,
+                        source,
+                        mo2_artifact_id,
+                        steam,
+                        validation,
+                        scenario,
+                        fixture_parent=fixture_parent,
+                    ),
+                )
             )
-            for scenario in ContainmentScenario
-        )
         records = tuple(_fixture_record(fixture, steam) for fixture in fixtures)
         document = {
             **intent,
@@ -552,13 +1060,14 @@ def prepare_run(
     return run_id
 
 
+@_receipted
 def arm_scenario(
     validation_root: Path,
     run_id: str,
     scenario: ContainmentScenario,
 ) -> ScenarioJournal:
     """Capture stable pre-state and stop only after the watcher is ready."""
-    store = ContainmentStore(validation_root)
+    store = _effect_store(validation_root)
     _require_current_execution_policy(store, run_id)
     record = _load_fixture_record(store, run_id, scenario)
     before = _capture_protected(record)
@@ -603,7 +1112,13 @@ def arm_scenario(
         roots=roots,
     )
     try:
-        worker_pid = start_watch(request)
+        worker_pid = _delegated_mutation(
+            evidence_root,
+            lambda: start_watch(request),
+        )
+        if type(worker_pid) is not int or worker_pid <= 0:
+            raise ContainmentServiceError("watch startup returned an invalid worker PID")
+        _current_effects().watcher(worker_pid)
     except (OSError, RuntimeError) as error:
         store.transition(
             journal,
@@ -614,13 +1129,14 @@ def arm_scenario(
     return store.transition(journal, ScenarioState.ARMED, monitor_pid=worker_pid)
 
 
+@_receipted
 def launch_scenario(
     validation_root: Path,
     run_id: str,
     scenario: ContainmentScenario,
 ) -> ScenarioJournal:
     """Persist ScenarioStarted before launching the exact Low-integrity child."""
-    store = ContainmentStore(validation_root)
+    store = _effect_store(validation_root)
     _require_current_execution_policy(store, run_id)
     record = _load_fixture_record(store, run_id, scenario)
     journal = store.load_journal(run_id, scenario)
@@ -664,6 +1180,8 @@ def launch_scenario(
             record.stage_app,
             record.stage_environment,
         )
+        if type(launch.pid) is int and launch.pid > 0:
+            _current_effects().mo2(launch.pid)
         observed_integrity = inspect_process_integrity(launch.pid)
         observation = inspect_mo2_processes(record.stage_root)
         exact = tuple(item for item in observation.relevant if item.pid == launch.pid)
@@ -725,13 +1243,14 @@ def launch_scenario(
         ) from error
 
 
+@_receipted
 def capture_scenario(
     validation_root: Path,
     run_id: str,
     scenario: ContainmentScenario,
 ) -> ScenarioResult:
     """Stop the same-controller watcher, bind its outcome, and capture final policy."""
-    store = ContainmentStore(validation_root)
+    store = _effect_store(validation_root)
     _require_current_execution_policy(store, run_id)
     record = _load_fixture_record(store, run_id, scenario)
     journal = store.load_journal(run_id, scenario)
@@ -773,8 +1292,12 @@ def capture_scenario(
         )
         raise ContainmentServiceError("exact launched MO2 absence is live or uncertain")
 
-    request_path = store.watch_path(run_id, scenario) / "request.json"
-    receipt = stop_watch(request_path)
+    watch_evidence_root = store.watch_path(run_id, scenario)
+    request_path = watch_evidence_root / "request.json"
+    receipt = _delegated_mutation(
+        watch_evidence_root,
+        lambda: stop_watch(request_path),
+    )
     if receipt.watch_outcome_id is None:
         store.transition(
             journal,
@@ -799,12 +1322,19 @@ def capture_scenario(
         raise ContainmentServiceError("watch receipt/outcome binding mismatch")
 
     post_mo2 = _capture_protected(record)
-    projection = _finalize_projection(
-        store,
-        run_id,
-        record,
-        journal.protected_before,
-        post_mo2,
+    projection = _delegated_mutations(
+        (
+            record.source_mods,
+            record.stage_mods,
+            store.quarantine_path(run_id) / scenario.value,
+        ),
+        lambda: _finalize_projection(
+            store,
+            run_id,
+            record,
+            journal.protected_before,
+            post_mo2,
+        ),
     )
     store.write_protected_state(
         run_id,
@@ -844,18 +1374,20 @@ def capture_scenario(
             projection.incomplete_reasons,
         )
     )
+    _record_result_effects(result)
     store.write_result(result)
     store.transition(journal, ScenarioState.CAPTURED)
     return result
 
 
+@_receipted
 def recover_scenario(
     validation_root: Path,
     run_id: str,
     scenario: ContainmentScenario,
 ) -> ScenarioRecovery:
     """Perform cleanup only; never return a journal or resume a success path."""
-    store = ContainmentStore(validation_root)
+    store = _effect_store(validation_root)
     journal = store.load_journal(run_id, scenario)
     if journal.state is ScenarioState.CAPTURED:
         raise ContainmentServiceError("Captured scenario does not require recovery")
@@ -996,6 +1528,7 @@ def recover_scenario(
             ("interrupted-scenario-cleaned",),
         )
     )
+    _record_result_effects(result)
     written = store.write_result(result)
     result_id = written.content_id
     recovery = ScenarioRecovery(
@@ -1014,9 +1547,10 @@ def recover_scenario(
     return recovery
 
 
+@_receipted
 def adjudicate_run(validation_root: Path, run_id: str) -> CapabilityDecision:
     """Resolve every retained result and write one immutable capability decision."""
-    store = ContainmentStore(validation_root)
+    store = _effect_store(validation_root)
     results: list[ScenarioResult] = []
     outcomes: list[WatchOutcome] = []
     for scenario in ContainmentScenario:
@@ -1754,7 +2288,11 @@ def _perform_recovery_cleanup(
     watch: WatchOutcome | None = proof.watch_outcome
     request_path = store.watch_path(journal.run_id, journal.scenario) / "request.json"
     if request_path.exists():
-        receipt = stop_watch(request_path)
+        recovery_watch_root = store.watch_path(journal.run_id, journal.scenario)
+        receipt = _delegated_mutation(
+            recovery_watch_root,
+            lambda: stop_watch(request_path),
+        )
         if receipt.watch_outcome_id is None:
             blockers.append("durable-watch-outcome-unavailable")
         else:
@@ -1798,12 +2336,23 @@ def _perform_recovery_cleanup(
         "Recovery-" + journal.scenario.value
     )
     try:
-        recovery_quarantine.mkdir(exist_ok=True)
+        _delegated_mutation(
+            recovery_quarantine,
+            lambda: recovery_quarantine.mkdir(exist_ok=True),
+        )
         stage_names = _direct_names(record.stage_mods)
         changed = _changed_projection_names(record)
         unexpected = tuple(name for name in stage_names if name not in record.before_names)
         for name in dict.fromkeys((*changed, *unexpected)):
-            _quarantine_exact(record.stage_mods / name, recovery_quarantine)
+            source = record.stage_mods / name
+            _delegated_mutations(
+                (record.stage_mods, recovery_quarantine),
+                partial(
+                    _quarantine_exact,
+                    source,
+                    recovery_quarantine,
+                ),
+            )
     except (OSError, ContainmentSafetyError):
         blockers.append("staging-quarantine-failed")
 
@@ -1822,9 +2371,15 @@ def _perform_recovery_cleanup(
     ):
         try:
             set_low_integrity_tree(path)
+        except IntegrityLabelError:
+            _current_effects().child_mutation_root(path)
+            blockers.append("stage-integrity-normalization-failed")
+            break
         except (OSError, RuntimeError):
             blockers.append("stage-integrity-normalization-failed")
             break
+        else:
+            _current_effects().child_mutation_root(path)
     source_integrity = _integrity_observation(record.source_root)
     stage_integrity = _integrity_observation(record.stage_root)
     if source_integrity not in {
@@ -2021,6 +2576,7 @@ def _persist_proven_recovery_breach(
     except ContainmentStoreNotFound:
         existing = None
     if existing is not None:
+        _record_result_effects(existing)
         return scenario_result_id_for(existing, outcome)
     result = evaluate_scenario(
         ScenarioEvidence(
@@ -2056,6 +2612,7 @@ def _persist_proven_recovery_breach(
     )
     if result.outcome is not ScenarioOutcome.FAILED:
         return None
+    _record_result_effects(result)
     return store.write_result(result).content_id
 
 
@@ -2663,7 +3220,10 @@ def _valid_retry_binding(value: object, command_fingerprint: object) -> bool:
 
 
 __all__ = [
+    "ContainmentEffects",
     "ContainmentDecisionNotReady",
+    "ContainmentOperationError",
+    "ContainmentServiceResult",
     "ContainmentServiceError",
     "FixtureRecord",
     "RecoveryCleanupEvidence",
@@ -2675,6 +3235,8 @@ __all__ = [
     "capture_scenario",
     "evaluate_scenario",
     "launch_scenario",
+    "load_decision",
+    "load_result",
     "prepare_run",
     "recover_scenario",
 ]

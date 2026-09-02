@@ -226,6 +226,30 @@ class ContainmentStoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_open_readonly_requires_existing_root_without_creating_it(self):
+        absent = self.root / "absent-validation"
+
+        with self.assertRaises(containment_store.ContainmentStoreNotFound):
+            ContainmentStore.open_readonly(absent)
+
+        self.assertFalse(absent.exists())
+
+    def test_open_readonly_never_prepares_existing_root_or_children(self):
+        existing = self.root / "existing-validation"
+        existing.mkdir()
+
+        with mock.patch.object(
+            ContainmentStore,
+            "_ensure_direct_directory",
+            side_effect=AssertionError("read-only open attempted preparation"),
+        ) as prepare:
+            store = ContainmentStore.open_readonly(existing)
+            self.assertEqual(existing.absolute(), store.root)
+            self.assertEqual((), store.list_run_ids())
+
+        prepare.assert_not_called()
+        self.assertEqual((), tuple(existing.iterdir()))
+
     def test_claim_and_transitions_are_atomic_and_idempotent(self):
         store = ContainmentStore(self.root)
         journal = store.create(valid_prepared_journal(self.root))
@@ -369,6 +393,88 @@ class ContainmentStoreTests(unittest.TestCase):
             store.transition(journal, ScenarioState.ARMED, monitor_pid=17)
         self.assertEqual(1, len(calls))
         self.assertEqual(store.journal_path(RUN_ID, journal.scenario), calls[0][1])
+
+    def test_effect_recorder_keeps_write_when_replace_fails_after_mutation(self):
+        recorded = []
+        store = ContainmentStore(self.root, _effect_recorder=recorded.append)
+        journal = store.create(valid_prepared_journal(self.root))
+        recorded.clear()
+
+        def replace_then_fail(source, target):
+            target.write_bytes(source.read_bytes())
+            source.unlink()
+            raise OSError("injected durability failure after replacement")
+
+        with (
+            mock.patch.object(
+                containment_store,
+                "_replace_durable",
+                side_effect=replace_then_fail,
+            ),
+            self.assertRaisesRegex(ContainmentStoreError, "atomically replace"),
+        ):
+            store.transition(journal, ScenarioState.ARMED, monitor_pid=17)
+
+        self.assertEqual([store.journal_path(RUN_ID, journal.scenario)], recorded)
+
+    def test_effect_recorder_distinguishes_post_publication_from_prepublication_failure(self):
+        recorded = []
+        store = ContainmentStore(self.root, _effect_recorder=recorded.append)
+        written_target = self.root / "written.json"
+        refused_target = self.root / "refused.json"
+        data = b'{"exact":true}\n'
+
+        def publish_then_fail(path, payload, _validator):
+            path.write_bytes(payload)
+            raise OSError("injected failure after publication")
+
+        with (
+            mock.patch.object(
+                containment_store,
+                "publish_new_pinned",
+                side_effect=publish_then_fail,
+            ),
+            self.assertRaisesRegex(ContainmentStoreError, "atomically create"),
+        ):
+            store._write_immutable(written_target, data, "written record")
+
+        with (
+            mock.patch.object(
+                containment_store,
+                "publish_new_pinned",
+                side_effect=OSError("injected refusal before publication"),
+            ),
+            self.assertRaisesRegex(ContainmentStoreError, "atomically create"),
+        ):
+            store._write_immutable(refused_target, data, "refused record")
+
+        self.assertEqual(data, written_target.read_bytes())
+        self.assertFalse(refused_target.exists())
+        self.assertEqual([written_target], recorded)
+
+    def test_effect_recorder_keeps_posix_promotion_before_late_failure(self):
+        recorded = []
+        store = ContainmentStore(self.root, _effect_recorder=recorded.append)
+        target = self.root / "promoted.json"
+        data = b'{"promoted":true}\n'
+
+        def promote_then_fail(source, destination):
+            destination.write_bytes(source.read_bytes())
+            raise OSError("injected failure after promotion")
+
+        with (
+            mock.patch.object(containment_store.os, "name", "posix"),
+            mock.patch.object(
+                containment_store,
+                "_promote_no_replace_posix",
+                side_effect=promote_then_fail,
+            ),
+            self.assertRaisesRegex(ContainmentStoreError, "after promotion"),
+        ):
+            store._write_immutable(target, data, "promoted record")
+
+        self.assertEqual(data, target.read_bytes())
+        self.assertEqual([target], recorded)
 
     def test_windows_immutable_writes_route_only_to_retained_publication(self):
         store = ContainmentStore(self.root)

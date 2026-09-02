@@ -1,5 +1,6 @@
 import io
 import json
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -24,6 +25,7 @@ from modlab.validation.mo2_containment_model import (
     WatcherEvent,
 )
 from modlab.validation import mo2_containment_cli as cli
+from modlab.validation import mo2_containment_service as containment_service
 from modlab.validation.mo2_containment_store import (
     ContainmentStoreError,
     ContainmentStoreMalformedEvidence,
@@ -33,6 +35,7 @@ from modlab.validation.mo2_containment_store import (
 
 RUN_ID = "containment-run:" + "a" * 32
 ARTIFACT_ID = "archive-sha256:" + "b" * 64
+EFFECT_ROOT = Path(r"C:\service-effects")
 
 
 def tree() -> TreeIdentity:
@@ -94,6 +97,7 @@ class FakeService:
         scenario_result: ScenarioResult | None = None,
         decision: CapabilityDecision | None = None,
         recovery: ScenarioRecovery | None = None,
+        effects: dict[str, object] | None = None,
     ) -> None:
         self.scenario_result = scenario_result or result()
         self.decision = decision
@@ -109,56 +113,131 @@ class FakeService:
         )
         self.calls: list[str] = []
         self.mutations: list[str] = []
+        self.effects = {} if effects is None else dict(effects)
+
+    def _effects(self, name: str):
+        supplied = self.effects.get(name)
+        if supplied is not None:
+            return supplied
+        scenario_root = EFFECT_ROOT / "scenario"
+        defaults = {
+            "prepare": containment_service.ContainmentEffects(
+                written_paths=(EFFECT_ROOT / "prepare-root",),
+                child_mutation_roots=(EFFECT_ROOT / "prepare-root",),
+            ),
+            "arm": containment_service.ContainmentEffects(
+                written_paths=(
+                    scenario_root / "before.json",
+                    scenario_root / "journal.json",
+                    scenario_root / "watch",
+                ),
+                child_mutation_roots=(scenario_root / "watch",),
+                watcher_pid=42,
+            ),
+            "launch": containment_service.ContainmentEffects(
+                written_paths=(
+                    scenario_root / "journal.json",
+                    scenario_root / "launch.json",
+                ),
+                mo2_pid=2468,
+            ),
+            "capture": containment_service.ContainmentEffects(
+                written_paths=(
+                    scenario_root / "watch",
+                    scenario_root / "fixture",
+                    scenario_root / "after.json",
+                    scenario_root / "result.json",
+                    scenario_root / "journal.json",
+                ),
+                child_mutation_roots=(
+                    scenario_root / "watch",
+                    scenario_root / "fixture",
+                ),
+            ),
+            "recover": containment_service.ContainmentEffects(
+                written_paths=(scenario_root / "recovery.json",),
+            ),
+            "adjudicate": containment_service.ContainmentEffects(
+                written_paths=(EFFECT_ROOT / "decision.json",),
+            ),
+            "show-result": containment_service.ContainmentEffects(),
+            "show-decision": containment_service.ContainmentEffects(),
+        }
+        return defaults[name]
+
+    def _result(self, value, operation: str):
+        return containment_service.ContainmentServiceResult(
+            value,
+            self._effects(operation),
+        )
 
     def prepare_run(self, source, artifact, steam, validation):
         self.mutations.append("prepare")
         self.calls.append("prepare")
         self.prepared = (source, artifact, steam, validation)
-        return RUN_ID
+        return self._result(RUN_ID, "prepare")
 
     def arm_scenario(self, validation, run_id, scenario):
         self.mutations.append("arm")
         self.calls.append("arm")
-        return SimpleNamespace(mo2_pid=None, stage_root=r"C:\contained-stage")
+        return self._result(
+            SimpleNamespace(mo2_pid=None, stage_root=r"C:\contained-stage"),
+            "arm",
+        )
 
     def launch_scenario(self, validation, run_id, scenario):
         self.mutations.append("launch")
         self.calls.append("launch")
-        return SimpleNamespace(mo2_pid=2468)
+        return self._result(SimpleNamespace(mo2_pid=2468), "launch")
 
     def capture_scenario(self, validation, run_id, scenario):
         self.mutations.append("capture")
         self.calls.append("capture")
-        return replace(self.scenario_result, run_id=run_id, scenario=scenario)
+        return self._result(
+            replace(self.scenario_result, run_id=run_id, scenario=scenario),
+            "capture",
+        )
 
     def recover_scenario(self, validation, run_id, scenario):
         self.mutations.append("recover")
         self.calls.append("recover")
-        return replace(self.recovery, run_id=run_id, scenario=scenario)
+        return self._result(
+            replace(self.recovery, run_id=run_id, scenario=scenario),
+            "recover",
+        )
 
     def adjudicate_run(self, validation, run_id):
         self.mutations.append("adjudicate")
         self.calls.append("adjudicate")
         if self.decision is None:
-            return CapabilityDecision(
-                1,
-                run_id,
-                "isolated-low-integrity-junction-projection-v1",
-                CapabilityVerdict.SUPPORTED,
-                (),
-                (),
+            return self._result(
+                CapabilityDecision(
+                    1,
+                    run_id,
+                    "isolated-low-integrity-junction-projection-v1",
+                    CapabilityVerdict.SUPPORTED,
+                    (),
+                    (),
+                ),
+                "adjudicate",
             )
-        return replace(self.decision, run_id=run_id)
+        return self._result(replace(self.decision, run_id=run_id), "adjudicate")
 
     def load_result(self, validation, run_id, scenario):
         self.calls.append("show-result")
-        return replace(self.scenario_result, run_id=run_id, scenario=scenario)
+        return self._result(
+            replace(self.scenario_result, run_id=run_id, scenario=scenario),
+            "show-result",
+        )
 
     def load_decision(self, validation, run_id):
         self.calls.append("show-decision")
         if self.decision is None:
             raise ContainmentStoreNotFound("decision is absent")
-        return replace(self.decision, run_id=run_id)
+        return self._result(
+            replace(self.decision, run_id=run_id),
+            "show-decision",
+        )
 
 
 def prepare_args(*, output_format="text") -> list[str]:
@@ -212,6 +291,67 @@ def invoke_cli(argv: list[str], service: FakeService, *, reply="continue"):
 
 
 class ContainmentCliTests(unittest.TestCase):
+    def test_show_against_absent_workspace_creates_nothing(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-show-absent-") as directory:
+            workspace = Path(directory) / "absent-workspace"
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            code = cli.main(
+                [
+                    "show",
+                    RUN_ID,
+                    "--workspace",
+                    str(workspace),
+                    "--format",
+                    "json",
+                ],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            document = json.loads(stdout.getvalue())
+            self.assertEqual(3, code)
+            self.assertFalse(workspace.exists())
+            self.assertEqual([], document["writtenPaths"])
+            self.assertEqual("", stderr.getvalue())
+
+    def test_malformed_live_show_is_exit_two_without_mutation(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-show-malformed-") as directory:
+            workspace = Path(directory) / "workspace"
+            validation = cli._validation_root(workspace)
+            run_root = validation / RUN_ID.removeprefix("containment-run:")
+            run_root.mkdir(parents=True)
+            decision = run_root / "decision.json"
+            decision.write_bytes(b"{malformed\n")
+            before = tuple(
+                (path.relative_to(workspace), path.read_bytes() if path.is_file() else None)
+                for path in sorted(workspace.rglob("*"))
+            )
+            stdout = io.StringIO()
+
+            code = cli.main(
+                [
+                    "show",
+                    RUN_ID,
+                    "--workspace",
+                    str(workspace),
+                    "--format",
+                    "json",
+                ],
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+            document = json.loads(stdout.getvalue())
+            after = tuple(
+                (path.relative_to(workspace), path.read_bytes() if path.is_file() else None)
+                for path in sorted(workspace.rglob("*"))
+            )
+            self.assertEqual(2, code)
+            self.assertEqual([], document["writtenPaths"])
+            self.assertEqual(before, after)
+
     def test_prepare_reports_disposable_validation_without_production_action(self):
         code, output, _ = invoke_cli(prepare_args(), FakeService())
 
@@ -219,6 +359,24 @@ class ContainmentCliTests(unittest.TestCase):
         self.assertIn("Disposable validation only", output)
         self.assertIn("Production MO2 changes: none", output)
         self.assertIn("Written paths:", output)
+
+    def test_prepare_maps_only_its_service_effect_receipt(self):
+        exact = containment_service.ContainmentEffects(
+            written_paths=(EFFECT_ROOT / "prepared-exact-root",),
+            child_mutation_roots=(EFFECT_ROOT / "prepared-exact-root",),
+        )
+
+        code, output, _ = invoke_cli(
+            prepare_args(output_format="json"),
+            FakeService(effects={"prepare": exact}),
+        )
+
+        document = json.loads(output)
+        self.assertEqual(0, code)
+        self.assertEqual(
+            [str(EFFECT_ROOT / "prepared-exact-root")],
+            document["writtenPaths"],
+        )
 
     def test_validate_prints_exact_visible_merge_instructions(self):
         code, output, _ = invoke_cli(scenario_args(), FakeService())
@@ -256,6 +414,73 @@ class ContainmentCliTests(unittest.TestCase):
 
         self.assertEqual(0, code)
         self.assertEqual(["arm", "launch", "capture"], service.calls)
+
+    def test_validate_maps_only_exact_service_receipts_without_guesses(self):
+        arm_path = EFFECT_ROOT / "only-arm.effect"
+        launch_path = EFFECT_ROOT / "only-launch.effect"
+        capture_path = EFFECT_ROOT / "only-capture.effect"
+        service = FakeService(
+            effects={
+                "arm": containment_service.ContainmentEffects(
+                    written_paths=(arm_path,),
+                    watcher_pid=123,
+                ),
+                "launch": containment_service.ContainmentEffects(
+                    written_paths=(launch_path,),
+                    mo2_pid=456,
+                ),
+                "capture": containment_service.ContainmentEffects(
+                    written_paths=(capture_path,),
+                    source_changes=("receipt-source-change",),
+                    game_changes=("receipt-game-change",),
+                    production_mo2_changes=("receipt-production-change",),
+                ),
+            },
+        )
+
+        code, output, _ = invoke_cli(
+            scenario_args(output_format="json"),
+            service,
+        )
+
+        document = json.loads(output)
+        self.assertEqual(0, code)
+        self.assertEqual(
+            [str(arm_path), str(launch_path), str(capture_path)],
+            document["writtenPaths"],
+        )
+        self.assertEqual(
+            ["Watcher PID: 123", "MO2 PID: 456"],
+            document["launchedProcesses"],
+        )
+        self.assertEqual(["receipt-source-change"], document["sourceChanges"])
+        self.assertEqual(["receipt-game-change"], document["gameChanges"])
+        self.assertEqual(
+            ["receipt-production-change"],
+            document["productionMo2Changes"],
+        )
+        self.assertFalse(
+            any(
+                path.endswith(("before.json", "request.json", "outcome.json", "result.json"))
+                for path in document["writtenPaths"]
+            )
+        )
+
+    def test_validate_does_not_infer_processes_from_return_values(self):
+        empty = containment_service.ContainmentEffects()
+        service = FakeService(
+            effects={"arm": empty, "launch": empty, "capture": empty},
+        )
+
+        code, output, _ = invoke_cli(
+            scenario_args(output_format="json"),
+            service,
+        )
+
+        document = json.loads(output)
+        self.assertEqual(0, code)
+        self.assertEqual([], document["launchedProcesses"])
+        self.assertEqual([], document["writtenPaths"])
 
     def test_validate_refuses_noninteractive_stdin_before_arming(self):
         # Catches an EOF-only controller launching MO2 and losing its capture gate.
@@ -300,9 +525,20 @@ class ContainmentCliTests(unittest.TestCase):
             production_backup_names=("Protected Existing_backup",),
         )
 
+        capture_effects = containment_service.ContainmentEffects(
+            written_paths=(EFFECT_ROOT / "scenario" / "result.json",),
+            source_changes=("SourceMods: Modified marker.txt",),
+            game_changes=("BoundedGame: Modified Skyrim.esm",),
+            production_mo2_changes=(
+                "Observed production backup: Protected Existing_backup",
+            ),
+        )
         code, output, _ = invoke_cli(
             scenario_args(output_format="json"),
-            FakeService(scenario_result=changed),
+            FakeService(
+                scenario_result=changed,
+                effects={"capture": capture_effects},
+            ),
         )
 
         document = json.loads(output)
@@ -310,17 +546,32 @@ class ContainmentCliTests(unittest.TestCase):
         self.assertTrue(any("SourceMods" in item for item in document["sourceChanges"]))
         self.assertTrue(any("BoundedGame" in item for item in document["gameChanges"]))
         self.assertTrue(any("Protected Existing_backup" in item for item in document["productionMo2Changes"]))
-        self.assertTrue(any(path.endswith("journal.json") for path in document["writtenPaths"]))
-        self.assertTrue(any(path.endswith("watch\\request.json") for path in document["writtenPaths"]))
-        self.assertTrue(any(path.endswith("launch.json") for path in document["writtenPaths"]))
-        self.assertTrue(any(path.endswith("watch\\outcome.json") for path in document["writtenPaths"]))
-        self.assertTrue(any(path.endswith("result.json") for path in document["writtenPaths"]))
+        self.assertEqual(
+            list(
+                map(
+                    str,
+                    containment_service.ContainmentEffects.merged(
+                        FakeService()._effects("arm"),
+                        FakeService()._effects("launch"),
+                        capture_effects,
+                    ).written_paths,
+                )
+            ),
+            document["writtenPaths"],
+        )
 
     def test_post_launch_capture_refusal_retains_pid_artifacts_and_containment_root(self):
+        failed_path = EFFECT_ROOT / "capture-failed-after-write.json"
         service = FakeService()
 
         def capture_refusal(*_args):
-            raise ContainmentStoreError("capture operation interrupted")
+            raise containment_service.ContainmentOperationError(
+                "capture operation interrupted",
+                effects=containment_service.ContainmentEffects(
+                    written_paths=(failed_path,),
+                    production_mo2_changes=("receipt-before-refusal",),
+                ),
+            )
 
         service.capture_scenario = capture_refusal
         code, output, _ = invoke_cli(scenario_args(output_format="json"), service)
@@ -329,17 +580,24 @@ class ContainmentCliTests(unittest.TestCase):
         self.assertEqual(3, code)
         self.assertEqual(RUN_ID, document["runId"])
         self.assertEqual("MergeExisting", document["scenario"])
+        self.assertIn("Watcher PID: 42", document["launchedProcesses"])
         self.assertIn("MO2 PID: 2468", document["launchedProcesses"])
-        self.assertTrue(any(path.endswith("journal.json") for path in document["writtenPaths"]))
-        self.assertTrue(any(path.endswith("watch\\request.json") for path in document["writtenPaths"]))
-        self.assertTrue(any(path.endswith("launch.json") for path in document["writtenPaths"]))
-        self.assertTrue(any(r"C:\contained-stage" in reason for reason in document["reasons"]))
+        self.assertIn(str(failed_path), document["writtenPaths"])
+        self.assertEqual(
+            ["receipt-before-refusal"],
+            document["productionMo2Changes"],
+        )
 
     def test_post_launch_capture_binding_refusal_retains_controller_context(self):
         service = FakeService()
-        service.capture_scenario = lambda *_args: replace(
-            result(),
-            run_id="containment-run:" + "f" * 32,
+        service.capture_scenario = lambda *_args: containment_service.ContainmentServiceResult(
+            replace(
+                result(),
+                run_id="containment-run:" + "f" * 32,
+            ),
+            containment_service.ContainmentEffects(
+                written_paths=(EFFECT_ROOT / "foreign-capture.json",),
+            ),
         )
 
         code, output, _ = invoke_cli(scenario_args(output_format="json"), service)
@@ -347,8 +605,12 @@ class ContainmentCliTests(unittest.TestCase):
         document = json.loads(output)
         self.assertEqual(3, code)
         self.assertEqual("MergeExisting", document["scenario"])
+        self.assertIn("Watcher PID: 42", document["launchedProcesses"])
         self.assertIn("MO2 PID: 2468", document["launchedProcesses"])
-        self.assertTrue(any(path.endswith("launch.json") for path in document["writtenPaths"]))
+        self.assertIn(
+            str(EFFECT_ROOT / "foreign-capture.json"),
+            document["writtenPaths"],
+        )
 
     def test_adjudicate_never_defaults_incomplete_to_supported(self):
         service = FakeService(
@@ -366,6 +628,26 @@ class ContainmentCliTests(unittest.TestCase):
 
         self.assertEqual(3, code)
         self.assertIn("Verdict: Incomplete", output)
+
+    def test_adjudicate_not_ready_is_exit_three_without_guessed_decision_write(self):
+        service = FakeService()
+
+        def refuse(*_args):
+            raise containment_service.ContainmentDecisionNotReady(
+                "four current results are required",
+                effects=containment_service.ContainmentEffects(),
+            )
+
+        service.adjudicate_run = refuse
+        code, output, _ = invoke_cli(
+            run_args("adjudicate", output_format="json"),
+            service,
+        )
+
+        document = json.loads(output)
+        self.assertEqual(3, code)
+        self.assertEqual([], document["writtenPaths"])
+        self.assertIsNone(document["verdict"])
 
     def test_json_prepare_exposes_exact_run_id_and_complete_shape(self):
         code, output, _ = invoke_cli(prepare_args(output_format="json"), FakeService())
@@ -443,10 +725,24 @@ class ContainmentCliTests(unittest.TestCase):
             ContainmentScenario.MERGE_EXISTING: result(ScenarioOutcome.FAILED),
         }
 
+        result_effects = {
+            ContainmentScenario.NEW_FOLDER: containment_service.ContainmentEffects(
+                source_changes=("new-folder-source",),
+                production_mo2_changes=("new-folder-production",),
+            ),
+            ContainmentScenario.MERGE_EXISTING: containment_service.ContainmentEffects(
+                source_changes=("merge-source",),
+                game_changes=("merge-game",),
+            ),
+        }
+
         def load_result(_validation, _run_id, scenario):
             if scenario not in results:
                 raise ContainmentStoreNotFound("result is absent")
-            return results[scenario]
+            return containment_service.ContainmentServiceResult(
+                results[scenario],
+                result_effects[scenario],
+            )
 
         service.load_result = load_result
         code, output, _ = invoke_cli(run_args("show", output_format="json"), service)
@@ -457,6 +753,16 @@ class ContainmentCliTests(unittest.TestCase):
         self.assertEqual("Rejected", document["verdict"])
         self.assertIn("Scenario NewFolder: Passed", document["reasons"])
         self.assertIn("Scenario MergeExisting: Failed", document["reasons"])
+        self.assertEqual(
+            ["new-folder-source", "merge-source"],
+            document["sourceChanges"],
+        )
+        self.assertEqual(["merge-game"], document["gameChanges"])
+        self.assertEqual(
+            ["new-folder-production"],
+            document["productionMo2Changes"],
+        )
+        self.assertEqual([], document["writtenPaths"])
 
     def test_parse_time_json_error_writes_one_complete_json_response(self):
         stdout = io.StringIO()
@@ -502,6 +808,23 @@ class ContainmentCliTests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertIn("Cleanup: Succeeded", output)
         self.assertEqual(ScenarioOutcome.INCOMPLETE, service.scenario_result.outcome)
+
+    def test_recover_maps_only_the_service_effect_receipt(self):
+        path = EFFECT_ROOT / "exact-recovery-write.json"
+        code, output, _ = invoke_cli(
+            scenario_args("recover", output_format="json"),
+            FakeService(
+                effects={
+                    "recover": containment_service.ContainmentEffects(
+                        written_paths=(path,),
+                    )
+                }
+            ),
+        )
+
+        document = json.loads(output)
+        self.assertEqual(0, code)
+        self.assertEqual([str(path)], document["writtenPaths"])
 
     def test_malformed_identifier_is_a_plain_exit_two_refusal(self):
         code, output, errors = invoke_cli(
