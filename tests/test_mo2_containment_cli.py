@@ -4,6 +4,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from modlab.validation.mo2_containment_model import (
     CapabilityDecision,
@@ -255,6 +256,27 @@ class ContainmentCliTests(unittest.TestCase):
 
         self.assertEqual(0, code)
         self.assertEqual(["arm", "launch", "capture"], service.calls)
+
+    def test_validate_refuses_noninteractive_stdin_before_arming(self):
+        # Catches an EOF-only controller launching MO2 and losing its capture gate.
+        service = FakeService()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with patch.object(cli.sys, "stdin", io.StringIO("")):
+            code = cli.main(
+                scenario_args(scenario="NewFolder", output_format="json"),
+                stdout=stdout,
+                stderr=stderr,
+                service=service,
+            )
+
+        document = json.loads(stdout.getvalue())
+        self.assertEqual(2, code)
+        self.assertEqual([], service.calls)
+        self.assertTrue(
+            any("interactive terminal" in reason for reason in document["reasons"])
+        )
 
     def test_validate_distinguishes_proven_failure_from_incomplete(self):
         failed = FakeService(scenario_result=result(ScenarioOutcome.FAILED))

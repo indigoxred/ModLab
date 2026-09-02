@@ -92,6 +92,7 @@ _PREVIOUS_CLASSIFICATION_POLICY = "scenario-classification-v3"
 _OLDER_CLASSIFICATION_POLICY = "scenario-classification-v2"
 _FIXTURE_POLICY = "disposable-shell-environment-v3"
 _PREVIOUS_FIXTURE_POLICY = "disposable-shell-environment-v2"
+_OPERATOR_POLICY = "foreground-interactive-confirmation-v1"
 _PROTECTED_NAME = "Protected Existing"
 _EXPECTED_NEW = {
     ContainmentScenario.NEW_FOLDER: "ModLab Spike New",
@@ -2249,6 +2250,28 @@ def _command_fingerprint(
         "fixturePolicy": _FIXTURE_POLICY,
         "mechanism": _MECHANISM,
         "mo2ArtifactId": mo2_artifact_id,
+        "operatorPolicy": _OPERATOR_POLICY,
+        "scenarios": [item.value for item in ContainmentScenario],
+        "sourceWorkspace": os.path.normcase(
+            os.path.normpath(str(Path(source_workspace).expanduser().absolute()))
+        ),
+        "steamRoot": os.path.normcase(
+            os.path.normpath(str(Path(steam_root).expanduser().absolute()))
+        ),
+    }
+    return _command_fingerprint_for(document)
+
+
+def _pre_operator_policy_command_fingerprint(
+    source_workspace: Path,
+    mo2_artifact_id: str,
+    steam_root: Path,
+) -> str:
+    document = {
+        "classificationPolicy": _CLASSIFICATION_POLICY,
+        "fixturePolicy": _FIXTURE_POLICY,
+        "mechanism": _MECHANISM,
+        "mo2ArtifactId": mo2_artifact_id,
         "scenarios": [item.value for item in ContainmentScenario],
         "sourceWorkspace": os.path.normcase(
             os.path.normpath(str(Path(source_workspace).expanduser().absolute()))
@@ -2366,9 +2389,12 @@ def _known_command_fingerprints(
     source_workspace: Path,
     mo2_artifact_id: str,
     steam_root: Path,
-) -> tuple[str, str, str, str, str, str]:
+) -> tuple[str, str, str, str, str, str, str]:
     return (
         _command_fingerprint(source_workspace, mo2_artifact_id, steam_root),
+        _pre_operator_policy_command_fingerprint(
+            source_workspace, mo2_artifact_id, steam_root
+        ),
         _previous_fixture_policy_command_fingerprint(
             source_workspace, mo2_artifact_id, steam_root
         ),

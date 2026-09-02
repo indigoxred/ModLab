@@ -913,6 +913,14 @@ the corrected fixture cohort; all results
 within one exact fixture-policy hash still retain normal failed-history
 precedence.
 
+The command fingerprint also binds the foreground operator protocol.
+`foreground-interactive-confirmation-v1` requires the real CLI to prove its
+standard input is an interactive terminal before it arms a watcher or launches
+MO2. The same foreground controller must remain alive while the operator works,
+and receives the exact word `continue` only after MO2 closes normally. Runs
+created before this operator policy remain readable, but are not predecessors
+of the corrected interactive cohort.
+
 - [ ] **Step 6: Run focused tests**
 
 Run: `& 'C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m unittest tests.test_mo2_containment_store tests.test_mo2_containment_service -v`
@@ -1137,7 +1145,7 @@ Before invoking `prepare`, verify that the exact `$artifactId` is present by run
 
 - [ ] **Step 4: Execute all four visible scenarios with computer control**
 
-Before GUI action, the main agent reads `C:\Users\red\.codex\plugins\cache\openai-bundled\computer-use\26.825.51511\skills\computer-use\SKILL.md` completely and announces that computer control is now required by the plan. For each scenario in this order—`NewFolder`, `MergeExisting`, `ReplaceExisting`, `FomodDependency`—start one foreground `validate`, follow only its exact printed MO2 actions with computer control, close MO2 normally, and explicitly continue the same waiting CLI process so it can capture and publish the result without transferring watcher ownership:
+Before GUI action, the main agent reads `C:\Users\red\.codex\plugins\cache\openai-bundled\computer-use\26.825.51511\skills\computer-use\SKILL.md` completely and announces that computer control is now required by the plan. For each scenario in this order—`NewFolder`, `MergeExisting`, `ReplaceExisting`, `FomodDependency`—start one foreground `validate` in an interactive terminal with live standard input, retain that exact waiting process, follow only its exact printed MO2 actions with computer control, close MO2 normally, and then type the exact word `continue` into the same CLI process so it can capture and publish the result without transferring watcher ownership. A non-interactive invocation must refuse before arming or launching MO2. When Codex owns the process, allocate a PTY and retain its session ID for the later `continue` input:
 
 ```powershell
 & $pythonPath -B -m modlab.validation.mo2_containment_cli validate $runId NewFolder --workspace $workspacePath
@@ -1176,11 +1184,20 @@ MO2's `meta.ini`, then recorded `Failed` because the v2 stage configuration made
 MO2 treat the non-plugin `marker.txt` dependency as missing. It recorded no
 source, game, or production-MO2 changes and remains immutable and read-only.
 
+The first v4/v3 run without an operator-policy field,
+`containment-run:9dc246cf35c54b3a92009e29f559d866`, installed the disposable
+NewFolder probe, but its non-interactive controller received EOF instead of the
+required `continue`. It published no scenario result; an early recovery attempt
+remained conservatively `Refused`, and adjudication recorded `Incomplete` with
+no result IDs. This is not evidence of containment success or failure. The run
+and its disposable stage remain immutable and read-only.
+
 Prepare the corrected run under `scenario-classification-v4` and
-`disposable-shell-environment-v3`. Verify its command fingerprint differs from
-the retained v4/v2 run and its `predecessorRunIds` is empty. Do not edit, delete,
-reuse, or list any diagnostic run as predecessor evidence for the corrected
-fixture-policy decision.
+`disposable-shell-environment-v3` with
+`foreground-interactive-confirmation-v1`. Verify its command fingerprint differs
+from both retained v4/v2 and pre-operator v4/v3 runs and its
+`predecessorRunIds` is empty. Do not edit, delete, reuse, or list any diagnostic
+run as predecessor evidence for the corrected operator-policy decision.
 
 - [ ] **Step 5: Adjudicate and inspect the decision**
 

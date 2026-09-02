@@ -369,6 +369,15 @@ def _validate(
     run_id = _require_run_id(args.run_id)
     scenario = _require_scenario(args.scenario)
     validation = _validation_root(args.workspace)
+    if input_func is input:
+        try:
+            interactive = bool(sys.stdin.isatty())
+        except (AttributeError, OSError):
+            interactive = False
+        if not interactive:
+            raise CliInputError(
+                "validate requires an interactive terminal before arming or launching MO2"
+            )
     armed = service.arm_scenario(validation, run_id, scenario)
     stage_value = getattr(armed, "stage_root", None)
     stage_root = Path(stage_value) if isinstance(stage_value, str) and stage_value else None
