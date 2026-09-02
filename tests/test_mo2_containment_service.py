@@ -11,6 +11,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from modlab.adapters.mo2.bootstrap_model import ProcessObservation
+from modlab.platform.windows_exact_fs import (
+    ExactObjectOwnershipError,
+    PinnedIdentity,
+    PinnedObject,
+)
 from modlab.validation.mo2_containment_model import (
     CapabilityVerdict,
     ContainmentScenario,
@@ -1010,7 +1015,7 @@ class ContainmentServiceTests(unittest.TestCase):
 
             def fake_prepare(_source, _artifact, _steam, _validation, scenario, *, fixture_parent=None):
                 parent = Path(fixture_parent)
-                parent.mkdir(parents=True)
+                self.assertTrue(parent.is_dir())
                 calls.append((scenario, parent))
                 run_id = "containment-run:" + parent.parents[1].name
                 observed_intents.append(
@@ -1035,6 +1040,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 )
 
             with (
+                patch.object(service, "preflight_containment_fixture"),
                 patch.object(service, "prepare_containment_fixture", side_effect=fake_prepare),
                 patch.object(service, "_fixture_record", side_effect=fake_record),
             ):
@@ -1046,10 +1052,11 @@ class ContainmentServiceTests(unittest.TestCase):
             run_id = prepared.value
 
             run_root = validation / run_id.removeprefix("containment-run:")
-            fixture_roots = tuple(
+            scenario_fixture_roots = tuple(
                 run_root / "fixtures" / item.value
                 for item in ContainmentScenario
             )
+            fixture_roots = (run_root / "fixtures", *scenario_fixture_roots)
             self.assertEqual(fixture_roots, prepared.effects.child_mutation_roots)
             self.assertEqual(
                 (
@@ -1067,7 +1074,7 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertEqual(tuple(ContainmentScenario), tuple(item[0] for item in calls))
             self.assertTrue(all(parent.is_relative_to(run_root) for _, parent in calls))
             self.assertEqual(
-                tuple(run_root / "fixtures" / item.value for item in ContainmentScenario),
+                scenario_fixture_roots,
                 tuple(parent for _, parent in calls),
             )
             request = ContainmentStore(validation).load_request(run_id)
@@ -1113,8 +1120,13 @@ class ContainmentServiceTests(unittest.TestCase):
                 ),
                 patch.object(
                     service,
-                    "prepare_containment_fixture",
+                    "preflight_containment_fixture",
                     side_effect=refuse_before_mutation,
+                ),
+                patch.object(
+                    service,
+                    "prepare_containment_fixture",
+                    side_effect=AssertionError("materialization must not begin"),
                 ),
                 self.assertRaises(service.ContainmentOperationError) as raised,
             ):
@@ -1150,7 +1162,7 @@ class ContainmentServiceTests(unittest.TestCase):
 
             def fail_after_mutation(*_args, fixture_parent=None, **_kwargs):
                 entered = Path(fixture_parent)
-                entered.mkdir(parents=True)
+                self.assertTrue(entered.is_dir())
                 (entered / "partial.marker").write_bytes(b"entered\n")
                 raise RuntimeError("fixture failed after mutation")
 
@@ -1160,6 +1172,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     "uuid4",
                     return_value=SimpleNamespace(hex="e" * 32),
                 ),
+                patch.object(service, "preflight_containment_fixture"),
                 patch.object(
                     service,
                     "prepare_containment_fixture",
@@ -1176,7 +1189,7 @@ class ContainmentServiceTests(unittest.TestCase):
 
             self.assertTrue((fixture_root / "partial.marker").is_file())
             self.assertEqual(
-                (fixture_root,),
+                (fixture_root.parent, fixture_root),
                 raised.exception.effects.child_mutation_roots,
             )
             self.assertEqual(
@@ -1184,6 +1197,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     layout.mo2_containment_validation
                     / ("e" * 32)
                     / "intent.json",
+                    fixture_root.parent,
                     fixture_root,
                 ),
                 raised.exception.effects.written_paths,
@@ -1434,6 +1448,8 @@ class ContainmentServiceTests(unittest.TestCase):
                 retry_binding=retry_binding,
             )
             record = records[1]
+            record.source_mods.mkdir(parents=True)
+            record.stage_mods.mkdir(parents=True)
             armed = store.create(ScenarioJournal(
                 1, RUN_ID, record.scenario, ScenarioState.ARMED,
                 str(record.source_root), str(record.stage_root), str(record.archive_path),
@@ -1531,12 +1547,16 @@ class ContainmentServiceTests(unittest.TestCase):
             result = capture_receipt.value
             self.assertEqual(51, result.mo2_process.pid)
             self.assertEqual(
-                (store.watch_path(RUN_ID, record.scenario),),
+                (
+                    store.watch_path(RUN_ID, record.scenario),
+                    store.quarantine_path(RUN_ID) / record.scenario.value,
+                ),
                 capture_receipt.effects.child_mutation_roots,
             )
             self.assertEqual(
                 (
                     store.watch_path(RUN_ID, record.scenario),
+                    store.quarantine_path(RUN_ID) / record.scenario.value,
                     store.scenario_path(RUN_ID, record.scenario) / "after.json",
                     store.result_path(RUN_ID, record.scenario),
                     store.journal_path(RUN_ID, record.scenario),
@@ -1693,6 +1713,8 @@ class ContainmentServiceTests(unittest.TestCase):
                 root / "steam",
                 "artifact:capture-effect-failure",
             )[0]
+            record.source_mods.mkdir(parents=True)
+            record.stage_mods.mkdir(parents=True)
             journal = store.create(
                 ScenarioJournal(
                     1,
@@ -1786,6 +1808,7 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertEqual(
                 (
                     store.watch_path(RUN_ID, record.scenario),
+                    store.quarantine_path(RUN_ID) / record.scenario.value,
                     store.scenario_path(RUN_ID, record.scenario) / "after.json",
                     store.result_path(RUN_ID, record.scenario),
                     store.journal_path(RUN_ID, record.scenario),
@@ -1823,11 +1846,14 @@ class ContainmentServiceTests(unittest.TestCase):
             )
             store.write_retry_authority(recovery, written.content_id, fingerprint)
 
-            with patch.object(
-                service,
-                "prepare_containment_fixture",
-                side_effect=RuntimeError("injected fixture failure"),
-            ) as fixture:
+            with (
+                patch.object(service, "preflight_containment_fixture"),
+                patch.object(
+                    service,
+                    "prepare_containment_fixture",
+                    side_effect=RuntimeError("injected fixture failure"),
+                ) as fixture,
+            ):
                 with self.assertRaisesRegex(RuntimeError, "injected fixture failure"):
                     service.prepare_run(
                         source, "artifact:abc", steam, store.root, retry_of=recovery
@@ -1904,6 +1930,7 @@ class ContainmentServiceTests(unittest.TestCase):
             fixture_calls = []
 
             with (
+                patch.object(service, "preflight_containment_fixture"),
                 patch.object(
                     service,
                     "prepare_containment_fixture",
@@ -2005,6 +2032,7 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertFalse(store.decision_path(RUN_ID).exists())
             fixture_calls = []
             with (
+                patch.object(service, "preflight_containment_fixture"),
                 patch.object(
                     service,
                     "prepare_containment_fixture",
@@ -2057,6 +2085,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 service.adjudicate_run(store.root, RUN_ID).verdict,
             )
             with (
+                patch.object(service, "preflight_containment_fixture"),
                 patch.object(
                     service,
                     "prepare_containment_fixture",
@@ -2131,6 +2160,7 @@ class ContainmentServiceTests(unittest.TestCase):
             )
 
             with (
+                patch.object(service, "preflight_containment_fixture"),
                 patch.object(
                     service,
                     "prepare_containment_fixture",
@@ -2250,6 +2280,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 )
 
             with (
+                patch.object(service, "preflight_containment_fixture"),
                 patch.object(
                     service,
                     "prepare_containment_fixture",
@@ -2349,6 +2380,7 @@ class ContainmentServiceTests(unittest.TestCase):
             )
 
             with (
+                patch.object(service, "preflight_containment_fixture"),
                 patch.object(
                     service,
                     "prepare_containment_fixture",
@@ -2441,6 +2473,7 @@ class ContainmentServiceTests(unittest.TestCase):
             )
 
             with (
+                patch.object(service, "preflight_containment_fixture"),
                 patch.object(
                     service,
                     "prepare_containment_fixture",
@@ -2687,6 +2720,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     errors.append(error)
 
             with (
+                patch.object(service, "preflight_containment_fixture"),
                 patch.object(
                     service,
                     "prepare_containment_fixture",
@@ -2753,6 +2787,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 recovery, recovery_write.content_id, fingerprint
             )
             with (
+                patch.object(service, "preflight_containment_fixture"),
                 patch.object(
                     service,
                     "prepare_containment_fixture",
@@ -3401,6 +3436,308 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
             return service._delegated_mutation(root, operation)
 
         return invoke()
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root guards are required")
+    def test_absent_root_never_enters_ordinary_delegated_mutation_unpinned(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-absent-root-") as directory:
+            base = Path(directory)
+            root = base / "root"
+            displaced = base / "displaced"
+            invoked = False
+
+            def create_swap_and_restore():
+                nonlocal invoked
+                invoked = True
+                root.mkdir()
+                (root / "original.txt").write_bytes(b"original\n")
+                root.rename(displaced)
+                root.mkdir()
+                (root / "replacement.txt").write_bytes(b"replacement\n")
+                (root / "replacement.txt").unlink()
+                root.rmdir()
+                displaced.rename(root)
+
+            with self.assertRaisesRegex(
+                service.ContainmentOperationError,
+                "absent|service-controlled",
+            ):
+                self._delegated_receipt(root, create_swap_and_restore)
+
+            self.assertFalse(invoked)
+            self.assertFalse(root.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root guards are required")
+    def test_controlled_creation_retains_every_new_component_before_delegate(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-controlled-root-") as directory:
+            base = Path(directory)
+            parent = base / "new-parent"
+            root = parent / "root"
+            displaced = base / "displaced"
+            preflight_observations = []
+            swap_succeeded = False
+
+            @service._receipted
+            def invoke():
+                def preflight():
+                    preflight_observations.append((parent.exists(), root.exists()))
+
+                def mutate(_prepared):
+                    nonlocal swap_succeeded
+                    try:
+                        parent.rename(displaced)
+                    except OSError:
+                        (root / "direct.txt").write_bytes(b"direct\n")
+                    else:
+                        swap_succeeded = True
+                    return "created"
+
+                return service._delegated_mutations_with_created_root(
+                    root,
+                    (),
+                    preflight,
+                    mutate,
+                    require_absent=True,
+                )
+
+            receipt = invoke()
+
+            self.assertEqual("created", receipt.value)
+            self.assertEqual([(False, False)], preflight_observations)
+            self.assertFalse(swap_succeeded)
+            self.assertEqual(
+                (parent, root),
+                receipt.effects.child_mutation_roots,
+            )
+            self.assertEqual((parent, root), receipt.effects.written_paths)
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root guards are required")
+    def test_controlled_creation_partial_chain_receipts_only_created_component(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-partial-chain-") as directory:
+            base = Path(directory)
+            parent = base / "new-parent"
+            root = parent / "root"
+            real_mkdir = Path.mkdir
+
+            def fail_final(candidate, *args, **kwargs):
+                if Path(candidate) == root:
+                    raise OSError("injected final-directory refusal")
+                return real_mkdir(candidate, *args, **kwargs)
+
+            @service._receipted
+            def invoke():
+                return service._delegated_mutations_with_created_root(
+                    root,
+                    (),
+                    lambda: None,
+                    lambda _prepared: self.fail("delegate must not run"),
+                    require_absent=True,
+                )
+
+            with (
+                patch.object(Path, "mkdir", autospec=True, side_effect=fail_final),
+                self.assertRaises(service.ContainmentOperationError) as raised,
+            ):
+                invoke()
+
+            self.assertTrue(parent.is_dir())
+            self.assertFalse(root.exists())
+            self.assertEqual(
+                (parent,),
+                raised.exception.effects.child_mutation_roots,
+            )
+            self.assertEqual((parent,), raised.exception.effects.written_paths)
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root guards are required")
+    def test_mutation_guard_rejects_same_file_id_from_foreign_volume(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-volume-identity-") as directory:
+            root = Path(directory)
+            file_id = int(root.lstat().st_ino)
+            path_identity = PinnedIdentity(101, file_id, 0x10)
+            pinned = PinnedObject(root, 7001, PinnedIdentity(202, file_id, 0x10))
+
+            with (
+                patch.object(
+                    service,
+                    "identity_at_path",
+                    return_value=path_identity,
+                    create=True,
+                ),
+                patch.object(
+                    service,
+                    "pin_stable_direct_object",
+                    return_value=pinned,
+                ),
+                patch.object(pinned, "close", side_effect=lambda: setattr(pinned, "handle", 0)),
+                self.assertRaisesRegex(
+                    service._MutationObservationError,
+                    "identity|volume",
+                ),
+            ):
+                service._mutation_root_guard(root)
+
+            self.assertEqual(0, pinned.handle)
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root guards are required")
+    def test_mutation_guard_retains_the_native_canonical_path_identity(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-native-identity-") as directory:
+            root = Path(directory)
+            expected = service.identity_at_path(root)
+            guard = service._mutation_root_guard(
+                root,
+                require_target_existing=True,
+            )
+            self.assertIsNotNone(guard)
+            try:
+                self.assertEqual(expected, guard.identity)
+            finally:
+                guard.close()
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root guards are required")
+    def test_mutation_guard_identity_lookup_ownership_remains_resolvable(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-identity-owner-") as directory:
+            root = Path(directory)
+            guard = PinnedObject(
+                root,
+                0,
+                PinnedIdentity(1, int(root.lstat().st_ino), 0x10),
+            )
+            retained = PinnedObject(root, 7002, PinnedIdentity(303, 404, 0x10))
+            exact = ExactObjectOwnershipError(
+                "identity lookup retained ownership",
+                verification=(retained,),
+            )
+
+            with (
+                patch.object(
+                    service,
+                    "identity_at_path",
+                    side_effect=exact,
+                    create=True,
+                ),
+                patch.object(
+                    service,
+                    "pin_stable_direct_object",
+                    return_value=guard,
+                ),
+                self.assertRaises(ContainmentStoreOwnershipError) as raised,
+            ):
+                service._mutation_root_guard(root)
+
+            self.assertIs(exact, raised.exception.ownership)
+            with patch(
+                "modlab.platform.windows_exact_fs._close_handle"
+            ) as close_handle:
+                raised.exception.resolve()
+            close_handle.assert_called_once_with(7002)
+            self.assertEqual(0, retained.handle)
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root guards are required")
+    def test_post_pin_identity_lookup_ownership_closes_guard_and_remains_resolvable(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-post-identity-owner-") as directory:
+            root = Path(directory)
+            identity = PinnedIdentity(505, 606, 0x10)
+            guard = PinnedObject(root, 7003, identity)
+            retained = PinnedObject(root, 7004, PinnedIdentity(505, 607, 0x10))
+            exact = ExactObjectOwnershipError(
+                "post-pin identity lookup retained ownership",
+                verification=(retained,),
+            )
+
+            with (
+                patch.object(
+                    service,
+                    "identity_at_path",
+                    side_effect=(identity, exact),
+                ),
+                patch.object(
+                    service,
+                    "pin_stable_direct_object",
+                    return_value=guard,
+                ),
+                patch.object(
+                    guard,
+                    "close",
+                    side_effect=lambda: setattr(guard, "handle", 0),
+                ) as close_guard,
+                self.assertRaises(ContainmentStoreOwnershipError) as raised,
+            ):
+                service._mutation_root_guard(root)
+
+            self.assertIs(exact, raised.exception.ownership)
+            close_guard.assert_called_once_with()
+            self.assertEqual(0, guard.handle)
+            with patch(
+                "modlab.platform.windows_exact_fs._close_handle"
+            ) as close_handle:
+                raised.exception.resolve()
+            close_handle.assert_called_once_with(7004)
+            self.assertEqual(0, retained.handle)
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root guards are required")
+    def test_dual_operation_and_observer_ownership_is_unioned_and_resolvable(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-effect-owner-union-") as directory:
+            root = Path(directory)
+            primary_pin = PinnedObject(
+                root / "primary.tmp",
+                7101,
+                PinnedIdentity(1, 11, 0),
+            )
+            observer_pin = PinnedObject(
+                root / "observer.tmp",
+                7102,
+                PinnedIdentity(1, 12, 0),
+            )
+            primary = ContainmentStoreOwnershipError(
+                "primary operation ownership",
+                ExactObjectOwnershipError(
+                    "primary owner",
+                    verification=(primary_pin,),
+                ),
+            )
+            primary.add_note("primary context note")
+            observer = ContainmentStoreOwnershipError(
+                "post-observation ownership",
+                ExactObjectOwnershipError(
+                    "observer owner",
+                    verification=(observer_pin,),
+                ),
+            )
+
+            with (
+                patch.object(
+                    service,
+                    "_mutation_root_observation",
+                    side_effect=((('before',),), observer),
+                ),
+                self.assertRaises(ContainmentStoreOwnershipError) as raised,
+            ):
+                self._delegated_receipt(
+                    root,
+                    lambda: (_ for _ in ()).throw(primary),
+                )
+
+            self.assertIs(primary, raised.exception)
+            self.assertEqual(
+                (primary_pin, observer_pin),
+                tuple(owner.pinned for owner in raised.exception.owners),
+            )
+            self.assertTrue(
+                any(
+                    "post-observation ownership" in note
+                    for note in getattr(raised.exception, "__notes__", ())
+                )
+            )
+            self.assertIn(
+                "primary context note",
+                getattr(raised.exception, "__notes__", ()),
+            )
+            with patch(
+                "modlab.platform.windows_exact_fs._close_handle"
+            ) as close_handle:
+                raised.exception.resolve()
+            self.assertEqual(2, close_handle.call_count)
+            self.assertEqual(0, primary_pin.handle)
+            self.assertEqual(0, observer_pin.handle)
 
     def test_delegated_mutation_rejects_root_junction_before_delegate(self):
         with tempfile.TemporaryDirectory(prefix="modlab-effect-root-junction-") as directory:

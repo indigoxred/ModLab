@@ -101,6 +101,16 @@ class ContainmentFixture:
     external_watch_roots: tuple[tuple[str, Path], ...]
 
 
+@dataclass(frozen=True)
+class _FixtureInputs:
+    scenario: ContainmentScenario
+    source_layout: WorkspaceLayout
+    validation: Path
+    source_record: object
+    payload: Path
+    fixture_parent: Path | None
+
+
 def write_scenario_archives(root: Path) -> ScenarioArchives:
     """Write the three exact, deterministic scenario ZIP inputs beneath *root*."""
     archive_root = _require_direct_directory(Path(root), create=True) / "archives"
@@ -138,45 +148,23 @@ def prepare_containment_fixture(
     fixture_parent: Path | None = None,
 ) -> ContainmentFixture:
     """Create two disposable portable instances and project the protected source mod."""
-    if not isinstance(scenario, ContainmentScenario):
-        raise ContainmentFixtureError("scenario must be a ContainmentScenario")
-    source_root = _require_direct_directory(Path(source_workspace), create=False)
-    source_layout = workspace_layout(source_root)
-    requested_validation = Path(validation_root).expanduser().absolute()
-    if os.path.normcase(str(requested_validation)) != os.path.normcase(
-        str(source_layout.mo2_containment_validation)
-    ):
-        raise ContainmentFixtureError("validation root must be the workspace containment root")
-    validation = _require_direct_directory(
-        source_layout.mo2_containment_validation, create=True
+    inputs = _fixture_inputs(
+        source_workspace,
+        mo2_artifact_id,
+        validation_root,
+        scenario,
+        fixture_parent=fixture_parent,
+        create_validation=True,
     )
+    source_layout = inputs.source_layout
+    validation = inputs.validation
+    source_record = inputs.source_record
+    payload = inputs.payload
 
-    source_vault = ArchiveVault(source_layout.root)
-    try:
-        source_record = source_vault.get(mo2_artifact_id)
-    except Exception as error:
-        raise ContainmentFixtureError("exact MO2 artifact is unavailable in source vault") from error
-    verified = source_vault.verify(mo2_artifact_id)
-    if verified.health is not ArtifactHealth.AVAILABLE:
-        raise ContainmentFixtureError("exact MO2 artifact did not verify in source vault")
-    payload = source_record.stored_path(source_layout.root)
-
-    if fixture_parent is None:
+    if inputs.fixture_parent is None:
         run_root = validation / f"{scenario.value}-{uuid.uuid4().hex}"
     else:
-        requested_parent = Path(fixture_parent).expanduser().absolute()
-        try:
-            relative_parent = requested_parent.relative_to(validation)
-        except ValueError as error:
-            raise ContainmentFixtureError(
-                "fixture parent must be beneath the workspace containment root"
-            ) from error
-        if not relative_parent.parts:
-            raise ContainmentFixtureError(
-                "fixture parent must be beneath the workspace containment root"
-            )
-        if any(part in {"", ".", ".."} for part in relative_parent.parts):
-            raise ContainmentFixtureError("fixture parent contains an unsafe segment")
+        relative_parent = inputs.fixture_parent.relative_to(validation)
         current = validation
         for part in relative_parent.parts:
             current = _require_direct_directory(current / part, create=True)
@@ -276,6 +264,87 @@ def prepare_containment_fixture(
         stage_receipt_id=stage_applied.receipt.receipt_id,
         stage_environment=MappingProxyType(stage_environment),
         external_watch_roots=_external_low_watch_roots(),
+    )
+
+
+def preflight_containment_fixture(
+    source_workspace: Path,
+    mo2_artifact_id: str,
+    validation_root: Path,
+    scenario: ContainmentScenario,
+    *,
+    fixture_parent: Path,
+) -> None:
+    """Validate fixture inputs without creating the fixture root or children."""
+    _fixture_inputs(
+        source_workspace,
+        mo2_artifact_id,
+        validation_root,
+        scenario,
+        fixture_parent=fixture_parent,
+        create_validation=False,
+    )
+
+
+def _fixture_inputs(
+    source_workspace: Path,
+    mo2_artifact_id: str,
+    validation_root: Path,
+    scenario: ContainmentScenario,
+    *,
+    fixture_parent: Path | None,
+    create_validation: bool,
+) -> _FixtureInputs:
+    if not isinstance(scenario, ContainmentScenario):
+        raise ContainmentFixtureError("scenario must be a ContainmentScenario")
+    source_root = _require_direct_directory(Path(source_workspace), create=False)
+    source_layout = workspace_layout(source_root)
+    requested_validation = Path(validation_root).expanduser().absolute()
+    if os.path.normcase(str(requested_validation)) != os.path.normcase(
+        str(source_layout.mo2_containment_validation)
+    ):
+        raise ContainmentFixtureError("validation root must be the workspace containment root")
+    validation = _require_direct_directory(
+        source_layout.mo2_containment_validation,
+        create=create_validation,
+    )
+
+    source_vault = ArchiveVault(source_layout.root)
+    try:
+        source_record = source_vault.get(mo2_artifact_id)
+    except Exception as error:
+        raise ContainmentFixtureError("exact MO2 artifact is unavailable in source vault") from error
+    verified = source_vault.verify(mo2_artifact_id)
+    if verified.health is not ArtifactHealth.AVAILABLE:
+        raise ContainmentFixtureError("exact MO2 artifact did not verify in source vault")
+    payload = _require_direct_regular_file(
+        source_record.stored_path(source_layout.root),
+        "retained MO2 archive",
+    )
+
+    if fixture_parent is None:
+        requested_parent = None
+    else:
+        requested_parent = Path(fixture_parent).expanduser().absolute()
+        try:
+            relative_parent = requested_parent.relative_to(validation)
+        except ValueError as error:
+            raise ContainmentFixtureError(
+                "fixture parent must be beneath the workspace containment root"
+            ) from error
+        if not relative_parent.parts:
+            raise ContainmentFixtureError(
+                "fixture parent must be beneath the workspace containment root"
+            )
+        if any(part in {"", ".", ".."} for part in relative_parent.parts):
+            raise ContainmentFixtureError("fixture parent contains an unsafe segment")
+    return _FixtureInputs(
+        scenario,
+        source_layout,
+        validation,
+        source_record,
+        payload,
+        requested_parent,
     )
 
 
@@ -601,6 +670,7 @@ __all__ = [
     "ContainmentFixture",
     "ContainmentFixtureError",
     "ScenarioArchives",
+    "preflight_containment_fixture",
     "prepare_containment_fixture",
     "write_scenario_archives",
 ]

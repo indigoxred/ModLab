@@ -24,6 +24,7 @@ from modlab.platform.windows_exact_fs import (
     ExactObjectOwnershipError,
     RetainedObjectOwner,
     RetainedObjectRole,
+    identity_at_path,
     pin_stable_direct_object,
     read_pinned_file,
 )
@@ -31,6 +32,7 @@ from modlab.workspace import workspace_layout
 
 from .mo2_containment_fixtures import (
     ContainmentFixture,
+    preflight_containment_fixture,
     prepare_containment_fixture,
 )
 from .mo2_containment_model import (
@@ -131,6 +133,7 @@ _EXPECTED_REPLACEMENT_OUTPUTS = (
 )
 
 
+_P = TypeVar("_P")
 _V = TypeVar("_V")
 
 
@@ -351,6 +354,8 @@ class _MutationObservationError(ContainmentServiceError):
 def _mutation_root_guard(
     supplied_root: Path,
     existing_guards: tuple[object, ...] = (),
+    *,
+    require_target_existing: bool = False,
 ) -> object | None:
     """Pin the nearest existing object and prove its entire pathname chain.
 
@@ -361,12 +366,20 @@ def _mutation_root_guard(
     DELETE access to protected ancestors such as ``C:\\Users``.
     """
     root = Path(supplied_root)
-    if os.name != "nt":
-        return None
     if not root.is_absolute():
         raise _MutationObservationError(
             f"delegated mutation root must be absolute: {root}"
         )
+    if require_target_existing:
+        try:
+            root.lstat()
+        except FileNotFoundError as error:
+            raise _MutationObservationError(
+                "delegated mutation root is absent; use the service-controlled "
+                f"creation lifecycle: {root}"
+            ) from error
+    if os.name != "nt":
+        return None
 
     def identity(metadata: os.stat_result) -> tuple[int, ...]:
         return (
@@ -405,7 +418,12 @@ def _mutation_root_guard(
         raise _MutationObservationError(
             f"delegated mutation path has no observable direct ancestor: {root}"
         )
-    existing, _existing_identity, existing_metadata = observed_chain[-1]
+    if require_target_existing and observed_chain[-1][0] != root:
+        raise _MutationObservationError(
+            "delegated mutation root is absent; use the service-controlled "
+            f"creation lifecycle: {root}"
+        )
+    existing, _existing_identity, _existing_metadata = observed_chain[-1]
     pinned = next(
         (
             held
@@ -418,6 +436,7 @@ def _mutation_root_guard(
     acquired = pinned is None
     if acquired:
         try:
+            expected_pinned_identity = identity_at_path(existing)
             pinned = pin_stable_direct_object(
                 existing,
                 "directory",
@@ -432,11 +451,15 @@ def _mutation_root_guard(
             raise _MutationObservationError(
                 f"delegated mutation guard rejected {existing}: {error}"
             ) from error
+    else:
+        expected_pinned_identity = pinned.identity
     assert pinned is not None
     try:
         if (
             pinned.identity is None
-            or int(existing_metadata.st_ino) != pinned.identity.file_id
+            or expected_pinned_identity is None
+            or expected_pinned_identity != pinned.identity
+            or identity_at_path(existing) != pinned.identity
         ):
             raise _MutationObservationError(
                 f"delegated mutation guard pinned a changed identity at {existing}"
@@ -462,12 +485,27 @@ def _mutation_root_guard(
                     ownership = ExactObjectOwnershipError(
                         "delegated mutation guard validation retained a live handle: "
                         f"{close_error}",
-                        verification=(pinned,),
+                        owners=(
+                            *(
+                                error.owners
+                                if isinstance(error, ExactObjectOwnershipError)
+                                else ()
+                            ),
+                            RetainedObjectOwner(
+                                RetainedObjectRole.VERIFICATION,
+                                pinned,
+                            ),
+                        ),
                     )
                     raise ContainmentStoreOwnershipError(
                         "delegated mutation guard requires retained-handle resolution",
                         ownership,
                     ) from error
+        if isinstance(error, ExactObjectOwnershipError):
+            raise ContainmentStoreOwnershipError(
+                "delegated mutation guard identity lookup retained exact ownership",
+                error,
+            ) from error
         raise
     return pinned if acquired else None
 
@@ -851,6 +889,30 @@ def _delegated_mutations_guarded(
     except BaseException as operation_error:
         try:
             record_observed_changes()
+        except ContainmentStoreOwnershipError as observation_error:
+            detail = (
+                "delegated mutation effect observation retained ownership after "
+                f"failure: {observation_error}"
+            )
+            if isinstance(operation_error, ContainmentStoreOwnershipError):
+                operation_error.ownership = ExactObjectOwnershipError(
+                    "delegated mutation operation and observation retained live ownership",
+                    owners=(
+                        *operation_error.ownership.owners,
+                        *observation_error.ownership.owners,
+                    ),
+                )
+                if hasattr(operation_error, "add_note"):
+                    operation_error.add_note(detail)
+                raise operation_error
+            if not isinstance(operation_error, Exception):
+                raise
+            if hasattr(observation_error, "add_note"):
+                observation_error.add_note(
+                    "delegated mutation operation failed before ownership was "
+                    f"observed: {operation_error}"
+                )
+            raise observation_error from operation_error
         except ContainmentServiceError as observation_error:
             detail = str(observation_error).replace("after operation", "after failure")
             if hasattr(operation_error, "add_note"):
@@ -876,7 +938,11 @@ def _delegated_mutations(
     primary: BaseException | None = None
     try:
         for root in exact_roots:
-            guard = _mutation_root_guard(root, tuple(guards))
+            guard = _mutation_root_guard(
+                root,
+                tuple(guards),
+                require_target_existing=True,
+            )
             if guard is not None:
                 guards.append(guard)
         token = _ACTIVE_GUARDED_MUTATION_ROOTS.set(exact_roots)
@@ -896,6 +962,153 @@ def _delegated_mutation(
     operation: Callable[[], _V],
 ) -> _V:
     return _delegated_mutations((root,), operation)
+
+
+def _direct_directory_present(path: Path) -> bool:
+    """Return whether *path* is a present direct directory without following it."""
+    candidate = Path(path)
+    try:
+        metadata = candidate.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise _MutationObservationError(
+            f"service-controlled mutation root cannot be inspected: {candidate}"
+        ) from error
+    if stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0) & 0x400
+    ):
+        raise _MutationObservationError(
+            f"service-controlled mutation root is redirected or reparse: {candidate}"
+        )
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise _MutationObservationError(
+            f"service-controlled mutation root is not a direct directory: {candidate}"
+        )
+    return True
+
+
+def _nearest_existing_direct_directory(path: Path) -> Path:
+    candidate = Path(path)
+    while not _direct_directory_present(candidate):
+        parent = candidate.parent
+        if parent == candidate:
+            raise _MutationObservationError(
+                f"service-controlled mutation root has no direct ancestor: {path}"
+            )
+        candidate = parent
+    return candidate
+
+
+def _delegated_mutations_with_created_root(
+    created_root: Path,
+    other_roots: tuple[Path, ...],
+    preflight: Callable[[], _P],
+    operation: Callable[[_P], _V],
+    *,
+    require_absent: bool = False,
+) -> _V:
+    """Create a missing direct root under retained ancestors before delegating.
+
+    Directory creation and stable-pin acquisition are deliberately distinct
+    operations.  The safety boundary is that trusted, read-only ``preflight``
+    runs first and no delegated mutation runs until every newly present path
+    component has been validated and retained against rename/delete.
+    """
+    target = Path(created_root)
+    exact_roots = _unique_paths((*other_roots, target))
+    if not target.is_absolute():
+        raise _MutationObservationError(
+            f"service-controlled mutation root must be absolute: {target}"
+        )
+    if _direct_directory_present(target):
+        if require_absent:
+            raise _MutationObservationError(
+                f"fresh service-controlled mutation root already exists: {target}"
+            )
+        return _delegated_mutations(
+            exact_roots,
+            lambda: operation(preflight()),
+        )
+
+    guards: list[object] = []
+    primary: BaseException | None = None
+    try:
+        ancestor_guard = _mutation_root_guard(target)
+        if ancestor_guard is not None:
+            guards.append(ancestor_guard)
+            ancestor = Path(ancestor_guard.path)
+        else:
+            ancestor = _nearest_existing_direct_directory(target)
+
+        if _direct_directory_present(target):
+            raise _MutationObservationError(
+                "service-controlled mutation root appeared during guard "
+                f"acquisition: {target}"
+            )
+        for root in exact_roots:
+            if root == target:
+                continue
+            guard = _mutation_root_guard(
+                root,
+                tuple(guards),
+                require_target_existing=True,
+            )
+            if guard is not None:
+                guards.append(guard)
+
+        prepared = preflight()
+        if _direct_directory_present(target):
+            _current_effects().child_mutation_root(target)
+            raise _MutationObservationError(
+                "service-controlled preflight mutated its delegated root: "
+                f"{target}"
+            )
+
+        try:
+            relative = target.relative_to(ancestor)
+        except ValueError as error:
+            raise _MutationObservationError(
+                f"service-controlled mutation root escapes its retained ancestor: {target}"
+            ) from error
+        current = ancestor
+        for part in relative.parts:
+            current /= part
+            try:
+                current.mkdir(exist_ok=False)
+            except FileExistsError as error:
+                raise _MutationObservationError(
+                    "service-controlled mutation root appeared before exact "
+                    f"creation: {current}"
+                ) from error
+            except OSError as error:
+                if _direct_directory_present(current):
+                    _current_effects().child_mutation_root(current)
+                raise _MutationObservationError(
+                    f"service-controlled mutation root creation failed: {current}"
+                ) from error
+            _current_effects().child_mutation_root(current)
+            guard = _mutation_root_guard(
+                current,
+                tuple(guards),
+                require_target_existing=True,
+            )
+            if guard is not None:
+                guards.append(guard)
+
+        token = _ACTIVE_GUARDED_MUTATION_ROOTS.set(exact_roots)
+        try:
+            return _delegated_mutations_guarded(
+                exact_roots,
+                lambda: operation(prepared),
+            )
+        finally:
+            _ACTIVE_GUARDED_MUTATION_ROOTS.reset(token)
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        _close_mutation_root_guards(tuple(guards), primary)
 
 
 def _receipted(
@@ -1429,17 +1642,28 @@ def prepare_run(
         for scenario in ContainmentScenario:
             fixture_parent = fixture_root / scenario.value
             fixtures.append(
-                _delegated_mutation(
+                _delegated_mutations_with_created_root(
                     fixture_parent,
+                    (),
                     partial(
-                        prepare_containment_fixture,
+                        preflight_containment_fixture,
                         source,
                         mo2_artifact_id,
-                        steam,
                         validation,
                         scenario,
                         fixture_parent=fixture_parent,
                     ),
+                    lambda _prepared, scenario=scenario, fixture_parent=fixture_parent: (
+                        prepare_containment_fixture(
+                            source,
+                            mo2_artifact_id,
+                            steam,
+                            validation,
+                            scenario,
+                            fixture_parent=fixture_parent,
+                        )
+                    ),
+                    require_absent=True,
                 )
             )
         records = tuple(_fixture_record(fixture, steam) for fixture in fixtures)
@@ -1727,18 +1951,21 @@ def capture_scenario(
         raise ContainmentServiceError("watch receipt/outcome binding mismatch")
 
     post_mo2 = _capture_protected(record)
-    projection = _delegated_mutations(
+    projection_quarantine = store.quarantine_path(run_id) / scenario.value
+    projection = _delegated_mutations_with_created_root(
+        projection_quarantine,
         (
             record.source_mods,
             record.stage_mods,
-            store.quarantine_path(run_id) / scenario.value,
         ),
-        lambda: _finalize_projection(
+        lambda: None,
+        lambda _prepared: _finalize_projection(
             store,
             run_id,
             record,
             journal.protected_before,
             post_mo2,
+            quarantine_root=projection_quarantine,
         ),
     )
     store.write_protected_state(
@@ -2505,6 +2732,8 @@ def _finalize_projection(
     record: FixtureRecord,
     before: ProtectedState,
     post_mo2: ProtectedState,
+    *,
+    quarantine_root: Path | None = None,
 ) -> _ProjectionEvidence:
     incomplete: list[str] = []
     try:
@@ -2544,9 +2773,13 @@ def _finalize_projection(
     )
     final = post_mo2
     restored = post_mo2 == before
-    quarantine = ensure_direct_subdirectory(
-        store.quarantine_path(run_id),
-        record.scenario.value,
+    quarantine = (
+        ensure_direct_subdirectory(
+            store.quarantine_path(run_id),
+            record.scenario.value,
+        )
+        if quarantine_root is None
+        else Path(quarantine_root)
     )
 
     if record.scenario in _EXPECTED_OUTPUTS:
@@ -2741,9 +2974,11 @@ def _perform_recovery_cleanup(
         "Recovery-" + journal.scenario.value
     )
     try:
-        _delegated_mutation(
+        _delegated_mutations_with_created_root(
             recovery_quarantine,
-            lambda: recovery_quarantine.mkdir(exist_ok=True),
+            (),
+            lambda: None,
+            lambda _prepared: None,
         )
         stage_names = _direct_names(record.stage_mods)
         changed = _changed_projection_names(record)

@@ -50,6 +50,55 @@ class ContainmentFixtureTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def test_fixture_preflight_is_read_only_for_an_absent_nested_target(self):
+        source = self.root / "source-vault"
+        layout = initialize_workspace(source)
+        archive = self.root / "Mod.Organizer-2.5.2.7z"
+        archive.write_bytes(b"preflight-retained-archive")
+        artifact = ArchiveVault(source).import_archive(
+            archive,
+            source_note="fixture preflight test",
+        )
+        fixture_parent = (
+            layout.mo2_containment_validation
+            / "run"
+            / "fixtures"
+            / "NewFolder"
+        )
+        source_entries_before = tuple(
+            path.relative_to(source).as_posix()
+            for path in sorted(source.rglob("*"))
+        )
+        validation_entries_before = tuple(
+            path.relative_to(layout.mo2_containment_validation).as_posix()
+            for path in sorted(layout.mo2_containment_validation.rglob("*"))
+        )
+
+        fixtures.preflight_containment_fixture(
+            source,
+            artifact.artifact_id,
+            layout.mo2_containment_validation,
+            fixtures.ContainmentScenario.NEW_FOLDER,
+            fixture_parent=fixture_parent,
+        )
+
+        self.assertFalse((layout.mo2_containment_validation / "run").exists())
+        self.assertFalse(fixture_parent.exists())
+        self.assertEqual(
+            source_entries_before,
+            tuple(
+                path.relative_to(source).as_posix()
+                for path in sorted(source.rglob("*"))
+            ),
+        )
+        self.assertEqual(
+            validation_entries_before,
+            tuple(
+                path.relative_to(layout.mo2_containment_validation).as_posix()
+                for path in sorted(layout.mo2_containment_validation.rglob("*"))
+            ),
+        )
+
     def test_archives_have_exact_safe_contents_and_fomod_dependency(self):
         # Catches archive payload drift or a missing FOMOD dependency rule.
         archives = write_scenario_archives(self.root)
