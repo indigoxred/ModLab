@@ -10,6 +10,17 @@ from pathlib import PureWindowsPath
 from typing import Any
 
 from .mo2_containment_model import *
+from .mo2_containment_authority import (
+    AUTHORITY_POLICY_VERSION,
+    HISTORICAL_CONTAINMENT_DECISION_ID,
+    HISTORICAL_CONTAINMENT_MECHANISM,
+    HISTORICAL_CONTAINMENT_RUN_ID,
+    HISTORICAL_RETIREMENT_REASON_CODES,
+    CapabilityEligibility,
+    CapabilityRetirement,
+    CapabilityReview,
+    CapabilitySupersession,
+)
 
 
 class ContainmentFormatError(ValueError):
@@ -36,6 +47,12 @@ _WATCH_OUTCOME_ID = re.compile(r"^watch-outcome-sha256:[0-9a-f]{64}$")
 _WATCH_REQUEST_ID = re.compile(r"^watch-request:[0-9a-f]{64}$")
 _WATCH_SESSION_ID = re.compile(r"^watch-session:[0-9a-f]{64}$")
 _JOURNAL_ID = re.compile(r"^containment-journal-sha256:[0-9a-f]{64}$")
+_DECISION_ID = re.compile(r"^containment-decision-sha256:[0-9a-f]{64}$")
+_RETIREMENT_ID = re.compile(r"^containment-retirement-sha256:[0-9a-f]{64}$")
+_SUPERSESSION_ID = re.compile(r"^containment-supersession-sha256:[0-9a-f]{64}$")
+_REVIEW_ID = re.compile(r"^containment-review-sha256:[0-9a-f]{64}$")
+_ELIGIBILITY_ID = re.compile(r"^containment-eligibility-sha256:[0-9a-f]{64}$")
+_REVIEWER_ID = re.compile(r"^containment-reviewer:[a-z0-9][a-z0-9._-]{0,63}$")
 _RESERVED = {
     "con",
     "prn",
@@ -141,6 +158,49 @@ _BINDINGS = {
     "protocolVersion", "publicationPolicyVersion", "fixtureVersion",
     "effectReceiptVersion", "authorityPolicyVersion", "mo2Version",
     "mo2ExecutableSha256",
+}
+_RETIREMENT = {
+    "schemaVersion",
+    "authorityPolicyVersion",
+    "decisionId",
+    "runId",
+    "mechanism",
+    "status",
+    "reasonCodes",
+}
+_SUPERSESSION = {
+    "schemaVersion",
+    "authorityPolicyVersion",
+    "retirementId",
+    "retiredDecisionId",
+    "replacementDecisionId",
+    "replacementRunId",
+    "replacementMechanism",
+    "replacementScenarioResultIds",
+    "replacementBindings",
+    "reviewId",
+}
+_REVIEW = {
+    "schemaVersion",
+    "authorityPolicyVersion",
+    "decisionId",
+    "runId",
+    "mechanism",
+    "scenarioResultIds",
+    "bindings",
+    "reviewerId",
+    "independent",
+    "status",
+    "reasonCodes",
+}
+_ELIGIBILITY = {
+    "schemaVersion",
+    "authorityPolicyVersion",
+    "decisionId",
+    "runId",
+    "supersessionId",
+    "reviewId",
+    "status",
 }
 _TREE = {"sha256", "regularFileCount", "directoryCount", "totalSize"}
 _PROTECTED = {
@@ -288,6 +348,76 @@ def source_artifact_id_for(manifest: Mapping[str, Any]) -> str:
     except (TypeError, ValueError) as error:
         raise ContainmentFormatError("source artifact manifest is not canonical") from error
     return "containment-source-artifact-sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def capability_retirement_to_bytes(value: CapabilityRetirement) -> bytes:
+    return _bytes(capability_retirement_to_dict(value))
+
+
+def capability_retirement_from_bytes(data: bytes) -> CapabilityRetirement:
+    value = capability_retirement_from_dict(_decode(data, "capability retirement"))
+    if _bytes(_retirement_dict(value)) != data:
+        raise ContainmentFormatError("capability retirement bytes are not canonical")
+    return value
+
+
+def capability_retirement_id_for(value: CapabilityRetirement) -> str:
+    return "containment-retirement-sha256:" + hashlib.sha256(
+        capability_retirement_to_bytes(value)
+    ).hexdigest()
+
+
+def capability_supersession_to_bytes(value: CapabilitySupersession) -> bytes:
+    return _bytes(capability_supersession_to_dict(value))
+
+
+def capability_supersession_from_bytes(data: bytes) -> CapabilitySupersession:
+    value = capability_supersession_from_dict(
+        _decode(data, "capability supersession")
+    )
+    if _bytes(_supersession_dict(value)) != data:
+        raise ContainmentFormatError("capability supersession bytes are not canonical")
+    return value
+
+
+def capability_supersession_id_for(value: CapabilitySupersession) -> str:
+    return "containment-supersession-sha256:" + hashlib.sha256(
+        capability_supersession_to_bytes(value)
+    ).hexdigest()
+
+
+def capability_review_to_bytes(value: CapabilityReview) -> bytes:
+    return _bytes(capability_review_to_dict(value))
+
+
+def capability_review_from_bytes(data: bytes) -> CapabilityReview:
+    value = capability_review_from_dict(_decode(data, "capability review"))
+    if _bytes(_review_dict(value)) != data:
+        raise ContainmentFormatError("capability review bytes are not canonical")
+    return value
+
+
+def capability_review_id_for(value: CapabilityReview) -> str:
+    return "containment-review-sha256:" + hashlib.sha256(
+        capability_review_to_bytes(value)
+    ).hexdigest()
+
+
+def capability_eligibility_to_bytes(value: CapabilityEligibility) -> bytes:
+    return _bytes(capability_eligibility_to_dict(value))
+
+
+def capability_eligibility_from_bytes(data: bytes) -> CapabilityEligibility:
+    value = capability_eligibility_from_dict(_decode(data, "capability eligibility"))
+    if _bytes(_eligibility_dict(value)) != data:
+        raise ContainmentFormatError("capability eligibility bytes are not canonical")
+    return value
+
+
+def capability_eligibility_id_for(value: CapabilityEligibility) -> str:
+    return "containment-eligibility-sha256:" + hashlib.sha256(
+        capability_eligibility_to_bytes(value)
+    ).hexdigest()
 
 
 def scenario_journal_to_dict(value: ScenarioJournal) -> dict[str, Any]:
@@ -646,6 +776,182 @@ def _capability_decision_from_dict(
         )
     _check_decision_results(decision, scenario_results, watch_outcomes, probe=probe)
     return decision
+
+
+def capability_retirement_to_dict(
+    value: CapabilityRetirement,
+) -> dict[str, Any]:
+    if not isinstance(value, CapabilityRetirement):
+        raise ContainmentFormatError(
+            "capability retirement must be CapabilityRetirement"
+        )
+    return _retirement_dict(
+        capability_retirement_from_dict(_retirement_dict(value))
+    )
+
+
+def capability_retirement_from_dict(value: Any) -> CapabilityRetirement:
+    data = _map(value, _RETIREMENT, "capability retirement")
+    decision_id = _pattern(data["decisionId"], _DECISION_ID, "decisionId")
+    run_id = _run(data["runId"])
+    mechanism = _fixed(data["mechanism"], _MECHANISM, "mechanism")
+    reasons = _sorted_text(data["reasonCodes"], "reasonCodes")
+    if not reasons:
+        raise ContainmentFormatError("capability retirement requires reasonCodes")
+    retirement = CapabilityRetirement(
+        schema_version=_schema(data["schemaVersion"]),
+        authority_policy_version=_fixed_int(
+            data["authorityPolicyVersion"],
+            AUTHORITY_POLICY_VERSION,
+            "authorityPolicyVersion",
+        ),
+        decision_id=decision_id,
+        run_id=run_id,
+        mechanism=mechanism,
+        status=_fixed(data["status"], "RetiredInvalidated", "status"),
+        reason_codes=reasons,
+    )
+    identifies_historical = (
+        decision_id == HISTORICAL_CONTAINMENT_DECISION_ID
+        or run_id == HISTORICAL_CONTAINMENT_RUN_ID
+    )
+    if identifies_historical and (
+        decision_id != HISTORICAL_CONTAINMENT_DECISION_ID
+        or run_id != HISTORICAL_CONTAINMENT_RUN_ID
+        or mechanism != HISTORICAL_CONTAINMENT_MECHANISM
+    ):
+        raise ContainmentFormatError(
+            "historical retirement must bind the exact historical run and decision"
+        )
+    if (
+        decision_id == HISTORICAL_CONTAINMENT_DECISION_ID
+        and reasons != HISTORICAL_RETIREMENT_REASON_CODES
+    ):
+        raise ContainmentFormatError(
+            "historical retirement must record the three exact defect reason codes"
+        )
+    return retirement
+
+
+def capability_supersession_to_dict(
+    value: CapabilitySupersession,
+) -> dict[str, Any]:
+    if not isinstance(value, CapabilitySupersession):
+        raise ContainmentFormatError(
+            "capability supersession must be CapabilitySupersession"
+        )
+    return _supersession_dict(
+        capability_supersession_from_dict(_supersession_dict(value))
+    )
+
+
+def capability_supersession_from_dict(value: Any) -> CapabilitySupersession:
+    data = _map(value, _SUPERSESSION, "capability supersession")
+    retired_decision_id = _pattern(
+        data["retiredDecisionId"], _DECISION_ID, "retiredDecisionId"
+    )
+    replacement_decision_id = _pattern(
+        data["replacementDecisionId"],
+        _DECISION_ID,
+        "replacementDecisionId",
+    )
+    if replacement_decision_id == retired_decision_id:
+        raise ContainmentFormatError(
+            "supersession replacement decision must differ from retired decision"
+        )
+    return CapabilitySupersession(
+        schema_version=_schema(data["schemaVersion"]),
+        authority_policy_version=_fixed_int(
+            data["authorityPolicyVersion"],
+            AUTHORITY_POLICY_VERSION,
+            "authorityPolicyVersion",
+        ),
+        retirement_id=_pattern(
+            data["retirementId"], _RETIREMENT_ID, "retirementId"
+        ),
+        retired_decision_id=retired_decision_id,
+        replacement_decision_id=replacement_decision_id,
+        replacement_run_id=_pattern(
+            data["replacementRunId"],
+            _RUN,
+            "replacementRunId",
+            "a containment run ID",
+        ),
+        replacement_mechanism=_fixed(
+            data["replacementMechanism"], _MECHANISM, "replacementMechanism"
+        ),
+        replacement_scenario_result_ids=_decision_ids(
+            data["replacementScenarioResultIds"]
+        ),
+        replacement_bindings=_bindings(data["replacementBindings"]),
+        review_id=_pattern(data["reviewId"], _REVIEW_ID, "reviewId"),
+    )
+
+
+def capability_review_to_dict(value: CapabilityReview) -> dict[str, Any]:
+    if not isinstance(value, CapabilityReview):
+        raise ContainmentFormatError("capability review must be CapabilityReview")
+    return _review_dict(capability_review_from_dict(_review_dict(value)))
+
+
+def capability_review_from_dict(value: Any) -> CapabilityReview:
+    data = _map(value, _REVIEW, "capability review")
+    status = _text(data["status"], "status")
+    if status not in {"Passed", "Failed"}:
+        raise ContainmentFormatError("review status must be Passed or Failed")
+    reasons = _sorted_text(data["reasonCodes"], "reasonCodes")
+    if status == "Passed" and reasons:
+        raise ContainmentFormatError("Passed review cannot record reasonCodes")
+    if status == "Failed" and not reasons:
+        raise ContainmentFormatError("Failed review requires reasonCodes")
+    return CapabilityReview(
+        schema_version=_schema(data["schemaVersion"]),
+        authority_policy_version=_fixed_int(
+            data["authorityPolicyVersion"],
+            AUTHORITY_POLICY_VERSION,
+            "authorityPolicyVersion",
+        ),
+        decision_id=_pattern(data["decisionId"], _DECISION_ID, "decisionId"),
+        run_id=_run(data["runId"]),
+        mechanism=_fixed(data["mechanism"], _MECHANISM, "mechanism"),
+        scenario_result_ids=_decision_ids(data["scenarioResultIds"]),
+        bindings=_bindings(data["bindings"]),
+        reviewer_id=_pattern(data["reviewerId"], _REVIEWER_ID, "reviewerId"),
+        independent=_bool(data["independent"], "independent"),
+        status=status,
+        reason_codes=reasons,
+    )
+
+
+def capability_eligibility_to_dict(
+    value: CapabilityEligibility,
+) -> dict[str, Any]:
+    if not isinstance(value, CapabilityEligibility):
+        raise ContainmentFormatError(
+            "capability eligibility must be CapabilityEligibility"
+        )
+    return _eligibility_dict(
+        capability_eligibility_from_dict(_eligibility_dict(value))
+    )
+
+
+def capability_eligibility_from_dict(value: Any) -> CapabilityEligibility:
+    data = _map(value, _ELIGIBILITY, "capability eligibility")
+    return CapabilityEligibility(
+        schema_version=_schema(data["schemaVersion"]),
+        authority_policy_version=_fixed_int(
+            data["authorityPolicyVersion"],
+            AUTHORITY_POLICY_VERSION,
+            "authorityPolicyVersion",
+        ),
+        decision_id=_pattern(data["decisionId"], _DECISION_ID, "decisionId"),
+        run_id=_run(data["runId"]),
+        supersession_id=_pattern(
+            data["supersessionId"], _SUPERSESSION_ID, "supersessionId"
+        ),
+        review_id=_pattern(data["reviewId"], _REVIEW_ID, "reviewId"),
+        status=_fixed(data["status"], "Eligible", "status"),
+    )
 
 
 def _check_watch_outcome(outcome: WatchOutcome) -> None:
@@ -1196,6 +1502,73 @@ def _decision_dict(value: CapabilityDecision) -> dict[str, Any]:
         "verdict": value.verdict.value,
         "scenarioResultIds": list(value.scenario_result_ids),
         "reasons": list(value.reasons),
+    }
+
+
+def _retirement_dict(value: CapabilityRetirement) -> dict[str, Any]:
+    return {
+        "schemaVersion": value.schema_version,
+        "authorityPolicyVersion": value.authority_policy_version,
+        "decisionId": value.decision_id,
+        "runId": value.run_id,
+        "mechanism": value.mechanism,
+        "status": value.status,
+        "reasonCodes": list(value.reason_codes),
+    }
+
+
+def _supersession_dict(value: CapabilitySupersession) -> dict[str, Any]:
+    identifiers = _bound_decision_ids(value.replacement_scenario_result_ids)
+    return {
+        "schemaVersion": value.schema_version,
+        "authorityPolicyVersion": value.authority_policy_version,
+        "retirementId": value.retirement_id,
+        "retiredDecisionId": value.retired_decision_id,
+        "replacementDecisionId": value.replacement_decision_id,
+        "replacementRunId": value.replacement_run_id,
+        "replacementMechanism": value.replacement_mechanism,
+        "replacementScenarioResultIds": {
+            scenario.value: identifier
+            for scenario, identifier in zip(
+                ContainmentScenario, identifiers, strict=True
+            )
+        },
+        "replacementBindings": _bindings_dict(value.replacement_bindings),
+        "reviewId": value.review_id,
+    }
+
+
+def _review_dict(value: CapabilityReview) -> dict[str, Any]:
+    identifiers = _bound_decision_ids(value.scenario_result_ids)
+    return {
+        "schemaVersion": value.schema_version,
+        "authorityPolicyVersion": value.authority_policy_version,
+        "decisionId": value.decision_id,
+        "runId": value.run_id,
+        "mechanism": value.mechanism,
+        "scenarioResultIds": {
+            scenario.value: identifier
+            for scenario, identifier in zip(
+                ContainmentScenario, identifiers, strict=True
+            )
+        },
+        "bindings": _bindings_dict(value.bindings),
+        "reviewerId": value.reviewer_id,
+        "independent": value.independent,
+        "status": value.status,
+        "reasonCodes": list(value.reason_codes),
+    }
+
+
+def _eligibility_dict(value: CapabilityEligibility) -> dict[str, Any]:
+    return {
+        "schemaVersion": value.schema_version,
+        "authorityPolicyVersion": value.authority_policy_version,
+        "decisionId": value.decision_id,
+        "runId": value.run_id,
+        "supersessionId": value.supersession_id,
+        "reviewId": value.review_id,
+        "status": value.status,
     }
 
 

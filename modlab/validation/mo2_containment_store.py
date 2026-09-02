@@ -22,6 +22,12 @@ from modlab.platform.windows_exact_fs import (
     publish_new_pinned,
     resolve_retained_ownership,
 )
+from .mo2_containment_authority import (
+    CapabilityEligibility,
+    CapabilityRetirement,
+    CapabilityReview,
+    CapabilitySupersession,
+)
 from .mo2_containment_model import (
     CapabilityDecision,
     CapabilityVerdict,
@@ -38,8 +44,20 @@ from .mo2_containment_model import (
 from .mo2_containment_serialization import (
     _capability_decision_probe_from_bytes,
     ContainmentFormatError,
+    capability_eligibility_from_bytes,
+    capability_eligibility_id_for,
+    capability_eligibility_to_bytes,
     capability_decision_from_bytes,
     capability_decision_to_bytes,
+    capability_retirement_from_bytes,
+    capability_retirement_id_for,
+    capability_retirement_to_bytes,
+    capability_review_from_bytes,
+    capability_review_id_for,
+    capability_review_to_bytes,
+    capability_supersession_from_bytes,
+    capability_supersession_id_for,
+    capability_supersession_to_bytes,
     scenario_journal_from_bytes,
     scenario_journal_to_bytes,
     scenario_recovery_from_bytes,
@@ -54,6 +72,13 @@ from .mo2_containment_serialization import (
 
 
 _RUN = re.compile(r"^containment-run:([0-9a-f]{32})$")
+_DECISION_ID = re.compile(r"^containment-decision-sha256:[0-9a-f]{64}$")
+_AUTHORITY_KINDS = {
+    "retirements": "containment-retirement-sha256:",
+    "supersessions": "containment-supersession-sha256:",
+    "reviews": "containment-review-sha256:",
+    "eligibilities": "containment-eligibility-sha256:",
+}
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _PROCESS_LOCKS: dict[str, threading.Lock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
@@ -648,12 +673,130 @@ class ContainmentStore:
                 existed,
             )
 
-    def load_decision(self, run_id: str) -> CapabilityDecision:
+    def load_decision(
+        self,
+        run_id: str,
+        expected_id: str | None = None,
+    ) -> CapabilityDecision:
         with self._run_lock(run_id):
             raw = self._read(self.decision_path(run_id), "capability decision")
             probe = self._decision_probe(raw, run_id)
             results, outcomes = self._resolve_decision_evidence_unlocked(probe)
-            return self._decision_from_bytes(raw, results, outcomes)
+            value = self._decision_from_bytes(raw, results, outcomes)
+            observed_id = (
+                "containment-decision-sha256:" + hashlib.sha256(raw).hexdigest()
+            )
+            if expected_id is not None:
+                if (
+                    type(expected_id) is not str
+                    or _DECISION_ID.fullmatch(expected_id) is None
+                ):
+                    raise ContainmentStoreError("expected decision ID is malformed")
+                if observed_id != expected_id:
+                    raise ContainmentStoreMalformedEvidence(
+                        "capability decision content ID mismatch"
+                    )
+            return value
+
+    def write_retirement(
+        self,
+        value: CapabilityRetirement,
+    ) -> ImmutableWrite[CapabilityRetirement]:
+        return self._write_authority_record(
+            value,
+            capability_retirement_to_bytes,
+            capability_retirement_id_for,
+            "retirements",
+            "capability retirement",
+            capability_retirement_from_bytes,
+        )
+
+    def load_retirement(self, identifier: str) -> CapabilityRetirement:
+        return self._load_authority_record(
+            identifier,
+            "retirements",
+            "capability retirement",
+            capability_retirement_from_bytes,
+            capability_retirement_id_for,
+        )
+
+    def list_retirement_ids(self) -> tuple[str, ...]:
+        return self._list_authority_ids("retirements")
+
+    def write_supersession(
+        self,
+        value: CapabilitySupersession,
+    ) -> ImmutableWrite[CapabilitySupersession]:
+        return self._write_authority_record(
+            value,
+            capability_supersession_to_bytes,
+            capability_supersession_id_for,
+            "supersessions",
+            "capability supersession",
+            capability_supersession_from_bytes,
+        )
+
+    def load_supersession(self, identifier: str) -> CapabilitySupersession:
+        return self._load_authority_record(
+            identifier,
+            "supersessions",
+            "capability supersession",
+            capability_supersession_from_bytes,
+            capability_supersession_id_for,
+        )
+
+    def list_supersession_ids(self) -> tuple[str, ...]:
+        return self._list_authority_ids("supersessions")
+
+    def write_review(
+        self,
+        value: CapabilityReview,
+    ) -> ImmutableWrite[CapabilityReview]:
+        return self._write_authority_record(
+            value,
+            capability_review_to_bytes,
+            capability_review_id_for,
+            "reviews",
+            "capability review",
+            capability_review_from_bytes,
+        )
+
+    def load_review(self, identifier: str) -> CapabilityReview:
+        return self._load_authority_record(
+            identifier,
+            "reviews",
+            "capability review",
+            capability_review_from_bytes,
+            capability_review_id_for,
+        )
+
+    def list_review_ids(self) -> tuple[str, ...]:
+        return self._list_authority_ids("reviews")
+
+    def write_eligibility(
+        self,
+        value: CapabilityEligibility,
+    ) -> ImmutableWrite[CapabilityEligibility]:
+        return self._write_authority_record(
+            value,
+            capability_eligibility_to_bytes,
+            capability_eligibility_id_for,
+            "eligibilities",
+            "capability eligibility",
+            capability_eligibility_from_bytes,
+        )
+
+    def load_eligibility(self, identifier: str) -> CapabilityEligibility:
+        return self._load_authority_record(
+            identifier,
+            "eligibilities",
+            "capability eligibility",
+            capability_eligibility_from_bytes,
+            capability_eligibility_id_for,
+        )
+
+    def list_eligibility_ids(self) -> tuple[str, ...]:
+        return self._list_authority_ids("eligibilities")
 
     def list_run_ids(self) -> tuple[str, ...]:
         rows: list[str] = []
@@ -760,6 +903,21 @@ class ContainmentStore:
 
     def decision_path(self, run_id: str) -> Path:
         return self.run_path(run_id) / "decision.json"
+
+    def authority_path(self) -> Path:
+        return self.root / "authority"
+
+    def retirement_path(self, identifier: str) -> Path:
+        return self._authority_record_path(identifier, "retirements")
+
+    def supersession_path(self, identifier: str) -> Path:
+        return self._authority_record_path(identifier, "supersessions")
+
+    def review_path(self, identifier: str) -> Path:
+        return self._authority_record_path(identifier, "reviews")
+
+    def eligibility_path(self, identifier: str) -> Path:
+        return self._authority_record_path(identifier, "eligibilities")
 
     def journal_id_for(self, journal: ScenarioJournal) -> str:
         data = self._serialize(scenario_journal_to_bytes, journal, "journal")
@@ -949,6 +1107,169 @@ class ContainmentStore:
             "state": "Consumed",
             "consumedByRunId": consumed["consumedByRunId"],
         }
+
+    def _write_authority_record(
+        self,
+        value: _T,
+        encoder: Callable[[_T], bytes],
+        identifier_for: Callable[[_T], str],
+        kind: str,
+        label: str,
+        decoder: Callable[[bytes], _T],
+    ) -> ImmutableWrite[_T]:
+        data = self._serialize(encoder, value, label)
+        try:
+            identifier = identifier_for(value)
+        except ContainmentFormatError as error:
+            raise ContainmentStoreError(f"{label} is invalid: {error}") from error
+        target = self._authority_record_path(identifier, kind)
+        self._ensure_direct_directory(target.parent)
+        self._validate_authority_layout()
+        existed = self._write_immutable(target, data, label)
+        loaded = self._load_authority_record(
+            identifier,
+            kind,
+            label,
+            decoder,
+            identifier_for,
+        )
+        if loaded != value:
+            raise ContainmentStoreError(f"stored {label} differs after write")
+        return ImmutableWrite(loaded, identifier, target, existed)
+
+    def _load_authority_record(
+        self,
+        identifier: str,
+        kind: str,
+        label: str,
+        decoder: Callable[[bytes], _T],
+        identifier_for: Callable[[_T], str],
+    ) -> _T:
+        target = self._authority_record_path(identifier, kind)
+        self._validate_authority_layout()
+        data = self._read(target, label)
+        value = self._parse(decoder, data, label)
+        try:
+            observed_id = identifier_for(value)
+        except ContainmentFormatError as error:
+            raise ContainmentStoreMalformedEvidence(
+                f"stored {label} is malformed: {error}"
+            ) from error
+        if observed_id != identifier:
+            raise ContainmentStoreMalformedEvidence(
+                f"stored {label} content ID mismatch"
+            )
+        return value
+
+    def _list_authority_ids(self, kind: str) -> tuple[str, ...]:
+        self._authority_prefix(kind)
+        if not self._validate_authority_layout():
+            return ()
+        directory = self.authority_path() / kind
+        try:
+            metadata = directory.lstat()
+        except FileNotFoundError:
+            return ()
+        except OSError as error:
+            raise ContainmentStoreError(
+                f"cannot inspect capability authority {kind}: {error}"
+            ) from error
+        self._require_direct_authority_directory(metadata, kind)
+        try:
+            entries = tuple(os.scandir(directory))
+        except OSError as error:
+            raise ContainmentStoreError(
+                f"cannot enumerate capability authority {kind}: {error}"
+            ) from error
+        prefix = self._authority_prefix(kind)
+        identifiers: list[str] = []
+        for entry in entries:
+            match = re.fullmatch(r"([0-9a-f]{64})\.json", entry.name)
+            if match is None:
+                raise ContainmentStoreError(
+                    f"capability authority {kind} entry is noncanonical: {entry.name}"
+                )
+            try:
+                entry_metadata = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise ContainmentStoreError(
+                    f"cannot prove capability authority {kind} entry {entry.name}: {error}"
+                ) from error
+            if stat.S_ISLNK(entry_metadata.st_mode) or bool(
+                getattr(entry_metadata, "st_file_attributes", 0)
+                & _FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise ContainmentStoreError(
+                    f"capability authority {kind} entry is a reparse object: {entry.name}"
+                )
+            if not stat.S_ISREG(entry_metadata.st_mode):
+                raise ContainmentStoreError(
+                    f"capability authority {kind} entry is not a direct regular file: {entry.name}"
+                )
+            identifiers.append(prefix + match.group(1))
+        return tuple(sorted(identifiers))
+
+    def _validate_authority_layout(self) -> bool:
+        authority = self.authority_path()
+        try:
+            metadata = authority.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise ContainmentStoreError(
+                f"cannot inspect capability authority root: {error}"
+            ) from error
+        self._require_direct_authority_directory(metadata, "root")
+        try:
+            entries = tuple(os.scandir(authority))
+        except OSError as error:
+            raise ContainmentStoreError(
+                f"cannot enumerate capability authority root: {error}"
+            ) from error
+        for entry in entries:
+            if entry.name not in _AUTHORITY_KINDS:
+                raise ContainmentStoreError(
+                    "capability authority root entry is noncanonical: " + entry.name
+                )
+            try:
+                entry_metadata = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise ContainmentStoreError(
+                    f"cannot prove capability authority directory {entry.name}: {error}"
+                ) from error
+            self._require_direct_authority_directory(entry_metadata, entry.name)
+        return True
+
+    @staticmethod
+    def _require_direct_authority_directory(metadata: os.stat_result, label: str) -> None:
+        if stat.S_ISLNK(metadata.st_mode) or bool(
+            getattr(metadata, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise ContainmentStoreError(
+                f"capability authority {label} directory is redirected or reparse"
+            )
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ContainmentStoreError(
+                f"capability authority {label} is not a direct directory"
+            )
+
+    def _authority_record_path(self, identifier: str, kind: str) -> Path:
+        prefix = self._authority_prefix(kind)
+        if type(identifier) is not str:
+            raise ContainmentStoreError(f"capability authority {kind} ID must be text")
+        match = re.fullmatch(re.escape(prefix) + r"([0-9a-f]{64})", identifier)
+        if match is None:
+            raise ContainmentStoreError(f"capability authority {kind} ID is malformed")
+        return self.authority_path() / kind / (match.group(1) + ".json")
+
+    @staticmethod
+    def _authority_prefix(kind: str) -> str:
+        try:
+            return _AUTHORITY_KINDS[kind]
+        except KeyError as error:
+            raise ContainmentStoreError(
+                f"unknown capability authority record kind: {kind}"
+            ) from error
 
     def _resolve_decision_evidence_unlocked(
         self,

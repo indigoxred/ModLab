@@ -1,6 +1,14 @@
-# RETIRED / INVALIDATED — MO2 pre-write containment capability verdict
+# RETIRED / INVALIDATED — MUST NOT BE USED AS CAPABILITY AUTHORITY
 
-> **MUST NOT BE USED AS CURRENT CAPABILITY AUTHORITY.** The historical run and decision below are retained only as evidence. They are invalidated because the implementation allowed a validated outcome candidate to be substituted before pathname-based publication, allowed premature immutable adjudication to freeze an incomplete decision, and reported an inaccurate CLI side-effect contract.
+> The historical run and decision below are retained only as evidence. They
+> authorize nothing. The production retirement record ID is **pending fresh
+> Task 7 generation**; no fixture or test record ID is production authority.
+>
+> Exact invalidation reason codes:
+>
+> - `validated-outcome-candidate-substitution-before-pathname-publication`
+> - `premature-adjudication-freezing-incomplete-evidence`
+> - `inaccurate-cli-side-effect-reporting`
 
 The original result was **historically reported as Supported**, but it is now **Retired/Invalidated**. ModLab bridge and installation workflows must reject its run and decision IDs mechanically through the immutable authority resolver. A replacement may become eligible only after corrected source-bound four-scenario validation and an independent review.
 
