@@ -77,6 +77,40 @@ class RetainedObjectOwner:
             raise TypeError("retained owner must reference a PinnedObject")
 
 
+@dataclass(frozen=True)
+class ExactDirectoryCreationOutcome:
+    """Native evidence returned for one rooted direct-directory create."""
+
+    path: Path
+    parent_path: Path
+    parent_identity: "PinnedIdentity"
+    status: int
+    information: int
+    has_valid_handle: bool
+
+    @property
+    def proven_created(self) -> bool:
+        """Whether the native result itself proves FILE_CREATED success."""
+        return self.status == 0 and self.information == _FILE_CREATED_INFORMATION
+
+    @property
+    def owns_created_candidate(self) -> bool:
+        """Whether a retained handle carries exact candidate cleanup authority."""
+        return self.proven_created and self.has_valid_handle
+
+
+class ExactDirectoryCreationError(ExactObjectError):
+    """A rooted directory create failed with explicit native outcome evidence."""
+
+    def __init__(
+        self,
+        message: str,
+        outcome: ExactDirectoryCreationOutcome,
+    ) -> None:
+        super().__init__(message)
+        self.outcome = outcome
+
+
 class ExactObjectOwnershipError(ExactObjectError):
     """A failed publication still has explicitly retained live ownership."""
 
@@ -148,6 +182,30 @@ class ExactObjectOwnershipError(ExactObjectError):
         resolve_retained_ownership(self)
 
 
+class ExactDirectoryCreationOwnershipError(ExactObjectOwnershipError):
+    """A rooted create outcome retains explicitly-role-bound live ownership."""
+
+    def __init__(
+        self,
+        message: str,
+        outcome: ExactDirectoryCreationOutcome,
+        *,
+        owners: tuple[RetainedObjectOwner, ...] = (),
+        candidate: "PinnedObject | None" = None,
+        destination_parent: "PinnedObject | None" = None,
+        verification: tuple["PinnedObject", ...] = (),
+    ) -> None:
+        super().__init__(
+            message,
+            owners=owners,
+            candidate=candidate,
+            destination_parent=destination_parent,
+            verification=verification,
+        )
+        self.outcome = outcome
+        self.created_candidate = candidate
+
+
 @dataclass(frozen=True)
 class PinnedIdentity:
     volume_serial: int
@@ -217,6 +275,25 @@ def _union_ownership(
     return ExactObjectOwnershipError(
         message,
         owners=(*prior_owners, *additional),
+    )
+
+
+def _directory_creation_ownership(
+    message: str,
+    outcome: ExactDirectoryCreationOutcome,
+    *,
+    prior: BaseException | None = None,
+    owners: tuple[RetainedObjectOwner, ...] = (),
+    candidate: PinnedObject | None = None,
+    verification: tuple[PinnedObject, ...] = (),
+) -> ExactDirectoryCreationOwnershipError:
+    prior_owners = prior.owners if isinstance(prior, ExactObjectOwnershipError) else ()
+    return ExactDirectoryCreationOwnershipError(
+        message,
+        outcome,
+        owners=(*prior_owners, *owners),
+        candidate=candidate,
+        verification=verification,
     )
 
 
@@ -628,27 +705,47 @@ def create_pinned_directory_child(
     )
     io_status = _IO_STATUS_BLOCK()
     output_handle = wintypes.HANDLE()
-    status = int(
-        _ntdll.NtCreateFile(
-            ctypes.byref(output_handle),
-            _DELETE
-            | _FILE_READ_ATTRIBUTES
-            | _FILE_LIST_DIRECTORY
-            | _FILE_ADD_FILE
-            | _FILE_ADD_SUBDIRECTORY,
-            ctypes.byref(object_attributes),
-            ctypes.byref(io_status),
-            None,
-            _FILE_ATTRIBUTE_DIRECTORY,
-            _FILE_SHARE_READ | _FILE_SHARE_WRITE,
-            _FILE_CREATE_DISPOSITION,
-            _FILE_DIRECTORY_FILE | _FILE_FLAG_OPEN_REPARSE_POINT,
-            None,
-            0,
-        )
+    status = _ntdll.NtCreateFile(
+        ctypes.byref(output_handle),
+        _DELETE
+        | _FILE_READ_ATTRIBUTES
+        | _FILE_LIST_DIRECTORY
+        | _FILE_ADD_FILE
+        | _FILE_ADD_SUBDIRECTORY,
+        ctypes.byref(object_attributes),
+        ctypes.byref(io_status),
+        None,
+        _FILE_ATTRIBUTE_DIRECTORY,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        _FILE_CREATE_DISPOSITION,
+        _FILE_DIRECTORY_FILE | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+        0,
+    )
+    handle = output_handle.value
+    has_valid_handle = bool(handle and handle != _INVALID_HANDLE_VALUE)
+    retained = (
+        PinnedObject(target, int(handle), None)
+        if has_valid_handle
+        else None
+    )
+    outcome = ExactDirectoryCreationOutcome(
+        path=target,
+        parent_path=destination_parent.path,
+        parent_identity=parent_identity,
+        status=status,
+        information=int(io_status.Information),
+        has_valid_handle=has_valid_handle,
     )
     if status != 0:
         unsigned_status = status & 0xFFFFFFFF
+        if retained is not None:
+            raise _directory_creation_ownership(
+                "rooted directory creation returned contradictory live ownership "
+                f"with status 0x{unsigned_status:08x}",
+                outcome,
+                verification=(retained,),
+            )
         if unsigned_status in {_STATUS_OBJECT_NAME_COLLISION, _STATUS_OBJECT_NAME_EXISTS}:
             raise FileExistsError(
                 _ERROR_FILE_EXISTS,
@@ -657,23 +754,18 @@ def create_pinned_directory_child(
             )
         error = int(_ntdll.RtlNtStatusToDosError(status))
         raise _winerror(f"rooted directory creation failed for {target}", error)
-    handle = output_handle.value
-    if not handle or handle == _INVALID_HANDLE_VALUE:
-        raise ExactObjectError("rooted directory creation returned no ownership handle")
-
-    candidate = PinnedObject(target, int(handle), None)
-    if int(io_status.Information) != _FILE_CREATED_INFORMATION:
-        try:
-            candidate.identity = _handle_identity(candidate.handle, target)
-        except BaseException as error:
-            raise ExactObjectOwnershipError(
-                "rooted directory creation returned an uncertain live object",
-                verification=(candidate,),
-            ) from error
-        raise ExactObjectOwnershipError(
-            "rooted directory creation did not prove a newly created object",
-            verification=(candidate,),
+    if retained is None:
+        raise ExactDirectoryCreationError(
+            "rooted directory creation returned no ownership handle",
+            outcome,
         )
+    if not outcome.owns_created_candidate:
+        raise _directory_creation_ownership(
+            "rooted directory creation did not prove a newly created object",
+            outcome,
+            verification=(retained,),
+        )
+    candidate = retained
     try:
         child_identity = _handle_identity(candidate.handle, target)
         candidate.identity = child_identity
@@ -712,18 +804,34 @@ def create_pinned_directory_child(
         except BaseException as candidate_cleanup_error:
             cleanup_error = candidate_cleanup_error
         if candidate.handle:
-            raise _union_ownership(
+            raise _directory_creation_ownership(
                 "new-directory validation retained live ownership after exact "
                 f"cleanup failed: {cleanup_error}",
+                outcome,
                 prior=error,
                 candidate=candidate,
             ) from error
-        if cleanup_error is not None and hasattr(error, "add_note"):
-            error.add_note(
+        if not isinstance(error, Exception):
+            raise
+        creation_error = (
+            _directory_creation_ownership(
+                "new-directory validation retained verification ownership after "
+                f"candidate cleanup: {error}",
+                outcome,
+                prior=error,
+            )
+            if isinstance(error, ExactObjectOwnershipError)
+            else ExactDirectoryCreationError(
+                f"new-directory validation failed after exact cleanup: {error}",
+                outcome,
+            )
+        )
+        if cleanup_error is not None and hasattr(creation_error, "add_note"):
+            creation_error.add_note(
                 "new-directory exact cleanup completed with an error: "
                 f"{cleanup_error}"
             )
-        raise
+        raise creation_error from error
 
 
 def write_pinned_file(source: PinnedObject, data: bytes) -> None:
@@ -888,11 +996,22 @@ def resolve_retained_ownership(error: ExactObjectOwnershipError) -> None:
         if pinned.handle:
             unresolved.append(owner)
     if unresolved:
-        raise ExactObjectOwnershipError(
-            "retained exact-object retry cleanup failed: "
-            + "; ".join(str(cleanup_error) for cleanup_error in cleanup_errors),
-            owners=tuple(unresolved),
-        ) from error
+        message = "retained exact-object retry cleanup failed: " + "; ".join(
+            str(cleanup_error) for cleanup_error in cleanup_errors
+        )
+        if isinstance(error, ExactDirectoryCreationOwnershipError):
+            created_candidate = error.created_candidate
+            raise _directory_creation_ownership(
+                message,
+                error.outcome,
+                owners=tuple(unresolved),
+                candidate=(
+                    created_candidate
+                    if created_candidate is not None and created_candidate.handle
+                    else None
+                ),
+            ) from error
+        raise ExactObjectOwnershipError(message, owners=tuple(unresolved)) from error
 
 
 def publish_new_pinned(

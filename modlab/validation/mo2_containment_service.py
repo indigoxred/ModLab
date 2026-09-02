@@ -20,8 +20,13 @@ from modlab.adapters.mo2.processes import inspect_mo2_processes
 from modlab.adapters.mo2.release import bundled_mo2_252_path, load_mo2_release
 from modlab.adapters.skyrim.windows_version import read_windows_file_version
 from modlab.platform.windows_exact_fs import (
+    ExactDirectoryCreationError,
+    ExactDirectoryCreationOutcome,
+    ExactDirectoryCreationOwnershipError,
     ExactObjectError,
     ExactObjectOwnershipError,
+    PinnedIdentity,
+    PinnedObject,
     RetainedObjectOwner,
     RetainedObjectRole,
     create_pinned_directory_child,
@@ -365,6 +370,16 @@ class _MutationObservationOwnershipError(ContainmentStoreOwnershipError):
         self.completed_observation = completed_observation
 
 
+def _path_component_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """Stable pathname-component identity, separate from subtree contents."""
+    return (
+        stat.S_IFMT(metadata.st_mode),
+        int(metadata.st_dev),
+        int(metadata.st_ino),
+        int(getattr(metadata, "st_file_attributes", 0)) & 0x410,
+    )
+
+
 def _mutation_root_guard(
     supplied_root: Path,
     existing_guards: tuple[object, ...] = (),
@@ -395,17 +410,6 @@ def _mutation_root_guard(
     if os.name != "nt":
         return None
 
-    def identity(metadata: os.stat_result) -> tuple[int, ...]:
-        return (
-            int(metadata.st_mode),
-            int(metadata.st_dev),
-            int(metadata.st_ino),
-            int(metadata.st_size),
-            int(metadata.st_mtime_ns),
-            int(metadata.st_ctime_ns),
-            int(getattr(metadata, "st_file_attributes", 0)),
-        )
-
     current = Path(root.anchor)
     path_chain = [current]
     for part in root.parts[1:]:
@@ -427,7 +431,7 @@ def _mutation_root_guard(
             raise _MutationObservationError(
                 f"delegated mutation path is not a direct directory: {current}"
             )
-        observed_chain.append((current, identity(metadata), metadata))
+        observed_chain.append((current, _path_component_identity(metadata), metadata))
     if not observed_chain:
         raise _MutationObservationError(
             f"delegated mutation path has no observable direct ancestor: {root}"
@@ -484,7 +488,7 @@ def _mutation_root_guard(
                 stat.S_ISLNK(metadata.st_mode)
                 or bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
                 or not stat.S_ISDIR(metadata.st_mode)
-                or identity(metadata) != expected_identity
+                or _path_component_identity(metadata) != expected_identity
             ):
                 raise _MutationObservationError(
                     "delegated mutation guard path changed during acquisition at "
@@ -604,6 +608,12 @@ def _mutation_root_observation(
             int(getattr(metadata, "st_file_attributes", 0)),
         )
 
+    def path_identity(path: Path, metadata: os.stat_result) -> tuple[int, ...]:
+        # Ancestor siblings are outside this receipt boundary.  The observed
+        # root and every descendant still retain the complete metadata/digest
+        # drift checks below, while ancestors prove only stable direct identity.
+        return identity(metadata) if path == root else _path_component_identity(metadata)
+
     def close_retained(
         primary: BaseException | None = None,
         *,
@@ -700,7 +710,7 @@ def _mutation_root_observation(
                     and root not in _ACTIVE_GUARDED_MUTATION_ROOTS.get()
                 ),
             )
-            path_identities.append((component, identity(metadata)))
+            path_identities.append((component, path_identity(component, metadata)))
         root_metadata = root.lstat()
     except _MutationObservationError as error:
         close_retained(error)
@@ -792,6 +802,12 @@ def _mutation_root_observation(
     except _MutationObservationError as error:
         close_retained(error)
         raise
+    except ExactObjectOwnershipError as error:
+        close_retained(error)
+        raise ContainmentStoreOwnershipError(
+            "stable delegated-effect observation retained exact ownership",
+            error,
+        ) from error
     except (ExactObjectError, OSError):
         close_retained()
         return None
@@ -854,13 +870,19 @@ def _mutation_root_observation(
                 raise _MutationObservationError(
                     f"delegated mutation path became redirected or reparse: {component}"
                 )
-            if identity(metadata) != expected_identity:
+            if path_identity(component, metadata) != expected_identity:
                 raise OSError(
                     f"delegated mutation path changed during observation: {component}"
                 )
     except _MutationObservationError as error:
         close_retained(error)
         raise
+    except ExactObjectOwnershipError as error:
+        close_retained(error)
+        raise ContainmentStoreOwnershipError(
+            "stable delegated-effect observation retained exact ownership",
+            error,
+        ) from error
     except (ExactObjectError, OSError):
         close_retained()
         return None
@@ -1085,6 +1107,78 @@ def _nearest_existing_direct_directory(path: Path) -> Path:
     return candidate
 
 
+def _receipt_exact_directory_creation_failure(
+    error: ExactDirectoryCreationError | ExactDirectoryCreationOwnershipError,
+    target: Path,
+    parent: object,
+) -> None:
+    """Retain only creation effects justified by native and exact-object evidence."""
+    outcome = error.outcome
+    if not (
+        isinstance(outcome, ExactDirectoryCreationOutcome)
+        and isinstance(parent, PinnedObject)
+        and parent.handle
+        and isinstance(parent.identity, PinnedIdentity)
+        and outcome.path == target
+        and target.parent == parent.path
+        and outcome.parent_path == parent.path
+        and outcome.parent_identity == parent.identity
+    ):
+        error.add_note(
+            "directory-creation effect observation is unavailable: retained "
+            "parent/target evidence does not bind the invoked direct child"
+        )
+        return
+    if not outcome.proven_created:
+        return
+    if not outcome.has_valid_handle:
+        # STATUS_SUCCESS + FILE_CREATED is evidence of a write even when the
+        # native result failed to return an owner.  Do not reopen or clean up
+        # the unowned pathname, and never enter the delegated mutation phase.
+        if isinstance(error, ExactDirectoryCreationError):
+            _current_effects().child_mutation_root(target)
+        return
+    if not isinstance(error, ExactDirectoryCreationOwnershipError):
+        # A created candidate whose exact cleanup completed is ephemeral.
+        return
+    candidate = error.created_candidate
+    if candidate is None:
+        return
+    try:
+        if not (
+            isinstance(candidate, PinnedObject)
+            and candidate.handle
+            and any(candidate is owned for owned in error.candidates)
+            and candidate.path == target
+            and isinstance(candidate.identity, PinnedIdentity)
+            and candidate.identity.volume_serial == parent.identity.volume_serial
+            and candidate.identity.attributes & 0x10
+            and not candidate.identity.attributes & 0x400
+            and identity_at_path(parent.path) == parent.identity
+            and identity_at_path(target) == candidate.identity
+        ):
+            raise ExactObjectError(
+                "surviving created candidate is not bound to its retained direct child"
+            )
+    except ExactObjectOwnershipError as observation_error:
+        error.owners = ExactObjectOwnershipError(
+            "directory-creation and effect observation retained exact ownership",
+            owners=(*error.owners, *observation_error.owners),
+        ).owners
+        error.add_note(
+            "directory-creation effect observation retained additional ownership: "
+            f"{observation_error}"
+        )
+        return
+    except (ExactObjectError, OSError) as observation_error:
+        error.add_note(
+            "directory-creation effect observation is unavailable: "
+            f"{observation_error}"
+        )
+        return
+    _current_effects().child_mutation_root(target)
+
+
 def _delegated_mutations_with_created_root(
     created_root: Path,
     other_roots: tuple[Path, ...],
@@ -1166,10 +1260,30 @@ def _delegated_mutations_with_created_root(
                     "service-controlled mutation root appeared before exact "
                     f"creation: {current}"
                 ) from error
+            except ExactDirectoryCreationOwnershipError as error:
+                _receipt_exact_directory_creation_failure(
+                    error,
+                    current,
+                    creation_parent,
+                )
+                raise ContainmentStoreOwnershipError(
+                    "service-controlled directory creation retained exact ownership",
+                    error,
+                ) from error
             except ExactObjectOwnershipError as error:
                 raise ContainmentStoreOwnershipError(
                     "service-controlled directory creation retained exact ownership",
                     error,
+                ) from error
+            except ExactDirectoryCreationError as error:
+                _receipt_exact_directory_creation_failure(
+                    error,
+                    current,
+                    creation_parent,
+                )
+                raise _MutationObservationError(
+                    "service-controlled mutation root creation returned an "
+                    f"unowned or rejected native outcome: {current}"
                 ) from error
             except ExactObjectError as error:
                 raise _MutationObservationError(

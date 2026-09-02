@@ -822,6 +822,15 @@ class WindowsExactFsTests(unittest.TestCase):
             ):
                 creator(child_path, parent)
             ownership = raised.exception
+            self.assertEqual(
+                "ExactDirectoryCreationOwnershipError",
+                type(ownership).__name__,
+            )
+            self.assertEqual(child_path, ownership.outcome.path)
+            self.assertEqual(0, ownership.outcome.status)
+            self.assertEqual(1, ownership.outcome.information)
+            self.assertTrue(ownership.outcome.has_valid_handle)
+            self.assertFalse(ownership.outcome.proven_created)
             self.assertEqual((), ownership.candidates)
             self.assertEqual(1, len(ownership.verification))
             self.assertEqual(child_path, ownership.verification[0].path)
@@ -830,8 +839,289 @@ class WindowsExactFsTests(unittest.TestCase):
             self.assertEqual(0, ownership.verification[0].handle)
             self.assertTrue(child_path.is_dir())
         finally:
-            if ownership is None and raw_handle:
+            if ownership is not None:
+                for owner in ownership.owners:
+                    if owner.pinned.handle:
+                        windows_exact_fs._close_handle(owner.pinned.handle)
+                        owner.pinned.handle = 0
+            elif raw_handle:
                 windows_exact_fs._close_handle(raw_handle)
+            parent.close()
+
+    def test_rooted_directory_creation_owns_failure_status_handle_as_verification(self) -> None:
+        child_path = self.root / "contradictory-failure-child"
+        parent = pin_stable_direct_object(
+            self.root,
+            kind="directory",
+            allow_writes=True,
+        )
+        real_create = windows_exact_fs._ntdll.NtCreateFile
+        raw_handle = 0
+        observed_error = None
+
+        def create_then_report_failure(
+            output_handle,
+            desired_access,
+            object_attributes,
+            io_status,
+            allocation_size,
+            file_attributes,
+            share_access,
+            create_disposition,
+            create_options,
+            ea_buffer,
+            ea_length,
+        ):
+            nonlocal raw_handle
+            status = real_create(
+                output_handle,
+                desired_access,
+                object_attributes,
+                io_status,
+                allocation_size,
+                file_attributes,
+                share_access,
+                create_disposition,
+                create_options,
+                ea_buffer,
+                ea_length,
+            )
+            self.assertEqual(0, status)
+            raw_handle = int(
+                ctypes.cast(
+                    output_handle,
+                    ctypes.POINTER(windows_exact_fs.wintypes.HANDLE),
+                ).contents.value
+            )
+            self.assertEqual(
+                windows_exact_fs._FILE_CREATED_INFORMATION,
+                int(
+                    ctypes.cast(
+                        io_status,
+                        ctypes.POINTER(windows_exact_fs._IO_STATUS_BLOCK),
+                    ).contents.Information
+                ),
+            )
+            return ctypes.c_long(0xC0000001).value
+
+        try:
+            try:
+                with mock.patch.object(
+                    windows_exact_fs._ntdll,
+                    "NtCreateFile",
+                    side_effect=create_then_report_failure,
+                ):
+                    windows_exact_fs.create_pinned_directory_child(child_path, parent)
+            except BaseException as error:
+                observed_error = error
+
+            self.assertIsNotNone(observed_error)
+            self.assertEqual(
+                "ExactDirectoryCreationOwnershipError",
+                type(observed_error).__name__,
+            )
+            self.assertEqual(child_path, observed_error.outcome.path)
+            self.assertNotEqual(0, observed_error.outcome.status)
+            self.assertEqual(
+                windows_exact_fs._FILE_CREATED_INFORMATION,
+                observed_error.outcome.information,
+            )
+            self.assertTrue(observed_error.outcome.has_valid_handle)
+            self.assertFalse(observed_error.outcome.proven_created)
+            self.assertEqual((), observed_error.candidates)
+            self.assertEqual(1, len(observed_error.verification))
+            self.assertEqual(raw_handle, observed_error.verification[0].handle)
+
+            real_close = windows_exact_fs._close_handle
+            close_attempts = 0
+
+            def fail_once(handle: int) -> None:
+                nonlocal close_attempts
+                close_attempts += 1
+                if close_attempts == 1:
+                    raise OSError("injected verification close failure")
+                real_close(handle)
+
+            with (
+                mock.patch.object(
+                    windows_exact_fs,
+                    "_close_handle",
+                    side_effect=fail_once,
+                ),
+                self.assertRaises(ExactObjectOwnershipError) as retry,
+            ):
+                observed_error.resolve()
+            self.assertEqual(
+                "ExactDirectoryCreationOwnershipError",
+                type(retry.exception).__name__,
+            )
+            self.assertIs(observed_error.outcome, retry.exception.outcome)
+            self.assertEqual(1, len(retry.exception.verification))
+            retry.exception.resolve()
+            self.assertEqual(0, observed_error.verification[0].handle)
+            self.assertTrue(child_path.is_dir())
+        finally:
+            if raw_handle and (
+                observed_error is None
+                or not isinstance(observed_error, ExactObjectOwnershipError)
+                or any(owner.pinned.handle for owner in observed_error.owners)
+            ):
+                try:
+                    windows_exact_fs._close_handle(raw_handle)
+                except OSError:
+                    pass
+            parent.close()
+
+    def test_rooted_directory_creation_success_without_handle_is_typed_created_evidence(self) -> None:
+        child_path = self.root / "created-without-handle"
+        parent = pin_stable_direct_object(
+            self.root,
+            kind="directory",
+            allow_writes=True,
+        )
+
+        def report_created_without_handle(
+            _output_handle,
+            _desired_access,
+            _object_attributes,
+            io_status,
+            _allocation_size,
+            _file_attributes,
+            _share_access,
+            _create_disposition,
+            _create_options,
+            _ea_buffer,
+            _ea_length,
+        ):
+            ctypes.cast(
+                io_status,
+                ctypes.POINTER(windows_exact_fs._IO_STATUS_BLOCK),
+            ).contents.Information = windows_exact_fs._FILE_CREATED_INFORMATION
+            return 0
+
+        try:
+            with (
+                mock.patch.object(
+                    windows_exact_fs._ntdll,
+                    "NtCreateFile",
+                    side_effect=report_created_without_handle,
+                ),
+                self.assertRaises(ExactObjectError) as raised,
+            ):
+                windows_exact_fs.create_pinned_directory_child(child_path, parent)
+            error = raised.exception
+            self.assertEqual("ExactDirectoryCreationError", type(error).__name__)
+            self.assertEqual(child_path, error.outcome.path)
+            self.assertEqual(0, error.outcome.status)
+            self.assertEqual(
+                windows_exact_fs._FILE_CREATED_INFORMATION,
+                error.outcome.information,
+            )
+            self.assertFalse(error.outcome.has_valid_handle)
+            self.assertTrue(error.outcome.proven_created)
+        finally:
+            parent.close()
+
+    def test_rooted_directory_creation_status_handle_matrix_is_verification_only(self) -> None:
+        cases = (
+            (ctypes.c_long(0xC0000035).value, 2),
+            (0x40000000, 2),
+            (0x00000103, 2),
+            (0, 1),
+        )
+        parent = pin_stable_direct_object(
+            self.root,
+            kind="directory",
+            allow_writes=True,
+        )
+        try:
+            for index, (status, information) in enumerate(cases):
+                with self.subTest(status=status, information=information):
+                    target = self.root / f"uncertain-{index}"
+                    raw_handle = 8500 + index
+
+                    def report_uncertain(*arguments):
+                        ctypes.cast(
+                            arguments[0],
+                            ctypes.POINTER(windows_exact_fs.wintypes.HANDLE),
+                        ).contents.value = raw_handle
+                        ctypes.cast(
+                            arguments[3],
+                            ctypes.POINTER(windows_exact_fs._IO_STATUS_BLOCK),
+                        ).contents.Information = information
+                        return status
+
+                    with (
+                        mock.patch.object(
+                            windows_exact_fs._ntdll,
+                            "NtCreateFile",
+                            side_effect=report_uncertain,
+                        ),
+                        self.assertRaises(ExactObjectOwnershipError) as raised,
+                    ):
+                        windows_exact_fs.create_pinned_directory_child(target, parent)
+
+                    error = raised.exception
+                    self.assertEqual((), error.candidates)
+                    self.assertEqual(1, len(error.verification))
+                    self.assertEqual(raw_handle, error.verification[0].handle)
+                    self.assertFalse(error.outcome.proven_created)
+                    self.assertEqual(parent.path, error.outcome.parent_path)
+                    self.assertEqual(parent.identity, error.outcome.parent_identity)
+                    with mock.patch.object(
+                        windows_exact_fs,
+                        "_close_handle",
+                    ) as close_handle:
+                        error.resolve()
+                    close_handle.assert_called_once_with(raw_handle)
+                    self.assertEqual(0, error.verification[0].handle)
+                    self.assertFalse(target.exists())
+        finally:
+            parent.close()
+
+    def test_rooted_directory_creation_invalid_handle_matrix_is_explicit(self) -> None:
+        parent = pin_stable_direct_object(
+            self.root,
+            kind="directory",
+            allow_writes=True,
+        )
+        try:
+            for handle in (0, windows_exact_fs._INVALID_HANDLE_VALUE):
+                for information in (1, 2):
+                    with self.subTest(handle=handle, information=information):
+                        target = self.root / "unowned-result"
+
+                        def report_unowned(*arguments):
+                            ctypes.cast(
+                                arguments[0],
+                                ctypes.POINTER(windows_exact_fs.wintypes.HANDLE),
+                            ).contents.value = handle
+                            ctypes.cast(
+                                arguments[3],
+                                ctypes.POINTER(windows_exact_fs._IO_STATUS_BLOCK),
+                            ).contents.Information = information
+                            return 0
+
+                        with (
+                            mock.patch.object(
+                                windows_exact_fs._ntdll,
+                                "NtCreateFile",
+                                side_effect=report_unowned,
+                            ),
+                            self.assertRaises(ExactObjectError) as raised,
+                        ):
+                            windows_exact_fs.create_pinned_directory_child(target, parent)
+
+                        error = raised.exception
+                        self.assertEqual(
+                            "ExactDirectoryCreationError",
+                            type(error).__name__,
+                        )
+                        self.assertEqual(target, error.outcome.path)
+                        self.assertFalse(error.outcome.has_valid_handle)
+                        self.assertEqual(information == 2, error.outcome.proven_created)
+                        self.assertFalse(target.exists())
+        finally:
             parent.close()
 
     def test_rooted_directory_creation_blocks_substitution_during_validation(self) -> None:
@@ -941,6 +1231,34 @@ class WindowsExactFsTests(unittest.TestCase):
         finally:
             parent.close()
 
+    def test_rooted_directory_creation_preserves_interrupt_after_exact_cleanup(self) -> None:
+        child_path = self.root / "interrupted-created-child"
+        parent = pin_stable_direct_object(
+            self.root,
+            kind="directory",
+            allow_writes=True,
+        )
+
+        def interrupted_identity(path: Path) -> PinnedIdentity:
+            if path == child_path:
+                raise KeyboardInterrupt("injected late validation interruption")
+            return identity_at_path(path)
+
+        observed = None
+        try:
+            try:
+                windows_exact_fs.create_pinned_directory_child(
+                    child_path,
+                    parent,
+                    identity_at_path_fn=interrupted_identity,
+                )
+            except BaseException as error:
+                observed = error
+            self.assertIsInstance(observed, KeyboardInterrupt)
+            self.assertFalse(child_path.exists())
+        finally:
+            parent.close()
+
     def test_rooted_directory_creation_cleanup_failure_returns_exact_owner(self) -> None:
         creator = getattr(windows_exact_fs, "create_pinned_directory_child", None)
         self.assertIsNotNone(creator)
@@ -980,6 +1298,12 @@ class WindowsExactFsTests(unittest.TestCase):
             ):
                 creator(child_path, parent)
             ownership = raised.exception
+            self.assertEqual(
+                "ExactDirectoryCreationOwnershipError",
+                type(ownership).__name__,
+            )
+            self.assertTrue(ownership.outcome.proven_created)
+            self.assertTrue(ownership.outcome.has_valid_handle)
             self.assertIsNotNone(ownership.candidate)
             self.assertEqual(child_path, ownership.candidate.path)
             self.assertNotEqual(0, ownership.candidate.handle)

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from modlab.adapters.mo2.bootstrap_model import ProcessObservation
+from modlab.platform import windows_exact_fs
 from modlab.platform.windows_exact_fs import (
     ExactObjectOwnershipError,
     PinnedIdentity,
@@ -3783,6 +3784,617 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
             self.assertTrue(
                 all(pin.handle == 0 for pin in (operation_pin, first_pin, last_pin))
             )
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root observation is required")
+    def test_child_pin_acquisition_ownership_unions_retained_close_owner(self):
+        for kind in ("directory", "file"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(
+                prefix=f"modlab-effect-{kind}-acquisition-owner-"
+            ) as directory:
+                root = Path(directory)
+                child = root / ("child" if kind == "directory" else "child.bin")
+                if kind == "directory":
+                    child.mkdir()
+                else:
+                    child.write_bytes(b"child\n")
+                root_pin = PinnedObject(
+                    root,
+                    7501,
+                    PinnedIdentity(1, 301, 0x10),
+                )
+                acquisition_pin = PinnedObject(
+                    child,
+                    7502,
+                    PinnedIdentity(1, 302, 0x10 if kind == "directory" else 0),
+                )
+                acquisition_error = ExactObjectOwnershipError(
+                    f"injected {kind} acquisition ownership",
+                    verification=(acquisition_pin,),
+                )
+
+                def pin(path, requested_kind, **_kwargs):
+                    if Path(path) == root:
+                        return root_pin
+                    if Path(path) == child and requested_kind == kind:
+                        raise acquisition_error
+                    self.fail(f"unexpected pin request: {path} ({requested_kind})")
+
+                with (
+                    patch.object(
+                        service,
+                        "pin_stable_direct_object",
+                        side_effect=pin,
+                    ),
+                    patch.object(
+                        root_pin,
+                        "close",
+                        side_effect=OSError("injected retained-root close failure"),
+                    ),
+                    self.assertRaises(ContainmentStoreOwnershipError) as raised,
+                ):
+                    service._mutation_root_observation(root)
+
+                self.assertNotIsInstance(
+                    raised.exception,
+                    service._MutationObservationOwnershipError,
+                    "a failed child acquisition did not complete the snapshot",
+                )
+                self.assertEqual(
+                    {7501, 7502},
+                    {owner.pinned.handle for owner in raised.exception.owners},
+                )
+                with patch(
+                    "modlab.platform.windows_exact_fs._close_handle"
+                ) as close_handle:
+                    raised.exception.resolve()
+                self.assertEqual(2, close_handle.call_count)
+                self.assertEqual(0, acquisition_pin.handle)
+                self.assertEqual(0, root_pin.handle)
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root observation is required")
+    def test_child_pin_acquisition_ownership_keeps_later_proven_root_effect(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-effect-acquisition-later-root-"
+        ) as directory:
+            roots = tuple(Path(directory) / name for name in ("first", "middle", "last"))
+            for root in roots:
+                root.mkdir()
+            first_child = roots[0] / "child.bin"
+            first_child.write_bytes(b"before\n")
+            acquisition_pin = PinnedObject(
+                first_child,
+                7510,
+                PinnedIdentity(1, 310, 0),
+            )
+            acquisition_error = ExactObjectOwnershipError(
+                "injected post-operation child acquisition ownership",
+                verification=(acquisition_pin,),
+            )
+            real_pin = service.pin_stable_direct_object
+            after_operation = False
+
+            def pin(path, kind, **kwargs):
+                if after_operation and Path(path) == first_child:
+                    raise acquisition_error
+                return real_pin(path, kind, **kwargs)
+
+            @service._receipted
+            def invoke():
+                def mutate():
+                    nonlocal after_operation
+                    (roots[2] / "changed.bin").write_bytes(b"changed\n")
+                    after_operation = True
+                    return "mutated"
+
+                return service._delegated_mutations_guarded(roots, mutate)
+
+            observed_error = None
+            try:
+                with patch.object(
+                    service,
+                    "pin_stable_direct_object",
+                    side_effect=pin,
+                ):
+                    invoke()
+            except BaseException as error:
+                observed_error = error
+
+            self.assertIsInstance(observed_error, ContainmentStoreOwnershipError)
+            raised_error = observed_error
+            self.assertEqual(
+                (roots[2],),
+                raised_error.effects.child_mutation_roots,
+            )
+            self.assertEqual(
+                (roots[2],),
+                raised_error.effects.written_paths,
+            )
+            self.assertEqual(
+                (acquisition_pin,),
+                tuple(owner.pinned for owner in raised_error.owners),
+            )
+            with patch(
+                "modlab.platform.windows_exact_fs._close_handle"
+            ) as close_handle:
+                raised_error.resolve()
+            close_handle.assert_called_once_with(7510)
+            self.assertEqual(0, acquisition_pin.handle)
+
+    @unittest.skipUnless(os.name == "nt", "Windows exact-root creation is required")
+    def test_surviving_exact_created_candidate_is_receipted_before_ownership_refusal(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-effect-created-candidate-owner-"
+        ) as directory:
+            parent = Path(directory)
+            root = parent / "created-root"
+            real_identity = windows_exact_fs.identity_at_path
+            parent_lookups = 0
+
+            def late_parent_mismatch(path):
+                nonlocal parent_lookups
+                observed = real_identity(path)
+                if Path(path) == parent:
+                    parent_lookups += 1
+                    if parent_lookups == 2:
+                        return replace(observed, file_id=observed.file_id + 1)
+                return observed
+
+            def create_with_late_validation_failure(path, retained_parent):
+                return windows_exact_fs.create_pinned_directory_child(
+                    path,
+                    retained_parent,
+                    identity_at_path_fn=late_parent_mismatch,
+                )
+
+            @service._receipted
+            def invoke():
+                return service._delegated_mutations_with_created_root(
+                    root,
+                    (),
+                    lambda: None,
+                    lambda _prepared: self.fail("delegate must not run"),
+                    require_absent=True,
+                )
+
+            with (
+                patch.object(
+                    service,
+                    "create_pinned_directory_child",
+                    side_effect=create_with_late_validation_failure,
+                ),
+                patch.object(
+                    windows_exact_fs,
+                    "delete_pinned_object",
+                    side_effect=OSError("injected candidate cleanup failure"),
+                ),
+                self.assertRaises(ContainmentStoreOwnershipError) as raised,
+            ):
+                invoke()
+
+            error = raised.exception
+            candidate = error.ownership.candidate
+            try:
+                self.assertEqual(
+                    "ExactDirectoryCreationOwnershipError",
+                    type(error.ownership).__name__,
+                )
+                self.assertEqual((root,), error.effects.child_mutation_roots)
+                self.assertEqual((root,), error.effects.written_paths)
+                self.assertEqual(1, len(error.ownership.candidates))
+                self.assertEqual(root, candidate.path)
+                self.assertEqual(
+                    candidate.identity,
+                    windows_exact_fs.identity_at_path(root),
+                )
+            finally:
+                error.resolve()
+            self.assertEqual(0, candidate.handle)
+            self.assertFalse(root.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows exact-root creation is required")
+    def test_exact_created_candidate_cleanup_success_has_no_surviving_receipt(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-effect-created-candidate-cleaned-"
+        ) as directory:
+            parent = Path(directory)
+            root = parent / "created-root"
+            real_identity = windows_exact_fs.identity_at_path
+            parent_lookups = 0
+
+            def late_parent_mismatch(path):
+                nonlocal parent_lookups
+                observed = real_identity(path)
+                if Path(path) == parent:
+                    parent_lookups += 1
+                    if parent_lookups == 2:
+                        return replace(observed, file_id=observed.file_id + 1)
+                return observed
+
+            def create_with_late_validation_failure(path, retained_parent):
+                return windows_exact_fs.create_pinned_directory_child(
+                    path,
+                    retained_parent,
+                    identity_at_path_fn=late_parent_mismatch,
+                )
+
+            @service._receipted
+            def invoke():
+                return service._delegated_mutations_with_created_root(
+                    root,
+                    (),
+                    lambda: None,
+                    lambda _prepared: self.fail("delegate must not run"),
+                    require_absent=True,
+                )
+
+            with (
+                patch.object(
+                    service,
+                    "create_pinned_directory_child",
+                    side_effect=create_with_late_validation_failure,
+                ),
+                self.assertRaises(service.ContainmentOperationError) as raised,
+            ):
+                invoke()
+
+            self.assertEqual((), raised.exception.effects.child_mutation_roots)
+            self.assertEqual((), raised.exception.effects.written_paths)
+            self.assertFalse(root.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows exact-root creation is required")
+    def test_created_without_handle_evidence_is_receipted_without_path_cleanup(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-effect-created-without-owner-"
+        ) as directory:
+            root = Path(directory) / "created-root"
+
+            def report_created_without_handle(
+                _output_handle,
+                _desired_access,
+                _object_attributes,
+                io_status,
+                _allocation_size,
+                _file_attributes,
+                _share_access,
+                _create_disposition,
+                _create_options,
+                _ea_buffer,
+                _ea_length,
+            ):
+                windows_exact_fs.ctypes.cast(
+                    io_status,
+                    windows_exact_fs.ctypes.POINTER(
+                        windows_exact_fs._IO_STATUS_BLOCK
+                    ),
+                ).contents.Information = windows_exact_fs._FILE_CREATED_INFORMATION
+                return 0
+
+            @service._receipted
+            def invoke():
+                return service._delegated_mutations_with_created_root(
+                    root,
+                    (),
+                    lambda: None,
+                    lambda _prepared: self.fail("delegate must not run"),
+                    require_absent=True,
+                )
+
+            with (
+                patch.object(
+                    windows_exact_fs._ntdll,
+                    "NtCreateFile",
+                    side_effect=report_created_without_handle,
+                ),
+                self.assertRaises(service.ContainmentOperationError) as raised,
+            ):
+                invoke()
+
+            self.assertEqual((root,), raised.exception.effects.child_mutation_roots)
+            self.assertEqual((root,), raised.exception.effects.written_paths)
+            self.assertFalse(root.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows exact-root creation is required")
+    def test_verification_only_native_creation_refusal_has_no_receipt(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-effect-uncertain-created-root-"
+        ) as directory:
+            root = Path(directory) / "uncertain-root"
+            real_create = windows_exact_fs._ntdll.NtCreateFile
+
+            def report_opened(*arguments):
+                status = real_create(*arguments)
+                windows_exact_fs.ctypes.cast(
+                    arguments[3],
+                    windows_exact_fs.ctypes.POINTER(
+                        windows_exact_fs._IO_STATUS_BLOCK
+                    ),
+                ).contents.Information = 1
+                return status
+
+            @service._receipted
+            def invoke():
+                return service._delegated_mutations_with_created_root(
+                    root,
+                    (),
+                    lambda: None,
+                    lambda _prepared: self.fail("delegate must not run"),
+                    require_absent=True,
+                )
+
+            with (
+                patch.object(
+                    windows_exact_fs._ntdll,
+                    "NtCreateFile",
+                    side_effect=report_opened,
+                ),
+                self.assertRaises(ContainmentStoreOwnershipError) as raised,
+            ):
+                invoke()
+
+            error = raised.exception
+            try:
+                self.assertEqual((), error.effects.child_mutation_roots)
+                self.assertEqual((), error.effects.written_paths)
+                self.assertEqual((), error.candidates)
+                self.assertEqual(1, len(error.verification))
+                self.assertFalse(error.ownership.outcome.proven_created)
+            finally:
+                error.resolve()
+            self.assertTrue(root.is_dir())
+
+    def test_created_candidate_receipt_lookup_ownership_preserves_all_owners(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-effect-candidate-receipt-owner-"
+        ) as directory:
+            parent_path = Path(directory)
+            root = parent_path / "created-root"
+            parent = PinnedObject(parent_path, 7600, PinnedIdentity(9, 400, 0x10))
+            candidate = PinnedObject(root, 7601, PinnedIdentity(9, 401, 0x10))
+            lookup_pin = PinnedObject(root, 7602, PinnedIdentity(9, 401, 0x10))
+            outcome = windows_exact_fs.ExactDirectoryCreationOutcome(
+                path=root,
+                parent_path=parent_path,
+                parent_identity=parent.identity,
+                status=0,
+                information=2,
+                has_valid_handle=True,
+            )
+            creation_error = windows_exact_fs.ExactDirectoryCreationOwnershipError(
+                "created candidate cleanup failed",
+                outcome,
+                candidate=candidate,
+            )
+            lookup_error = ExactObjectOwnershipError(
+                "receipt lookup retained ownership",
+                verification=(lookup_pin,),
+            )
+
+            @service._receipted
+            def invoke():
+                service._receipt_exact_directory_creation_failure(
+                    creation_error,
+                    root,
+                    parent,
+                )
+                raise ContainmentStoreOwnershipError(
+                    "creation failed with live ownership",
+                    creation_error,
+                )
+
+            with (
+                patch.object(
+                    service,
+                    "identity_at_path",
+                    side_effect=(parent.identity, lookup_error),
+                ),
+                self.assertRaises(ContainmentStoreOwnershipError) as raised,
+            ):
+                invoke()
+
+            self.assertEqual((), raised.exception.effects.written_paths)
+            self.assertEqual(
+                (candidate, lookup_pin),
+                tuple(owner.pinned for owner in raised.exception.owners),
+            )
+            self.assertTrue(
+                any(
+                    "effect observation retained additional ownership" in note
+                    for note in getattr(creation_error, "__notes__", ())
+                )
+            )
+            with (
+                patch.object(
+                    windows_exact_fs,
+                    "delete_pinned_object",
+                    side_effect=lambda pinned: setattr(pinned, "handle", 0),
+                ),
+                patch.object(windows_exact_fs, "_close_handle"),
+            ):
+                raised.exception.resolve()
+            self.assertEqual(0, candidate.handle)
+            self.assertEqual(0, lookup_pin.handle)
+
+    def test_created_candidate_receipt_rejects_changed_pinned_path_binding(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-effect-candidate-receipt-mismatch-"
+        ) as directory:
+            parent_path = Path(directory)
+            root = parent_path / "created-root"
+            parent = PinnedObject(parent_path, 7610, PinnedIdentity(9, 410, 0x10))
+            candidate = PinnedObject(root, 7611, PinnedIdentity(9, 411, 0x10))
+            outcome = windows_exact_fs.ExactDirectoryCreationOutcome(
+                path=root,
+                parent_path=parent_path,
+                parent_identity=parent.identity,
+                status=0,
+                information=2,
+                has_valid_handle=True,
+            )
+            creation_error = windows_exact_fs.ExactDirectoryCreationOwnershipError(
+                "created candidate cleanup failed",
+                outcome,
+                candidate=candidate,
+            )
+
+            @service._receipted
+            def invoke():
+                service._receipt_exact_directory_creation_failure(
+                    creation_error,
+                    root,
+                    parent,
+                )
+                raise ContainmentStoreOwnershipError(
+                    "creation failed with live ownership",
+                    creation_error,
+                )
+
+            with (
+                patch.object(
+                    service,
+                    "identity_at_path",
+                    side_effect=(
+                        parent.identity,
+                        PinnedIdentity(10, 411, 0x10),
+                    ),
+                ),
+                self.assertRaises(ContainmentStoreOwnershipError) as raised,
+            ):
+                invoke()
+
+            self.assertEqual((), raised.exception.effects.written_paths)
+            self.assertTrue(
+                any(
+                    "effect observation is unavailable" in note
+                    for note in getattr(creation_error, "__notes__", ())
+                )
+            )
+            with patch.object(
+                windows_exact_fs,
+                "delete_pinned_object",
+                side_effect=lambda pinned: setattr(pinned, "handle", 0),
+            ):
+                raised.exception.resolve()
+            self.assertEqual(0, candidate.handle)
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root guards are required")
+    def test_mutation_guard_allows_unrelated_sibling_creation_during_acquisition(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-effect-sibling-acquisition-"
+        ) as directory:
+            parent = Path(directory)
+            root = parent / "root"
+            sibling = parent / "unrelated-sibling"
+            root.mkdir()
+            real_pin = service.pin_stable_direct_object
+            created_sibling = False
+
+            def pin_after_sibling_creation(path, kind, **kwargs):
+                nonlocal created_sibling
+                if Path(path) == root and not created_sibling:
+                    sibling.mkdir()
+                    created_sibling = True
+                return real_pin(path, kind, **kwargs)
+
+            guard = None
+            observed_error = None
+            try:
+                try:
+                    with patch.object(
+                        service,
+                        "pin_stable_direct_object",
+                        side_effect=pin_after_sibling_creation,
+                    ):
+                        guard = service._mutation_root_guard(
+                            root,
+                            require_target_existing=True,
+                        )
+                except BaseException as error:
+                    observed_error = error
+
+                self.assertTrue(created_sibling)
+                self.assertIsNone(observed_error)
+                self.assertIsNotNone(guard)
+                self.assertEqual(guard.identity, service.identity_at_path(root))
+            finally:
+                if guard is not None:
+                    guard.close()
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root observation is required")
+    def test_mutation_observation_allows_unrelated_ancestor_sibling_creation(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-effect-sibling-observation-"
+        ) as directory:
+            parent = Path(directory)
+            root = parent / "root"
+            sibling = parent / "unrelated-sibling"
+            root.mkdir()
+            (root / "unchanged.bin").write_bytes(b"unchanged\n")
+            real_scandir = service.os.scandir
+            created_sibling = False
+
+            def scan_after_sibling_creation(path):
+                nonlocal created_sibling
+                if Path(path) == root and not created_sibling:
+                    sibling.mkdir()
+                    metadata = parent.lstat()
+                    # NTFS may coalesce directory timestamps; force the benign
+                    # ancestor metadata tick without sleeping or touching root.
+                    os.utime(
+                        parent,
+                        ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000_000),
+                    )
+                    created_sibling = True
+                return real_scandir(path)
+
+            with patch.object(
+                service.os,
+                "scandir",
+                side_effect=scan_after_sibling_creation,
+            ):
+                observed = service._mutation_root_observation(root)
+
+            self.assertTrue(created_sibling)
+            self.assertIsNotNone(observed)
+            self.assertEqual(2, len(observed))
+            self.assertEqual("unchanged.bin", observed[1][0])
+
+    @unittest.skipUnless(os.name == "nt", "Windows stable-root guards are required")
+    def test_mutation_guard_rejects_exact_root_swap_during_acquisition(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-effect-exact-root-swap-"
+        ) as directory:
+            parent = Path(directory)
+            root = parent / "root"
+            displaced = parent / "displaced-root"
+            root.mkdir()
+            original_identity = service.identity_at_path(root)
+            real_pin = service.pin_stable_direct_object
+            swapped = False
+
+            def swap_then_pin(path, kind, **kwargs):
+                nonlocal swapped
+                if Path(path) == root and not swapped:
+                    root.rename(displaced)
+                    root.mkdir()
+                    swapped = True
+                return real_pin(path, kind, **kwargs)
+
+            with (
+                patch.object(
+                    service,
+                    "pin_stable_direct_object",
+                    side_effect=swap_then_pin,
+                ),
+                self.assertRaisesRegex(
+                    service._MutationObservationError,
+                    "changed identity",
+                ),
+            ):
+                service._mutation_root_guard(root, require_target_existing=True)
+
+            self.assertTrue(swapped)
+            self.assertEqual(original_identity, service.identity_at_path(displaced))
+            self.assertNotEqual(original_identity, service.identity_at_path(root))
 
     @unittest.skipUnless(os.name == "nt", "Windows stable-root guards are required")
     def test_mutation_guard_rejects_same_file_id_from_foreign_volume(self):
