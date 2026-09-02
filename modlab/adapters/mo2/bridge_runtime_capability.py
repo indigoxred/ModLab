@@ -442,8 +442,14 @@ def launch_environment(root, layout, phase, nonce, inherited=None):
     _require(layout in LAYOUTS and phase in PHASES and _hex(nonce, 32), "invalid launch binding")
     inherited = os.environ if inherited is None else inherited
     _require(not any(name.upper().startswith("PYTHON") for name in inherited), "inherited Python environment controls require operator resolution")
+    # MO2 v2.5.2 src/loglist.cpp initLogging concatenates getenv("USERNAME") without a null check.
+    usernames = [value for name, value in inherited.items() if name.upper() == "USERNAME"]
+    _require(len(usernames) == 1 and type(usernames[0]) is str, "one required Windows USERNAME must be supplied")
+    username = usernames[0]
+    _require(username.strip() and username.isprintable() and not any(char in username for char in "/\\"),
+             "required Windows USERNAME is invalid")
     system = next((value for name, value in inherited.items() if name.upper() == "SYSTEMROOT"), r"C:\Windows")
-    environment = {"SystemRoot": system, "WINDIR": system, "PATH": str(Path(system) / "System32")}
+    environment = {"SystemRoot": system, "WINDIR": system, "PATH": str(Path(system) / "System32"), "USERNAME": username}
     base = root / layout / "environment"
     environment.update({name: str(base / name) for name in ("TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME")})
     environment.update(MODLAB_CAPABILITY_PHASE=phase, MODLAB_CAPABILITY_NONCE=nonce)

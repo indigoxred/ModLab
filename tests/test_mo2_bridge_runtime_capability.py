@@ -337,14 +337,43 @@ class CandidateTests(unittest.TestCase):
     def test_environment_refuses_inherited_bytecode_controls_and_confines_writes(self):
         self.assertTrue(hasattr(cap, "launch_environment"), "environment builder is missing")
         root = Path(tempfile.gettempdir()) / ("a" * 32)
-        for name in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "PYTHONHOME", "PYTHONPATH"):
+        for name in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "PYTHONHOME", "PYTHONPATH", "PythonPath"):
             with self.subTest(name=name), self.assertRaises(cap.CapabilityError):
-                cap.launch_environment(root, "SingleFile", "First", "c" * 32, {name: "anything"})
-        result = cap.launch_environment(root, "SingleFile", "First", "c" * 32, {"SystemRoot": "C:\\Windows", "SECRET": "do-not-copy"})
+                cap.launch_environment(root, "SingleFile", "First", "c" * 32, {name: "anything", "USERNAME": "fixture"})
+        result = cap.launch_environment(root, "SingleFile", "First", "c" * 32,
+                                        {"SystemRoot": "C:\\Windows", "USERNAME": "fixture", "SECRET": "do-not-copy"})
         self.assertNotIn("SECRET", result)
         for name in ("TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME"):
             self.assertTrue(Path(result[name]).is_relative_to(root))
         self.assertNotIn("MODLAB_CAPABILITY_GUARD", result)
+
+    def test_environment_preserves_required_username_case_insensitively_without_other_values(self):
+        root = Path(tempfile.gettempdir()) / ("a" * 32)
+        for key in ("USERNAME", "username", "UserName"):
+            with self.subTest(key=key):
+                supplied = {key: "Réd Mod", "SystemRoot": "C:\\Windows", "SECRET": "private", "PATH": "untrusted"}
+                result = cap.launch_environment(root, "SingleFile", "First", "c" * 32, supplied)
+                self.assertEqual("Réd Mod", result.get("USERNAME"))
+                self.assertEqual(["USERNAME"], [name for name in result if name.upper() == "USERNAME"])
+                self.assertNotIn("SECRET", result)
+                self.assertNotEqual("untrusted", result["PATH"])
+                self.assertEqual({key: "Réd Mod", "SystemRoot": "C:\\Windows", "SECRET": "private", "PATH": "untrusted"}, supplied)
+
+    def test_environment_reads_required_username_from_inherited_environment(self):
+        root = Path(tempfile.gettempdir()) / ("a" * 32)
+        with patch.dict(os.environ, {"USERNAME": " Inherited User ", "SECRET": "private"}, clear=True):
+            result = cap.launch_environment(root, "SingleFile", "First", "c" * 32)
+        self.assertEqual(" Inherited User ", result.get("USERNAME"))
+        self.assertNotIn("SECRET", result)
+
+    def test_environment_refuses_missing_invalid_or_ambiguous_required_username(self):
+        root = Path(tempfile.gettempdir()) / ("a" * 32)
+        invalid = [{}, {"USERNAME": "red", "username": "other"}, {"USERNAME": "red", "username": "red"}]
+        invalid.extend({"USERNAME": value} for value in
+                       (None, True, 42, b"red", "", " \t", "red\0suffix", "red\n", "red/path", "red\\path"))
+        for supplied in invalid:
+            with self.subTest(supplied=supplied), self.assertRaises(cap.CapabilityError):
+                cap.launch_environment(root, "SingleFile", "First", "c" * 32, supplied)
 
     def test_log_parser_requires_one_exact_loaded_marker_for_this_launch(self):
         self.assertTrue(hasattr(cap, "loaded_from_logs"), "live observation parser is missing")
