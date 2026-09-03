@@ -16,6 +16,7 @@ from typing import Protocol
 
 from .bootstrap_model import ExtractorIdentity, FileIdentity
 from .release import Mo2ReleaseDescriptor, ReleaseFileIdentity
+from .path_budget import PathBudgetError, PlannedPath, admit_paths, archive_paths
 
 
 class Mo2ArchiveError(RuntimeError):
@@ -215,11 +216,16 @@ def extract_and_inventory(
             f"insufficient free space: require {release.minimum_free_bytes} bytes"
         )
 
+    command_runner = runner or SubprocessCommandRunner()
+    listing = preflight_archive(archive_path, release, extractor_path, runner=command_runner)
+    try:
+        admit_paths((*archive_paths(listing, stage), PlannedPath("archive-input", "preparation-wide", str(Path(archive_path).absolute()))))
+    except PathBudgetError as error:
+        raise Mo2ArchiveError(str(error)) from error
     try:
         stage.mkdir()
     except OSError as error:
         raise Mo2ArchiveError(f"cannot create fresh staging root: {error}") from error
-    command_runner = runner or SubprocessCommandRunner()
     args = (
         str(Path(extractor_path)),
         "-xf",

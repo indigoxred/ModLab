@@ -92,10 +92,10 @@ class FakeRunner:
 
     @classmethod
     def for_extraction(cls, files: dict[str, bytes]):
-        return cls(
-            {"-xf": CompletedProcess((), 0, b"", b"")},
-            extraction_files=dict(files),
-        )
+        runner = cls.for_listing(sorted(files), ["-"] * len(files))
+        runner.responses["-xf"] = CompletedProcess((), 0, b"", b"")
+        runner.extraction_files = dict(files)
+        return runner
 
     def run(self, args: tuple[str, ...]) -> CompletedProcess[bytes]:
         self.calls.append(list(args))
@@ -256,6 +256,8 @@ def descriptor_for_package(files: dict[str, bytes]) -> Mo2ReleaseDescriptor:
     )
     return replace(
         base,
+        archive_entry_count=len(files),
+        archive_listing_sha256=hashlib.sha256(("\n".join(sorted(files)) + "\n").encode()).hexdigest(),
         package_file_count=len(files),
         extracted_size=sum(len(data) for data in files.values()),
         minimum_free_bytes=1024,
@@ -859,7 +861,10 @@ class BootstrapPlanningFixture:
         self.make_ready_existing()
         planned = self.prepare()
         store = Mo2BootstrapStore(self.workspace)
-        journal = store.create_job(planned.plan)
+        from modlab.adapters.mo2.archive import preflight_archive
+        listing = preflight_archive(Path("payload.7z"), self.release.descriptor,
+                                    Path("tar.exe"), runner=self.runner)
+        journal = store.create_job(planned.plan, listing=listing)
         staging = replace(
             journal.journal,
             state=BootstrapJobState.STAGING,

@@ -1,0 +1,38 @@
+test_effect_merge_preserves_repeated_preparation_launches_in_order (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_effect_merge_preserves_repeated_preparation_launches_in_order) ... FAIL
+test_archive_budget_rejects_forged_entry_spelling_kind_and_digest (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_archive_budget_rejects_forged_entry_spelling_kind_and_digest) ... 
+  test_archive_budget_rejects_forged_entry_spelling_kind_and_digest (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_archive_budget_rejects_forged_entry_spelling_kind_and_digest) (listing=namespace(entries=(namespace(relative_path='folder'),), canonical_sha256='4fabae4f6b7c6600599cc1bf7a1a0738ce336fbe36031e29ceb6e95bce2537ec')) ... ERROR
+
+======================================================================
+ERROR: test_archive_budget_rejects_forged_entry_spelling_kind_and_digest (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_archive_budget_rejects_forged_entry_spelling_kind_and_digest) (listing=namespace(entries=(namespace(relative_path='folder'),), canonical_sha256='4fabae4f6b7c6600599cc1bf7a1a0738ce336fbe36031e29ceb6e95bce2537ec'))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 345, in test_archive_budget_rejects_forged_entry_spelling_kind_and_digest
+    archive_paths(listing, r"C:\stage")
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\adapters\mo2\path_budget.py", line 170, in archive_paths
+    if entry.kind not in {"file", "directory"}:
+       ^^^^^^^^^^
+AttributeError: 'types.SimpleNamespace' object has no attribute 'kind'
+
+======================================================================
+FAIL: test_effect_merge_preserves_repeated_preparation_launches_in_order (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_effect_merge_preserves_repeated_preparation_launches_in_order)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 5224, in test_effect_merge_preserves_repeated_preparation_launches_in_order
+    self.assertEqual((launched, launched), merged.preparation_processes)
+AssertionError: Tuples differ: ('C:\[24 chars]-names] PID: 42', 'C:\\tools\\bsdtar.exe [list-names] PID: 42') != ('C:\[24 chars]-names] PID: 42',)
+
+First tuple contains 1 additional elements.
+First extra element 1:
+'C:\\tools\\bsdtar.exe [list-names] PID: 42'
+
+- ('C:\\tools\\bsdtar.exe [list-names] PID: 42',
++ ('C:\\tools\\bsdtar.exe [list-names] PID: 42',)
+?                                               +
+
+-  'C:\\tools\\bsdtar.exe [list-names] PID: 42')
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.002s
+
+FAILED (failures=1, errors=1)
+Exit: 1

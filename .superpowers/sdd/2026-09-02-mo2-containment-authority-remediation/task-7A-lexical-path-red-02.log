@@ -1,0 +1,30 @@
+test_mutable_part_path_is_lexical_when_host_name_is_mocked (tests.test_mo2_containment_store.ContainmentStoreTests.test_mutable_part_path_is_lexical_when_host_name_is_mocked) ... ERROR
+
+======================================================================
+ERROR: test_mutable_part_path_is_lexical_when_host_name_is_mocked (tests.test_mo2_containment_store.ContainmentStoreTests.test_mutable_part_path_is_lexical_when_host_name_is_mocked)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_store.py", line 235, in test_mutable_part_path_is_lexical_when_host_name_is_mocked
+    part = containment_store.mutable_replacement_part_path(target, token)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_store.py", line 174, in mutable_replacement_part_path
+    return path.parent / f".{path.name}.{token}.part"
+           ^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 739, in parent
+    return self._from_parsed_parts(drv, root, tail[:-1])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 422, in _from_parsed_parts
+    path = self.with_segments(path_str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 385, in with_segments
+    return type(self)(*pathsegments)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 1422, in __new__
+    raise NotImplementedError(
+NotImplementedError: cannot instantiate 'PosixPath' on your system
+
+----------------------------------------------------------------------
+Ran 1 test in 0.002s
+
+FAILED (errors=1)
+Exit: 1

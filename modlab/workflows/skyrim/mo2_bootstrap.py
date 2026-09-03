@@ -1,6 +1,7 @@
 """Read-only evidence planning for the verified portable MO2 bootstrap."""
 
 from __future__ import annotations
+from modlab.adapters.mo2.path_budget import PathBudgetError, admit_paths, bootstrap_paths, stage_name
 
 import hashlib
 import json
@@ -168,7 +169,7 @@ _WRITE_TEMPLATES = (
     "runtime/jobs/mo2-bootstrap/{jobId}/journal.json",
 )
 _JOB_DIRECTORY = re.compile(r"^[0-9a-f]{32}$")
-_STAGE_DIRECTORY = re.compile(r"^\.skyrim-se-ae\.modlab-stage-([0-9a-f]{32})$")
+_STAGE_DIRECTORY = re.compile(r"^(?:\.skyrim-se-ae\.modlab-stage-[0-9a-f]{32}|\.s[a-z2-7]{26})$")
 _RECEIPT_DOCUMENT = re.compile(r"^([0-9a-f]{64})\.json$")
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _HASH_CHUNK = 1024 * 1024
@@ -337,6 +338,7 @@ def _collect_mo2_setup(
     process_inspector: Callable[[Path], ProcessObservation],
     command_runner: CommandRunner | None,
     free_space_reader: Callable[[Path], int],
+    layout_version: int = 2,
 ) -> _CollectedSetup:
     """Collect stable bootstrap evidence without retaining any new state."""
     requested_workspace = Path(workspace_root).expanduser().absolute()
@@ -524,7 +526,7 @@ def _collect_mo2_setup(
         f"{extractor.executable.path} [list-types]",
     )
     plan = BootstrapPlan(
-        schema_version=1,
+        schema_version=layout_version,
         plan_id="bootstrap-plan-sha256:" + "0" * 64,
         disposition=disposition,
         workspace_root=str(layout.root),
@@ -532,7 +534,7 @@ def _collect_mo2_setup(
         game_root=str(game_root),
         final_root=str(layout.skyrim_mo2),
         staging_parent=str(layout.skyrim_mo2.parent),
-        staging_name_template=".skyrim-se-ae.modlab-stage-<job-hex>",
+        staging_name_template=(".skyrim-se-ae.modlab-stage-<job-hex>" if layout_version == 1 else ".s<job-base32>"),
         skyrim_executable=game_executable,
         environment_sha256=(
             None if environment.snapshot is None else environment.snapshot.sha256
@@ -558,8 +560,14 @@ def _collect_mo2_setup(
         programs_launched=programs,
     )
     try:
+        budget = admit_paths((*bootstrap_paths(layout.root, listing, layout_version=layout_version,
+                                               disposition="Create", archive_path=artifact.payload_path),
+                              *bootstrap_paths(layout.root, listing, layout_version=layout_version,
+                                               disposition="Adopt", archive_path=artifact.payload_path)))
+        if layout_version == 2:
+            plan = replace(plan, path_budget=budget)
         plan = replace(plan, plan_id=plan_id_for(plan))
-    except BootstrapFormatError as error:
+    except (BootstrapFormatError, PathBudgetError) as error:
         raise Mo2BootstrapRefusal(
             "plan-invalid", f"bootstrap plan could not be derived safely: {error}"
         ) from error
@@ -662,6 +670,7 @@ def apply_mo2_setup(
             process_inspector=process_inspector,
             command_runner=runner,
             free_space_reader=free_space_reader,
+            layout_version=plan.schema_version,
         )
         return _apply_collected_mo2_setup(
             plan=plan,
@@ -1023,7 +1032,7 @@ def _require_recovery_job_plan(
         )
     expected = (
         (journal.final_root, layout.skyrim_mo2),
-        (journal.stage_root, Mo2BootstrapStore(layout.root).stage_root(journal.job_id)),
+        (journal.stage_root, Mo2BootstrapStore(layout.root).stage_root(journal.job_id, journal.schema_version)),
         (journal.prior_root, Mo2BootstrapStore(layout.root).prior_root(journal.job_id)),
         (plan.workspace_root, layout.root),
         (plan.final_root, layout.skyrim_mo2),
@@ -1781,6 +1790,7 @@ def _recover_activated_job(
         process_inspector=process_inspector,
         command_runner=command_runner,
         free_space_reader=free_bytes_at,
+        layout_version=plan.schema_version,
     )
     _validate_captured_ancestry(manager_ancestry)
     programs = collected.plan.programs_launched
@@ -2322,7 +2332,8 @@ def _apply_create_plan(
 ) -> SetupApplyResult:
     runner = command_runner or SubprocessCommandRunner()
     try:
-        job = store.create_job(plan)
+        _require_extraction_inputs_current(collected)
+        job = store.create_job(plan, listing=collected.listing)
     except Mo2BootstrapStorePromotionError as error:
         refusal = Mo2BootstrapRefusal(
             "recovery-required",
@@ -2707,10 +2718,7 @@ def _apply_create_plan(
             )
             raise _refusal_with_failure(refusal, failure) from error
 
-    programs = (
-        *collected.plan.programs_launched,
-        f"{plan.extractor.executable.path} [extract]",
-    )
+    programs = _recorded_programs(runner)
     assert stored_receipt is not None
     return SetupApplyResult(
         outcome=BootstrapReceiptMode.CREATED.value,
@@ -3128,7 +3136,8 @@ def _apply_adopt_plan(
 ) -> SetupApplyResult:
     runner = command_runner or SubprocessCommandRunner()
     try:
-        job = store.create_job(plan)
+        _require_extraction_inputs_current(collected)
+        job = store.create_job(plan, listing=collected.listing)
     except Mo2BootstrapStorePromotionError as error:
         refusal = Mo2BootstrapRefusal(
             "recovery-required",
@@ -3318,6 +3327,7 @@ def _apply_adopt_plan(
             job.journal.job_id,
             stage_inventory,
             collected.listing,
+            layout_version=job.journal.schema_version,
         )
     except (Mo2ArchiveError, OSError) as error:
         refusal = Mo2BootstrapRefusal(
@@ -3334,7 +3344,7 @@ def _apply_adopt_plan(
         )
         raise _refusal_with_failure(refusal, failure) from error
 
-    programs = (*collected.plan.programs_launched, f"{plan.extractor.executable.path} [extract]")
+    programs = _recorded_programs(runner)
     assert stored_receipt is not None
     return SetupApplyResult(
         outcome=BootstrapReceiptMode.ADOPTED.value,
@@ -3545,9 +3555,10 @@ def _remove_verified_stage(
     job_id: str,
     expected: PackageInventory,
     listing: ArchiveListing,
+    *,
+    layout_version: int = 1,
 ) -> None:
-    job_hex = job_id.removeprefix("bootstrap-job:")
-    expected_name = f".skyrim-se-ae.modlab-stage-{job_hex}"
+    expected_name = stage_name(job_id, layout_version)
     if stage_root.name != expected_name or stage_root.parent != staging_parent:
         raise Mo2ArchiveError("staging path does not match its exact job identity")
     ancestry = _capture_cleanup_ancestry(staging_parent)
@@ -4141,7 +4152,7 @@ def _observe_recovery_state(
             )
             continue
         if journal.state.value not in {"Verified", "Recovered"}:
-            active_jobs.add(entry.name)
+            active_jobs.add(stage_name(journal.job_id, journal.schema_version))
             _put_finding(
                 findings,
                 CheckState.BLOCKED,
@@ -4152,7 +4163,7 @@ def _observe_recovery_state(
         stage = _STAGE_DIRECTORY.fullmatch(entry.name)
         if stage is None:
             continue
-        code = "stage-collision" if stage.group(1) in active_jobs else "orphan-stage"
+        code = "stage-collision" if entry.name in active_jobs else "orphan-stage"
         _put_finding(
             findings,
             CheckState.BLOCKED,

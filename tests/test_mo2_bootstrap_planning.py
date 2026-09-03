@@ -518,12 +518,19 @@ class Mo2BootstrapPlanningTests(unittest.TestCase):
         self.assertIn("orphan-stage", {item.code for item in stage_result.plan.findings})
 
     def test_active_job_stage_collision_requires_recovery(self):
+        from modlab.adapters.mo2.archive import preflight_archive
         from modlab.workflows.skyrim.mo2_bootstrap_store import Mo2BootstrapStore
 
         self.fixture.make_ready_existing()
         plan = self.fixture.prepare().plan
         store = Mo2BootstrapStore(self.fixture.workspace)
-        job = store.create_job(plan)
+        listing = preflight_archive(
+            Path("payload.7z"),
+            self.fixture.release.descriptor,
+            Path("tar.exe"),
+            runner=self.fixture.runner,
+        )
+        job = store.create_job(plan, listing=listing)
         Path(job.journal.stage_root).mkdir()
 
         result = self.fixture.prepare()

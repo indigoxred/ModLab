@@ -1,0 +1,42 @@
+Native invocation (require_escalated):
+TEMP=TMP=C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt
+C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest tests.test_mo2_path_budget tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_unsupported_future_preparation_preserves_all_failed_attempt_bytes -v
+Native result chunk 4194cf, exit 1:
+test_archive_deep_destination_refuses_without_creating_stage (tests.test_mo2_path_budget.PathBudgetEntryPointTests.test_archive_deep_destination_refuses_without_creating_stage) ... FAIL
+test_new_bootstrap_plan_explicitly_selects_new_layout (tests.test_mo2_path_budget.PathBudgetEntryPointTests.test_new_bootstrap_plan_explicitly_selects_new_layout) ... FAIL
+test_unsupported_future_preparation_preserves_all_failed_attempt_bytes (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_unsupported_future_preparation_preserves_all_failed_attempt_bytes) ... FAIL
+
+======================================================================
+FAIL: test_archive_deep_destination_refuses_without_creating_stage (tests.test_mo2_path_budget.PathBudgetEntryPointTests.test_archive_deep_destination_refuses_without_creating_stage)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 22, in test_archive_deep_destination_refuses_without_creating_stage
+    with self.assertRaisesRegex(Mo2ArchiveError, "path budget"):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Mo2ArchiveError not raised
+
+======================================================================
+FAIL: test_new_bootstrap_plan_explicitly_selects_new_layout (tests.test_mo2_path_budget.PathBudgetEntryPointTests.test_new_bootstrap_plan_explicitly_selects_new_layout)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 31, in test_new_bootstrap_plan_explicitly_selects_new_layout
+    self.assertEqual(2, planned.plan.schema_version)
+AssertionError: 2 != 1
+
+======================================================================
+FAIL: test_unsupported_future_preparation_preserves_all_failed_attempt_bytes (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_unsupported_future_preparation_preserves_all_failed_attempt_bytes)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_preparation_recovery.py", line 348, in test_unsupported_future_preparation_preserves_all_failed_attempt_bytes
+    self.assertEqual(before, snapshot())
+AssertionError: {'int[2364 chars]tion-projections\\NewFolder.json': b'{"kind":"[4361 chars]oad'} != {'int[2364 chars]tion-recovery.json': b'{"kind":"[9930 chars]oad'}
+Diff is 28696 characters long. Set self.maxDiff to None to see it.
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.659s
+
+FAILED (failures=3)
+
+Prior setup correction (chunk20a0c4): initial archive fixture omitted ModOrganizer.exe,
+causing KeyError before assertion. Corrected the fixture, then reran the above true RED
+before production edits. The two other intended regressions failed on both runs.

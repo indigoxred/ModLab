@@ -227,6 +227,16 @@ class ContainmentStoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_mutable_part_path_is_lexical_when_host_name_is_mocked(self):
+        target = self.root / "journal.json"
+        token = "1" * 32
+
+        with mock.patch.object(containment_store.os, "name", "posix"):
+            part = containment_store.mutable_replacement_part_path(target, token)
+
+        self.assertIs(type(target), type(part))
+        self.assertEqual(self.root / f".journal.json.{token}.part", part)
+
     def test_open_readonly_requires_existing_root_without_creating_it(self):
         absent = self.root / "absent-validation"
 

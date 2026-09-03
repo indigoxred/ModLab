@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import os
 from pathlib import Path
@@ -130,12 +130,25 @@ def prepare_fixture_with_fake_bootstrap(root: Path, *, fixture_parent: Path | No
     def fake_integrity(path: Path) -> IntegrityLevel:
         return (
             IntegrityLevel.LOW
-            if "stage-workspace" in str(path).casefold() or "stage-environment" in str(path).casefold()
+            if "t" in path.parts or "stage-workspace" in str(path).casefold() or "stage-environment" in str(path).casefold()
             else IntegrityLevel.MEDIUM
         )
 
     report = SimpleNamespace(executable=SimpleNamespace(file_version="2.5.2.0"))
+    from modlab.adapters.mo2.archive import ArchiveEntry, ArchiveListing
+    descriptor = replace(load_mo2_release(bundled_mo2_252_path()).descriptor,
+                         archive_sha256=artifact.sha256, archive_size=artifact.size)
     with (
+        patch.object(fixtures, "load_mo2_release", return_value=SimpleNamespace(descriptor=descriptor)),
+        patch.object(fixtures, "observe_bsdtar", return_value=SimpleNamespace(executable=SimpleNamespace(path=r"C:\Windows\System32\tar.exe"))),
+        patch.object(
+            fixtures,
+            "preflight_archive",
+            return_value=ArchiveListing(
+                (ArchiveEntry("ModOrganizer.exe", "file"),),
+                hashlib.sha256(b"ModOrganizer.exe\n").hexdigest(),
+            ),
+        ),
         patch.object(fixtures, "prepare_mo2_setup", side_effect=fake_prepare),
         patch.object(fixtures, "apply_mo2_setup", side_effect=fake_apply),
         patch.object(fixtures, "inspect_skyrim_mo2", return_value=report),

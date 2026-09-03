@@ -1,6 +1,7 @@
 """Crash-safe orchestration and fail-closed adjudication for MO2 containment."""
 
 from __future__ import annotations
+from modlab.adapters.mo2.path_budget import PlannedPath, admit_paths, publication_paths
 
 from contextvars import ContextVar
 from contextlib import contextmanager
@@ -40,6 +41,7 @@ from modlab.workspace import workspace_layout
 
 from .mo2_containment_fixtures import (
     ContainmentFixture,
+    PROTECTED_MOD_FILES,
     preflight_containment_fixture,
     prepare_containment_fixture,
 )
@@ -71,10 +73,12 @@ from .mo2_containment_serialization import (
     watch_outcome_id_for,
 )
 from .mo2_containment_store import (
+    PROTECTED_STATE_LABELS,
     ContainmentStore,
     ContainmentStoreError,
     ContainmentStoreNotFound,
     ContainmentStoreOwnershipError,
+    mutable_replacement_part_path,
 )
 from .windows_integrity import (
     IntegrityLabelError,
@@ -178,6 +182,7 @@ class ContainmentEffects:
     source_changes: tuple[str, ...] = ()
     game_changes: tuple[str, ...] = ()
     production_mo2_changes: tuple[str, ...] = ()
+    preparation_processes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         written = _unique_paths(tuple(self.written_paths))
@@ -197,6 +202,8 @@ class ContainmentEffects:
         for label, values in changes:
             if any(type(value) is not str or not value for value in values):
                 raise ValueError(f"{label} effects must be nonempty text")
+        if any(type(value) is not str or not value for value in self.preparation_processes):
+            raise ValueError("preparation processes must be nonempty text")
         object.__setattr__(self, "written_paths", written)
         object.__setattr__(self, "child_mutation_roots", roots)
         object.__setattr__(self, "source_changes", _unique_text(changes[0][1]))
@@ -214,7 +221,7 @@ class ContainmentEffects:
             rows.append(f"Watcher PID: {self.watcher_pid}")
         if self.mo2_pid is not None:
             rows.append(f"MO2 PID: {self.mo2_pid}")
-        return tuple(rows)
+        return (*rows, *self.preparation_processes)
 
     @classmethod
     def merged(cls, *receipts: "ContainmentEffects") -> "ContainmentEffects":
@@ -244,6 +251,9 @@ class ContainmentEffects:
             ),
             production_mo2_changes=tuple(
                 item for value in values for item in value.production_mo2_changes
+            ),
+            preparation_processes=tuple(
+                item for value in values for item in value.preparation_processes
             ),
         )
 
@@ -299,6 +309,7 @@ class _EffectLedger:
         self._source_changes: list[str] = []
         self._game_changes: list[str] = []
         self._production_mo2_changes: list[str] = []
+        self._preparation_processes: list[str] = []
 
     def write(self, path: Path) -> None:
         self._written_paths.append(Path(path))
@@ -313,6 +324,9 @@ class _EffectLedger:
 
     def mo2(self, pid: int) -> None:
         self._mo2_pid = pid
+
+    def preparation_process(self, label: str) -> None:
+        self._preparation_processes.append(label)
 
     def changes(
         self,
@@ -334,6 +348,7 @@ class _EffectLedger:
             tuple(self._source_changes),
             tuple(self._game_changes),
             tuple(self._production_mo2_changes),
+            tuple(self._preparation_processes),
         )
 
 
@@ -1876,6 +1891,91 @@ def load_decision(
     return ContainmentServiceResult(decision, ContainmentEffects())
 
 
+class _PreparationCommandRunner:
+    """Receipt a real process as soon as its native creation has succeeded."""
+
+    def run(self, args):
+        with subprocess.Popen(list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                shell=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)) as process:
+            _current_effects().preparation_process(f"{args[0]} [{args[1]}] PID: {process.pid}")
+            try:
+                stdout, stderr = process.communicate()
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
+            return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
+
+def _preflight_preparation(source, artifact_id, validation, run_id):
+    """Read-only admission for all four fixtures and their service-owned paths.
+
+    This does not qualify native MO2 runtime outputs. The returned policy's
+    machine-readable scope is preparation-only and runtimeQualified is false.
+    """
+    if not isinstance(run_id, str) or not re.fullmatch(r"containment-run:[0-9a-f]{32}", run_id):
+        raise ContainmentServiceError("path budget: invalid future run identity")
+    root = Path(validation) / run_id.split(":")[1]
+    rows = []
+    for scenario in ContainmentScenario:
+        fixture = root / "fixtures/v2" / scenario.value
+        budget = preflight_containment_fixture(source, artifact_id, validation,
+                                               scenario, fixture_parent=fixture,
+                                               command_runner=_PreparationCommandRunner())
+        rows.extend(budget.paths)
+        scenario_root = root / "scenarios" / scenario.value
+        record_names = (
+            "journal.json", "result.json", "retry.json", "retry-consumption.json",
+            "launch.json", *(label + ".json" for label in PROTECTED_STATE_LABELS),
+            "recovery.json",
+        )
+        for name in record_names:
+            rows.extend(publication_paths(scenario_root / name, "containment-record"))
+        rows.append(PlannedPath(
+            "containment-record:replacement-candidate",
+            "preparation-wide",
+            str(mutable_replacement_part_path(
+                scenario_root / "journal.json",
+                "f" * 32,
+            )),
+        ))
+        for name in ("request.json", "controller-claim.json", "worker-launch.json", "ready.json",
+                     "events.ndjson", "terminal.json", "controller-loss.json", "outcome.json", "stop.token"):
+            rows.extend(publication_paths(scenario_root / "watch" / name, "watcher-record"))
+        for suffix in (".json", "-cleanup.json"):
+            rows.extend(publication_paths(root / "preparation-projections" / (scenario.value + suffix), "preparation-projection"))
+        # Preparation cleanup relocates the exact projection itself, not its target.
+        rows.append(PlannedPath("preparation-recovery", "preparation-wide",
+            str(root / ("preparation-quarantine-" + scenario.value) / "Protected Existing")))
+        # Declared fixture payloads at all later quarantine destinations; no
+        # arbitrary user-selected mod names or unknown native outputs admitted.
+        members = {
+            ContainmentScenario.NEW_FOLDER: _EXPECTED_OUTPUTS[ContainmentScenario.NEW_FOLDER],
+            ContainmentScenario.MERGE_EXISTING: tuple(PROTECTED_MOD_FILES),
+            ContainmentScenario.REPLACE_EXISTING: _EXPECTED_REPLACEMENT_OUTPUTS,
+            ContainmentScenario.FOMOD_DEPENDENCY: _EXPECTED_OUTPUTS[ContainmentScenario.FOMOD_DEPENDENCY],
+        }[scenario]
+        for quarantine in (root / "quarantine" / scenario.value,
+                           root / "quarantine" / ("Recovery-" + scenario.value)):
+            destination = quarantine / _EXPECTED_NEW[scenario]
+            rows.append(PlannedPath(
+                "fixture-quarantine",
+                "preparation-wide",
+                str(destination),
+            ))
+            for member in members:
+                rows.append(PlannedPath(
+                    "fixture-quarantine:member",
+                    "preparation-wide",
+                    str(destination / member),
+                ))
+    for name in ("intent.json", "request.json", "decision.json", "preparation-attempt.json",
+                 "preparation-failure.json", "preparation-recovery.json", "preparation-replacement.json",
+                 "preparation-startup-initialized.json", "preparation-startup-failure.json"):
+        rows.extend(publication_paths(root / name, "containment-run-record"))
+    return admit_paths(rows)
+
+
 @_receipted
 def prepare_run(
     source_workspace: Path,
@@ -1885,6 +1985,7 @@ def prepare_run(
     *,
     retry_of: ScenarioRecovery | None = None,
     preparation_recovery: PreparationRecovery | None = None,
+    _admitted_run_id: str | None = None,
 ) -> str:
     """Create four independent disposable fixtures and one immutable request."""
     source = Path(source_workspace).expanduser().absolute()
@@ -1892,11 +1993,15 @@ def prepare_run(
     expected_validation = workspace_layout(source).mo2_containment_validation
     if not _same_path(validation, expected_validation):
         raise ContainmentServiceError("validation root must be the workspace containment root")
-    run_id = "containment-run:" + uuid.uuid4().hex
+    run_id = _admitted_run_id or ("containment-run:" + uuid.uuid4().hex)
+    # Read-only complete future operation admission precedes store creation,
+    # cleanup, scenario retry consumption, or one-use preparation replacement.
+    _preflight_preparation(source, mo2_artifact_id, validation, run_id)
     store = _effect_store(validation)
     steam = Path(steam_root).expanduser().absolute()
     command_fingerprint = _command_fingerprint(source, mo2_artifact_id, steam)
     with store.command_lock(command_fingerprint):
+        _preflight_preparation(source, mo2_artifact_id, validation, run_id)
         predecessor_run_ids = _prepare_predecessor_run_ids(
             store,
             command_fingerprint,
@@ -1945,7 +2050,7 @@ def prepare_run(
         else:
             intent_write = store.write_intent(run_id, intent)
             store.write_preparation_attempt(attempt)
-        fixture_root = store.run_path(run_id) / "fixtures"
+        fixture_root = store.run_path(run_id) / "fixtures" / "v2"
         fixtures: list[ContainmentFixture] = []
         projection_ids = []
         def retain_projection(scenario, owner):
@@ -1975,6 +2080,7 @@ def prepare_run(
                             validation,
                             scenario,
                             fixture_parent=fixture_parent,
+                            command_runner=_PreparationCommandRunner(),
                         ),
                         lambda _prepared, scenario=scenario, fixture_parent=fixture_parent: (
                             prepare_containment_fixture(
@@ -1984,6 +2090,7 @@ def prepare_run(
                                 validation,
                                 scenario,
                                 fixture_parent=fixture_parent,
+                                command_runner=_PreparationCommandRunner(),
                                 retain_projection_owners=True,
                                 on_projection_created=partial(retain_projection, scenario),
                             )
@@ -2229,6 +2336,12 @@ def _pin_preparation_projection(store, projection):
     expected_link = fixture / "stage-workspace/tools/mo2/skyrim-se-ae/mods/Protected Existing"
     expected_target = fixture / "source-workspace/tools/mo2/skyrim-se-ae/mods/Protected Existing"
     expected = (expected_link, expected_target, expected_target.parent, expected_link.parent)
+    actual = tuple(Path(item.path) for item in projection.identities)
+    if actual != expected:
+        fixture = store.run_path(projection.run_id) / "fixtures" / "v2" / projection.scenario
+        expected_link = fixture / "t/tools/mo2/skyrim-se-ae/mods/Protected Existing"
+        expected_target = fixture / "s/tools/mo2/skyrim-se-ae/mods/Protected Existing"
+        expected = (expected_link, expected_target, expected_target.parent, expected_link.parent)
     if tuple(Path(item.path) for item in projection.identities) != expected:
         raise ContainmentServiceError("preparation projection is not the exact confined fixture link")
     pins = []
@@ -2350,6 +2463,11 @@ def _retained_preparation_recovery(store, recovery):
 
 @_receipted
 def restart_preparation(validation_root: Path, run_id: str) -> str:
+    store = ContainmentStore.open_readonly(validation_root)
+    intent = store.load_intent(run_id)
+    future_run_id = "containment-run:" + uuid.uuid4().hex
+    _preflight_preparation(Path(intent["sourceWorkspace"]), str(intent["mo2ArtifactId"]),
+                           Path(validation_root), future_run_id)
     receipt = recover_preparation(validation_root, run_id)
     _record_preparation_effects(receipt.effects)
     recovery = receipt.value
@@ -2358,7 +2476,8 @@ def restart_preparation(validation_root: Path, run_id: str) -> str:
     store = ContainmentStore.open_readonly(validation_root)
     intent = store.load_intent(run_id)
     fresh = prepare_run(Path(intent["sourceWorkspace"]), str(intent["mo2ArtifactId"]),
-        Path(intent["steamRoot"]), validation_root, preparation_recovery=recovery)
+        Path(intent["steamRoot"]), validation_root, preparation_recovery=recovery,
+        _admitted_run_id=future_run_id)
     _record_preparation_effects(fresh.effects)
     return fresh.value
 
@@ -2369,6 +2488,8 @@ def _record_preparation_effects(effects):
         ledger.write(path)
     for root in effects.child_mutation_roots:
         ledger.child_mutation_root(root)
+    for process in effects.preparation_processes:
+        ledger.preparation_process(process)
     if effects.watcher_pid is not None:
         ledger.watcher(effects.watcher_pid)
     if effects.mo2_pid is not None:

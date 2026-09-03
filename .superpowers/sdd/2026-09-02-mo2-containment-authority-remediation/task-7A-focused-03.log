@@ -1,0 +1,233 @@
+Command: bundled Python -B -m unittest tests.test_mo2_path_budget tests.test_mo2_containment_fixtures tests.test_mo2_containment_service tests.test_mo2_preparation_recovery -v
+Archive opt-in enabled; Steam restart opt-in not enabled on this pass.
+Initial native chunk57ae42: policy512 Python/shared-handle/watcher test PASSED; policy/fixture tests passed, one privilege skip. Following raw terminal output:
+ok
+test_prepare_run_generates_identity_before_confined_fixture_creation (tests.test_mo2_containment_service.ContainmentServiceTests.test_prepare_run_generates_identity_before_confined_fixture_creation) ... ERROR
+test_prepare_run_propagates_uncertain_run_enumeration_before_fixtures (tests.test_mo2_containment_service.ContainmentServiceTests.test_prepare_run_propagates_uncertain_run_enumeration_before_fixtures) ... FAIL
+test_previous_fixture_policy_remains_readable_without_blocking_current_cohort (tests.test_mo2_containment_service.ContainmentServiceTests.test_previous_fixture_policy_remains_readable_without_blocking_current_cohort) ... ok
+test_previous_operator_protocol_refuses_arm_before_any_scenario_write (tests.test_mo2_containment_service.ContainmentServiceTests.test_previous_operator_protocol_refuses_arm_before_any_scenario_write) ... ok
+test_previous_operator_protocol_refuses_capture_before_runtime_inspection (tests.test_mo2_containment_service.ContainmentServiceTests.test_previous_operator_protocol_refuses_capture_before_runtime_inspection) ... ok
+test_previous_operator_protocol_refuses_launch_before_advancing_journal (tests.test_mo2_containment_service.ContainmentServiceTests.test_previous_operator_protocol_refuses_launch_before_advancing_journal) ... ok
+test_previous_operator_protocol_remains_readable_without_blocking_current_cohort (tests.test_mo2_containment_service.ContainmentServiceTests.test_previous_operator_protocol_remains_readable_without_blocking_current_cohort) ... ok
+test_projection_producer_distinguishes_wrong_from_unobservable (tests.test_mo2_containment_service.ContainmentServiceTests.test_projection_producer_distinguishes_wrong_from_unobservable) ... ok
+test_projection_reobservation_access_failure_is_incomplete (tests.test_mo2_containment_service.ContainmentServiceTests.test_projection_reobservation_access_failure_is_incomplete) ... ok
+test_protected_delta_before_adoption_never_moves_staging_into_source (tests.test_mo2_containment_service.ContainmentServiceTests.test_protected_delta_before_adoption_never_moves_staging_into_source) ... ok
+test_protected_delta_plus_damaged_terminal_is_failed_but_malformed_only_is_incomplete (tests.test_mo2_containment_service.ContainmentServiceTests.test_protected_delta_plus_damaged_terminal_is_failed_but_malformed_only_is_incomplete) ... ok
+test_replace_quarantines_disposable_replacement_and_restores_projection (tests.test_mo2_containment_service.ContainmentServiceTests.test_replace_quarantines_disposable_replacement_and_restores_projection) ... ok
+test_replaced_baseline_projection_is_classified_for_quarantine (tests.test_mo2_containment_service.ContainmentServiceTests.test_replaced_baseline_projection_is_classified_for_quarantine) ... ok
+test_same_command_prepare_calls_are_serialized_before_snapshot (tests.test_mo2_containment_service.ContainmentServiceTests.test_same_command_prepare_calls_are_serialized_before_snapshot) ... ok
+test_supported_requires_all_four_exact_passes (tests.test_mo2_containment_service.ContainmentServiceTests.test_supported_requires_all_four_exact_passes) ... ok
+test_terminal_incomplete_run_still_requires_its_available_retry_ticket (tests.test_mo2_containment_service.ContainmentServiceTests.test_terminal_incomplete_run_still_requires_its_available_retry_ticket) ... ok
+test_terminal_run_permits_explicit_manual_same_command_run (tests.test_mo2_containment_service.ContainmentServiceTests.test_terminal_run_permits_explicit_manual_same_command_run) ... ok
+test_valid_forbidden_event_then_controller_death_is_failed_without_retry (tests.test_mo2_containment_service.ContainmentServiceTests.test_valid_forbidden_event_then_controller_death_is_failed_without_retry) ... ok
+test_delegate_and_projection_close_failures_retain_the_union_of_live_owners (tests.test_mo2_containment_service.PreparationProjectionRegressionTests.test_delegate_and_projection_close_failures_retain_the_union_of_live_owners) ... ok
+test_job_created_projection_is_observed_without_following_target (tests.test_mo2_containment_service.PreparationProjectionRegressionTests.test_job_created_projection_is_observed_without_following_target) ... ok
+test_real_delegate_exception_observes_partial_projection_then_releases_owners (tests.test_mo2_containment_service.PreparationProjectionRegressionTests.test_real_delegate_exception_observes_partial_projection_then_releases_owners) ... ok
+test_real_fixture_reaches_guarded_post_observation (tests.test_mo2_containment_service.PreparationProjectionRegressionTests.test_real_fixture_reaches_guarded_post_observation) ... ok
+test_recover_preparation_refuses_absent_storage_without_creating_it (tests.test_mo2_containment_service.PreparationProjectionRegressionTests.test_recover_preparation_refuses_absent_storage_without_creating_it) ... ok
+test_absent_root_never_enters_ordinary_delegated_mutation_unpinned (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_absent_root_never_enters_ordinary_delegated_mutation_unpinned) ... ok
+test_child_pin_acquisition_ownership_keeps_later_proven_root_effect (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_child_pin_acquisition_ownership_keeps_later_proven_root_effect) ... ok
+test_child_pin_acquisition_ownership_unions_retained_close_owner (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_child_pin_acquisition_ownership_unions_retained_close_owner) ... ok
+test_completed_mutation_snapshot_survives_close_only_ownership (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_completed_mutation_snapshot_survives_close_only_ownership) ... ok
+test_controlled_creation_cannot_substitute_new_object_before_it_is_pinned (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_controlled_creation_cannot_substitute_new_object_before_it_is_pinned) ... ok
+test_controlled_creation_partial_chain_receipts_only_created_component (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_controlled_creation_partial_chain_receipts_only_created_component) ... ok
+test_controlled_creation_retains_every_new_component_before_delegate (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_controlled_creation_retains_every_new_component_before_delegate) ... ok
+test_created_candidate_receipt_lookup_ownership_preserves_all_owners (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_created_candidate_receipt_lookup_ownership_preserves_all_owners) ... ok
+test_created_candidate_receipt_rejects_changed_pinned_path_binding (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_created_candidate_receipt_rejects_changed_pinned_path_binding) ... ok
+test_created_without_handle_evidence_is_receipted_without_path_cleanup (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_created_without_handle_evidence_is_receipted_without_path_cleanup) ... ok
+test_creation_outcome_survives_service_outer_union_and_failed_retry (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_creation_outcome_survives_service_outer_union_and_failed_retry) ... ok
+test_creation_outer_retry_preserves_new_owner_after_candidate_cleanup (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_creation_outer_retry_preserves_new_owner_after_candidate_cleanup) ... ok
+test_creation_receipt_interrupt_preserves_primary_owners_and_proven_effects (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_creation_receipt_interrupt_preserves_primary_owners_and_proven_effects) ... ok
+test_delegated_guard_rejects_ancestor_swap_during_root_acquisition (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_delegated_guard_rejects_ancestor_swap_during_root_acquisition) ... ok
+test_delegated_mutation_rejects_ancestor_junction_before_delegate (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_delegated_mutation_rejects_ancestor_junction_before_delegate) ... ok
+test_delegated_mutation_rejects_nested_junction_before_delegate (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_delegated_mutation_rejects_nested_junction_before_delegate) ... ok
+test_delegated_mutation_rejects_root_junction_before_delegate (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_delegated_mutation_rejects_root_junction_before_delegate) ... ok
+test_delegated_mutation_reports_root_then_fails_if_delegate_creates_reparse (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_delegated_mutation_reports_root_then_fails_if_delegate_creates_reparse) ... ok
+test_delegated_observation_failure_preserves_store_ownership_type (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_delegated_observation_failure_preserves_store_ownership_type) ... ok
+test_delegated_root_ancestor_cannot_be_swapped_during_delegate (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_delegated_root_ancestor_cannot_be_swapped_during_delegate) ... ok
+test_delegated_root_cannot_be_swapped_in_pre_delegate_gap (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_delegated_root_cannot_be_swapped_in_pre_delegate_gap) ... ok
+test_dual_operation_and_observer_ownership_is_unioned_and_resolvable (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_dual_operation_and_observer_ownership_is_unioned_and_resolvable) ... ok
+test_effect_receipt_rejects_relative_paths (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_effect_receipt_rejects_relative_paths) ... ok
+test_exact_created_candidate_cleanup_success_has_no_surviving_receipt (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_exact_created_candidate_cleanup_success_has_no_surviving_receipt) ... ok
+test_interrupted_snapshot_closes_retained_pins_without_completing_observation (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_interrupted_snapshot_closes_retained_pins_without_completing_observation) ... ok
+test_interrupted_snapshot_unions_acquisition_retained_and_close_failure_owners (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_interrupted_snapshot_unions_acquisition_retained_and_close_failure_owners) ... ok
+test_launch_evidence_ownership_failure_is_not_flattened_or_transitioned (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_launch_evidence_ownership_failure_is_not_flattened_or_transitioned) ... ok
+test_launch_helper_failure_after_creation_preserves_mo2_pid (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_launch_helper_failure_after_creation_preserves_mo2_pid) ... ok
+test_multi_root_post_observation_collects_every_position_and_change (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_multi_root_post_observation_collects_every_position_and_change) ... ok
+test_multi_root_unions_all_observers_and_dual_operation_owner (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_multi_root_unions_all_observers_and_dual_operation_owner) ... ok
+test_mutation_guard_allows_unrelated_sibling_creation_during_acquisition (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_mutation_guard_allows_unrelated_sibling_creation_during_acquisition) ... ok
+test_mutation_guard_identity_lookup_ownership_remains_resolvable (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_mutation_guard_identity_lookup_ownership_remains_resolvable) ... ok
+test_mutation_guard_rejects_exact_root_swap_during_acquisition (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_mutation_guard_rejects_exact_root_swap_during_acquisition) ... ok
+test_mutation_guard_rejects_same_file_id_from_foreign_volume (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_mutation_guard_rejects_same_file_id_from_foreign_volume) ... ok
+test_mutation_guard_retains_the_native_canonical_path_identity (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_mutation_guard_retains_the_native_canonical_path_identity) ... ok
+test_mutation_observation_allows_unrelated_ancestor_sibling_creation (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_mutation_observation_allows_unrelated_ancestor_sibling_creation) ... ok
+test_mutation_observation_rejects_directory_swap_during_enumeration (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_mutation_observation_rejects_directory_swap_during_enumeration) ... ok
+test_post_pin_identity_lookup_ownership_closes_guard_and_remains_resolvable (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_post_pin_identity_lookup_ownership_closes_guard_and_remains_resolvable) ... ok
+test_surviving_exact_created_candidate_is_receipted_before_ownership_refusal (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_surviving_exact_created_candidate_is_receipted_before_ownership_refusal) ... ok
+test_verification_only_native_creation_refusal_has_no_receipt (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_verification_only_native_creation_refusal_has_no_receipt) ... ok
+test_ambiguous_attempt_publication_is_not_adopted_or_retried (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_ambiguous_attempt_publication_is_not_adopted_or_retried) ... ok
+test_attempt_publication_failure_has_reserved_failed_successor_lineage (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_attempt_publication_failure_has_reserved_failed_successor_lineage) ... ok
+test_cached_recovery_holds_all_cleanup_identities_while_reproving_absence (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_cached_recovery_holds_all_cleanup_identities_while_reproving_absence) ... ok
+test_concurrent_consumption_is_atomic_and_cross_command_replay_refuses (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_concurrent_consumption_is_atomic_and_cross_command_replay_refuses) ... ok
+test_cross_reference_refusal_does_not_publish_an_immutable_poison_record (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_cross_reference_refusal_does_not_publish_an_immutable_poison_record) ... ok
+test_exact_consumed_preparation_predecessor_does_not_require_fake_scenario_history (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_exact_consumed_preparation_predecessor_does_not_require_fake_scenario_history) ... ok
+test_failed_replacement_has_its_own_lineage_without_refunding_old_authority (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_failed_replacement_has_its_own_lineage_without_refunding_old_authority) ... ok
+test_fresh_projection_receipt_parent_failure_is_a_durable_new_attempt_failure (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_fresh_projection_receipt_parent_failure_is_a_durable_new_attempt_failure) ... ok
+test_interrupted_cleanup_never_grants_authority_without_exact_reconciliation (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_interrupted_cleanup_never_grants_authority_without_exact_reconciliation) ... ok
+test_interruption_immediately_after_consumption_keeps_exact_failed_identity (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_interruption_immediately_after_consumption_keeps_exact_failed_identity) ... ok
+test_legacy_exact_intent_only_disposition_preserves_every_unproved_fixture (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_legacy_exact_intent_only_disposition_preserves_every_unproved_fixture) ... ok
+test_legacy_failure_cannot_reinterpret_an_existing_new_format_attempt (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_legacy_failure_cannot_reinterpret_an_existing_new_format_attempt) ... ok
+test_legacy_live_process_refusal_does_not_record_an_abandonment (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_legacy_live_process_refusal_does_not_record_an_abandonment) ... ok
+test_legacy_restart_consumes_only_new_authority_and_preserves_old_fixture (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_legacy_restart_consumes_only_new_authority_and_preserves_old_fixture) ... ok
+test_real_archive_unsupported_future_path_preserves_native_failed_attempt (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_real_archive_unsupported_future_path_preserves_native_failed_attempt) ... ok
+test_real_cut_after_attempt_publication_reconciles_only_new_startup (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_real_cut_after_attempt_publication_reconciles_only_new_startup) ... ok
+test_real_cut_after_consumption_reconciles_only_new_startup (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_real_cut_after_consumption_reconciles_only_new_startup) ... ok
+test_real_cut_before_attempt_publication_reconciles_only_new_startup (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_real_cut_before_attempt_publication_reconciles_only_new_startup) ... ok
+test_same_byte_publication_collision_cannot_be_adopted (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_same_byte_publication_collision_cannot_be_adopted) ... ok
+test_source_binding_failure_precedes_consumption_without_fresh_effects (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_source_binding_failure_precedes_consumption_without_fresh_effects) ... ok
+test_started_scenario_child_is_not_empty_direct_scaffolding (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_started_scenario_child_is_not_empty_direct_scaffolding) ... ok
+test_startup_abandonment_refuses_real_live_reserved_controller (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_startup_abandonment_refuses_real_live_reserved_controller) ... ok
+test_startup_abandonment_refuses_substituted_attempt_and_keeps_its_bytes (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_startup_abandonment_refuses_substituted_attempt_and_keeps_its_bytes) ... ok
+test_startup_abandonment_refuses_uncertain_controller_and_rechecks_state_after_proof (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_startup_abandonment_refuses_uncertain_controller_and_rechecks_state_after_proof) ... ok
+test_startup_abandonment_refuses_unknown_child_and_uncertain_barrier (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_startup_abandonment_refuses_unknown_child_and_uncertain_barrier) ... ok
+test_startup_dual_publication_ownership_retains_both_real_native_handles (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_startup_dual_publication_ownership_retains_both_real_native_handles) ... ok
+test_substituted_cleanup_link_is_left_untouched_and_cannot_grant_replacement (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_substituted_cleanup_link_is_left_untouched_and_cannot_grant_replacement) ... ok
+test_substituted_quarantined_link_cannot_consume_cached_recovery (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_substituted_quarantined_link_cannot_consume_cached_recovery) ... ok
+test_substituted_startup_intent_is_preserved_without_abandonment (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_substituted_startup_intent_is_preserved_without_abandonment) ... ok
+test_unknown_legacy_shape_and_prepared_run_refuse_without_disposition (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_unknown_legacy_shape_and_prepared_run_refuse_without_disposition) ... ok
+test_unknown_link_blocks_cleanup_before_any_owned_link_moves (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_unknown_link_blocks_cleanup_before_any_owned_link_moves) ... ok
+test_unsupported_future_preparation_preserves_all_failed_attempt_bytes (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_unsupported_future_preparation_preserves_all_failed_attempt_bytes) ... ok
+test_v2_reservation_is_strict_and_cannot_replay_as_v1_or_other_intent (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_v2_reservation_is_strict_and_cannot_replay_as_v1_or_other_intent) ... ok
+test_native_inventory_rejects_a_real_live_python_child (tests.test_mo2_preparation_recovery.PreparationRecoveryContractTests.test_native_inventory_rejects_a_real_live_python_child) ... ok
+test_native_inventory_rejects_incomplete_enumeration_and_close_uncertainty (tests.test_mo2_preparation_recovery.PreparationRecoveryContractTests.test_native_inventory_rejects_incomplete_enumeration_and_close_uncertainty) ... ok
+test_native_inventory_retains_both_process_and_snapshot_close_owners (tests.test_mo2_preparation_recovery.PreparationRecoveryContractTests.test_native_inventory_retains_both_process_and_snapshot_close_owners) ... ok
+test_native_process_absence_rejects_live_reused_and_access_denied_pid (tests.test_mo2_preparation_recovery.PreparationRecoveryContractTests.test_native_process_absence_rejects_live_reused_and_access_denied_pid) ... ok
+test_preparation_records_reject_noncanonical_and_cross_run_replay (tests.test_mo2_preparation_recovery.PreparationRecoveryContractTests.test_preparation_records_reject_noncanonical_and_cross_run_replay) ... ok
+test_recovery_cannot_grant_retry_without_exact_process_and_failure_binding (tests.test_mo2_preparation_recovery.PreparationRecoveryContractTests.test_recovery_cannot_grant_retry_without_exact_process_and_failure_binding) ... ok
+test_restart_preparation_is_an_explicit_operation (tests.test_mo2_preparation_recovery.PreparationRecoveryContractTests.test_restart_preparation_is_an_explicit_operation) ... ok
+test_foreground_failed_attempt_recovers_once_into_completely_fresh_real_preparation (tests.test_mo2_preparation_recovery.RealPreparationRestartTests.test_foreground_failed_attempt_recovers_once_into_completely_fresh_real_preparation) ... skipped 'all-real preparation regression requires explicit read-only archive and Steam inputs'
+
+======================================================================
+ERROR: test_prepare_run_generates_identity_before_confined_fixture_creation (tests.test_mo2_containment_service.ContainmentServiceTests.test_prepare_run_generates_identity_before_confined_fixture_creation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 1414, in invoke
+    value = operation(*args, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 2016, in prepare_run
+    _delegated_mutations_with_created_root(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 1393, in _delegated_mutations_with_created_root
+    return _delegated_mutations_guarded(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 1064, in _delegated_mutations_guarded
+    value = operation()
+            ^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 1395, in <lambda>
+    lambda: operation(prepared),
+            ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 2028, in <lambda>
+    prepare_containment_fixture(
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1139, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1143, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1204, in _execute_mock_call
+    result = effect(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 1138, in fake_prepare
+    ContainmentStore(validation).load_intent(run_id)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_store.py", line 440, in load_intent
+    with self._run_lock(run_id):
+         ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_store.py", line 1605, in _run_lock
+    run_hex = self._run_hex(run_id)
+              ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_store.py", line 1628, in _run_hex
+    raise ContainmentStoreError("run ID is malformed")
+modlab.validation.mo2_containment_store.ContainmentStoreError: run ID is malformed
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 1163, in test_prepare_run_generates_identity_before_confined_fixture_creation
+    prepared = service.prepare_run(
+               ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 1427, in invoke
+    raise ContainmentOperationError(
+modlab.validation.mo2_containment_service.ContainmentOperationError: run ID is malformed
+
+======================================================================
+FAIL: test_prepare_partial_fixture_failure_reports_only_entered_root (tests.test_mo2_containment_service.ContainmentServiceTests.test_prepare_partial_fixture_failure_reports_only_entered_root)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 1310, in test_prepare_partial_fixture_failure_reports_only_entered_root
+    self.assertTrue((fixture_root / "partial.marker").is_file())
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_prepare_pre_mutation_refusal_does_not_claim_fixture_root (tests.test_mo2_containment_service.ContainmentServiceTests.test_prepare_pre_mutation_refusal_does_not_claim_fixture_root)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 1258, in test_prepare_pre_mutation_refusal_does_not_claim_fixture_root
+    self.assertEqual((fixture_root.parent.parent / "preparation-projections",), raised.exception.effects.child_mutation_roots)
+AssertionError: Tuples differ: (WindowsPath('C:/Users/red/Desktop/Modlab/[178 chars]s'),) != ()
+
+First tuple contains 1 additional elements.
+First extra element 0:
+WindowsPath('C:/Users/red/Desktop/Modlab/.worktrees/mo2-guard-bridge-handshake/nt/modlab-prepare-refusal-effects-z0v8s4hn/source/runtime/validation/mo2-containment/dddddddddddddddddddddddddddddddd/preparation-projections')
+
+- (WindowsPath('C:/Users/red/Desktop/Modlab/.worktrees/mo2-guard-bridge-handshake/nt/modlab-prepare-refusal-effects-z0v8s4hn/source/runtime/validation/mo2-containment/dddddddddddddddddddddddddddddddd/preparation-projections'),)
++ ()
+
+======================================================================
+FAIL: test_prepare_run_propagates_uncertain_run_enumeration_before_fixtures (tests.test_mo2_containment_service.ContainmentServiceTests.test_prepare_run_propagates_uncertain_run_enumeration_before_fixtures)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_fixtures.py", line 347, in _fixture_inputs
+    observed = _observe_artifact(source_layout, mo2_artifact_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3801, in _observe_artifact
+    raise Mo2BootstrapRefusal(
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: artifact ID must use archive-sha256:<hash>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 1414, in invoke
+    value = operation(*args, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 1942, in prepare_run
+    _preflight_preparation(source, mo2_artifact_id, validation, run_id)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 1892, in _preflight_preparation
+    budget = preflight_containment_fixture(source, artifact_id, validation,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_fixtures.py", line 315, in preflight_containment_fixture
+    inputs = _fixture_inputs(
+             ^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_fixtures.py", line 350, in _fixture_inputs
+    raise ContainmentFixtureError("exact MO2 artifact is unavailable in source vault") from error
+modlab.validation.mo2_containment_fixtures.ContainmentFixtureError: exact MO2 artifact is unavailable in source vault
+
+The above exception was the direct cause of the following exception:
+
+modlab.validation.mo2_containment_service.ContainmentOperationError: exact MO2 artifact is unavailable in source vault
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 1345, in test_prepare_run_propagates_uncertain_run_enumeration_before_fixtures
+    with self.assertRaisesRegex(
+         ^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "enumerate containment runs" does not match "exact MO2 artifact is unavailable in source vault"
+
+----------------------------------------------------------------------
+Ran 192 tests in 28.713s
+
+FAILED (failures=3, errors=1, skipped=2)
+
+Exit: 1

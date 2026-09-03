@@ -106,7 +106,7 @@ class Mo2BootstrapRecoveryTests(unittest.TestCase):
         replace_path = mo2_bootstrap._replace_path
 
         def crash_activation(source, target):
-            if Path(source).name.startswith(".skyrim-se-ae.modlab-stage-"):
+            if Path(source) == Path(self._job().stage_root):
                 raise KeyboardInterrupt("fixture crash during activation")
             return replace_path(source, target)
 
@@ -573,7 +573,7 @@ class Mo2BootstrapRecoveryTests(unittest.TestCase):
 
         def activate_then_crash(source, target):
             result = replace_path(source, target)
-            if Path(source).name.startswith(".skyrim-se-ae.modlab-stage-"):
+            if Path(source) == Path(self._job().stage_root):
                 raise KeyboardInterrupt("fixture crash after activation rename")
             return result
 

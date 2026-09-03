@@ -1133,7 +1133,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 parent = Path(fixture_parent)
                 self.assertTrue(parent.is_dir())
                 calls.append((scenario, parent))
-                run_id = "containment-run:" + parent.parents[1].name
+                run_id = "containment-run:" + parent.parents[2].name
                 observed_intents.append(
                     ContainmentStore(validation).load_intent(run_id)
                 )
@@ -1169,10 +1169,10 @@ class ContainmentServiceTests(unittest.TestCase):
 
             run_root = validation / run_id.removeprefix("containment-run:")
             scenario_fixture_roots = tuple(
-                run_root / "fixtures" / item.value
+                run_root / "fixtures" / "v2" / item.value
                 for item in ContainmentScenario
             )
-            fixture_roots = (run_root / "preparation-projections", run_root / "fixtures", *scenario_fixture_roots)
+            fixture_roots = (run_root / "preparation-projections", run_root / "fixtures", run_root / "fixtures/v2", *scenario_fixture_roots)
             self.assertEqual(fixture_roots, prepared.effects.child_mutation_roots)
             self.assertEqual(
                 (
@@ -1221,6 +1221,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 layout.mo2_containment_validation
                 / ("d" * 32)
                 / "fixtures"
+                / "v2"
                 / ContainmentScenario.NEW_FOLDER.value
             )
 
@@ -1255,16 +1256,9 @@ class ContainmentServiceTests(unittest.TestCase):
                 )
 
             self.assertFalse(fixture_root.exists())
-            self.assertEqual((fixture_root.parent.parent / "preparation-projections",), raised.exception.effects.child_mutation_roots)
+            self.assertEqual((), raised.exception.effects.child_mutation_roots)
             self.assertEqual(
-                (
-                    layout.mo2_containment_validation
-                    / ("d" * 32)
-                    / "intent.json",
-                    layout.mo2_containment_validation / ("d" * 32) / "preparation-attempt.json",
-                    layout.mo2_containment_validation / ("d" * 32) / "preparation-projections",
-                    layout.mo2_containment_validation / ("d" * 32) / "preparation-failure.json",
-                ),
+                (),
                 raised.exception.effects.written_paths,
             )
 
@@ -1277,6 +1271,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 layout.mo2_containment_validation
                 / ("e" * 32)
                 / "fixtures"
+                / "v2"
                 / ContainmentScenario.NEW_FOLDER.value
             )
 
@@ -1309,7 +1304,7 @@ class ContainmentServiceTests(unittest.TestCase):
 
             self.assertTrue((fixture_root / "partial.marker").is_file())
             self.assertEqual(
-                (fixture_root.parent.parent / "preparation-projections", fixture_root.parent, fixture_root),
+                (fixture_root.parents[2] / "preparation-projections", fixture_root.parent.parent, fixture_root.parent, fixture_root),
                 raised.exception.effects.child_mutation_roots,
             )
             self.assertEqual(
@@ -1319,6 +1314,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     / "intent.json",
                     layout.mo2_containment_validation / ("e" * 32) / "preparation-attempt.json",
                     layout.mo2_containment_validation / ("e" * 32) / "preparation-projections",
+                    fixture_root.parent.parent,
                     fixture_root.parent,
                     fixture_root,
                     layout.mo2_containment_validation / ("e" * 32) / "preparation-failure.json",
@@ -1338,6 +1334,7 @@ class ContainmentServiceTests(unittest.TestCase):
             )
 
             with (
+                patch.object(service, "preflight_containment_fixture"),
                 patch.object(service, "prepare_containment_fixture") as fixture,
                 patch.object(service, "_fixture_record", return_value=object()),
                 patch.object(service, "_record_document", return_value={}),
@@ -5215,6 +5212,17 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
                 "absolute",
             ):
                 service.ContainmentEffects(**supplied)
+
+    def test_effect_merge_preserves_repeated_preparation_launches_in_order(self):
+        launched = r"C:\tools\bsdtar.exe [list-names] PID: 42"
+
+        merged = service.ContainmentEffects.merged(
+            service.ContainmentEffects(preparation_processes=(launched,)),
+            service.ContainmentEffects(preparation_processes=(launched,)),
+        )
+
+        self.assertEqual((launched, launched), merged.preparation_processes)
+        self.assertEqual((launched, launched), merged.launched_processes)
 
     def test_launch_helper_failure_after_creation_preserves_mo2_pid(self):
         with tempfile.TemporaryDirectory(prefix="modlab-launch-created-failure-") as directory:

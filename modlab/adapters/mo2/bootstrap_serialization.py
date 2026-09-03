@@ -35,6 +35,7 @@ from .bootstrap_model import (
     ProfileSeedEvidence,
     TargetSnapshot,
 )
+from .path_budget import PathBudgetError, budget_from_dict, budget_to_dict, stage_name
 
 
 class BootstrapFormatError(ValueError):
@@ -200,9 +201,9 @@ def plan_to_dict(value: BootstrapPlan) -> dict[str, object]:
 
 
 def plan_from_dict(value: object) -> BootstrapPlan:
-    data = _exact_mapping(value, _PLAN_FIELDS, "bootstrap plan")
+    data = _exact_mapping(value, _versioned_fields(value, _PLAN_FIELDS), "bootstrap plan")
     plan_id = _typed_id(data["planId"], _PLAN_ID, "planId")
-    body = {key: data[key] for key in _PLAN_BODY_FIELDS}
+    body = {key: data[key] for key in _versioned_fields(data, _PLAN_BODY_FIELDS)}
     parsed = _parse_plan_body(body)
     expected = _plan_id_for_normalized(parsed)
     if plan_id != expected:
@@ -224,8 +225,8 @@ def journal_to_dict(value: BootstrapJournal) -> dict[str, object]:
 
 
 def journal_from_dict(value: object) -> BootstrapJournal:
-    data = _exact_mapping(value, _JOURNAL_FIELDS, "bootstrap journal")
-    schema_version = _schema_version(data["schemaVersion"])
+    data = _exact_mapping(value, _versioned_fields(value, _JOURNAL_FIELDS), "bootstrap journal")
+    schema_version = _layout_schema_version(data["schemaVersion"])
     job_id = _typed_id(data["jobId"], _JOB_ID, "jobId")
     disposition = _enum(BootstrapDisposition, data["disposition"], "disposition")
     if disposition not in {BootstrapDisposition.CREATE, BootstrapDisposition.ADOPT}:
@@ -238,7 +239,7 @@ def journal_from_dict(value: object) -> BootstrapJournal:
         raise BootstrapFormatError("stageRoot, priorRoot, and finalRoot must differ")
     match = _JOB_ID.fullmatch(job_id)
     assert match is not None
-    expected_stage_name = f".skyrim-se-ae.modlab-stage-{match.group(1)}"
+    expected_stage_name = stage_name(job_id, schema_version)
     stage_path = PureWindowsPath(stage_root)
     final_path = PureWindowsPath(final_root)
     if (
@@ -310,6 +311,7 @@ def journal_from_dict(value: object) -> BootstrapJournal:
         updated_at=updated_at,
         receipt_id=receipt_id,
         error=error,
+        path_budget=_path_budget_from_document(data),
     )
 
 
@@ -376,7 +378,8 @@ def _receipt_id_for_normalized(value: BootstrapReceipt) -> str:
 
 
 def _parse_plan_body(value: object) -> BootstrapPlan:
-    data = _exact_mapping(value, _PLAN_BODY_FIELDS, "bootstrap plan body")
+    data = _exact_mapping(value, _versioned_fields(value, _PLAN_BODY_FIELDS), "bootstrap plan body")
+    version = _layout_schema_version(data["schemaVersion"])
     disposition = _enum(BootstrapDisposition, data["disposition"], "disposition")
     environment_sha = _optional_sha256(data["environmentSha256"], "environmentSha256")
     baseline_id = _optional_typed_id(data["baselineId"], _CHECKPOINT_ID, "baselineId")
@@ -396,7 +399,7 @@ def _parse_plan_body(value: object) -> BootstrapPlan:
         raise BootstrapFormatError("bootstrap preview action arrays must be empty")
 
     return BootstrapPlan(
-        schema_version=_schema_version(data["schemaVersion"]),
+        schema_version=version,
         plan_id="",
         disposition=disposition,
         workspace_root=_absolute_path(data["workspaceRoot"], "workspaceRoot"),
@@ -406,7 +409,7 @@ def _parse_plan_body(value: object) -> BootstrapPlan:
         staging_parent=_absolute_path(data["stagingParent"], "stagingParent"),
         staging_name_template=_fixed_text(
             data["stagingNameTemplate"],
-            ".skyrim-se-ae.modlab-stage-<job-hex>",
+            ".skyrim-se-ae.modlab-stage-<job-hex>" if version == 1 else ".s<job-base32>",
             "stagingNameTemplate",
         ),
         skyrim_executable=_file_from_dict(data["skyrimExecutable"], "skyrimExecutable"),
@@ -436,6 +439,7 @@ def _parse_plan_body(value: object) -> BootstrapPlan:
         manager_changes=manager_changes,
         game_changes=game_changes,
         programs_launched=_text_array(data["programsLaunched"], "programsLaunched"),
+        path_budget=_path_budget_from_document(data),
     )
 
 
@@ -526,6 +530,7 @@ def _parse_receipt_body(value: object) -> BootstrapReceipt:
 
 def _plan_body_to_dict(value: BootstrapPlan) -> dict[str, object]:
     return {
+        **_path_budget_to_document(value),
         "schemaVersion": value.schema_version,
         "disposition": value.disposition.value,
         "workspaceRoot": value.workspace_root,
@@ -560,6 +565,7 @@ def _plan_body_to_dict(value: BootstrapPlan) -> dict[str, object]:
 
 def _journal_to_dict(value: BootstrapJournal) -> dict[str, object]:
     return {
+        **_path_budget_to_document(value),
         "schemaVersion": value.schema_version,
         "jobId": value.job_id,
         "planId": value.plan_id,
@@ -942,6 +948,39 @@ def _exact_mapping(
             f"extra={sorted(actual - expected_fields)}"
         )
     return value
+
+
+def _layout_schema_version(value: object) -> int:
+    if type(value) is not int or value not in (1, 2):
+        raise BootstrapFormatError("unsupported bootstrap layout schemaVersion")
+    return value
+
+
+def _versioned_fields(value, fields):
+    if not isinstance(value, Mapping):
+        return fields
+    version = _layout_schema_version(value.get("schemaVersion"))
+    return fields if version == 1 else fields | {"pathBudget"}
+
+
+def _path_budget_from_document(value):
+    if value["schemaVersion"] == 1:
+        return None
+    try:
+        return budget_from_dict(value["pathBudget"])
+    except PathBudgetError as error:
+        raise BootstrapFormatError(str(error)) from error
+
+
+def _path_budget_to_document(value):
+    if value.schema_version == 1:
+        if value.path_budget is not None:
+            raise BootstrapFormatError("legacy layout cannot carry a new path budget")
+        return {}
+    try:
+        return {"pathBudget": budget_to_dict(value.path_budget)}
+    except PathBudgetError as error:
+        raise BootstrapFormatError(str(error)) from error
 
 
 def _schema_version(value: object) -> int:

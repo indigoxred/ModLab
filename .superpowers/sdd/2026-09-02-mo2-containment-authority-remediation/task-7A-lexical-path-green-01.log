@@ -1,0 +1,7 @@
+test_mutable_part_path_is_lexical_when_host_name_is_mocked (tests.test_mo2_containment_store.ContainmentStoreTests.test_mutable_part_path_is_lexical_when_host_name_is_mocked) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.002s
+
+OK
+Exit: 0

@@ -1,0 +1,20 @@
+test_schema_two_budget_error_is_mapped_before_job_or_stage_creation (tests.test_mo2_path_budget.PathBudgetEntryPointTests.test_schema_two_budget_error_is_mapped_before_job_or_stage_creation) ... ok
+test_containment_prepare_one_over_refuses_before_root_or_record_creation (tests.test_mo2_path_budget.PathBudgetEntryPointTests.test_containment_prepare_one_over_refuses_before_root_or_record_creation) ... ok
+test_schema_one_plan_and_journal_have_fixed_canonical_byte_identities (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_schema_one_plan_and_journal_have_fixed_canonical_byte_identities) ... ok
+test_bootstrap_budget_uses_exact_mutator_temp_names (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_bootstrap_budget_uses_exact_mutator_temp_names) ... ok
+test_archive_budget_rejects_forged_entry_spelling_kind_and_digest (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_archive_budget_rejects_forged_entry_spelling_kind_and_digest) ... ok
+test_containment_budget_names_exact_records_replacements_and_quarantine (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_containment_budget_names_exact_records_replacements_and_quarantine) ... FAIL
+
+======================================================================
+FAIL: test_containment_budget_names_exact_records_replacements_and_quarantine (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_containment_budget_names_exact_records_replacements_and_quarantine)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 281, in test_containment_budget_names_exact_records_replacements_and_quarantine
+    self.assertFalse(any("new-folder" in path or "fomod-dependency" in path
+AssertionError: True is not false
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.438s
+
+FAILED (failures=1)
+Exit: 1

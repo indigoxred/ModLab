@@ -1,0 +1,8 @@
+test_effect_merge_preserves_repeated_preparation_launches_in_order (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_effect_merge_preserves_repeated_preparation_launches_in_order) ... ok
+test_archive_budget_rejects_forged_entry_spelling_kind_and_digest (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_archive_budget_rejects_forged_entry_spelling_kind_and_digest) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.000s
+
+OK
+Exit: 0

@@ -393,7 +393,7 @@ def _require_bootstrap_programs(
 ) -> None:
     operations = ("version", "list-names", "list-types")
     if include_extract:
-        operations = (*operations, "extract")
+        operations = (*operations, "list-names", "list-types", "extract")
     expected = tuple(f"{extractor_path} [{operation}]" for operation in operations)
     if programs != expected:
         raise BootstrapFormatError(
@@ -521,7 +521,7 @@ def _text_values(
         for value in result
     ):
         raise BootstrapFormatError(f"{label} entries must be non-blank text")
-    if len(set(result)) != len(result):
+    if not ordered and len(set(result)) != len(result):
         raise BootstrapFormatError(f"{label} cannot contain duplicates")
     if not ordered:
         _require_sorted_unique(result, label)

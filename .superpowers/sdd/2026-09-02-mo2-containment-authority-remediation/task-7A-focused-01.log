@@ -1,0 +1,111 @@
+Command: bundled Python -B -m unittest tests.test_mo2_path_budget tests.test_mo2_archive tests.test_mo2_bootstrap_serialization tests.test_mo2_bootstrap_store tests.test_mo2_bootstrap_create tests.test_mo2_bootstrap_adopt -q
+Exit: 1
+======================================================================
+ERROR: test_preexisting_valid_receipt_is_a_write_free_noop (tests.test_mo2_bootstrap_adopt.Mo2BootstrapAdoptTests.test_preexisting_valid_receipt_is_a_write_free_noop)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_adopt.py", line 522, in test_preexisting_valid_receipt_is_a_write_free_noop
+    self.fixture.make_receipt_covered()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\support\mo2_bootstrap.py", line 864, in make_receipt_covered
+    journal = store.create_job(planned.plan)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 352, in create_job
+    raise Mo2BootstrapStoreError("new layout requires current archive listing admission")
+modlab.workflows.skyrim.mo2_bootstrap_store.Mo2BootstrapStoreError: new layout requires current archive listing admission
+
+======================================================================
+ERROR: test_repeated_apply_returns_existing_receipt_without_new_job_or_extract (tests.test_mo2_bootstrap_adopt.Mo2BootstrapAdoptTests.test_repeated_apply_returns_existing_receipt_without_new_job_or_extract)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 673, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 705, in _apply_collected_mo2_setup
+    _require_apply_revalidation(plan, collected.plan)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2235, in _require_apply_revalidation
+    raise Mo2BootstrapRefusal(
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap evidence changed after planning: path_budget
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_adopt.py", line 510, in test_repeated_apply_returns_existing_receipt_without_new_job_or_extract
+    second = self._apply(plan.plan_id)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_adopt.py", line 61, in _apply
+    return apply_mo2_setup(plan_id, self.fixture.workspace, **arguments)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 691, in apply_mo2_setup
+    raise _refusal_with_failure(error, failure) from error
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap evidence changed after planning: path_budget
+
+======================================================================
+FAIL: test_create_activates_exact_contained_ready_instance (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_create_activates_exact_contained_ready_instance)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_create.py", line 101, in test_create_activates_exact_contained_ready_instance
+    self.assertEqual(
+AssertionError: Lists differ: ['--version', '-tf', '-tvf', '-xf'] != ['--version', '-tf', '-tvf', '-tf', '-tvf', '-xf']
+
+First differing element 3:
+'-xf'
+'-tf'
+
+Second list contains 2 additional elements.
+First extra element 4:
+'-tvf'
+
+- ['--version', '-tf', '-tvf', '-xf']
++ ['--version', '-tf', '-tvf', '-tf', '-tvf', '-xf']
+?                              +++++++++++++++
+
+
+======================================================================
+FAIL: test_failure_activating_stage_restores_exact_target (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_failure_activating_stage_restores_exact_target)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_create.py", line 403, in test_failure_activating_stage_restores_exact_target
+    with self.assertRaisesRegex(Mo2BootstrapRefusal, "recovery"):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Mo2BootstrapRefusal not raised
+
+======================================================================
+FAIL: test_target_appearing_during_rollback_rehash_is_not_overwritten (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_target_appearing_during_rollback_rehash_is_not_overwritten)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_create.py", line 492, in test_target_appearing_during_rollback_rehash_is_not_overwritten
+    self.assertEqual((), tree_state(self.fixture.layout.skyrim_mo2))
+AssertionError: Tuples differ: () != (('app', 'directory', None), ('app/loot', [3277 chars]one))
+
+Second tuple contains 35 additional elements.
+First extra element 0:
+('app', 'directory', None)
+
+Diff is 3674 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_adopt_links_package_without_changing_existing_manager (tests.test_mo2_bootstrap_adopt.Mo2BootstrapAdoptTests.test_adopt_links_package_without_changing_existing_manager)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_adopt.py", line 104, in test_adopt_links_package_without_changing_existing_manager
+    self.assertEqual(
+AssertionError: Lists differ: ['--version', '-tf', '-tvf', '-xf'] != ['--version', '-tf', '-tvf', '-tf', '-tvf', '-xf']
+
+First differing element 3:
+'-xf'
+'-tf'
+
+Second list contains 2 additional elements.
+First extra element 4:
+'-tvf'
+
+- ['--version', '-tf', '-tvf', '-xf']
++ ['--version', '-tf', '-tvf', '-tf', '-tvf', '-xf']
+?                              +++++++++++++++
+
+
+----------------------------------------------------------------------
+Ran 86 tests in 27.926s
+
+FAILED (failures=4, errors=2, skipped=1)
+

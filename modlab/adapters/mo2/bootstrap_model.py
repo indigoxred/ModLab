@@ -7,6 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from modlab.recipes.model import CheckState
+from .path_budget import PathBudget
 
 
 class BootstrapDisposition(StrEnum):
@@ -140,6 +141,7 @@ class BootstrapPlan:
     manager_changes: tuple[str, ...]
     game_changes: tuple[str, ...]
     programs_launched: tuple[str, ...]
+    path_budget: PathBudget | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +165,7 @@ class BootstrapJournal:
     updated_at: str
     receipt_id: str | None
     error: str | None
+    path_budget: PathBudget | None = None
 
 
 @dataclass(frozen=True)

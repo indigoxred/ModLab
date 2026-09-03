@@ -1,0 +1,12 @@
+test_real_archive_unsupported_future_path_preserves_native_failed_attempt (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_real_archive_unsupported_future_path_preserves_native_failed_attempt) ... ok
+test_prepare_partial_fixture_failure_reports_only_entered_root (tests.test_mo2_containment_service.ContainmentServiceTests.test_prepare_partial_fixture_failure_reports_only_entered_root) ... ok
+test_prepare_pre_mutation_refusal_does_not_claim_fixture_root (tests.test_mo2_containment_service.ContainmentServiceTests.test_prepare_pre_mutation_refusal_does_not_claim_fixture_root) ... ok
+test_prepare_run_generates_identity_before_confined_fixture_creation (tests.test_mo2_containment_service.ContainmentServiceTests.test_prepare_run_generates_identity_before_confined_fixture_creation) ... ok
+test_prepare_run_propagates_uncertain_run_enumeration_before_fixtures (tests.test_mo2_containment_service.ContainmentServiceTests.test_prepare_run_propagates_uncertain_run_enumeration_before_fixtures) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 1.466s
+
+OK
+
+Exit: 0

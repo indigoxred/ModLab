@@ -1,0 +1,8 @@
+test_native_tar_exact_cwd_and_member_limits_then_one_over_no_stage (tests.test_mo2_path_budget.NativePathBudgetTests.test_native_tar_exact_cwd_and_member_limits_then_one_over_no_stage) ... ok
+test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary (tests.test_mo2_path_budget.NativePathBudgetTests.test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.697s
+
+OK
+Exit: 0

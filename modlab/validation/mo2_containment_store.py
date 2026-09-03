@@ -78,6 +78,9 @@ from .mo2_containment_serialization import (
 )
 
 
+PROTECTED_STATE_LABELS = ("before", "after")
+
+
 _RUN = re.compile(r"^containment-run:([0-9a-f]{32})$")
 _DECISION_ID = re.compile(r"^containment-decision-sha256:[0-9a-f]{64}$")
 _AUTHORITY_KINDS = {
@@ -161,6 +164,13 @@ def _canonical(value: object) -> bytes:
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         + "\n"
     ).encode("utf-8")
+
+
+def mutable_replacement_part_path(target: Path, token: str) -> Path:
+    """Construct the exact temporary pathname used by mutable journal replace."""
+    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise ContainmentStoreError("mutable replacement token must be 32 lowercase hex characters")
+    return target.with_name(f".{target.name}.{token}.part")
 
 
 def _unique_json(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -640,7 +650,7 @@ class ContainmentStore:
         label: str,
         value: ProtectedState,
     ) -> ImmutableWrite[ProtectedState]:
-        if label not in {"before", "after"}:
+        if label not in PROTECTED_STATE_LABELS:
             raise ContainmentStoreError("protected state label must be before or after")
         checked = _protected_from_document(_protected_document(value))
         data = _canonical(_protected_document(checked))
@@ -1191,7 +1201,7 @@ class ContainmentStore:
         scenario: ContainmentScenario,
         label: str,
     ) -> ProtectedState:
-        if label not in {"before", "after"}:
+        if label not in PROTECTED_STATE_LABELS:
             raise ContainmentStoreError("protected state label must be before or after")
         data = self._read(
             self.scenario_path(run_id, scenario) / f"{label}.json",
@@ -1847,7 +1857,7 @@ class ContainmentStore:
                     f"cannot atomically create {label} through retained ownership: {error}"
                     f"{self._effect_observation_suffix(effect_detail)}"
                 ) from error
-        part = target.parent / f".{target.name}.{uuid.uuid4().hex}.part"
+        part = mutable_replacement_part_path(target, uuid.uuid4().hex)
         promoted = False
         try:
             with part.open("xb") as handle:
@@ -1896,7 +1906,7 @@ class ContainmentStore:
         before = self._effect_target_observation(target, label)
         if before is None or before[1] != expected:
             raise ContainmentStoreError(f"{label} changed before atomic replacement")
-        part = target.parent / f".{target.name}.{uuid.uuid4().hex}.part"
+        part = mutable_replacement_part_path(target, uuid.uuid4().hex)
         try:
             with part.open("xb") as handle:
                 handle.write(data)

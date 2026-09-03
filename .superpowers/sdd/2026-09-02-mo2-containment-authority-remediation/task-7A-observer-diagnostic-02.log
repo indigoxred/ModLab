@@ -1,0 +1,29 @@
+test_foreground_failed_attempt_recovers_once_into_completely_fresh_real_preparation (tests.test_mo2_preparation_recovery.RealPreparationRestartTests.test_foreground_failed_attempt_recovers_once_into_completely_fresh_real_preparation) ... ERROR
+
+======================================================================
+ERROR: test_foreground_failed_attempt_recovers_once_into_completely_fresh_real_preparation (tests.test_mo2_preparation_recovery.RealPreparationRestartTests.test_foreground_failed_attempt_recovers_once_into_completely_fresh_real_preparation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\support\mo2_containment.py", line 71, in import_curated_mo2_archive
+    with source.open("rb") as reader, curated_copy.open("xb") as writer:
+         ^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 1013, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\red\\Desktop\\Modlab\\retained-inputs\\MO2-2.5.2.7z'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_preparation_recovery.py", line 121, in test_foreground_failed_attempt_recovers_once_into_completely_fresh_real_preparation
+    artifact = import_curated_mo2_archive(archive_input, source, root / "curated-input")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\support\mo2_containment.py", line 77, in import_curated_mo2_archive
+    raise RuntimeError(f"could not copy supplied MO2 archive: {error}") from error
+RuntimeError: could not copy supplied MO2 archive: [Errno 2] No such file or directory: 'C:\\Users\\red\\Desktop\\Modlab\\retained-inputs\\MO2-2.5.2.7z'
+
+----------------------------------------------------------------------
+Ran 1 test in 0.061s
+
+FAILED (errors=1)
+Exit: 1

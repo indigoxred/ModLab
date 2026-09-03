@@ -99,13 +99,13 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
         self.assertEqual(lab_files, play_files)
         self.assertEqual(before_external, self.fixture.external_state())
         self.assertEqual(
-            ["--version", "-tf", "-tvf", "-xf"],
+            ["--version", "-tf", "-tvf", "-tf", "-tvf", "-xf"],
             [arguments[1] for arguments in self.fixture.runner.calls],
         )
         self.assertEqual(
             [],
             list(self.fixture.layout.skyrim_mo2.parent.glob(
-                ".skyrim-se-ae.modlab-stage-*"
+                ".s*"
             )),
         )
         expected_manager_changes = tuple(
@@ -395,7 +395,7 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
         replace_path = mo2_bootstrap._replace_path
 
         def fail_activation(source, target):
-            if Path(source).name.startswith(".skyrim-se-ae.modlab-stage-"):
+            if Path(source) == Path(self._job().stage_root):
                 raise OSError("fixture activation failure")
             return replace_path(source, target)
 
@@ -470,7 +470,7 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
             return result
 
         def fail_activation(source, target):
-            if Path(source).name.startswith(".skyrim-se-ae.modlab-stage-"):
+            if Path(source) == Path(self._job().stage_root):
                 raise OSError("fixture activation failure")
             return replace_path(source, target)
 

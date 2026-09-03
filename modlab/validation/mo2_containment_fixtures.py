@@ -15,9 +15,12 @@ import uuid
 import zipfile
 
 from modlab.adapters.mo2.bootstrap_model import BootstrapReceiptMode
+from modlab.adapters.mo2.archive import observe_bsdtar, preflight_archive
+from modlab.adapters.mo2.path_budget import (
+    PathBudget, PlannedPath, admit_paths, bootstrap_paths,
+)
 from modlab.adapters.mo2.release import bundled_mo2_252_path, load_mo2_release
 from modlab.adapters.mo2.scanner import inspect_skyrim_mo2
-from modlab.artifacts.model import ArtifactHealth
 from modlab.artifacts.vault import ArchiveVault
 from modlab.validation.mo2_containment_model import ContainmentScenario
 from modlab.validation.windows_integrity import (
@@ -30,7 +33,9 @@ from modlab.validation.windows_integrity import (
 from modlab.validation.windows_junction import (
     OwnedProjection, build_projection, create_owned_projection, inspect_junction,
 )
-from modlab.workflows.skyrim.mo2_bootstrap import apply_mo2_setup, prepare_mo2_setup
+from modlab.workflows.skyrim.mo2_bootstrap import (
+    apply_mo2_setup, prepare_mo2_setup, _observe_artifact, _require_release_artifact,
+)
 from modlab.workspace import WorkspaceLayout, workspace_layout
 
 
@@ -38,6 +43,11 @@ _ZIP_TIMESTAMP = (2026, 1, 1, 0, 0, 0)
 _ZIP_MODE = 0o100644 << 16
 _PROTECTED_MOD = "Protected Existing"
 _ACTIVE_MODLIST = b"+Protected Existing\r\n"
+PROTECTED_MOD_FILES = MappingProxyType({
+    "marker.txt": b"active-projected-marker\n",
+    "meshes/canary.bin": b"source-canary-must-remain\n",
+    "meta.ini": b"[General]\ninstallationFile=ModLab\n",
+})
 _FOMOD_INFO = b"""<?xml version="1.0" encoding="UTF-8"?>
 <fomod>
   <Name>ModLab FOMOD Dependency Probe</Name>
@@ -151,6 +161,7 @@ def prepare_containment_fixture(
     fixture_parent: Path | None = None,
     retain_projection_owners: bool = False,
     on_projection_created: Callable[[OwnedProjection], None] | None = None,
+    command_runner=None,
 ) -> ContainmentFixture:
     """Create two disposable portable instances and project the protected source mod."""
     inputs = _fixture_inputs(
@@ -159,7 +170,7 @@ def prepare_containment_fixture(
         validation_root,
         scenario,
         fixture_parent=fixture_parent,
-        create_validation=True,
+        create_validation=False,
     )
     source_layout = inputs.source_layout
     validation = inputs.validation
@@ -167,8 +178,13 @@ def prepare_containment_fixture(
     payload = inputs.payload
 
     if inputs.fixture_parent is None:
-        run_root = validation / f"{scenario.value}-{uuid.uuid4().hex}"
+        run_root = validation / ("fixture-v2-" + uuid.uuid4().hex) / scenario.value
     else:
+        run_root = inputs.fixture_parent
+    # Pure complete path admission precedes even the validation/scenario directory.
+    _admit_fixture(inputs, run_root, command_runner=command_runner)
+    _require_direct_directory(validation, create=True)
+    if inputs.fixture_parent is not None:
         relative_parent = inputs.fixture_parent.relative_to(validation)
         current = validation
         for part in relative_parent.parts:
@@ -180,8 +196,8 @@ def prepare_containment_fixture(
     bootstrap_archive = _materialize_verified_bootstrap_archive(
         source_record, payload, run_root
     )
-    source_instance = run_root / "source-workspace"
-    stage_instance = run_root / "stage-workspace"
+    source_instance = run_root / "s"
+    stage_instance = run_root / "t"
     source_documents = _write_documents_root(run_root / "source-documents")
     stage_documents = _write_documents_root(run_root / "stage-documents")
     source_artifact = ArchiveVault(source_instance).import_archive(
@@ -196,18 +212,22 @@ def prepare_containment_fixture(
         workspace_root=source_instance,
         steam_root=steam_root,
         documents_root=source_documents,
+        command_runner=command_runner,
     )
     source_applied = apply_mo2_setup(
-        source_planned.plan.plan_id, source_instance, documents_root=source_documents
+        source_planned.plan.plan_id, source_instance, documents_root=source_documents,
+        command_runner=command_runner,
     )
     stage_planned = prepare_mo2_setup(
         artifact_id=stage_artifact.artifact_id,
         workspace_root=stage_instance,
         steam_root=steam_root,
         documents_root=stage_documents,
+        command_runner=command_runner,
     )
     stage_applied = apply_mo2_setup(
-        stage_planned.plan.plan_id, stage_instance, documents_root=stage_documents
+        stage_planned.plan.plan_id, stage_instance, documents_root=stage_documents,
+        command_runner=command_runner,
     )
     _require_created_receipt(source_applied)
     _require_created_receipt(stage_applied)
@@ -299,9 +319,10 @@ def preflight_containment_fixture(
     scenario: ContainmentScenario,
     *,
     fixture_parent: Path,
-) -> None:
+    command_runner=None,
+) -> PathBudget:
     """Validate fixture inputs without creating the fixture root or children."""
-    _fixture_inputs(
+    inputs = _fixture_inputs(
         source_workspace,
         mo2_artifact_id,
         validation_root,
@@ -309,6 +330,7 @@ def preflight_containment_fixture(
         fixture_parent=fixture_parent,
         create_validation=False,
     )
+    return _admit_fixture(inputs, Path(fixture_parent), command_runner=command_runner)
 
 
 def _fixture_inputs(
@@ -329,19 +351,13 @@ def _fixture_inputs(
         str(source_layout.mo2_containment_validation)
     ):
         raise ContainmentFixtureError("validation root must be the workspace containment root")
-    validation = _require_direct_directory(
-        source_layout.mo2_containment_validation,
-        create=create_validation,
-    )
+    validation = _require_future_directory(source_layout.mo2_containment_validation)
 
-    source_vault = ArchiveVault(source_layout.root)
     try:
-        source_record = source_vault.get(mo2_artifact_id)
+        observed = _observe_artifact(source_layout, mo2_artifact_id)
+        source_record = observed.record
     except Exception as error:
         raise ContainmentFixtureError("exact MO2 artifact is unavailable in source vault") from error
-    verified = source_vault.verify(mo2_artifact_id)
-    if verified.health is not ArtifactHealth.AVAILABLE:
-        raise ContainmentFixtureError("exact MO2 artifact did not verify in source vault")
     payload = _require_direct_regular_file(
         source_record.stored_path(source_layout.root),
         "retained MO2 archive",
@@ -371,6 +387,59 @@ def _fixture_inputs(
         payload,
         requested_parent,
     )
+
+
+def _require_future_directory(path: Path) -> Path:
+    candidate = Path(path).expanduser().absolute()
+    admit_paths((PlannedPath("fixture-input-root", "preparation-wide", str(candidate)),))
+    for ancestor in reversed((candidate, *candidate.parents)):
+        try:
+            metadata = ancestor.lstat()
+        except FileNotFoundError:
+            continue
+        if ancestor.is_symlink() or not stat.S_ISDIR(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 0x400:
+            raise ContainmentFixtureError(f"fixture path must be direct: {ancestor}")
+    return candidate
+
+
+def _admit_fixture(inputs: _FixtureInputs, run_root: Path, *, command_runner=None):
+    """Exact release listing plus bounded generated preparation paths, no writes."""
+    from modlab.workspace import _DIRECTORIES
+    run_root = _require_future_directory(run_root)
+    release = load_mo2_release(bundled_mo2_252_path()).descriptor
+    _require_release_artifact(release, inputs.source_record)
+    _require_curated_archive_filename(inputs.source_record.original_name, release.archive_name)
+    extractor = observe_bsdtar(runner=command_runner)
+    listing = preflight_archive(inputs.payload, release, Path(extractor.executable.path), runner=command_runner)
+    rows = [PlannedPath("fixture-retained-archive-input", "preparation-wide", str(inputs.payload)),
+            PlannedPath("fixture-extractor-input", "preparation-wide", extractor.executable.path)]
+    for role in ("s", "t"):
+        root = run_root / role
+        _require_future_directory(root)
+        if root.exists():
+            raise ContainmentFixtureError(f"fixture workspace must be fresh: {root}")
+        digest = inputs.source_record.sha256
+        rows.extend(bootstrap_paths(root, listing,
+            archive_path=root / f"library/archives/{digest[:2]}/{digest}/payload.7z"))
+        rows.extend(PlannedPath("fixture-workspace", "preparation-wide", str(root / name)) for name in _DIRECTORIES)
+        digest = inputs.source_record.sha256
+        for name in (f"library/archives/{digest[:2]}/{digest}/payload.7z",
+                     f"library/metadata/artifacts/{digest}.json", "runtime/jobs/import-" + "f" * 32 + ".part",
+                     "library/metadata/artifacts/metadata." + "f" * 32 + ".part"):
+            rows.append(PlannedPath("fixture-vault", "preparation-wide", str(root / name)))
+        manager = root / "tools/mo2/skyrim-se-ae"
+        for name in (*(f"mods/Protected Existing/{relative}" for relative in PROTECTED_MOD_FILES),
+                     "app/nxmhandler.ini", "logs", "webcache"):
+            rows.append(PlannedPath("fixture-state", "preparation-wide", str(manager / name)))
+    for documents in ("source-documents", "stage-documents"):
+        for name in ("Skyrim.ini", "SkyrimPrefs.ini", "SkyrimCustom.ini"):
+            rows.append(PlannedPath("fixture-seed", "preparation-wide", str(run_root / documents / "My Games/Skyrim Special Edition" / name)))
+    for name in ("TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME", "USERPROFILE/Desktop"):
+        rows.append(PlannedPath("fixture-environment-root", "preparation-wide", str(run_root / "stage-environment" / name)))
+    for name in ("new-folder.zip", "overwrite-probe.zip", "fomod-dependency.zip"):
+        rows.append(PlannedPath("fixture-archive", "preparation-wide", str(run_root / "archives" / name)))
+    rows.append(PlannedPath("fixture-bootstrap-archive", "preparation-wide", str(run_root / "bootstrap-archive" / release.archive_name)))
+    return admit_paths(rows)
 
 
 def _write_zip(destination: Path, entries: dict[str, bytes]) -> None:
@@ -543,11 +612,11 @@ def _require_beneath(root: Path, *paths: Path) -> None:
 
 def _populate_protected_mod(layout: WorkspaceLayout) -> None:
     protected = layout.skyrim_mo2_mods / _PROTECTED_MOD
-    meshes = protected / "meshes"
-    meshes.mkdir(parents=True, exist_ok=False)
-    (protected / "marker.txt").write_bytes(b"active-projected-marker\n")
-    (meshes / "canary.bin").write_bytes(b"source-canary-must-remain\n")
-    (protected / "meta.ini").write_bytes(b"[General]\ninstallationFile=ModLab\n")
+    protected.mkdir(parents=True, exist_ok=False)
+    for relative, data in PROTECTED_MOD_FILES.items():
+        destination = protected.joinpath(*PurePosixPath(relative).parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
     for profile in ("ModLab - Lab", "ModLab - Play"):
         (layout.skyrim_mo2_profiles / profile / "modlist.txt").write_bytes(_ACTIVE_MODLIST)
 

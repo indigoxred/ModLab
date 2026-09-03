@@ -84,7 +84,7 @@ class Mo2BootstrapAdoptTests(unittest.TestCase):
             result.receipt.package_file_count,
         )
         self.assertEqual([], list(self.fixture.layout.skyrim_mo2.parent.glob(
-            ".skyrim-se-ae.modlab-stage-*"
+            ".s*"
         )))
         self.assertEqual((), result.manager_changes)
         self.assertEqual((), result.game_changes)
@@ -102,7 +102,7 @@ class Mo2BootstrapAdoptTests(unittest.TestCase):
             set(result.paths_written),
         )
         self.assertEqual(
-            ["--version", "-tf", "-tvf", "-xf"],
+            ["--version", "-tf", "-tvf", "-tf", "-tvf", "-xf"],
             [arguments[1] for arguments in self.fixture.runner.calls],
         )
 

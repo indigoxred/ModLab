@@ -33,6 +33,13 @@ from modlab.adapters.mo2.bootstrap_serialization import (
     receipt_to_bytes,
 )
 from modlab.workspace import WorkspaceLayout, workspace_layout
+from modlab.adapters.mo2.path_budget import (
+    PathBudgetError,
+    admit_paths,
+    bootstrap_paths,
+    bootstrap_staging_part_path,
+    stage_name,
+)
 
 
 class Mo2BootstrapStoreError(RuntimeError):
@@ -259,11 +266,9 @@ class Mo2BootstrapStore:
     def journal_path(self, job_id: str) -> Path:
         return self.job_directory(job_id) / "journal.json"
 
-    def stage_root(self, job_id: str) -> Path:
-        job_hex = self._identity_digest(job_id, _JOB_ID, "job ID")
-        return self.layout.skyrim_mo2.parent / (
-            f".skyrim-se-ae.modlab-stage-{job_hex}"
-        )
+    def stage_root(self, job_id: str, layout_version: int = 1) -> Path:
+        self._identity_digest(job_id, _JOB_ID, "job ID")
+        return self.layout.skyrim_mo2.parent / stage_name(job_id, layout_version)
 
     def prior_root(self, job_id: str) -> Path:
         return self.job_directory(job_id) / "prior"
@@ -314,7 +319,7 @@ class Mo2BootstrapStore:
             changed=False,
         )
 
-    def create_job(self, plan: BootstrapPlan) -> StoredBootstrapJournal:
+    def create_job(self, plan: BootstrapPlan, *, listing=None) -> StoredBootstrapJournal:
         data = self._serialize(plan_to_bytes, plan, "plan")
         stored_plan = self.load_plan(plan.plan_id)
         if stored_plan.data != data or stored_plan.plan != plan:
@@ -345,8 +350,20 @@ class Mo2BootstrapStore:
             ) from error
         self._identity_digest(job_id, _JOB_ID, "job ID")
         job_directory = self.job_directory(job_id)
-        stage_root = self.stage_root(job_id)
+        stage_root = self.stage_root(job_id, plan.schema_version)
         prior_root = self.prior_root(job_id)
+        budget = None
+        if plan.schema_version == 2:
+            try:
+                if listing is None:
+                    raise Mo2BootstrapStoreError("new layout requires current archive listing admission")
+                if listing.canonical_sha256 != plan.archive.listing_sha256 or listing.entry_count != plan.archive.entry_count:
+                    raise Mo2BootstrapStoreError("current archive listing differs from admitted plan")
+                budget = admit_paths(bootstrap_paths(self.layout.root, listing, job_id=job_id,
+                    layout_version=plan.schema_version, disposition=plan.disposition.value,
+                    archive_path=self.layout.root / plan.archive.stored_path))
+            except PathBudgetError as error:
+                raise Mo2BootstrapStoreError(str(error)) from error
         self._validate_target(job_directory)
         self._validate_target(stage_root)
         if self._lstat_if_exists(job_directory) is not None:
@@ -360,7 +377,7 @@ class Mo2BootstrapStore:
 
         timestamp = self._timestamp(self._clock())
         journal = BootstrapJournal(
-            schema_version=1,
+            schema_version=plan.schema_version,
             job_id=job_id,
             plan_id=plan.plan_id,
             disposition=plan.disposition,
@@ -379,6 +396,7 @@ class Mo2BootstrapStore:
             updated_at=timestamp,
             receipt_id=None,
             error=None,
+            path_budget=budget,
         )
         journal_data = self._serialize(journal_to_bytes, journal, "journal")
 
@@ -702,9 +720,11 @@ class Mo2BootstrapStore:
         self._validate_target(target)
         self._prepare_directory(self.layout.mo2_bootstrap_jobs)
         self._prepare_directory(target.parent)
-        part = self.layout.mo2_bootstrap_jobs / (
-            f"{label}-{uuid.uuid4().hex}.part"
-        )
+        part = Path(bootstrap_staging_part_path(
+            self.layout.mo2_bootstrap_jobs,
+            label,
+            uuid.uuid4().hex,
+        ))
         try:
             with part.open("xb") as handle:
                 handle.write(data)
@@ -928,7 +948,7 @@ class Mo2BootstrapStore:
 
     def _journal_paths_match(self, journal: BootstrapJournal) -> bool:
         return (
-            self._same_windows_path(journal.stage_root, self.stage_root(journal.job_id))
+            self._same_windows_path(journal.stage_root, self.stage_root(journal.job_id, journal.schema_version))
             and self._same_windows_path(journal.prior_root, self.prior_root(journal.job_id))
             and self._same_windows_path(journal.final_root, self.layout.skyrim_mo2)
         )

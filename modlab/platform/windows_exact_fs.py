@@ -14,6 +14,7 @@ from enum import Enum
 import os
 from pathlib import Path
 from collections.abc import Callable
+import re
 import secrets
 import threading
 
@@ -1061,6 +1062,22 @@ def resolve_retained_ownership(error: ExactObjectOwnershipError) -> None:
         ) from error
 
 
+def publication_candidate_path(
+    destination: Path,
+    pid: int,
+    thread_id: int,
+    token: str,
+) -> Path:
+    """Build the bounded private name used by immutable publication."""
+    if (type(pid) is not int or not 1 <= pid <= 0xFFFFFFFF
+            or type(thread_id) is not int or not 1 <= thread_id <= 0xFFFFFFFF):
+        raise ExactObjectError("publication PID and thread identity must fit unsigned DWORD")
+    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{16}", token):
+        raise ExactObjectError("publication token must be 16 lowercase hex characters")
+    target = Path(destination)
+    return target.with_name(f".{target.name}.{pid}.{thread_id}.{token}.tmp")
+
+
 def publish_new_pinned(
     path: Path,
     data: bytes,
@@ -1073,8 +1090,11 @@ def publish_new_pinned(
     retained candidate, including a candidate already moved to its destination.
     """
     destination = _absolute(path)
-    temporary = destination.with_name(
-        f".{destination.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(8)}.tmp"
+    temporary = publication_candidate_path(
+        destination,
+        os.getpid(),
+        threading.get_ident(),
+        secrets.token_hex(8),
     )
     candidate: PinnedObject | None = None
     primary_error: BaseException | None = None

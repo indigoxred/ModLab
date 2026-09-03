@@ -136,7 +136,9 @@ class Mo2ArchiveTests(unittest.TestCase):
 
             self.assertEqual(len(files), result.file_count)
             self.assertEqual(
-                [[r"C:\Windows\System32\tar.exe", "-xf", "payload.7z", "-C", str(stage)]],
+                [[r"C:\Windows\System32\tar.exe", "-tf", "payload.7z"],
+                 [r"C:\Windows\System32\tar.exe", "-tvf", "payload.7z"],
+                 [r"C:\Windows\System32\tar.exe", "-xf", "payload.7z", "-C", str(stage)]],
                 runner.calls,
             )
 

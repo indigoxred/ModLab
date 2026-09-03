@@ -42,6 +42,14 @@ from tests.support.mo2_bootstrap import (
 
 PLAN_ID = "bootstrap-plan-sha256:" + "a" * 64
 JOB_ID = "bootstrap-job:0123456789abcdef0123456789abcdef"
+APPLY_PROGRAMS = (
+    r"C:\Windows\System32\tar.exe [version]",
+    r"C:\Windows\System32\tar.exe [list-names]",
+    r"C:\Windows\System32\tar.exe [list-types]",
+    r"C:\Windows\System32\tar.exe [list-names]",
+    r"C:\Windows\System32\tar.exe [list-types]",
+    r"C:\Windows\System32\tar.exe [extract]",
+)
 
 
 @dataclass(frozen=True)
@@ -85,12 +93,7 @@ class Mo2BootstrapRenderingTests(unittest.TestCase):
                 "tools/mo2/skyrim-se-ae/app/ModOrganizer.exe",
             ),
             game_changes=(),
-            programs_launched=(
-                r"C:\Windows\System32\tar.exe [version]",
-                r"C:\Windows\System32\tar.exe [list-names]",
-                r"C:\Windows\System32\tar.exe [list-types]",
-                r"C:\Windows\System32\tar.exe [extract]",
-            ),
+            programs_launched=APPLY_PROGRAMS,
         )
 
     def _apply_live_fixture(self):
@@ -273,6 +276,8 @@ class Mo2BootstrapRenderingTests(unittest.TestCase):
             ["portable-mo2-create"], value["installationActionsPerformed"]
         )
         self.assertTrue(value["managerChangesPerformed"])
+        self.assertEqual(list(APPLY_PROGRAMS), value["programsLaunched"])
+        self.assertEqual(APPLY_PROGRAMS, result.programs_launched)
 
     def test_real_adopt_and_already_managed_results_are_manager_no_ops(self):
         self.fixture.make_ready_existing()
@@ -285,6 +290,7 @@ class Mo2BootstrapRenderingTests(unittest.TestCase):
 
         self.assertEqual("Adopted", adopted_value["mo2Setup"]["outcome"])
         self.assertEqual([], adopted_value["managerChangesPerformed"])
+        self.assertEqual(list(APPLY_PROGRAMS), adopted_value["programsLaunched"])
         self.assertEqual("AlreadyManaged", managed_value["mo2Setup"]["outcome"])
         self.assertEqual([], managed_value["pathsWritten"])
 
@@ -478,12 +484,7 @@ class Mo2BootstrapCliTests(unittest.TestCase):
                 "tools/mo2/skyrim-se-ae/app/ModOrganizer.exe",
             ),
             game_changes=(),
-            programs_launched=(
-                r"C:\Windows\System32\tar.exe [version]",
-                r"C:\Windows\System32\tar.exe [list-names]",
-                r"C:\Windows\System32\tar.exe [list-types]",
-                r"C:\Windows\System32\tar.exe [extract]",
-            ),
+            programs_launched=APPLY_PROGRAMS,
         )
         recovered = RecoveryResult(
             outcome="Verified",
@@ -615,6 +616,7 @@ class Mo2BootstrapCliTests(unittest.TestCase):
             r"C:\Windows\System32\tar.exe [extract]",
             value["programsLaunched"][-1],
         )
+        self.assertEqual(list(APPLY_PROGRAMS), value["programsLaunched"])
 
     def test_real_post_quarantine_failure_reports_both_recovery_paths(self):
         transition = Mo2BootstrapStore.transition_job
@@ -660,7 +662,9 @@ class Mo2BootstrapCliTests(unittest.TestCase):
         self.assertTrue(setup["actionEvidenceComplete"])
         self.assertEqual(JOB_ID, setup["jobId"])
         changes = value["managerChangesPerformed"]
-        self.assertTrue(any(".skyrim-se-ae.modlab-stage-" in path for path in changes))
+        from modlab.adapters.mo2.path_budget import stage_name
+        expected_stage = f"tools/mo2/{stage_name(JOB_ID, 2)}"
+        self.assertIn(expected_stage, changes)
         self.assertTrue(any(path.endswith("/recovered-stage") for path in changes))
         self.assertEqual([], value["programsLaunched"])
 
@@ -776,6 +780,7 @@ class Mo2BootstrapCliTests(unittest.TestCase):
                         for path in value["pathsWritten"]
                     )
                 )
+                self.assertEqual(list(APPLY_PROGRAMS), value["programsLaunched"])
 
     def test_invalid_typed_identifiers_exit_two_without_service_calls(self):
         with patch("modlab.cli.prepare_mo2_setup") as preview_service:

@@ -291,20 +291,34 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="modlab-prep-adversarial-", dir=Path(__file__).resolve().parents[1])
         self.root = Path(self.temporary.name)
+        # Startup/ownership tests use their explicit native failed fixture,
+        # not a real release vault. Keep the archive boundary isolated; the
+        # refusal and opt-in archive tests below disable this test-only seam.
+        from modlab.adapters.mo2.path_budget import PlannedPath, admit_paths
+        self.preflight_patch = patch.object(service, "preflight_containment_fixture",
+            side_effect=lambda *args, **kwargs: admit_paths([PlannedPath(
+                "test-fixture-input", "preparation-wide", str(kwargs["fixture_parent"]))]))
+        self.preflight_patch.start()
+        self.addCleanup(self.preflight_patch.stop)
 
     def tearDown(self):
         self.temporary.cleanup()
 
-    def failed_fixture(self, *, legacy=False):
+    def failed_fixture(self, *, legacy=False, real_archive=False):
         from modlab.validation import mo2_preparation_recovery as recovery
         from modlab.validation import windows_junction as junction
         from modlab.workspace import initialize_workspace
-        layout = initialize_workspace(self.root / "workspace")
+        layout = initialize_workspace(self.root / ("workspace" if not real_archive else "w" * 70))
+        artifact_id = "archive-sha256:" + "b" * 64
+        if real_archive:
+            from tests.support.mo2_containment import import_curated_mo2_archive
+            artifact_id = import_curated_mo2_archive(Path(os.environ["MODLAB_PREPARATION_ARCHIVE"]),
+                layout.root, self.root / "curated-input").artifact_id
         store = ContainmentStore(layout.mo2_containment_validation)
         run_id = "containment-run:" + "a" * 32
-        fingerprint = service._command_fingerprint(layout.root, "archive-sha256:" + "b" * 64, self.root / "Steam")
+        fingerprint = service._command_fingerprint(layout.root, artifact_id, self.root / "Steam")
         intent = dict(schemaVersion=1, runId=run_id, mechanism="isolated-low-integrity-junction-projection-v1",
-            sourceWorkspace=str(layout.root), mo2ArtifactId="archive-sha256:" + "b" * 64,
+            sourceWorkspace=str(layout.root), mo2ArtifactId=artifact_id,
             steamRoot=str(self.root / "Steam"), commandFingerprint=fingerprint, predecessorRunIds=[], retryOf=None)
         intent_id = store.write_intent(run_id, intent).content_id
         fixture = store.run_path(run_id) / "fixtures/NewFolder"
@@ -332,6 +346,44 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
         finally:
             owner.close()
         return store, run_id, fixture, link, target
+
+    def test_unsupported_future_preparation_preserves_all_failed_attempt_bytes(self):
+        self.preflight_patch.stop()
+        store, run_id, fixture, link, target = self.failed_fixture()
+        # The real retained failed fixture has no admitted replacement archive.
+        # Admission must refuse before recovery relocates its owned projection.
+        def snapshot():
+            return {str(path.relative_to(store.run_path(run_id))): path.read_bytes()
+                    for path in store.run_path(run_id).rglob("*")
+                    if path.is_file() and not path.is_symlink()}
+        before = snapshot()
+        identity = link.lstat().st_ino
+        with self.assertRaises(service.ContainmentServiceError):
+            service.restart_preparation(store.root, run_id)
+        self.assertEqual(before, snapshot())
+        self.assertEqual(identity, link.lstat().st_ino)
+        self.assertFalse(store.preparation_path(run_id, "recovery").exists())
+        self.assertFalse(store.preparation_path(run_id, "replacement").exists())
+        self.assertEqual((run_id,), store.list_run_ids())
+
+    @unittest.skipUnless(os.environ.get("MODLAB_PREPARATION_ARCHIVE"), "exact archive path-budget regression is opt-in")
+    def test_real_archive_unsupported_future_path_preserves_native_failed_attempt(self):
+        self.preflight_patch.stop()
+        store, run_id, fixture, link, target = self.failed_fixture(real_archive=True)
+        def snapshot():
+            return {str(path.relative_to(store.run_path(run_id))): path.read_bytes()
+                    for path in store.run_path(run_id).rglob("*") if path.is_file()}
+        before = snapshot()
+        identity = link.lstat().st_ino
+        with self.assertRaisesRegex(service.ContainmentServiceError, "path budget.*tar-cwd") as raised:
+            service.restart_preparation(store.root, run_id)
+        self.assertTrue(any("tar.exe" in process for process in raised.exception.effects.launched_processes))
+        self.assertEqual((), raised.exception.effects.written_paths)
+        self.assertEqual(before, snapshot())
+        self.assertEqual(identity, link.lstat().st_ino)
+        self.assertFalse(store.preparation_path(run_id, "replacement").exists())
+        self.assertFalse(store.preparation_path(run_id, "recovery").exists())
+        self.assertEqual((run_id,), store.list_run_ids())
 
     def test_substituted_cleanup_link_is_left_untouched_and_cannot_grant_replacement(self):
         from modlab.validation import windows_junction as junction
@@ -726,7 +778,7 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
 
     def test_failed_replacement_has_its_own_lineage_without_refunding_old_authority(self):
         store, run_id, *_ = self.failed_fixture()
-        with patch.object(service, "preflight_containment_fixture", side_effect=RuntimeError("fresh failure")):
+        with patch.object(service, "prepare_containment_fixture", side_effect=RuntimeError("fresh failure")):
             with self.assertRaises(service.ContainmentServiceError) as raised:
                 service.restart_preparation(store.root, run_id)
         replacement = store.load_preparation_replacement(run_id)
@@ -759,7 +811,7 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
         store, run_id, fixture, link, target = self.failed_fixture(legacy=True)
         old_bytes = store.intent_path(run_id).read_bytes()
         old_link_id = link.lstat().st_ino
-        with patch.object(service, "preflight_containment_fixture", side_effect=RuntimeError("fresh preflight deliberately fails")):
+        with patch.object(service, "prepare_containment_fixture", side_effect=RuntimeError("fresh fixture deliberately fails")):
             with self.assertRaises(service.ContainmentServiceError):
                 service.restart_preparation(store.root, run_id)
         replacement = store.load_preparation_replacement(run_id)

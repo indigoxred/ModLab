@@ -1,0 +1,22 @@
+Command: bundled Python -B -m unittest tests.test_mo2_path_budget tests.test_mo2_containment_fixtures tests.test_mo2_bootstrap_create tests.test_mo2_bootstrap_adopt tests.test_mo2_bootstrap_recovery -q
+Exit: 1
+======================================================================
+ERROR: test_fixture_preflight_is_read_only_for_an_absent_nested_target (tests.test_mo2_containment_fixtures.ContainmentFixtureTests.test_fixture_preflight_is_read_only_for_an_absent_nested_target)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_fixtures.py", line 77, in test_fixture_preflight_is_read_only_for_an_absent_nested_target
+    fixtures.preflight_containment_fixture(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_fixtures.py", line 323, in preflight_containment_fixture
+    return _admit_fixture(inputs, Path(fixture_parent))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_fixtures.py", line 400, in _admit_fixture
+    _require_release_artifact(release, inputs.source_record)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3868, in _require_release_artifact
+    raise Mo2BootstrapRefusal(
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: retained archive identity does not match the curated MO2 release
+
+----------------------------------------------------------------------
+Ran 109 tests in 62.675s
+
+FAILED (errors=1, skipped=2)
+

@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\.superpowers\sdd\2026-09-02-mo2-containment-authority-remediation\task-7A-observer-diagnostic.py", line 8, in <module>
+    from modlab.validation import mo2_containment_service as service
+ModuleNotFoundError: No module named 'modlab'
+Exit: 1

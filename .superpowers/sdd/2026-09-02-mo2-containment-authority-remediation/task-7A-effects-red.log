@@ -1,0 +1,16 @@
+test_real_archive_unsupported_future_path_preserves_native_failed_attempt (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_real_archive_unsupported_future_path_preserves_native_failed_attempt) ... FAIL
+
+======================================================================
+FAIL: test_real_archive_unsupported_future_path_preserves_native_failed_attempt (tests.test_mo2_preparation_recovery.PreparationRecoveryAdversarialTests.test_real_archive_unsupported_future_path_preserves_native_failed_attempt)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_preparation_recovery.py", line 380, in test_real_archive_unsupported_future_path_preserves_native_failed_attempt
+    self.assertTrue(any("tar.exe" in process for process in raised.exception.effects.launched_processes))
+AssertionError: False is not true
+
+----------------------------------------------------------------------
+Ran 1 test in 0.978s
+
+FAILED (failures=1)
+
+Exit: 1

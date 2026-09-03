@@ -1,0 +1,17 @@
+test_effect_merge_preserves_repeated_preparation_launches_in_order (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_effect_merge_preserves_repeated_preparation_launches_in_order) ... ERROR
+test_archive_budget_rejects_forged_entry_spelling_kind_and_digest (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_archive_budget_rejects_forged_entry_spelling_kind_and_digest) ... ok
+
+======================================================================
+ERROR: test_effect_merge_preserves_repeated_preparation_launches_in_order (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_effect_merge_preserves_repeated_preparation_launches_in_order)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 5225, in test_effect_merge_preserves_repeated_preparation_launches_in_order
+    self.assertEqual((launched, launched), merged.programs_launched)
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'ContainmentEffects' object has no attribute 'programs_launched'
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.002s
+
+FAILED (errors=1)
+Exit: 1
