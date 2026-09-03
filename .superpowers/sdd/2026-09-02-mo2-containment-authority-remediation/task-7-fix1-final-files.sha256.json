@@ -1,0 +1,14 @@
+[
+  {"Path":"modlab/validation/mo2_containment_cli.py","SHA256":"3dc71fd52cf0b7786e816143c1c4c2d42a545782920bef1f8edde12c2ef0efc9"},
+  {"Path":"modlab/validation/mo2_containment_fixtures.py","SHA256":"bff328068aa7fc66f6ce1b911bb88533edb41d01948b2820fa853e0c700480a0"},
+  {"Path":"modlab/validation/mo2_containment_service.py","SHA256":"64b67fffb517cc6fe60a045b6becb753b36911be05397827f3ba3e0c9fc272a3"},
+  {"Path":"modlab/validation/mo2_containment_store.py","SHA256":"94789042963da2d24e2d1d7cac44dcff929d0ef16a4b229cac5b178412377f84"},
+  {"Path":"modlab/validation/windows_junction.py","SHA256":"24ea961d2551a32e74adc82a12ef40be3874bd474789c99c4061d0fd3cfd012b"},
+  {"Path":"modlab/validation/mo2_preparation_recovery.py","SHA256":"c670905b3ec77cb117bee11e1879dbbb3eb0ef2102d1b2b797d3bf4d38ec2682"},
+  {"Path":"tests/support/mo2_containment.py","SHA256":"7d1a01407b6031a1eb6310a5088d5093d5d8d5d2275b54b82d44cbb9eeb5712d"},
+  {"Path":"tests/test_mo2_containment_cli.py","SHA256":"e67ff844863949ade318dc69e39273123894f709075a56b06391430c655664e4"},
+  {"Path":"tests/test_mo2_containment_junction.py","SHA256":"9a4a7be17cf0517f60deaed208d575679c562e48ce04ebe2dab2a42e8494602c"},
+  {"Path":"tests/test_mo2_containment_service.py","SHA256":"ea21400d6edfd2b61effa7aa087ed6f035870555e57cb65d73fb7d275cb16ceb"},
+  {"Path":"tests/test_mo2_preparation_recovery.py","SHA256":"00528b822492661cd6a7d9575df20599fbf2c7469339b57d10e8a200498f747d"},
+  {"Path":"docs/superpowers/plans/2026-09-02-mo2-containment-authority-remediation.md","SHA256":"88b1c97b6170618742c0d9399102e457e3fc4b0b93a46592ddb9f3debd34c326"}
+]
