@@ -38,6 +38,22 @@ ARTIFACT_ID = "archive-sha256:" + "b" * 64
 EFFECT_ROOT = Path(r"C:\service-effects")
 
 
+class PreparationCliTests(unittest.TestCase):
+    def test_preparation_commands_reach_live_readonly_absent_root_refusal(self):
+        for command in ("recover-preparation", "restart-preparation"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as directory:
+                absent = Path(directory) / "absent"
+                output = io.StringIO()
+                code = cli.main([command, RUN_ID, "--workspace", str(absent), "--format", "json"], stdout=output)
+                self.assertEqual(3, code, "valid preparation command must reach the service refusal, not parser rejection")
+                value = json.loads(output.getvalue())
+                self.assertEqual(command, value["command"])
+                self.assertEqual([], value["writtenPaths"])
+                self.assertEqual([], value["launchedProcesses"])
+                self.assertIsNone(value["verdict"])
+                self.assertFalse(absent.exists())
+
+
 def tree() -> TreeIdentity:
     return TreeIdentity("c" * 64, 1, 1, 1)
 

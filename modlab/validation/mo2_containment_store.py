@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from .mo2_preparation_recovery import (
+    PreparationAttempt, PreparationFailure, PreparationProjection,
+    PreparationRecovery, PreparationReplacement, PreparationCleanup, record_from_bytes,
+    record_to_bytes, record_id,
+)
+
 import ctypes
 from ctypes import wintypes
 from contextlib import contextmanager
@@ -431,6 +437,132 @@ class ContainmentStore:
     def load_intent(self, run_id: str) -> dict[str, object]:
         with self._run_lock(run_id):
             return self._load_intent_unlocked(run_id)
+
+    def preparation_path(self, run_id: str, kind: str, scenario: str | None = None) -> Path:
+        if kind not in {"attempt", "failure", "projection", "recovery", "replacement", "cleanup"}:
+            raise ContainmentStoreError("unknown preparation record kind")
+        suffix = ""
+        if kind in {"projection", "cleanup"}:
+            try:
+                return self.run_path(run_id) / "preparation-projections" / (ContainmentScenario(scenario).value + ("-cleanup" if kind == "cleanup" else "") + ".json")
+            except (TypeError, ValueError) as error:
+                raise ContainmentStoreError("invalid preparation projection scenario") from error
+        elif scenario is not None:
+            raise ContainmentStoreError("scenario cannot qualify this preparation record")
+        return self.run_path(run_id) / ("preparation-" + kind + suffix + ".json")
+
+    def _preparation_binding(self, value) -> None:
+        intent = self._load_intent_unlocked(value.run_id)
+        expected_id = "containment-intent-sha256:" + hashlib.sha256(_canonical(intent)).hexdigest()
+        if value.intent_id != expected_id or value.command_fingerprint != intent["commandFingerprint"]:
+            raise ContainmentStoreError("preparation record differs from its exact source intent")
+
+    def _load_preparation(self, run_id: str, record_type, kind: str, scenario=None):
+        try:
+            value = record_from_bytes(self._read(self.preparation_path(run_id, kind, scenario), "preparation " + kind), record_type)
+        except (ValueError, TypeError, UnicodeError) as error:
+            raise ContainmentStoreMalformedEvidence(f"malformed preparation {kind}: {error}") from error
+        if value.run_id != run_id:
+            raise ContainmentStoreError("preparation record has a different run")
+        self._validate_preparation_references(value, scenario)
+        return value
+
+    def _validate_preparation_references(self, value, scenario=None):
+        run_id = value.run_id
+        self._preparation_binding(value)
+        if isinstance(value, PreparationFailure) and value.legacy:
+            try:
+                self.load_preparation_attempt(run_id)
+            except ContainmentStoreNotFound:
+                pass
+            else:
+                raise ContainmentStoreError("legacy failure cannot reinterpret a new-format preparation attempt")
+        if isinstance(value, PreparationFailure) and value.attempt_id is not None:
+            if value.attempt_id != record_id(self.load_preparation_attempt(run_id)):
+                raise ContainmentStoreError("preparation failure attempt differs")
+        if isinstance(value, PreparationProjection):
+            if value.scenario != scenario or value.attempt_id != record_id(self.load_preparation_attempt(run_id)):
+                raise ContainmentStoreError("preparation projection attempt/scenario differs")
+        if isinstance(value, PreparationRecovery):
+            if value.failure_id != record_id(self.load_preparation_failure(run_id)):
+                raise ContainmentStoreError("preparation recovery failure differs")
+        if isinstance(value, PreparationCleanup):
+            projection = self.load_preparation_projection(run_id, scenario)
+            if value.scenario != scenario or value.projection_id != record_id(projection):
+                raise ContainmentStoreError("preparation cleanup projection differs")
+        if isinstance(value, PreparationReplacement):
+            recovery = self.load_preparation_recovery(run_id)
+            if value.recovery_id != record_id(recovery) or not recovery.fresh_run_permitted:
+                raise ContainmentStoreError("preparation replacement recovery differs or refuses replacement")
+
+    def _write_preparation(self, value, kind: str, scenario=None):
+        try:
+            data = record_to_bytes(value)
+        except (ValueError, TypeError) as error:
+            raise ContainmentStoreError(f"invalid preparation {kind}: {error}") from error
+        with self._run_lock(value.run_id):
+            self._validate_preparation_references(value, scenario)
+            target = self.preparation_path(value.run_id, kind, scenario)
+            existed = self._write_immutable(target, data, "preparation " + kind)
+            loaded = self._load_preparation(value.run_id, type(value), kind, scenario)
+            return ImmutableWrite(loaded, record_id(loaded), target, existed)
+
+    def write_preparation_attempt(self, value: PreparationAttempt):
+        return self._write_preparation(value, "attempt")
+
+    def load_preparation_attempt(self, run_id: str) -> PreparationAttempt:
+        return self._load_preparation(run_id, PreparationAttempt, "attempt")
+
+    def write_preparation_projection(self, value: PreparationProjection):
+        return self._write_preparation(value, "projection", value.scenario)
+
+    def load_preparation_projection(self, run_id: str, scenario: str) -> PreparationProjection:
+        return self._load_preparation(run_id, PreparationProjection, "projection", scenario)
+
+    def write_preparation_failure(self, value: PreparationFailure):
+        return self._write_preparation(value, "failure")
+
+    def load_preparation_failure(self, run_id: str) -> PreparationFailure:
+        return self._load_preparation(run_id, PreparationFailure, "failure")
+
+    def write_preparation_recovery(self, value: PreparationRecovery):
+        return self._write_preparation(value, "recovery")
+
+    def load_preparation_recovery(self, run_id: str) -> PreparationRecovery:
+        return self._load_preparation(run_id, PreparationRecovery, "recovery")
+
+    def write_preparation_cleanup(self, value: PreparationCleanup):
+        return self._write_preparation(value, "cleanup", value.scenario)
+
+    def load_preparation_cleanup(self, run_id: str, scenario: str) -> PreparationCleanup:
+        return self._load_preparation(run_id, PreparationCleanup, "cleanup", scenario)
+
+    def load_preparation_replacement(self, run_id: str) -> PreparationReplacement:
+        return self._load_preparation(run_id, PreparationReplacement, "replacement")
+
+    def consume_preparation_replacement(self, recovery: PreparationRecovery, new_run_id: str, *, process_proof=None) -> PreparationReplacement:
+        self._run_hex(new_run_id)
+        with self._run_lock(recovery.run_id):
+            stored = self.load_preparation_recovery(recovery.run_id)
+            if recovery != stored or not recovery.fresh_run_permitted:
+                raise ContainmentStoreError("replacement requires exact permissive preparation recovery")
+            marker = self.preparation_path(recovery.run_id, "replacement")
+            try:
+                marker.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise ContainmentStoreError("preparation replacement is already consumed")
+            try:
+                self.run_path(new_run_id).lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise ContainmentStoreError("replacement run must be completely fresh")
+            value = PreparationReplacement(recovery.run_id, recovery.intent_id,
+                recovery.command_fingerprint, record_id(recovery), new_run_id,
+                recovery.process_proof if process_proof is None else process_proof)
+            return self._write_preparation(value, "replacement").value
 
     def write_launch_evidence(
         self,

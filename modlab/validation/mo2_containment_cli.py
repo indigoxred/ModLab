@@ -34,7 +34,10 @@ from .mo2_containment_service import (
     load_result as load_service_result,
     prepare_run,
     recover_scenario,
+    recover_preparation,
+    restart_preparation,
 )
+from .mo2_preparation_recovery import PreparationRecovery
 from .mo2_containment_store import (
     ContainmentStoreError,
     ContainmentStoreMalformedEvidence,
@@ -72,6 +75,8 @@ class _ValidationControllerRefusal(RuntimeError):
 
 
 class _Service(Protocol):
+    def recover_preparation(self, validation: Path, run_id: str) -> ContainmentServiceResult[PreparationRecovery]: ...
+    def restart_preparation(self, validation: Path, run_id: str) -> ContainmentServiceResult[str]: ...
     def prepare_run(
         self, source: Path, artifact: str, steam: Path, validation: Path
     ) -> ContainmentServiceResult[str]: ...
@@ -100,6 +105,12 @@ class _Service(Protocol):
 
 @dataclass(frozen=True)
 class _LiveService:
+    def recover_preparation(self, validation: Path, run_id: str):
+        return recover_preparation(validation, run_id)
+
+    def restart_preparation(self, validation: Path, run_id: str):
+        return restart_preparation(validation, run_id)
+
     def prepare_run(
         self, source: Path, artifact: str, steam: Path, validation: Path
     ) -> ContainmentServiceResult[str]:
@@ -163,7 +174,7 @@ def _parser() -> argparse.ArgumentParser:
     recover.add_argument("--workspace", required=True, type=Path)
     recover.add_argument("--format", choices=("text", "json"), default="text")
 
-    for name in ("show", "adjudicate"):
+    for name in ("show", "adjudicate", "recover-preparation", "restart-preparation"):
         command = commands.add_parser(name)
         command.add_argument("run_id")
         command.add_argument("--workspace", required=True, type=Path)
@@ -527,6 +538,27 @@ def _recover(args: argparse.Namespace, service: _Service) -> tuple[int, dict[str
     )
 
 
+def _preparation_lifecycle(args: argparse.Namespace, service: _Service):
+    run_id = _require_run_id(args.run_id)
+    validation = _validation_root(args.workspace)
+    if args.command == "recover-preparation":
+        receipt = _require_receipt(service.recover_preparation(validation, run_id))
+        value = receipt.value
+        if type(value) is not PreparationRecovery or value.run_id != run_id:
+            raise ContainmentServiceError("preparation recovery returned a different run", effects=receipt.effects)
+        return (0 if value.fresh_run_permitted else 3), _response(
+            args.command, run_id=run_id,
+            state="PreparationRecovered" if value.fresh_run_permitted else "Refused",
+            reasons=value.blockers, **_effect_fields(receipt.effects))
+    receipt = _require_receipt(service.restart_preparation(validation, run_id))
+    fresh_id = _require_run_id(receipt.value)
+    if fresh_id == run_id:
+        raise ContainmentServiceError("preparation restart reused the failed run", effects=receipt.effects)
+    return 0, _response(args.command, run_id=fresh_id, state="Prepared",
+        reasons=("A fresh preparation replaced the abandoned attempt; no scenario verdict or authority was issued.",),
+        **_effect_fields(receipt.effects))
+
+
 def _show(args: argparse.Namespace, service: _Service) -> tuple[int, dict[str, object]]:
     run_id = _require_run_id(args.run_id)
     validation = _validation_root(args.workspace)
@@ -625,7 +657,7 @@ def main(
         args = parser.parse_args(argv)
     except CliInputError as error:
         raw = sys.argv[1:] if argv is None else argv
-        command = next((item for item in raw if item in {"prepare", "validate", "recover", "show", "adjudicate"}), "unknown")
+        command = next((item for item in raw if item in {"prepare", "validate", "recover", "show", "adjudicate", "recover-preparation", "restart-preparation"}), "unknown")
         json_requested = any(
             item == "--format=json"
             or (item == "--format" and index + 1 < len(raw) and raw[index + 1] == "json")
@@ -645,6 +677,8 @@ def main(
             code, value = _validate(args, active_service, guidance, input_func)
         elif args.command == "recover":
             code, value = _recover(args, active_service)
+        elif args.command in {"recover-preparation", "restart-preparation"}:
+            code, value = _preparation_lifecycle(args, active_service)
         elif args.command == "show":
             code, value = _show(args, active_service)
         else:

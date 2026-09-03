@@ -301,6 +301,173 @@ If no layout passes, stop with `NotSupported`. Do not freeze bridge inventory or
 
 ### Task 7: Four fresh visible containment scenarios and replacement decision
 
+#### Approved prerequisite repair — 2026-09-03
+
+The user explicitly approved fixing both observed preparation defects, including stable
+link/target/parent/volume/file identity, cleanup-only fresh restart, adversarial tests, the
+complete native Windows suite, and independent review before consumption or merge. This
+amendment is part of Task 7; completed Tasks 1–6 are not silently repeated or relabeled.
+The actual failed preparation is `containment-run:7b664285ad8c442d97acde65ce22b65a` at source
+`28554debfefe75348b7c8c712eaf976c72b4e5fc`, tree `4c6fac6e520ba35bf5c983bf9359f98b82a84d3c`.
+It has an intent and partial NewFolder fixture, but no request, journal, launch, result or
+decision. Its evidence must remain immutable; never fill in missing successful history.
+
+**Repair files and responsibilities:**
+
+- Modify `modlab/validation/windows_junction.py`: retain creation-bound projection ownership
+  and verify the exact link, target, both direct parents and native volume/file identities.
+- Modify `modlab/validation/mo2_containment_fixtures.py`: carry that ownership through the
+  fixture operation and its effect observation, including failure unwinding.
+- Modify `modlab/validation/mo2_containment_service.py`: narrow expected-projection
+  observation; durable early-failure ownership/effects; cleanup-only recovery and fresh-run
+  predecessor consumption. Do not restructure unrelated service behavior.
+- Create `modlab/validation/mo2_preparation_recovery.py`: focused strict preparation-failure,
+  recovery and one-use replacement models/serialization/validation, kept distinct from
+  scenario results and capability authority.
+- Modify `modlab/validation/mo2_containment_store.py`: immutable canonical preparation
+  records and atomic one-use replacement consumption using the existing shared publisher.
+- Modify `modlab/validation/mo2_containment_cli.py`: explicit `recover-preparation` and
+  `restart-preparation` operator commands; preserve the approved public response field set.
+- Test in `tests/test_mo2_containment_junction.py`, `tests/test_mo2_containment_service.py`,
+  `tests/test_mo2_containment_store.py`, `tests/test_mo2_containment_cli.py`, and new focused
+  `tests/test_mo2_preparation_recovery.py`.
+
+**Required interfaces and invariants:**
+
+1. Provide `create_owned_projection(source_mod: Path, staging_mod: Path)` returning a
+   retained projection owner through the existing junction machinery, with explicit `close()`
+   and creation-bound identity verification. It must
+   retain creation-time link identity, canonical reparse bytes, exact direct target and both
+   parent identities until the guarded post-observation completes. An after-the-fact
+   pathname/target match is not creation ownership. Preserve existing non-owning callers'
+   behavior without inventing a second rename primitive.
+2. `_mutation_root_observation(root, *, expected_projections=())` and the delegated boundary
+   accept an explicit, default-empty tuple of those owners only for the fixture's actual
+   created projections. Generic callers
+   continue to reject every reparse. Record an opaque junction row and never descend through
+   it. Verify all retained identities before and after observation, including rescans. A
+   replaced target/parent/link, same-name different file ID, wrong volume, unknown reparse,
+   missing object, payload change or unresolved handle ownership refuses. Never treat failed
+   cleanup as success or lose a still-live handle.
+3. Preparation failure is a separate lifecycle, never a ScenarioResult or decision. Record
+   exact intent/source identity and observed job-owned effects before authorizing later
+   cleanup. Bind creation ownership while it is available, rather than reconstructing it
+   from path names after a crash. Existing evidence files are never overwritten.
+4. `recover_preparation(validation_root: Path, run_id: str)` returns an exact receipted
+   `PreparationRecovery` value. It proves all old processes/owners absent using native
+   identity-aware observations and the existing command/run exclusion mechanisms. Timeouts,
+   PID reuse, access-denied or incomplete process enumeration are not absence. It unwinds
+   only retained/proven job-owned transient objects, never game, Play, source payload or
+   unrelated state. Shared no-replace exact-object moves may preserve cleanup targets in
+   quarantine. Unknown/substituted objects are left untouched and reported; absence of a
+   request/journal alone never proves safe cleanup or grants retry.
+5. `restart_preparation(validation_root: Path, run_id: str)` explicitly performs/loads that
+   cleanup-only recovery, consumes one exact immutable preparation replacement authority,
+   and calls the normal preparation path with a fresh run and fresh fixture/session/request
+   identities. It never resumes or upgrades the failed attempt. Concurrent/replayed
+   consumption cannot create multiple new attempts. Failure while creating the replacement
+   leaves that new attempt failed with its own lineage; it does not replenish old authority.
+6. Existing scenario recovery stays separate. A prepared/request-bearing run, started
+   scenario, launch evidence, inconsistent records, conflicting predecessor or malformed
+   record cannot take the early-failure shortcut. Existing `prepare_run` without exact
+   replacement authority continues to refuse unresolved same-command predecessors.
+7. The older retained intent-only failure lacks new creation receipts. Do not fabricate
+   those receipts, retroactively declare observed objects job-owned, or delete/rewrite its
+   fixture. Support only a verified, explicitly recorded legacy failure disposition using
+   actual existing evidence and native absence proof. Preserve any state whose creation
+   ownership cannot be proved. If a safe fresh replacement cannot be proven while preserving
+   that state, refuse that operation and report the exact missing proof; do not evade it by
+   changing the workspace or command fingerprint. This limitation must be tested and
+   disclosed, not hidden behind success for new-format failures only.
+8. Every failure/recovery/replacement record binds its exact source intent and bytes, actual
+   effects, process proof, and consumed-by fresh run. Canonical reads are non-creating;
+   collisions, substitutions, cross-run and cross-command replay refuse. Cleanup grants
+   no successful receipt, validation verdict, Keep, bridge or eligibility authority.
+
+- [ ] **Repair step 1: Add failing real-native regressions before production edits**
+
+Use the existing unittest fixture helpers and real retained-handle/junction/store behavior.
+The initial integration regression must reach the real guarded post-observer with a real
+job-created projection, not a mock replacing `prepare_containment_fixture` with only a
+regular-file tree. These concrete native/negative regressions additionally define the new
+observation and physically-read-only recovery interfaces:
+
+```python
+def test_job_created_projection_is_observed_without_following_target(self):
+    with tempfile.TemporaryDirectory(prefix="modlab-owned-link-") as directory:
+        root = Path(directory).absolute()
+        source = root / "source" / "Protected Existing"
+        stage = root / "stage"
+        source.mkdir(parents=True)
+        stage.mkdir()
+        (source / "marker.txt").write_bytes(b"unchanged")
+        owner = junction.create_owned_projection(source, stage / "Protected Existing")
+        try:
+            rows = service._mutation_root_observation(
+                root, expected_projections=(owner,)
+            )
+            self.assertIsNotNone(rows)
+            names = {row[0] for row in rows}
+            self.assertIn("stage/Protected Existing", names)
+            self.assertNotIn("stage/Protected Existing/marker.txt", names)
+            self.assertEqual(b"unchanged", (source / "marker.txt").read_bytes())
+        finally:
+            owner.close()
+
+def test_recover_preparation_refuses_absent_storage_without_creating_it(self):
+    with tempfile.TemporaryDirectory(prefix="modlab-preparation-recovery-") as directory:
+        absent = Path(directory).absolute() / "absent-validation"
+        with self.assertRaises((service.ContainmentServiceError, ContainmentStoreError)):
+            service.recover_preparation(absent, "containment-run:" + "a" * 32)
+        self.assertFalse(absent.exists())
+```
+
+Import `Path`, `tempfile`, the service module, junction module and `ContainmentStoreError`
+normally in the test module. Native test scratch belongs under ModLab. Use existing test
+cleanup that removes only the exact test-created link, never target traversal. The complete
+fresh-attempt regression must run a real controlled preparation failure in a foreground
+native child, retain old evidence bytes, prove that child exited, then recover/restart through
+the production APIs: assert old evidence byte equality, disjoint old/new generated identities,
+no old success authority, and rejection of a second consumption. Keep filesystem effects,
+process identity and publication real; replace only slow archive extraction with a controlled
+fixture at its actual dependency boundary. Also cover link/target/parent substitution between creation and
+observation, payload/type/volume mismatch, unknown links, no target traversal, retained-handle
+close failure, genuine delegate exception with partial effects, old processes alive or
+uncertain, PID reuse, substituted cleanup objects, interrupted cleanup, duplicate/concurrent
+replacement consumption, failure in the fresh replacement, absent root read-only behavior,
+prepared/started-run rejection, and the exact old-format intent-only failure shape.
+
+Run focused tests with bundled Python `-B -m unittest <affected modules> -v` natively;
+retain actual RED output proving the intended failures, not unrelated import/setup errors.
+
+- [ ] **Repair step 2: Implement only the approved invariants and obtain focused GREEN**
+
+Carry exact projection owners through the real fixture pipeline; add strict early-failure
+records, verified cleanup and one-time new preparation. Keep all public effect claims based
+on actual operation receipts, including failures. Preserve all original failed-run artifacts.
+Run each new regression and existing affected junction/service/store/CLI tests; report every
+skip and unresolved limitation. No live MO2 launch or real failed-run cleanup during coding.
+
+- [ ] **Repair step 3: Complete native suite, commit and independent repair review**
+
+Run the complete native Windows suite once on the final repair, preserving stdout/stderr,
+exit code, counts and declared skip reasons. Use the existing configured native runner if
+needed for equivalent full discovery. Check the tracked diff for unrelated changes, then
+commit the repair and test evidence summary. The independent reviewer receives the entire
+repair diff from the pre-repair BASE, these user requirements, the diagnostic and RED/GREEN/
+full-suite evidence, and verifies both spec compliance and quality. Fix and re-review actual
+findings before consuming this repair. No main merge/push, live recovery/restart, fresh
+containment decision, eligibility or bridge receipt before the gate passes.
+
+- [ ] **Repair step 4: Review source-bound evidence implications before returning to live work**
+
+Keep the existing Task 6 capability record at its original commit/tree; do not edit its
+source fields or call it fresh repaired-head evidence. Independently determine required
+revalidation for any exercised code changed by this repair. The four containment scenarios
+and their eventual decision must be genuinely fresh on the repaired, reviewed source. Only
+then operate the supported cleanup/restart command against the retained failure, preserving
+all refusals and real effects. Resume the following original Task 7 steps in order.
+
 **Files:**
 - Create after live run: fresh evidence below `workspace/runtime/validation/mo2-containment/<new-run>/`
 - Create: `docs/validation/mo2-containment-replacement.md`

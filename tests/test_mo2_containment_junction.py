@@ -46,11 +46,64 @@ def _mount_point_payload(substitute_name: str, print_name: str) -> bytes:
 @unittest.skipUnless(os.name == "nt", "NTFS junction tests require Windows")
 class Mo2ContainmentJunctionTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(prefix="modlab-containment-junction-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="modlab-containment-junction-", dir=Path(__file__).resolve().parents[1])
         self.root = Path(self.temporary.name)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_owned_projection_retains_link_target_and_parents_until_close(self):
+        self.assertTrue(callable(getattr(windows_junction, "create_owned_projection", None)))
+        source = self.root / "source" / "Protected"
+        source.mkdir(parents=True)
+        stage = self.root / "stage"
+        stage.mkdir()
+        owner = windows_junction.create_owned_projection(source, stage / "Protected")
+        try:
+            for target in (owner.evidence.link_path, source, source.parent, stage):
+                with self.subTest(target=target):
+                    with self.assertRaises(OSError):
+                        target.rename(target.with_name(target.name + "-substituted"))
+            owner.verify()
+        finally:
+            owner.close()
+        with self.assertRaises(ContainmentSafetyError):
+            owner.verify()
+
+    def test_owned_projection_rejects_every_identity_or_payload_mismatch(self):
+        self.assertTrue(callable(getattr(windows_junction, "create_owned_projection", None)))
+        source = self.root / "source" / "Protected"
+        source.mkdir(parents=True)
+        stage = self.root / "stage"
+        stage.mkdir()
+        owner = windows_junction.create_owned_projection(source, stage / "Protected")
+        real_identity = windows_junction._identity_at_path
+        try:
+            for pinned in owner.pins:
+                for changed in ((pinned.identity[0] + 1, pinned.identity[1]), (pinned.identity[0], pinned.identity[1] + 1)):
+                    with self.subTest(path=pinned.path, changed=changed):
+                        with mock.patch.object(windows_junction, "_identity_at_path", side_effect=lambda path, p=pinned, c=changed: c if path == p.path else real_identity(path)):
+                            with self.assertRaises(ContainmentSafetyError):
+                                owner.verify()
+            with mock.patch.object(windows_junction, "_read_reparse_payload_handle", return_value=b"bad"):
+                with self.assertRaises(ContainmentSafetyError):
+                    owner.verify()
+        finally:
+            owner.close()
+
+    def test_owned_projection_close_failure_preserves_all_live_pins(self):
+        self.assertTrue(callable(getattr(windows_junction, "create_owned_projection", None)))
+        source = self.root / "source" / "Protected"
+        source.mkdir(parents=True)
+        stage = self.root / "stage"
+        stage.mkdir()
+        owner = windows_junction.create_owned_projection(source, stage / "Protected")
+        with mock.patch.object(windows_junction, "_close_handle", side_effect=OSError("injected close")):
+            with self.assertRaises(JunctionOwnershipError) as raised:
+                owner.close()
+        self.assertEqual(4, len(raised.exception.pins))
+        raised.exception.resolve()
+        self.assertTrue(all(not pin.handle for pin in owner.pins))
 
     def test_projection_reads_source_without_copying_and_records_exact_payload(self):
         source = self.root / "source" / "Protected Existing"

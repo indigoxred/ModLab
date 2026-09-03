@@ -48,6 +48,7 @@ from modlab.validation.mo2_containment_store import (
     ContainmentStoreOwnershipError,
 )
 from modlab.validation import mo2_containment_service as service
+from modlab.validation import windows_junction as junction
 from modlab.validation.windows_watch_protocol import (
     CLAIM_NAME,
     LAUNCH_NAME,
@@ -75,6 +76,120 @@ WATCH_ROOT_KINDS = (
     "ExternalTempLow",
 )
 RUN_ID = "containment-run:0123456789abcdef0123456789abcdef"
+
+
+@unittest.skipUnless(os.name == "nt", "retained projection tests require Windows")
+class PreparationProjectionRegressionTests(unittest.TestCase):
+    def test_delegate_and_projection_close_failures_retain_the_union_of_live_owners(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-owner-union-", dir=Path(__file__).resolve().parents[1]) as directory:
+            base = Path(directory)
+            root = base / "observed"
+            target = root / "source/Protected"
+            target.mkdir(parents=True)
+            (root / "stage").mkdir()
+            unrelated = base / "delegate-owned"
+            unrelated.mkdir()
+            pins = []
+            real_close = junction._close_handle
+            def close(handle):
+                if any(pin.handle == handle for pin in pins):
+                    raise OSError("injected exact-owner close failure")
+                real_close(handle)
+            def operation():
+                owner = junction.create_owned_projection(target, root / "stage/Protected")
+                pins.extend(owner.pins)
+                extra = junction._pin_object(unrelated, desired_access=junction._FILE_READ_ATTRIBUTES, allow_reparse=False)
+                pins.append(extra)
+                failure = junction.JunctionOwnershipError("delegate retains a separate exact owner", (extra,))
+                failure.projection_owners = (owner,)
+                raise failure
+            token = service._ACTIVE_EFFECTS.set(service._EffectLedger())
+            try:
+                with patch.object(junction, "_close_handle", side_effect=close):
+                    with self.assertRaises(junction.JunctionOwnershipError) as raised:
+                        service._delegated_mutations((root,), operation)
+                self.assertEqual(5, len(raised.exception.pins))
+            finally:
+                service._ACTIVE_EFFECTS.reset(token)
+                junction._close_pinned_objects(tuple(pins), "test owner union")
+
+    def test_real_delegate_exception_observes_partial_projection_then_releases_owners(self):
+        with tempfile.TemporaryDirectory(prefix="modlab-partial-owner-", dir=Path(__file__).resolve().parents[1]) as directory:
+            root = Path(directory)
+            target = root / "source/Protected"
+            target.mkdir(parents=True)
+            stage = root / "stage"
+            stage.mkdir()
+            owners = []
+            failure = RuntimeError("genuine delegate failure after partial mutation")
+            def operation():
+                owner = junction.create_owned_projection(target, stage / "Protected")
+                owners.append(owner)
+                (stage / "partial.txt").write_bytes(b"actual partial output")
+                failure.projection_owners = (owner,)
+                raise failure
+            ledger = service._EffectLedger()
+            token = service._ACTIVE_EFFECTS.set(ledger)
+            try:
+                with self.assertRaises(RuntimeError) as raised:
+                    service._delegated_mutations((root,), operation)
+                self.assertIs(failure, raised.exception)
+                self.assertEqual((root,), ledger.freeze().child_mutation_roots)
+                self.assertTrue(all(not pinned.handle for pinned in owners[0].pins))
+                self.assertEqual(b"actual partial output", (stage / "partial.txt").read_bytes())
+            finally:
+                service._ACTIVE_EFFECTS.reset(token)
+                for owner in owners:
+                    owner.close()
+
+    def test_real_fixture_reaches_guarded_post_observation(self):
+        # Catches loss of the real fixture's projection owner at the effect boundary.
+        from tests.support.mo2_containment import prepare_fixture_with_fake_bootstrap
+        with tempfile.TemporaryDirectory(prefix="modlab-preparation-red-", dir=Path(__file__).resolve().parents[1]) as directory:
+            root = Path(directory)
+            ledger = service._EffectLedger()
+            token = service._ACTIVE_EFFECTS.set(ledger)
+            try:
+                try:
+                    fixture = service._delegated_mutations(
+                        (root,), lambda: prepare_fixture_with_fake_bootstrap(root, retain_projection_owners=True)
+                    )
+                except service.ContainmentServiceError as error:
+                    self.fail(f"real guarded fixture rejected its own projection: {error}")
+                self.assertTrue(fixture.stage_mods.joinpath("Protected Existing").is_junction())
+                self.assertEqual((root,), ledger.freeze().child_mutation_roots)
+            finally:
+                service._ACTIVE_EFFECTS.reset(token)
+
+    def test_job_created_projection_is_observed_without_following_target(self):
+        # Catches blanket reparse rejection and traversal through an allowed link.
+        self.assertTrue(callable(getattr(junction, "create_owned_projection", None)), "creation-bound projection API is missing")
+        with tempfile.TemporaryDirectory(prefix="modlab-owned-link-", dir=Path(__file__).resolve().parents[1]) as directory:
+            root = Path(directory)
+            source = root / "source" / "Protected Existing"
+            stage = root / "stage"
+            source.mkdir(parents=True)
+            stage.mkdir()
+            (source / "marker.txt").write_bytes(b"unchanged")
+            owner = junction.create_owned_projection(source, stage / "Protected Existing")
+            try:
+                rows = service._mutation_root_observation(root, expected_projections=(owner,))
+                self.assertIsNotNone(rows)
+                names = {row[0] for row in rows}
+                self.assertIn("stage/Protected Existing", names)
+                self.assertNotIn("stage/Protected Existing/marker.txt", names)
+                self.assertEqual(b"unchanged", (source / "marker.txt").read_bytes())
+            finally:
+                owner.close()
+
+    def test_recover_preparation_refuses_absent_storage_without_creating_it(self):
+        # Catches physically mutating an absent root while handling recovery refusal.
+        self.assertTrue(callable(getattr(service, "recover_preparation", None)), "preparation recovery API is missing")
+        with tempfile.TemporaryDirectory(prefix="modlab-preparation-recovery-", dir=Path(__file__).resolve().parents[1]) as directory:
+            absent = Path(directory) / "absent-validation"
+            with self.assertRaises((service.ContainmentServiceError, ContainmentStoreError)):
+                service.recover_preparation(absent, "containment-run:" + "a" * 32)
+            self.assertFalse(absent.exists())
 
 
 def tree(letter: str) -> TreeIdentity:
@@ -1014,7 +1129,7 @@ class ContainmentServiceTests(unittest.TestCase):
             calls = []
             observed_intents = []
 
-            def fake_prepare(_source, _artifact, _steam, _validation, scenario, *, fixture_parent=None):
+            def fake_prepare(_source, _artifact, _steam, _validation, scenario, *, fixture_parent=None, **_kwargs):
                 parent = Path(fixture_parent)
                 self.assertTrue(parent.is_dir())
                 calls.append((scenario, parent))
@@ -1057,11 +1172,12 @@ class ContainmentServiceTests(unittest.TestCase):
                 run_root / "fixtures" / item.value
                 for item in ContainmentScenario
             )
-            fixture_roots = (run_root / "fixtures", *scenario_fixture_roots)
+            fixture_roots = (run_root / "preparation-projections", run_root / "fixtures", *scenario_fixture_roots)
             self.assertEqual(fixture_roots, prepared.effects.child_mutation_roots)
             self.assertEqual(
                 (
                     run_root / "intent.json",
+                    run_root / "preparation-attempt.json",
                     *fixture_roots,
                     run_root / "request.json",
                 ),
@@ -1139,12 +1255,15 @@ class ContainmentServiceTests(unittest.TestCase):
                 )
 
             self.assertFalse(fixture_root.exists())
-            self.assertEqual((), raised.exception.effects.child_mutation_roots)
+            self.assertEqual((fixture_root.parent.parent / "preparation-projections",), raised.exception.effects.child_mutation_roots)
             self.assertEqual(
                 (
                     layout.mo2_containment_validation
                     / ("d" * 32)
                     / "intent.json",
+                    layout.mo2_containment_validation / ("d" * 32) / "preparation-attempt.json",
+                    layout.mo2_containment_validation / ("d" * 32) / "preparation-projections",
+                    layout.mo2_containment_validation / ("d" * 32) / "preparation-failure.json",
                 ),
                 raised.exception.effects.written_paths,
             )
@@ -1190,7 +1309,7 @@ class ContainmentServiceTests(unittest.TestCase):
 
             self.assertTrue((fixture_root / "partial.marker").is_file())
             self.assertEqual(
-                (fixture_root.parent, fixture_root),
+                (fixture_root.parent.parent / "preparation-projections", fixture_root.parent, fixture_root),
                 raised.exception.effects.child_mutation_roots,
             )
             self.assertEqual(
@@ -1198,8 +1317,11 @@ class ContainmentServiceTests(unittest.TestCase):
                     layout.mo2_containment_validation
                     / ("e" * 32)
                     / "intent.json",
+                    layout.mo2_containment_validation / ("e" * 32) / "preparation-attempt.json",
+                    layout.mo2_containment_validation / ("e" * 32) / "preparation-projections",
                     fixture_root.parent,
                     fixture_root,
+                    layout.mo2_containment_validation / ("e" * 32) / "preparation-failure.json",
                 ),
                 raised.exception.effects.written_paths,
             )
@@ -2694,6 +2816,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 scenario,
                 *,
                 fixture_parent=None,
+                **_kwargs,
             ):
                 if threading.current_thread().name == "first-prepare":
                     if not entered_first.is_set():

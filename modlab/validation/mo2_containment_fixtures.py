@@ -27,7 +27,9 @@ from modlab.validation.windows_integrity import (
     source_integrity_allowed,
     stage_integrity_allowed,
 )
-from modlab.validation.windows_junction import build_projection, inspect_junction
+from modlab.validation.windows_junction import (
+    OwnedProjection, build_projection, create_owned_projection, inspect_junction,
+)
 from modlab.workflows.skyrim.mo2_bootstrap import apply_mo2_setup, prepare_mo2_setup
 from modlab.workspace import WorkspaceLayout, workspace_layout
 
@@ -99,6 +101,7 @@ class ContainmentFixture:
     stage_receipt_id: str
     stage_environment: Mapping[str, str]
     external_watch_roots: tuple[tuple[str, Path], ...]
+    projection_owners: tuple[OwnedProjection, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -146,6 +149,8 @@ def prepare_containment_fixture(
     scenario: ContainmentScenario,
     *,
     fixture_parent: Path | None = None,
+    retain_projection_owners: bool = False,
+    on_projection_created: Callable[[OwnedProjection], None] | None = None,
 ) -> ContainmentFixture:
     """Create two disposable portable instances and project the protected source mod."""
     inputs = _fixture_inputs(
@@ -219,13 +224,6 @@ def prepare_containment_fixture(
 
     stage_environment = _prepare_stage_environment(run_root, stage_layout)
     _verify_stage_integrity_before_projection(stage_environment)
-    projections = build_projection(source_layout.skyrim_mo2_mods, stage_layout.skyrim_mo2_mods)
-    if len(projections) != 1:
-        raise ContainmentFixtureError("exactly one protected mod projection is required")
-    projection = inspect_junction(stage_layout.skyrim_mo2_mods / _PROTECTED_MOD)
-    if projection.target_path != source_layout.skyrim_mo2_mods / _PROTECTED_MOD:
-        raise ContainmentFixtureError("protected mod projection target does not match source")
-
     source_report = inspect_skyrim_mo2(
         source_layout.skyrim_mo2_app,
         Path(source_planned.plan.game_root),
@@ -244,6 +242,32 @@ def prepare_containment_fixture(
     if not stage_integrity_allowed(inspect_path_integrity(stage_layout.skyrim_mo2)):
         raise ContainmentFixtureError("stage instance integrity is not Low")
 
+    archives = write_scenario_archives(run_root)
+    external_roots = _external_low_watch_roots()
+    owners = ()
+    if retain_projection_owners:
+        if tuple(path.name for path in source_layout.skyrim_mo2_mods.iterdir()) != (_PROTECTED_MOD,):
+            raise ContainmentFixtureError("exactly one protected source mod is required")
+        if tuple(stage_layout.skyrim_mo2_mods.iterdir()):
+            raise ContainmentFixtureError("projection staging root must be empty")
+        owners = (create_owned_projection(
+            source_layout.skyrim_mo2_mods / _PROTECTED_MOD,
+            stage_layout.skyrim_mo2_mods / _PROTECTED_MOD,
+        ),)
+        if on_projection_created is not None:
+            try:
+                on_projection_created(owners[0])
+            except BaseException as error:
+                error.projection_owners = owners
+                raise
+    else:
+        projections = build_projection(source_layout.skyrim_mo2_mods, stage_layout.skyrim_mo2_mods)
+        if len(projections) != 1:
+            raise ContainmentFixtureError("exactly one protected mod projection is required")
+        projection = inspect_junction(stage_layout.skyrim_mo2_mods / _PROTECTED_MOD)
+        if projection.target_path != source_layout.skyrim_mo2_mods / _PROTECTED_MOD:
+            raise ContainmentFixtureError("protected mod projection target does not match source")
+
     return ContainmentFixture(
         scenario=scenario,
         run_root=run_root,
@@ -259,11 +283,12 @@ def prepare_containment_fixture(
         stage_play_modlist=stage_layout.skyrim_mo2_profiles / "ModLab - Play" / "modlist.txt",
         stage_cache=stage_layout.skyrim_mo2 / "webcache",
         stage_logs=stage_layout.skyrim_mo2 / "logs",
-        archives=write_scenario_archives(run_root),
+        archives=archives,
         source_receipt_id=source_applied.receipt.receipt_id,
         stage_receipt_id=stage_applied.receipt.receipt_id,
         stage_environment=MappingProxyType(stage_environment),
-        external_watch_roots=_external_low_watch_roots(),
+        external_watch_roots=external_roots,
+        projection_owners=owners,
     )
 
 

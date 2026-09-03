@@ -12,6 +12,8 @@ from pathlib import Path, PureWindowsPath
 import stat
 import struct
 
+from modlab.platform import windows_exact_fs as _exact_fs
+
 from modlab.platform.windows_exact_fs import (
     ExactObjectError,
     ExactObjectOwnershipError,
@@ -293,6 +295,91 @@ class _RetainedJunction:
 
     def close(self) -> None:
         self.pinned.close()
+
+
+@dataclass(frozen=True)
+class OwnedProjection:
+    """Creation-bound link, direct target and parents, retained through observation.
+
+    Only create_owned_projection constructs this capability. Closing it forfeits
+    observation authority; reopening matching paths never restores ownership.
+    """
+
+    evidence: JunctionEvidence
+    pins: tuple[_PinnedObject, ...]
+    payload: bytes
+
+    def verify(self) -> None:
+        if len(self.pins) != 4 or any(not pin.handle for pin in self.pins):
+            raise ContainmentSafetyError("projection creation ownership is unresolved or closed")
+        link, target, target_parent, link_parent = self.pins
+        if (link.path != self.evidence.link_path or target.path != self.evidence.target_path
+                or target.path.parent != target_parent.path or link.path.parent != link_parent.path):
+            raise ContainmentSafetyError("projection retained path binding differs")
+        for index, pin in enumerate(self.pins):
+            _require_direct_components(pin.path, allow_final_reparse=index == 0)
+            if (_file_identity(_handle_information(pin.handle, pin.path)) != pin.identity
+                    or _identity_at_path(pin.path) != pin.identity):
+                raise ContainmentSafetyError("projection native volume/file identity changed")
+            attributes, tag = _attribute_tag_for_handle(pin.handle, pin.path)
+            if not attributes & _FILE_ATTRIBUTE_DIRECTORY or (index and _is_reparse(attributes, tag)):
+                raise ContainmentSafetyError("projection retained object type changed")
+        if len({pin.identity[0] for pin in self.pins}) != 1:
+            raise ContainmentSafetyError("projection native volumes differ")
+        if (_read_reparse_payload_handle(link.handle, link.path) != self.payload
+                or _inspect_junction_handle(link.path, link.handle) != self.evidence):
+            raise ContainmentSafetyError("projection canonical payload or target changed")
+
+    def close(self) -> None:
+        _close_pinned_objects(self.pins, "owned projection close")
+
+
+def create_owned_projection(source_mod: Path, staging_mod: Path) -> OwnedProjection:
+    """Create relative to the retained parent; never infer creation from a reopen."""
+    source = _require_direct_directory(source_mod)
+    link = _absolute(staging_mod)
+    _require_direct_directory(link.parent)
+    parents: list[_PinnedObject] = []
+    created = None
+    link_pin = None
+    try:
+        for path in (source, source.parent, link.parent):
+            parents.append(_pin_object(path, desired_access=_DELETE | _FILE_READ_ATTRIBUTES,
+                                       allow_reparse=False,
+                                       share_mode=_FILE_SHARE_READ | _FILE_SHARE_WRITE))
+        parent = parents[-1]
+        shared_parent = _exact_fs.PinnedObject(
+            parent.path, parent.handle, _exact_fs.identity_at_path(parent.path)
+        )
+        created = _exact_fs.create_pinned_directory_child(link, shared_parent)
+        link_pin = _PinnedObject(link, created.handle,
+                                 (created.identity.volume_serial, created.identity.file_id))
+        # Transfer the first native handle, not a path-reopened handle.
+        created.handle = 0
+        payload = _mount_point_payload("\\??\\" + str(source), str(source))
+        native_buffer = ctypes.create_string_buffer(payload)
+        returned = wintypes.DWORD()
+        if not _kernel32.DeviceIoControl(link_pin.handle, _FSCTL_SET_REPARSE_POINT,
+                                        native_buffer, len(payload), None, 0,
+                                        ctypes.byref(returned), None):
+            raise _winerror(f"FSCTL_SET_REPARSE_POINT failed for {link}")
+        owner = OwnedProjection(_inspect_junction_handle(link, link_pin.handle),
+                                (link_pin, *parents), payload)
+        owner.verify()
+        return owner
+    except BaseException as error:
+        # Keep any surviving exact pins reachable even if native cleanup fails.
+        if link_pin is not None and link_pin.handle:
+            try:
+                _delete_exact_pinned_object(link_pin)
+            except BaseException as cleanup_error:
+                error.add_note(f"exact projection cleanup failed: {cleanup_error}")
+        try:
+            _close_retained_owners((error, created, link_pin, *parents),
+                                   "owned projection creation failure")
+        except JunctionOwnershipError as ownership_error:
+            raise ownership_error from error
+        raise
 
 
 @dataclass
@@ -1756,10 +1843,12 @@ __all__ = [
     "JunctionOwnershipError",
     "IO_REPARSE_TAG_MOUNT_POINT",
     "JunctionEvidence",
+    "OwnedProjection",
     "ReplacementQuarantineEvidence",
     "adopt_unique_staged_mod",
     "build_projection",
     "create_mod_projection",
+    "create_owned_projection",
     "ensure_direct_subdirectory",
     "inspect_junction",
     "quarantine_exact_object",

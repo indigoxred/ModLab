@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import partial, wraps
 import hashlib
@@ -97,6 +98,11 @@ from .windows_junction import (
     stable_tree_identity,
 )
 from . import windows_watch as _windows_watch
+from .mo2_preparation_recovery import (
+    PreparationAttempt, PreparationFailure, PreparationProjection,
+    PreparationRecovery, PreparationProcess, ProjectionIdentity, PreparationCleanup,
+    native_preparation_process_inventory, native_process_absent, record_id,
+)
 from .windows_watch import start_watch, stop_watch, watch_root
 from .windows_watch_protocol import (
     CLAIM_NAME,
@@ -590,6 +596,8 @@ def _close_mutation_root_guards(
 
 def _mutation_root_observation(
     supplied_root: Path,
+    *,
+    expected_projections: tuple = (),
 ) -> tuple[tuple[object, ...], ...] | None:
     """Take one stable, non-following inventory used to prove delegated mutation."""
     root = Path(supplied_root)
@@ -600,6 +608,28 @@ def _mutation_root_observation(
 
     rows: list[tuple[object, ...]] = []
     retained: list[object] = []
+    from .windows_junction import OwnedProjection
+    if type(expected_projections) is not tuple or any(type(owner) is not OwnedProjection for owner in expected_projections):
+        raise _MutationObservationError("expected projections must be exact retained owners")
+    projections = {}
+    owned_direct = {}
+    for owner in expected_projections:
+        try:
+            owner.verify()
+            link = owner.evidence.link_path
+            if not _beneath(root, link) or link == root or link in projections:
+                raise ContainmentSafetyError("expected projection is outside observation or duplicated")
+            projections[link] = owner
+            owned_direct.update((pin.path, pin) for pin in owner.pins[1:])
+        except (ContainmentSafetyError, OSError) as error:
+            raise _MutationObservationError(str(error)) from error
+
+    def verify_projections() -> None:
+        for owner in expected_projections:
+            try:
+                owner.verify()
+            except (ContainmentSafetyError, OSError) as error:
+                raise _MutationObservationError(str(error)) from error
 
     def redirected(metadata: os.stat_result) -> bool:
         return stat.S_ISLNK(metadata.st_mode) or bool(
@@ -684,6 +714,9 @@ def _mutation_root_observation(
     def stable_pin(path: Path, kind: str) -> object | None:
         if os.name != "nt":
             return None
+        if path in owned_direct:
+            verify_projections()
+            return owned_direct[path]
         pinned = pin_stable_direct_object(path, kind)
         retained.append(pinned)
         return pinned
@@ -860,6 +893,12 @@ def _mutation_root_observation(
         entries = scan(current)
         for name, child_path, metadata in entries:
             child_relative = relative / name
+            if child_path in projections:
+                verify_projections()
+                owner = projections[child_path]
+                rows.append((child_relative.as_posix(), "junction", owner.pins[0].identity,
+                             owner.evidence.reparse_payload_sha256))
+                continue
             if redirected(metadata):
                 raise _MutationObservationError(
                     f"delegated mutation entry is redirected or reparse: {child_path}"
@@ -876,7 +915,8 @@ def _mutation_root_observation(
         rescanned = scan(current)
         before_rows = tuple((name, identity(metadata)) for name, _path, metadata in entries)
         after_rows = tuple((name, identity(metadata)) for name, _path, metadata in rescanned)
-        if any(redirected(metadata) for _name, _path, metadata in rescanned):
+        verify_projections()
+        if any(redirected(metadata) and path not in projections for _name, path, metadata in rescanned):
             raise _MutationObservationError(
                 f"delegated mutation directory gained a reparse entry: {current}"
             )
@@ -885,6 +925,7 @@ def _mutation_root_observation(
 
     try:
         visit(root, Path(), root_metadata)
+        verify_projections()
         for component, expected_identity in path_identities:
             metadata = component.lstat()
             if redirected(metadata):
@@ -918,6 +959,8 @@ def _mutation_root_observation(
 def _delegated_mutations_guarded(
     roots: tuple[Path, ...],
     operation: Callable[[], _V],
+    *,
+    expected_projections: tuple = (),
 ) -> _V:
     """Record delegated roots iff pre/post inventories prove they changed."""
     exact_roots = _unique_paths(roots)
@@ -946,7 +989,9 @@ def _delegated_mutations_guarded(
         ownership_after: list[tuple[Path, ContainmentStoreOwnershipError]] = []
         for root, prior in zip(exact_roots, before, strict=True):
             try:
-                current = _mutation_root_observation(root)
+                owners = tuple(owner for owner in expected_projections if _beneath(root, owner.evidence.link_path))
+                current = (_mutation_root_observation(root, expected_projections=owners)
+                           if owners else _mutation_root_observation(root))
             except ContainmentStoreOwnershipError as error:
                 completed = (
                     error.completed_observation
@@ -1016,8 +1061,17 @@ def _delegated_mutations_guarded(
     try:
         value = operation()
     except BaseException as operation_error:
+        expected_projections = (*expected_projections, *getattr(operation_error, "projection_owners", ()))
         try:
-            record_observed_changes()
+            observation_error = None
+            try:
+                record_observed_changes()
+            except BaseException as error:
+                observation_error = error
+                raise
+            finally:
+                if expected_projections:
+                    _close_preparation_owners(expected_projections, "failed delegated projection observation", operation_error, observation_error)
         except ContainmentStoreOwnershipError as observation_error:
             detail = (
                 "delegated mutation effect observation retained ownership after "
@@ -1056,7 +1110,17 @@ def _delegated_mutations_guarded(
                 f"delegated mutation failed ({operation_error}); {detail}"
             ) from operation_error
         raise
-    record_observed_changes()
+    if isinstance(value, ContainmentFixture):
+        expected_projections = (*expected_projections, *value.projection_owners)
+    observation_error = None
+    try:
+        record_observed_changes()
+    except BaseException as error:
+        observation_error = error
+        raise
+    finally:
+        if expected_projections:
+            _close_preparation_owners(expected_projections, "delegated projection observation", observation_error)
     return value
 
 
@@ -1819,6 +1883,7 @@ def prepare_run(
     validation_root: Path,
     *,
     retry_of: ScenarioRecovery | None = None,
+    preparation_recovery: PreparationRecovery | None = None,
 ) -> str:
     """Create four independent disposable fixtures and one immutable request."""
     source = Path(source_workspace).expanduser().absolute()
@@ -1835,7 +1900,18 @@ def prepare_run(
             store,
             command_fingerprint,
             retry_of,
+            preparation_recovery=preparation_recovery,
         )
+        if preparation_recovery is not None:
+            if retry_of is not None:
+                raise ContainmentServiceError("scenario and preparation replacements are distinct")
+            try:
+                old_attempt = store.load_preparation_attempt(preparation_recovery.run_id)
+            except ContainmentStoreNotFound:
+                old_attempt = None
+            with store._run_lock(preparation_recovery.run_id), _retained_preparation_recovery(store, preparation_recovery):
+                proof = _preparation_absence_proof(old_attempt)
+                store.consume_preparation_replacement(preparation_recovery, run_id, process_proof=proof)
         retry_binding = None
         if retry_of is not None:
             if not isinstance(retry_of, ScenarioRecovery):
@@ -1863,43 +1939,384 @@ def prepare_run(
             "retryOf": retry_binding,
         }
         intent_write = store.write_intent(run_id, intent)
+        attempt = _new_preparation_attempt(run_id, intent_write.content_id, command_fingerprint, preparation_recovery)
+        store.write_preparation_attempt(attempt)
         fixture_root = store.run_path(run_id) / "fixtures"
         fixtures: list[ContainmentFixture] = []
-        for scenario in ContainmentScenario:
-            fixture_parent = fixture_root / scenario.value
-            fixtures.append(
-                _delegated_mutations_with_created_root(
-                    fixture_parent,
-                    (),
-                    partial(
-                        preflight_containment_fixture,
-                        source,
-                        mo2_artifact_id,
-                        validation,
-                        scenario,
-                        fixture_parent=fixture_parent,
-                    ),
-                    lambda _prepared, scenario=scenario, fixture_parent=fixture_parent: (
-                        prepare_containment_fixture(
+        projection_ids = []
+        def retain_projection(scenario, owner):
+            owner.verify()
+            projection = PreparationProjection(run_id, intent_write.content_id,
+                command_fingerprint, record_id(attempt), scenario.value,
+                tuple(ProjectionIdentity(str(pin.path), *pin.identity) for pin in owner.pins),
+                owner.payload.hex())
+            store.write_preparation_projection(projection)
+            projection_ids.append(record_id(projection))
+        try:
+            # Receipts use a separate direct parent: the fixture operation holds
+            # DELETE-denying ancestor guards through post-observation.
+            _delegated_mutations_with_created_root(
+                store.run_path(run_id) / "preparation-projections", (),
+                lambda: None, lambda _prepared: None, require_absent=True)
+            for scenario in ContainmentScenario:
+                fixture_parent = fixture_root / scenario.value
+                fixtures.append(
+                    _delegated_mutations_with_created_root(
+                        fixture_parent,
+                        (),
+                        partial(
+                            preflight_containment_fixture,
                             source,
                             mo2_artifact_id,
-                            steam,
                             validation,
                             scenario,
                             fixture_parent=fixture_parent,
-                        )
-                    ),
-                    require_absent=True,
+                        ),
+                        lambda _prepared, scenario=scenario, fixture_parent=fixture_parent: (
+                            prepare_containment_fixture(
+                                source,
+                                mo2_artifact_id,
+                                steam,
+                                validation,
+                                scenario,
+                                fixture_parent=fixture_parent,
+                                retain_projection_owners=True,
+                                on_projection_created=partial(retain_projection, scenario),
+                            )
+                        ),
+                        require_absent=True,
+                    )
                 )
-            )
-        records = tuple(_fixture_record(fixture, steam) for fixture in fixtures)
-        document = {
-            **intent,
-            "intentId": intent_write.content_id,
-            "scenarios": [_record_document(record) for record in records],
-        }
-        store.write_request(run_id, document)
+            records = tuple(_fixture_record(fixture, steam) for fixture in fixtures)
+            document = {
+                **intent,
+                "intentId": intent_write.content_id,
+                "scenarios": [_record_document(record) for record in records],
+            }
+            store.write_request(run_id, document)
+        except BaseException as error:
+            # Never rewrite intent/request or reinterpret this as a scenario result.
+            if not _path_exists_no_follow(store.request_path(run_id)):
+                failure = PreparationFailure(run_id, intent_write.content_id,
+                    command_fingerprint, record_id(attempt),
+                    tuple(str(path) for path in _current_effects().freeze().written_paths),
+                    tuple(projection_ids), f"{type(error).__name__}: {error}", False)
+                try:
+                    store.write_preparation_failure(failure)
+                except BaseException as publication_error:
+                    error.add_note(f"preparation failure evidence publication refused: {publication_error}")
+                    if isinstance(publication_error, ContainmentStoreOwnershipError):
+                        raise publication_error from error
+            raise
     return run_id
+
+
+def _new_preparation_attempt(run_id, intent_id, fingerprint, recovery):
+    source = Path(__file__).resolve().parents[2]
+    commit = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    tree = subprocess.run(["git", "-C", str(source), "rev-parse", commit + "^{tree}"], check=True, capture_output=True, text=True).stdout.strip()
+    digest = hashlib.sha256()
+    for path in sorted((source / "modlab").rglob("*.py")):
+        name, data = path.relative_to(source).as_posix().encode(), path.read_bytes()
+        digest.update(len(name).to_bytes(8, "big") + name + len(data).to_bytes(8, "big") + data)
+    handle, created = _windows_watch._open_process_identity(os.getpid())
+    if _windows_watch._close_controller_handle(handle, "preparation controller", source):
+        raise ContainmentServiceError("preparation controller identity handle could not be closed")
+    return PreparationAttempt(run_id, intent_id, fingerprint, commit, tree, digest.hexdigest(),
+        "preparation-session:" + uuid.uuid4().hex, os.getpid(), created,
+        None if recovery is None else record_id(recovery))
+
+
+def _require_early_preparation(store, run_id):
+    # lstat: a substituted link, malformed file or any started evidence also blocks.
+    for path in (store.request_path(run_id), store.decision_path(run_id)):
+        if _path_exists_no_follow(path):
+            raise ContainmentServiceError("prepared or scenario-bearing run cannot use preparation recovery")
+    scenarios = store.run_path(run_id) / "scenarios"
+    if _path_exists_no_follow(scenarios):
+        store._require_existing_direct_directory(scenarios, "preparation scenarios")
+        if tuple(scenarios.iterdir()):
+            raise ContainmentServiceError("scenario-bearing run cannot use preparation recovery")
+
+
+def _preparation_absence_proof(attempt):
+    proof = ()
+    if attempt is not None:
+        if not native_process_absent(attempt.controller_pid, attempt.controller_creation_time):
+            raise ContainmentServiceError("old preparing controller is live, reused or uncertain")
+        proof = (PreparationProcess(attempt.controller_pid, attempt.controller_creation_time, "preparing-controller", "Absent"),)
+    first = native_preparation_process_inventory()
+    second = native_preparation_process_inventory()
+    if first != second:
+        raise ContainmentServiceError("native preparation process inventory changed")
+    return (*proof, *second)
+
+
+def _require_supported_legacy_preparation(store, run_id, intent):
+    """Recognize only the retained v1 intent-only/NewFolder failure shape.
+
+    This policy proves current abandonment, not the old exit code or Git source.
+    No legacy pathname observation confers object creation or deletion ownership.
+    """
+    if intent["retryOf"] is not None or intent["predecessorRunIds"]:
+        raise ContainmentServiceError("unsupported legacy preparation lineage")
+    root = store.run_path(run_id)
+    allowed = {"intent.json", "fixtures", "scenarios", "quarantine", "preparation-failure.json", "preparation-recovery.json", "preparation-replacement.json"}
+    if set(_direct_names(root)) - allowed:
+        raise ContainmentServiceError("unknown legacy preparation run shape")
+    for name in ("scenarios", "quarantine"):
+        path = root / name
+        if _path_exists_no_follow(path):
+            store._require_existing_direct_directory(path, "legacy " + name)
+            if tuple(path.iterdir()):
+                raise ContainmentServiceError("legacy preparation has scenario or cleanup state")
+    fixtures = root / "fixtures"
+    store._require_existing_direct_directory(fixtures, "legacy fixtures")
+    if _direct_names(fixtures) != ("NewFolder",):
+        raise ContainmentServiceError("unsupported legacy fixture shape")
+    store._require_existing_direct_directory(fixtures / "NewFolder", "legacy NewFolder fixture")
+
+
+@_receipted
+def recover_preparation(validation_root: Path, run_id: str) -> PreparationRecovery:
+    """Cleanup-only preparation recovery; no request, result, decision or launch."""
+    store = ContainmentStore.open_readonly(validation_root)
+    store._effect_recorder = _current_effects().write
+    intent = store.load_intent(run_id)
+    fingerprint = _intent_command_fingerprint(intent, run_id)
+    with store.command_lock(fingerprint), store._run_lock(run_id):
+        _require_early_preparation(store, run_id)
+        try:
+            existing = store.load_preparation_recovery(run_id)
+        except ContainmentStoreNotFound:
+            existing = None
+        if existing is not None:
+            with _retained_preparation_recovery(store, existing):
+                try:
+                    prior_attempt = store.load_preparation_attempt(run_id)
+                except ContainmentStoreNotFound:
+                    prior_attempt = None
+                _preparation_absence_proof(prior_attempt)
+            return existing
+        try:
+            attempt = store.load_preparation_attempt(run_id)
+        except ContainmentStoreNotFound:
+            attempt = None
+        if attempt is None:
+            _require_supported_legacy_preparation(store, run_id, intent)
+        try:
+            failure = store.load_preparation_failure(run_id)
+        except ContainmentStoreNotFound:
+            if attempt is not None:
+                raise ContainmentServiceError("preparation was interrupted without final effect receipts; cleanup ownership is incomplete")
+            _preparation_absence_proof(None)
+            failure = PreparationFailure(run_id, _intent_id_for(intent), fingerprint,
+                None, (), (), "legacy abandonment under supported-preparation-python-git-tar-mo2-absence-v1; no historic source/exit or creation ownership attested", True)
+            store.write_preparation_failure(failure)
+        proof = _preparation_absence_proof(attempt)
+        if failure.legacy:
+            recovery = PreparationRecovery(run_id, failure.intent_id, fingerprint, record_id(failure),
+                proof, (), (str(store.run_path(run_id) / "fixtures"),),
+                (), True)
+            store.write_preparation_recovery(recovery)
+            return recovery
+        projections = []
+        for scenario in ContainmentScenario:
+            try:
+                projections.append(store.load_preparation_projection(run_id, scenario.value))
+            except ContainmentStoreNotFound:
+                pass
+        if tuple(record_id(item) for item in projections) != failure.projection_ids:
+            raise ContainmentServiceError("preparation failure projection receipts are incomplete or inconsistent")
+        cleaned = []
+        cleanup_ids = []
+        from . import windows_junction as junction
+        owners = []
+        primary = None
+        try:
+            for projection in projections:
+                owners.append(_pin_preparation_projection(store, projection))
+            fixtures = store.run_path(run_id) / "fixtures"
+            if _path_exists_no_follow(fixtures):
+                observation = _mutation_root_observation(fixtures, expected_projections=tuple(owners))
+                if observation is None:
+                    raise ContainmentServiceError("preparation fixture state could not be observed exactly")
+            for projection, owner in zip(projections, owners, strict=True):
+                cleaned.extend(_recover_preparation_projection(store, projection, owner))
+                cleanup_ids.append(record_id(store.load_preparation_cleanup(run_id, projection.scenario)))
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            _close_preparation_owners(tuple(owners), "preparation recovery owners", primary)
+        # Reprove after cleanup, before issuing the single immutable authority.
+        proof = _preparation_absence_proof(attempt)
+        recovery = PreparationRecovery(run_id, failure.intent_id, fingerprint, record_id(failure),
+            proof, tuple(cleaned), (str(store.run_path(run_id) / "fixtures"),), (), True,
+            cleanup_ids=tuple(cleanup_ids))
+        store.write_preparation_recovery(recovery)
+        return recovery
+
+
+def _close_preparation_owners(owners, label, *errors):
+    from . import windows_junction as junction
+    retained = tuple(error if isinstance(error, (junction.JunctionOwnershipError, ExactObjectOwnershipError))
+        else getattr(error, "ownership", None) for error in errors)
+    junction._close_retained_owners((*retained, *owners), label)
+
+
+def _pin_preparation_projection(store, projection):
+    from . import windows_junction as junction
+    fixture = store.run_path(projection.run_id) / "fixtures" / projection.scenario
+    expected_link = fixture / "stage-workspace/tools/mo2/skyrim-se-ae/mods/Protected Existing"
+    expected_target = fixture / "source-workspace/tools/mo2/skyrim-se-ae/mods/Protected Existing"
+    expected = (expected_link, expected_target, expected_target.parent, expected_link.parent)
+    if tuple(Path(item.path) for item in projection.identities) != expected:
+        raise ContainmentServiceError("preparation projection is not the exact confined fixture link")
+    pins = []
+    try:
+        for index, item in enumerate(projection.identities):
+            pins.append(junction._pin_object(Path(item.path), desired_access=junction._DELETE | junction._FILE_READ_ATTRIBUTES,
+                expected_identity=(item.volume, item.file_id), allow_reparse=index == 0,
+                share_mode=junction._FILE_SHARE_READ | junction._FILE_SHARE_WRITE))
+        owner = junction.OwnedProjection(junction._inspect_junction_handle(expected_link, pins[0].handle), tuple(pins), bytes.fromhex(projection.payload_hex))
+        owner.verify()
+        return owner
+    except BaseException as error:
+        _close_preparation_owners(tuple(pins), "preparation cleanup", error)
+        raise
+
+
+def _recover_preparation_projection(store, projection, owner):
+    from . import windows_junction as junction
+    owner.verify()
+    quarantine = store.run_path(projection.run_id) / ("preparation-quarantine-" + projection.scenario)
+    def record_created_parent(_prepared):
+        volume, file_id = junction._identity_at_path(quarantine)
+        cleanup = PreparationCleanup(projection.run_id, projection.intent_id, projection.command_fingerprint,
+            record_id(projection), projection.scenario, str(quarantine / owner.evidence.link_path.name),
+            ProjectionIdentity(str(quarantine), volume, file_id))
+        store.write_preparation_cleanup(cleanup)
+        return cleanup
+    cleanup = _delegated_mutations_with_created_root(quarantine, (), lambda: None,
+        record_created_parent, require_absent=True)
+    parent = junction._pin_parent_directory(quarantine)
+    primary = None
+    try:
+        if parent.identity != (cleanup.destination_parent.volume, cleanup.destination_parent.file_id):
+            raise ContainmentServiceError("created cleanup parent was substituted")
+        junction._rename_pinned_object(owner.pins[0], Path(cleanup.destination), parent)
+        if _path_exists_no_follow(owner.evidence.link_path):
+            raise ContainmentServiceError("cleaned projection source path reappeared")
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        # An error after the native move still reports the observed real effect.
+        if owner.pins[0].path != owner.evidence.link_path:
+            _current_effects().child_mutation_root(owner.evidence.link_path.parent)
+            _current_effects().write(owner.pins[0].path)
+        _close_preparation_owners((parent,), "preparation cleanup parent", primary)
+    return (str(owner.pins[0].path),)
+
+
+@contextmanager
+def _retained_preparation_recovery(store, recovery):
+    """Hold every cleaned object/parent through absence proof and consumption."""
+    from . import windows_junction as junction
+    if store.load_preparation_recovery(recovery.run_id) != recovery:
+        raise ContainmentServiceError("preparation recovery is not the exact stored value")
+    failure = store.load_preparation_failure(recovery.run_id)
+    pins = []
+    guards = []
+    primary = None
+    try:
+        _require_early_preparation(store, recovery.run_id)
+        if failure.legacy:
+            _require_supported_legacy_preparation(store, recovery.run_id, store.load_intent(recovery.run_id))
+            guard = _mutation_root_guard(store.run_path(recovery.run_id) / "fixtures/NewFolder", require_target_existing=True)
+            if guard is not None:
+                guards.append(guard)
+            if recovery.cleaned or recovery.cleanup_ids:
+                raise ContainmentServiceError("legacy recovery cannot claim cleanup ownership")
+        else:
+            projections = []
+            cleanups = []
+            destinations = []
+            for scenario in ContainmentScenario:
+                try:
+                    projection = store.load_preparation_projection(recovery.run_id, scenario.value)
+                except ContainmentStoreNotFound:
+                    continue
+                cleanup = store.load_preparation_cleanup(recovery.run_id, scenario.value)
+                projections.append(record_id(projection))
+                cleanups.append(record_id(cleanup))
+                destinations.append(cleanup.destination)
+                expected_parent = store.run_path(recovery.run_id) / ("preparation-quarantine-" + scenario.value)
+                if Path(cleanup.destination_parent.path) != expected_parent or Path(cleanup.destination) != expected_parent / "Protected Existing":
+                    raise ContainmentServiceError("cleanup destination escaped its exact run")
+                for index, identity in enumerate(projection.identities):
+                    path = Path(cleanup.destination) if index == 0 else Path(identity.path)
+                    junction._require_direct_components(path, allow_final_reparse=index == 0)
+                    pinned = junction._pin_object(path, desired_access=junction._DELETE | junction._FILE_READ_ATTRIBUTES,
+                        expected_identity=(identity.volume, identity.file_id), allow_reparse=index == 0,
+                        share_mode=junction._FILE_SHARE_READ | junction._FILE_SHARE_WRITE)
+                    pins.append(pinned)
+                    information = junction._handle_information(pinned.handle, path)
+                    if (not information.dwFileAttributes & junction._FILE_ATTRIBUTE_DIRECTORY
+                            or junction._identity_at_path(path) != pinned.identity):
+                        raise ContainmentServiceError("cleanup verification identity or directory type differs")
+                    if index == 0:
+                        if junction._read_reparse_payload_handle(pinned.handle, path) != bytes.fromhex(projection.payload_hex):
+                            raise ContainmentServiceError("cleaned projection payload was substituted")
+                        if _path_exists_no_follow(Path(identity.path)):
+                            raise ContainmentServiceError("old projection path reappeared after cleanup")
+                parent = cleanup.destination_parent
+                pins.append(junction._pin_object(Path(parent.path), desired_access=junction._DELETE | junction._FILE_READ_ATTRIBUTES,
+                    expected_identity=(parent.volume, parent.file_id), allow_reparse=False,
+                    share_mode=junction._FILE_SHARE_READ | junction._FILE_SHARE_WRITE))
+            if (tuple(projections) != failure.projection_ids or tuple(cleanups) != recovery.cleanup_ids
+                    or tuple(destinations) != recovery.cleaned):
+                raise ContainmentServiceError("cleanup record set does not match the recovered failure")
+            for pinned in pins:
+                if junction._identity_at_path(pinned.path) != pinned.identity:
+                    raise ContainmentServiceError("cleanup identity changed before consumption")
+        yield
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        _close_mutation_root_guards(tuple(guards), primary)
+        _close_preparation_owners(tuple(pins), "preparation replacement verification", primary)
+
+
+@_receipted
+def restart_preparation(validation_root: Path, run_id: str) -> str:
+    receipt = recover_preparation(validation_root, run_id)
+    _record_preparation_effects(receipt.effects)
+    recovery = receipt.value
+    if not recovery.fresh_run_permitted:
+        raise ContainmentServiceError("preparation replacement refused: " + "; ".join(recovery.blockers))
+    store = ContainmentStore.open_readonly(validation_root)
+    intent = store.load_intent(run_id)
+    fresh = prepare_run(Path(intent["sourceWorkspace"]), str(intent["mo2ArtifactId"]),
+        Path(intent["steamRoot"]), validation_root, preparation_recovery=recovery)
+    _record_preparation_effects(fresh.effects)
+    return fresh.value
+
+
+def _record_preparation_effects(effects):
+    ledger = _current_effects()
+    for path in effects.written_paths:
+        ledger.write(path)
+    for root in effects.child_mutation_roots:
+        ledger.child_mutation_root(root)
+    if effects.watcher_pid is not None:
+        ledger.watcher(effects.watcher_pid)
+    if effects.mo2_pid is not None:
+        ledger.mo2(effects.mo2_pid)
+    ledger.changes(source=effects.source_changes, game=effects.game_changes,
+        production_mo2=effects.production_mo2_changes)
 
 
 @_receipted
@@ -2479,11 +2896,22 @@ def adjudicate_run(validation_root: Path, run_id: str) -> CapabilityDecision:
                 historical_fingerprint = _intent_command_fingerprint(
                     historical_intent, historical_run_id
                 )
-                _load_bound_request(store, historical_run_id, historical_intent)
                 if historical_fingerprint != current_fingerprint:
                     raise ContainmentServiceError(
                         "listed predecessor command fingerprint differs"
                     )
+                try:
+                    replacement = store.load_preparation_replacement(historical_run_id)
+                except ContainmentStoreNotFound:
+                    pass
+                else:
+                    _load_preparation_successor(store, replacement, current_fingerprint)
+                    if replacement.consumed_by_run_id not in (*predecessors, run_id):
+                        raise ContainmentServiceError("preparation replacement escaped current predecessor cohort")
+                    # This is only an abandoned preparation disposition. It has
+                    # no scenario result and contributes no successful evidence.
+                    continue
+                _load_bound_request(store, historical_run_id, historical_intent)
             except (ContainmentStoreError, ContainmentServiceError) as error:
                 metadata_valid = False
                 cohort_reasons.append(
@@ -3913,6 +4341,8 @@ def _prepare_predecessor_run_ids(
     store: ContainmentStore,
     command_fingerprint: str,
     retry_of: ScenarioRecovery | None,
+    *,
+    preparation_recovery: PreparationRecovery | None = None,
 ) -> tuple[str, ...]:
     run_ids: list[str] = []
     unresolved: list[str] = []
@@ -3938,7 +4368,12 @@ def _prepare_predecessor_run_ids(
         try:
             store.load_decision(run_id)
         except ContainmentStoreError:
-            unresolved.append(run_id)
+            try:
+                replacement = store.load_preparation_replacement(run_id)
+            except ContainmentStoreNotFound:
+                unresolved.append(run_id)
+            else:
+                _load_preparation_successor(store, replacement, command_fingerprint)
         for scenario in ContainmentScenario:
             try:
                 authority = store.load_retry_authority(run_id, scenario)
@@ -3974,6 +4409,15 @@ def _prepare_predecessor_run_ids(
                 )
     predecessors = tuple(sorted(set(run_ids)))
     unresolved_runs = tuple(sorted(set(unresolved)))
+    if preparation_recovery is not None:
+        if type(preparation_recovery) is not PreparationRecovery or retry_of is not None:
+            raise ContainmentServiceError("preparation replacement requires an exact distinct recovery")
+        stored = store.load_preparation_recovery(preparation_recovery.run_id)
+        if (stored != preparation_recovery or not stored.fresh_run_permitted
+                or stored.command_fingerprint != command_fingerprint
+                or unresolved_runs != (stored.run_id,) or outstanding_retries):
+            raise ContainmentServiceError("preparation authority must identify the sole unresolved same-command predecessor")
+        return predecessors
     if retry_of is None:
         if unresolved_runs or outstanding_retries:
             raise ContainmentServiceError(
@@ -4007,6 +4451,19 @@ def _prepare_predecessor_run_ids(
             + ",".join((*other_unresolved, *other_authorities))
         )
     return predecessors
+
+
+def _load_preparation_successor(store, replacement, fingerprint):
+    _require_early_preparation(store, replacement.run_id)
+    successor = store.load_preparation_attempt(replacement.consumed_by_run_id)
+    intent = store.load_intent(successor.run_id)
+    if (successor.replaces_recovery_id != replacement.recovery_id
+            or successor.command_fingerprint != fingerprint
+            or replacement.command_fingerprint != fingerprint
+            or intent["retryOf"] is not None
+            or replacement.run_id not in intent["predecessorRunIds"]):
+        raise ContainmentServiceError("preparation replacement successor lineage differs")
+    return successor
 
 
 def _intent_command_fingerprint(

@@ -84,7 +84,7 @@ def import_curated_mo2_archive(
     )
 
 
-def prepare_fixture_with_fake_bootstrap(root: Path, *, fixture_parent: Path | None = None):
+def prepare_fixture_with_fake_bootstrap(root: Path, *, fixture_parent: Path | None = None, retain_projection_owners: bool = False):
     """Exercise fixture assembly without extracting or launching a real MO2 archive."""
     from modlab.validation import mo2_containment_fixtures as fixtures
 
@@ -150,6 +150,7 @@ def prepare_fixture_with_fake_bootstrap(root: Path, *, fixture_parent: Path | No
             initialize_workspace(source_workspace).mo2_containment_validation,
             ContainmentScenario.NEW_FOLDER,
             fixture_parent=fixture_parent,
+            **({"retain_projection_owners": True} if retain_projection_owners else {}),
         )
 
 
