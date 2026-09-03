@@ -299,6 +299,147 @@ If no layout passes, stop with `NotSupported`. Do not freeze bridge inventory or
 
 ---
 
+### Task 7A: Pre-mutation complete path budget and versioned short job layout
+
+**Approval:** The user's 2026-09-03 “we can continue” approves the two prerequisites
+forwarded from Pro, with the controller's four clarifications. Execute 7A then 7B,
+then the existing Task 7 live gates. The earlier link/recovery repair is complete.
+Do not repeat it, spend the retained failed run's retry, or touch public `main`.
+
+**Files and responsibilities:**
+
+- Create `modlab/adapters/mo2/path_budget.py`: pure, bounded ordinary-Windows-path
+  admission for the complete declared operation, including UTF-16/component counts.
+- Modify `modlab/adapters/mo2/archive.py`: check admitted archive entry destinations
+  before extraction directory creation, with no filename rewriting.
+- Modify `modlab/adapters/mo2/bootstrap_model.py`, `bootstrap_serialization.py`,
+  `modlab/workflows/skyrim/mo2_bootstrap_store.py`, and `mo2_bootstrap.py` only for
+  strict versioned NEW-job layout, path admission and its consumers. Preserve old
+  canonical plan/journal reads and old layout interpretation exactly.
+- Modify `modlab/validation/mo2_containment_fixtures.py` and
+  `mo2_containment_service.py`: budget all scenarios before preparation effects and
+  before recovery/replacement consumption; shorten only new job-owned physical paths.
+- Test in `tests/test_mo2_path_budget.py` and affected archive/bootstrap/containment
+  serialization, store, service and native recovery tests.
+
+**Contract:** A path check is not a live MO2 capability claim. Produce a versioned,
+auditable budget for this admitted release/fixture/operation, with the limiting path,
+component and stage on refusal. The policy covers nested admitted archive entries,
+all known generated state, temporary files, logs, watcher/publication candidates,
+quarantine and recovery destinations, both before and after each planned relocation.
+Unknown/unbounded output patterns are unsupported, not implicitly safe. Count actual
+Windows string units and per-component limits, not just `len(root)`.
+
+Use deterministic compact names derived from the full job identity only inside
+new job-owned layout. Record the version so readers do not reinterpret historical
+paths. Do not change user mod/archive member names, production layout, old attempts,
+command identity, configured workspace, or Steam. No hidden drive/junction mappings,
+8.3 dependency, global registry/manifest edits or extended-prefix-only workaround.
+An observed failure at 259 characters is evidence, not a universal policy threshold.
+
+`restart_preparation` must perform a physically read-only complete future-job admission
+before `recover_preparation`, any cleanup, or one-use replacement publication. Recheck
+at the actual effect boundary so a changed listing/configuration cannot use a stale
+budget. Refused ordinary prepare/apply likewise creates no job/stage/marker. Existing
+exclusion, process-absence, ownership, failed-publication rollback, and immutable
+failure lineage stay intact. No original live recovery or MO2 launch during coding.
+
+- [ ] **Step 1: Reproduce and write RED regressions**
+
+Use the retained exact MO2 archive and installed system tar only in new disposable
+worktree scratch to characterize the actual failing path shape, then test the real
+production entry points. Preserve the failing output. Boundary cases include shortest
+admitted layout, exact limit and one unit over, deep member names, non-BMP units,
+long components, relocation/recovery expansion, malformed aliases/reparses, and
+unchanged legacy bytes. For an unsupported replacement, assert byte equality of the
+old evidence and absence of cleanup/replacement/new-job effects. A mocked budget
+assertion alone is not the regression.
+
+```python
+# The side-effect contract, using the native test fixture's real old failed run:
+before = fixture.snapshot_all_attempt_bytes()
+with self.assertRaises(ContainmentServiceError):
+    service.restart_preparation(fixture.validation_root, fixture.run_id)
+self.assertEqual(before, fixture.snapshot_all_attempt_bytes())
+self.assertFalse(fixture.replacement_marker.exists())
+```
+
+- [ ] **Step 2: Implement admission and strict new-layout compatibility**
+
+Keep the budget implementation separate from filesystem mutation. Feed it actual
+validated archive listing and exact planned roots; cover later bootstrap recovery
+names for Task 7B. Run behavioral legacy/new round trips and all focused consumers.
+List the exact Python/tar/native watcher/shared-rename checks performed; explicitly
+defer actual MO2 first/reload/passive/guarded verification to the reviewed live gate.
+
+- [ ] **Step 3: Verify, commit and obtain independent task review**
+
+Use bundled Python `-B -m unittest <affected modules> -v` natively, with scratch under
+this worktree and durable RED/GREEN logs. Include the opt-in real archive/recovery
+regression where it exercises the change. No concurrent candidate-process probes.
+Run the complete native suite before the commit, preserving exit status and skips.
+The reviewer must approve spec compliance and code quality before Task 7B consumes
+the new layout/budget. Commit message: `fix: preflight complete MO2 job path budgets`.
+
+---
+
+### Task 7B: Classify and migrate bootstrap exact-object moves
+
+**Files:** `modlab/workflows/skyrim/mo2_bootstrap.py`, relevant bootstrap store
+immutable-publication helpers if classification proves they are authority moves,
+and focused bootstrap/native exact-filesystem tests. Consume Task 7A's versioned
+layout/budget. Reuse `modlab/platform/windows_exact_fs.py`; do not add a second
+Windows rename algorithm or broaden unrelated recovery/watch behavior.
+
+**Contract:** Classify every bootstrap `_replace_path` caller and relevant publication
+as activation, preservation/quarantine, recovery/restoration, in-place adoption
+verification, immutable publication, or mutable journal update before editing it.
+Adoption currently verifies the existing manager in place: do not invent relocation.
+Preserve legitimate mutable-journal `os.replace` with its existing locking/byte checks.
+
+Every actual authority-bearing move must retain exact source and destination-parent
+handles through validation, same-volume no-replace rename and post-move identity/
+inventory validation. Preserve source ownership, both path ancestry contracts, journal
+ordering and immutable receipts. No pathname-only fallback, overwrite, copy/delete,
+cross-volume move or reconstruction of unknown objects. Still-live handle ownership
+must survive combined operation/cleanup failures. A rename-visible candidate is not
+a completed successful receipt; apply the existing shared publisher's exact rollback
+boundary without refunding already-consumed replacement authority.
+
+- [ ] **Step 1: Write native RED substitution and recovery regressions**
+
+Exercise real bootstrap activation and old-state preservation/restoration. Test
+source/parent substitution, unknown reparse, case-insensitive destination collision,
+cross-volume refusal, wrong type, post-move mismatch, retained-handle close failure,
+and interruption before/after move and before journal/receipt publication. Test
+restart against exact old objects and refusal for substituted ones; assert prior
+evidence and unknown content remain unchanged. Cover mutable journal transitions
+and in-place adoption behavior so the migration cannot break them.
+
+- [ ] **Step 2: Migrate actual moves and obtain focused GREEN**
+
+Route each classified actual move through the existing shared retained-handle
+primitive and preserve caller-specific inventory checks and recovery effects. Prove
+normal activation, failed activation preservation, recovery and idempotent reads.
+
+- [ ] **Step 3: Complete combined native gate and independent review**
+
+Run the complete native Windows suite on final combined corrected source, retaining
+raw output, exit code, source identity and every skip reason. Commit the source and
+evidence; obtain independent review before any live test consumes it. Do not treat
+Task 7A's earlier suite or legacy capability evidence as repaired-head proof.
+
+- [ ] **Step 4: Reviewed disposable full-stack gate, then original Task 7**
+
+Only after both code reviews and the complete suite pass, use fresh IDs at the
+corrected committed head for exact Python/MO2/archive/watcher/rename live tests.
+Include first, reload/second, passive and guarded bytecode/no-drift observations;
+freeze no bundle or successful bridge receipt before proof. Preserve every failed
+attempt. Independent live-evidence review and the existing fresh four-scenario
+decision/eligibility gates still precede main integration or bridge consumption.
+
+---
+
 ### Task 7: Four fresh visible containment scenarios and replacement decision
 
 #### Approved prerequisite repair — 2026-09-03
