@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import abc
 import copy
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import types
 import unittest
@@ -57,8 +59,8 @@ def fixture(parent=None):
             loaded = None if phase == "Control" else {
                 "runId": "a" * 32, "layout": layout, "phase": phase, "nonce": nonce, "pid": 123,
                 "pythonVersion": "3.12.8 (fixture)", "implementation": "cpython", "cacheTag": "cpython-312",
-                "bytecodeDisabled": False, "executable": str(Path(app) / "ModOrganizer.exe"),
-                "mobasePath": str(Path(app) / "plugins/plugin_python/libs/mobase.cp312-win_amd64.pyd")}
+                "schemaVersion": 2, "bytecodeDisabled": False, "executableRelative": "ModOrganizer.exe",
+                "mobaseRelative": "plugins/plugin_python/libs/mobase.cp312-win_amd64.pyd"}
             observations.append({
                 "phase": phase, "sequence": index, "job": job, "nonce": nonce, "pid": 123,
                 "before": copy.deepcopy(baseline if index == 0 else full),
@@ -87,7 +89,7 @@ def fixture(parent=None):
                 ]}
         candidates.append({"layout": layout, "appRoot": app, "declared": declared,
                            "control": observations[0], "observations": observations[1:]})
-    return {"schemaVersion": 1, "runId": "a" * 32, "root": root,
+    return {"schemaVersion": 2, "runId": "a" * 32, "root": root,
             "source": {"commit": "b" * 40, "tree": "c" * 40},
             "archive": {"sha256": "e6376efd87fd5ddd95aee959405e8f067afa526ea6c2c0c5aa03c5108bf4a815", "size": 149660212},
             "candidates": candidates}
@@ -309,7 +311,7 @@ class CapabilitySelectionTests(unittest.TestCase):
                      lambda v: v["archive"].update(size=True),
                      lambda v: v["candidates"][0]["observations"][0].update(pid=True),
                      lambda v: v["candidates"][0]["observations"][0]["loaded"].update(runId="d" * 32),
-                     lambda v: v["candidates"][0]["observations"][0]["loaded"].update(mobasePath="C:/wrong.pyd"),
+                     lambda v: v["candidates"][0]["observations"][0]["loaded"].update(mobaseRelative="C:/wrong.pyd"),
                      lambda v: v["candidates"][0]["observations"][0].update(job=v["root"]),
                      lambda v: v["candidates"][0]["declared"][0].update(size=True)]
         for mutate in mutations:
@@ -375,7 +377,7 @@ class CapabilityFilesystemTests(unittest.TestCase):
                 log = observation["logs"][0]
                 path = Path(log["path"])
                 path.parent.mkdir(parents=True)
-                data = b"control log\n" if observation["loaded"] is None else b"MODLAB_CAPABILITY_V1 " + json.dumps(observation["loaded"], separators=(",", ":")).encode() + b"\n"
+                data = b"control log\n" if observation["loaded"] is None else b"MODLAB_CAPABILITY_V2 " + json.dumps(observation["loaded"], separators=(",", ":")).encode() + b"\n"
                 path.write_bytes(data)
                 log.update(sha256=hashlib.sha256(data).hexdigest(), size=len(data))
                 if observation["guarded"] is not None:
@@ -452,6 +454,177 @@ class CapabilityFilesystemTests(unittest.TestCase):
         self.assertTrue(blocked, "earlier content became mutable before snapshot completion")
 
 
+class CandidateRuntimeV2Tests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "Users" / "red" / ("a" * 32)
+        for layout in ("SingleFile", "Package"):
+            (self.root / layout / "jobs" / "Guarded").mkdir(parents=True)
+
+    @contextmanager
+    def probe(self, layout, paths=None):
+        """Execute generated code; only unavailable MO2/Qt imports and runtime paths are doubles."""
+        app = self.root / layout / "app"
+        runtime = {"executable": str(app / "ModOrganizer.exe"),
+                   "mobase": str(app / "plugins/plugin_python/libs/mobase.cp312-win_amd64.pyd")}
+        runtime.update(paths or {})
+        names = ("init", "name", "localizedName", "author", "description", "version", "requirements",
+                 "settings", "displayName", "tooltip", "icon", "setParentWidget", "display")
+        mobase = types.ModuleType("mobase")
+        mobase.IPluginTool = abc.ABCMeta("IPluginTool", (), {
+            name: abc.abstractmethod(lambda self, *args: None) for name in names})
+        mobase.VersionInfo = lambda *args: args
+        mobase.__file__ = runtime["mobase"]
+        messages = []
+        qt, core, gui = (types.ModuleType(name) for name in ("PyQt6", "PyQt6.QtCore", "PyQt6.QtGui"))
+        core.qInfo, gui.QIcon = messages.append, object
+        package = types.ModuleType("probe_under_test")
+        package.__path__ = []
+        package.__package__ = "probe_under_test"
+        module = types.ModuleType("probe_under_test.plugin")
+        module.__package__ = "probe_under_test"
+        modules = {"mobase": mobase, "PyQt6": qt, "PyQt6.QtCore": core, "PyQt6.QtGui": gui,
+                   "probe_under_test": package, "probe_under_test.plugin": module}
+        sources = cap.candidate_sources(self.root, layout)
+        with patch.dict(sys.modules, modules), patch.object(sys, "executable", runtime["executable"]):
+            if layout == "SingleFile":
+                exec(compile(sources["modlab_capability_probe.py"], "candidate.py", "exec"), module.__dict__)
+                factory = module.createPlugin
+            else:
+                exec(compile(sources["modlab_capability_probe/plugin.py"], "plugin.py", "exec"), module.__dict__)
+                exec(compile(sources["modlab_capability_probe/__init__.py"], "__init__.py", "exec"), package.__dict__)
+                factory = package.createPlugin
+            yield factory(), messages
+
+    def launch(self, plugin, phase, nonce="c" * 32, guard=None):
+        environment = {"MODLAB_CAPABILITY_PHASE": phase, "MODLAB_CAPABILITY_NONCE": nonce}
+        if guard is not None:
+            environment["MODLAB_CAPABILITY_GUARD"] = guard
+        with patch.dict(os.environ, environment, clear=True):
+            return plugin.init(object())
+
+    def test_both_generated_layouts_emit_v2_observed_relative_paths_without_passive_files(self):
+        for layout in ("SingleFile", "Package"):
+            for phase in ("First", "Second", "Passive"):
+                with self.subTest(layout=layout, phase=phase), self.probe(layout) as (plugin, messages):
+                    before = list(self.root.rglob("*"))
+                    self.assertTrue(self.launch(plugin, phase))
+                    self.assertIsNone(plugin.display())
+                    self.assertEqual(before, list(self.root.rglob("*")))
+                    self.assertEqual(1, len(messages))
+                    self.assertTrue(messages[0].startswith("MODLAB_CAPABILITY_V2 "), messages)
+                    observed = cap.loaded_from_logs([messages[0].encode()], phase, "c" * 32)
+                    self.assertEqual({"schemaVersion", "runId", "layout", "phase", "nonce", "pid", "pythonVersion",
+                                      "implementation", "cacheTag", "bytecodeDisabled", "executableRelative", "mobaseRelative"}, set(observed))
+                    self.assertEqual((2, "a" * 32, layout, phase, "c" * 32, os.getpid()),
+                                     tuple(observed[k] for k in ("schemaVersion", "runId", "layout", "phase", "nonce", "pid")))
+                    self.assertEqual("ModOrganizer.exe", observed["executableRelative"])
+                    self.assertEqual("plugins/plugin_python/libs/mobase.cp312-win_amd64.pyd", observed["mobaseRelative"])
+                    self.assertEqual(sys.dont_write_bytecode, observed["bytecodeDisabled"])
+                    self.assertNotIn(str(self.root), messages[0])
+
+    def test_both_generated_layouts_refuse_outside_traversal_alias_and_wrong_runtime_paths(self):
+        for layout in ("SingleFile", "Package"):
+            app = self.root / layout / "app"
+            for field, relative in (("executable", "ModOrganizer.exe"),
+                                     ("mobase", "plugins/plugin_python/libs/mobase.cp312-win_amd64.pyd")):
+                bad = [None, True, 42, b"path", "", relative, "C:" + relative, str(app / "wrong-name"),
+                       str(app.parent / "outside" / relative), str(Path(str(app) + "-sibling") / relative),
+                       str(app / ".." / "app" / relative), str(app / "extra" / ".." / relative),
+                       str(app) + os.sep + "." + os.sep + relative,
+                       str(app) + os.sep * 2 + relative]
+                if os.name == "nt":
+                    bad.extend((str(app / relative).replace("\\", "/"), "\\" + relative,
+                                "\\\\?\\" + str(app / relative), str(app / relative).swapcase()))
+                for actual in bad:
+                    with self.subTest(layout=layout, field=field, actual=actual), self.probe(layout, {field: actual}) as (plugin, messages):
+                        before = list(self.root.rglob("*"))
+                        try:
+                            accepted = self.launch(plugin, "First")
+                        except (TypeError, ValueError) as error:
+                            self.fail(f"invalid observed runtime path was not refused cleanly: {error}")
+                        self.assertFalse(accepted)
+                        self.assertEqual([], messages)
+                        self.assertEqual(before, list(self.root.rglob("*")))
+
+    def test_generated_relative_payload_survives_representative_username_privacy_filter(self):
+        for layout in ("SingleFile", "Package"):
+            with self.subTest(layout=layout), self.probe(layout) as (plugin, messages):
+                self.assertTrue(self.launch(plugin, "First"))
+                filtered = messages[0].replace("\\red", "\\USERNAME").replace("/red", "/USERNAME")
+                self.assertEqual(messages[0], filtered)
+                observed = cap.loaded_from_logs([filtered.encode()], "First", "c" * 32)
+                self.assertEqual("ModOrganizer.exe", observed["executableRelative"])
+                self.assertEqual("plugins/plugin_python/libs/mobase.cp312-win_amd64.pyd", observed["mobaseRelative"])
+
+    def test_guarded_file_matches_same_v2_marker_and_requires_exact_guard_nonce(self):
+        for layout in ("SingleFile", "Package"):
+            with self.subTest(layout=layout), self.probe(layout) as (plugin, messages):
+                job = self.root / layout / "jobs" / "Guarded"
+                for nonce, guard in (("c" * 32, None), ("c" * 32, "d" * 32), ("invalid", "invalid")):
+                    self.assertTrue(self.launch(plugin, "Guarded", nonce, guard))
+                    self.assertEqual([], list(job.iterdir()))
+                messages.clear()
+                self.assertTrue(self.launch(plugin, "Guarded", guard="c" * 32))
+                self.assertEqual(["guarded.json"], [path.name for path in job.iterdir()])
+                loaded = cap.loaded_from_logs([messages[0].encode()], "Guarded", "c" * 32)
+                self.assertIsNotNone(loaded, "generated guarded evidence did not emit the V2 marker")
+                self.assertEqual(2, loaded.get("schemaVersion"))
+                self.assertEqual("c" * 32, loaded["nonce"])
+                original = (job / "guarded.json").read_bytes()
+                self.assertEqual(loaded, json.loads(original))
+                with self.assertRaises(FileExistsError):
+                    self.launch(plugin, "Guarded", guard="c" * 32)
+                self.assertEqual(original, (job / "guarded.json").read_bytes())
+
+
+class RuntimeV2SchemaTests(unittest.TestCase):
+    def test_v2_selection_round_trips_and_old_or_wrong_matrix_versions_refuse(self):
+        value = fixture()
+        try:
+            result = cap.select_capability(value)
+        except cap.CapabilityError as error:
+            self.fail(f"valid V2 matrix refused: {error}")
+        self.assertEqual(2, result["schemaVersion"])
+        self.assertEqual(result, cap.capability_from_bytes(cap.capability_to_bytes(result)))
+        for version in (1, 3, True, 2.0, "2", None):
+            changed = copy.deepcopy(value)
+            changed["schemaVersion"] = version
+            with self.subTest(version=version), self.assertRaises(cap.CapabilityError):
+                cap.select_capability(changed)
+
+    def test_loaded_format_rejects_v1_mixed_unknown_fields_versions_types_and_path_aliases(self):
+        mutations = [lambda loaded: loaded.pop("schemaVersion"), lambda loaded: loaded.update(extra=True),
+                     lambda loaded: loaded.update(executable="C:\\old\\ModOrganizer.exe"),
+                     lambda loaded: loaded.update(mobasePath="C:\\old\\mobase.pyd")]
+        mutations += [lambda loaded, version=version: loaded.update(schemaVersion=version)
+                      for version in (1, 3, True, 2.0, "2", None)]
+        mutations += [lambda loaded, field=field, value=value: loaded.update({field: value})
+                      for field in ("executableRelative", "mobaseRelative")
+                      for value in (None, True, 42, [], {}, "../ModOrganizer.exe", "/ModOrganizer.exe",
+                                    "C:\\ModOrganizer.exe", "C:ModOrganizer.exe", "./ModOrganizer.exe",
+                                    "plugins\\plugin_python\\libs\\mobase.cp312-win_amd64.pyd")]
+        for mutate in mutations:
+            matrix = fixture()
+            loaded = matrix["candidates"][0]["observations"][0]["loaded"]
+            mutate(loaded)
+            with self.subTest(mutation=mutate), self.assertRaises(cap.CapabilityError):
+                cap.select_capability(matrix)
+            log = b"MODLAB_CAPABILITY_V2 " + json.dumps(loaded).encode()
+            with self.subTest(parser_mutation=mutate), self.assertRaises(cap.CapabilityError):
+                cap.loaded_from_logs([log], "First", "2" * 32)
+
+    def test_parser_refuses_v1_unknown_and_mixed_markers_instead_of_reinterpreting_them(self):
+        loaded = fixture()["candidates"][0]["observations"][0]["loaded"]
+        payload = json.dumps(loaded).encode()
+        good = b"MODLAB_CAPABILITY_V2 " + payload
+        for marker in (b"MODLAB_CAPABILITY_V1 ", b"MODLAB_CAPABILITY_V3 ", b"MODLAB_CAPABILITY_V02 "):
+            for logs in ([marker + payload], [good, marker + payload]):
+                with self.subTest(marker=marker, mixed=len(logs) == 2), self.assertRaises(cap.CapabilityError):
+                    cap.loaded_from_logs(logs, "First", loaded["nonce"])
+
+
 class CandidateTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(cap, "runtime capability implementation is missing")
@@ -465,7 +638,6 @@ class CandidateTests(unittest.TestCase):
         mobase = types.ModuleType("mobase")
         mobase.IPluginTool = contract
         mobase.VersionInfo = lambda *args: args
-        mobase.__file__ = "C:/fixture/mobase.pyd"
         qt = types.ModuleType("PyQt6")
         gui = types.ModuleType("PyQt6.QtGui")
         core = types.ModuleType("PyQt6.QtCore")
@@ -473,13 +645,15 @@ class CandidateTests(unittest.TestCase):
         core.qInfo = messages.append
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / ("a" * 32)
+            mobase.__file__ = str(root / "SingleFile/app/plugins/plugin_python/libs/mobase.cp312-win_amd64.pyd")
             job = root / "SingleFile/jobs/Guarded"
             job.mkdir(parents=True)
             sources = cap.candidate_sources(root, "SingleFile")
             self.assertEqual(["modlab_capability_probe.py"], list(sources))
             package = cap.candidate_sources(root, "Package")
             self.assertEqual(["modlab_capability_probe/__init__.py", "modlab_capability_probe/plugin.py"], list(package))
-            with patch.dict("sys.modules", {"mobase": mobase, "PyQt6": qt, "PyQt6.QtGui": gui, "PyQt6.QtCore": core}):
+            with patch.dict("sys.modules", {"mobase": mobase, "PyQt6": qt, "PyQt6.QtGui": gui, "PyQt6.QtCore": core}), \
+                    patch.object(sys, "executable", str(root / "SingleFile/app/ModOrganizer.exe")):
                 scope = {"__name__": "test_candidate"}
                 exec(compile(sources["modlab_capability_probe.py"], "candidate.py", "exec"), scope)
                 plugin = scope["createPlugin"]()
@@ -541,10 +715,10 @@ class CandidateTests(unittest.TestCase):
     def test_log_parser_requires_one_exact_loaded_marker_for_this_launch(self):
         self.assertTrue(hasattr(cap, "loaded_from_logs"), "live observation parser is missing")
         observed = fixture()["candidates"][0]["observations"][0]["loaded"]
-        log = b"[info] MODLAB_CAPABILITY_V1 " + json.dumps(observed, separators=(",", ":")).encode() + b"\n"
+        log = b"[info] MODLAB_CAPABILITY_V2 " + json.dumps(observed, separators=(",", ":")).encode() + b"\n"
         self.assertEqual(observed, cap.loaded_from_logs([log], "First", observed["nonce"]))
         self.assertIsNone(cap.loaded_from_logs([b"[info] plugin failed\n"], "First", observed["nonce"]))
-        for logs in ([log, log], [log.replace(b'"First"', b'"Second"')], [b"MODLAB_CAPABILITY_V1 invalid\n"]):
+        for logs in ([log, log], [log.replace(b'"First"', b'"Second"')], [b"MODLAB_CAPABILITY_V2 invalid\n"]):
             with self.subTest(logs=logs), self.assertRaises(cap.CapabilityError):
                 cap.loaded_from_logs(logs, "First", observed["nonce"])
 

@@ -112,18 +112,23 @@ def _runtime(value):
              "exact retained MO2/Python/mobase content identity differs")
 
 
-def _loaded(value, observation, candidate, matrix):
-    if value is None:
-        return
-    _fields(value, {"runId", "layout", "phase", "nonce", "pid", "pythonVersion", "implementation", "cacheTag",
-                    "bytecodeDisabled", "executable", "mobasePath"}, "loaded runtime")
-    _require(value["runId"] == matrix["runId"] and value["layout"] == candidate["layout"], "loaded run/layout binding differs")
-    _require(all(value[k] == observation[k] for k in ("phase", "nonce", "pid")), "loaded launch binding differs")
+def _loaded_format(value):
+    _fields(value, {"schemaVersion", "runId", "layout", "phase", "nonce", "pid", "pythonVersion", "implementation", "cacheTag",
+                    "bytecodeDisabled", "executableRelative", "mobaseRelative"}, "loaded runtime")
+    _require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 2, "loaded runtime version differs")
     _require(_integer(value["pid"], 1), "loaded PID invalid")
     _require(_text(value["pythonVersion"]) and _text(value["implementation"]) and _text(value["cacheTag"])
              and type(value["bytecodeDisabled"]) is bool, "loaded Python identity invalid")
-    _require(value["executable"] == str(Path(candidate["appRoot"]) / RUNTIME_PATHS[0])
-             and value["mobasePath"] == str(Path(candidate["appRoot"]) / RUNTIME_PATHS[2]), "loaded runtime path binding differs")
+    _require(value["executableRelative"] == RUNTIME_PATHS[0] and value["mobaseRelative"] == RUNTIME_PATHS[2],
+             "loaded relative runtime path binding differs")
+
+
+def _loaded(value, observation, candidate, matrix):
+    if value is None:
+        return
+    _loaded_format(value)
+    _require(value["runId"] == matrix["runId"] and value["layout"] == candidate["layout"], "loaded run/layout binding differs")
+    _require(all(value[k] == observation[k] for k in ("phase", "nonce", "pid")), "loaded launch binding differs")
 
 
 def _visible_process_binding(ui, launcher, executable, pid):
@@ -244,7 +249,7 @@ def parse_json(data):
 
 def select_capability(matrix):
     _fields(matrix, MATRIX_FIELDS, "matrix")
-    _require(type(matrix["schemaVersion"]) is int and matrix["schemaVersion"] == 1 and _hex(matrix["runId"], 32), "invalid matrix identity")
+    _require(type(matrix["schemaVersion"]) is int and matrix["schemaVersion"] == 2 and _hex(matrix["runId"], 32), "invalid matrix identity")
     root = _path(matrix["root"])
     _require(root.name == matrix["runId"], "run root binding differs")
     _fields(matrix["source"], {"commit", "tree"}, "source")
@@ -437,6 +442,20 @@ from PyQt6.QtGui import QIcon
 
 ROOT = Path(ROOT_LITERAL)
 LAYOUT = LAYOUT_LITERAL
+APP = ROOT / LAYOUT / "app"
+
+def runtime_relative(value, expected):
+    if type(value) is not str:
+        return None
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts:
+        return None
+    try:
+        relative = path.relative_to(APP).as_posix()
+    except ValueError:
+        return None
+    # Derive from the observation, refusing aliases instead of resolving or guessing.
+    return relative if relative == expected and value == str(APP / relative) else None
 
 class CapabilityProbe(mobase.IPluginTool):
     def init(self, organizer):
@@ -444,12 +463,16 @@ class CapabilityProbe(mobase.IPluginTool):
         nonce = os.environ.get("MODLAB_CAPABILITY_NONCE", "")
         if phase not in ("First", "Second", "Passive", "Guarded"):
             return False
-        observed = {"runId": ROOT.name, "layout": LAYOUT, "phase": phase, "nonce": nonce,
+        executable = runtime_relative(sys.executable, "ModOrganizer.exe")
+        mobase_path = runtime_relative(getattr(mobase, "__file__", None), "plugins/plugin_python/libs/mobase.cp312-win_amd64.pyd")
+        if executable is None or mobase_path is None:
+            return False
+        # MO2 v2.5.2 loglist.cpp filters username prefixes; do not log unnecessary absolute paths.
+        observed = {"schemaVersion": 2, "runId": ROOT.name, "layout": LAYOUT, "phase": phase, "nonce": nonce,
                     "pid": os.getpid(), "pythonVersion": sys.version,
                     "implementation": sys.implementation.name, "cacheTag": sys.implementation.cache_tag,
                     "bytecodeDisabled": sys.dont_write_bytecode,
-                    "executable": str(Path(sys.executable).absolute()),
-                    "mobasePath": str(Path(mobase.__file__).absolute())}
+                    "executableRelative": executable, "mobaseRelative": mobase_path}
         if phase == "Guarded" and re.fullmatch(r"[0-9a-f]{32}", nonce) and os.environ.get("MODLAB_CAPABILITY_GUARD") == nonce:
             job = ROOT / LAYOUT / "jobs" / "Guarded"
             for path in (job, *job.parents):
@@ -459,7 +482,7 @@ class CapabilityProbe(mobase.IPluginTool):
             with (job / "guarded.json").open("x", encoding="utf-8", newline="\\n") as output:
                 json.dump(observed, output, sort_keys=True, separators=(",", ":"))
                 output.write("\\n")
-        qInfo("MODLAB_CAPABILITY_V1 " + json.dumps(observed, sort_keys=True, separators=(",", ":")))
+        qInfo("MODLAB_CAPABILITY_V2 " + json.dumps(observed, sort_keys=True, separators=(",", ":")))
         return True
     def name(self): return "ModLab Capability Probe"
     def localizedName(self): return self.name()
@@ -510,11 +533,13 @@ def loaded_from_logs(logs, phase, nonce):
     for data in logs:
         _require(type(data) is bytes, "log must be bytes")
         for line in data.splitlines():
-            marker = b"MODLAB_CAPABILITY_V1 "
-            if marker not in line:
+            prefix = b"MODLAB_CAPABILITY_"
+            if prefix not in line:
                 continue
-            value = parse_json(line.split(marker, 1)[1])
-            _require(type(value) is dict, "runtime marker must be an object")
+            payload = line.split(prefix, 1)[1]
+            _require(payload.startswith(b"V2 "), "unsupported runtime marker version")
+            value = parse_json(payload[len(b"V2 "):])
+            _loaded_format(value)
             if value.get("nonce") == nonce:
                 _require(value.get("phase") == phase, "runtime marker phase binding differs")
                 markers.append(value)
