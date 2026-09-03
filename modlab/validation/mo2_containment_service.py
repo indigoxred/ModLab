@@ -101,7 +101,8 @@ from . import windows_watch as _windows_watch
 from .mo2_preparation_recovery import (
     PreparationAttempt, PreparationFailure, PreparationProjection,
     PreparationRecovery, PreparationProcess, ProjectionIdentity, PreparationCleanup,
-    native_preparation_process_inventory, native_process_absent, record_id,
+    PreparationReplacementV2, PreparationStartupInitialized, PreparationStartupFailure,
+    native_preparation_process_inventory, native_process_absent, record_id, record_to_bytes,
 )
 from .windows_watch import start_watch, stop_watch, watch_root
 from .windows_watch_protocol import (
@@ -1902,16 +1903,8 @@ def prepare_run(
             retry_of,
             preparation_recovery=preparation_recovery,
         )
-        if preparation_recovery is not None:
-            if retry_of is not None:
-                raise ContainmentServiceError("scenario and preparation replacements are distinct")
-            try:
-                old_attempt = store.load_preparation_attempt(preparation_recovery.run_id)
-            except ContainmentStoreNotFound:
-                old_attempt = None
-            with store._run_lock(preparation_recovery.run_id), _retained_preparation_recovery(store, preparation_recovery):
-                proof = _preparation_absence_proof(old_attempt)
-                store.consume_preparation_replacement(preparation_recovery, run_id, process_proof=proof)
+        if preparation_recovery is not None and retry_of is not None:
+            raise ContainmentServiceError("scenario and preparation replacements are distinct")
         retry_binding = None
         if retry_of is not None:
             if not isinstance(retry_of, ScenarioRecovery):
@@ -1938,9 +1931,20 @@ def prepare_run(
             "predecessorRunIds": list(predecessor_run_ids),
             "retryOf": retry_binding,
         }
-        intent_write = store.write_intent(run_id, intent)
-        attempt = _new_preparation_attempt(run_id, intent_write.content_id, command_fingerprint, preparation_recovery)
-        store.write_preparation_attempt(attempt)
+        # Source/native identity acquisition has no fresh-run effects and must
+        # precede consuming the old one-use preparation authority.
+        attempt = _new_preparation_attempt(run_id, _intent_id_for(intent), command_fingerprint, preparation_recovery)
+        if preparation_recovery is not None:
+            with store._run_lock(preparation_recovery.run_id), _retained_preparation_recovery(store, preparation_recovery):
+                try:
+                    old_attempt = store.load_preparation_attempt(preparation_recovery.run_id)
+                except ContainmentStoreNotFound:
+                    old_attempt = None
+                proof = _preparation_absence_proof(old_attempt)
+                intent_write = _initialize_preparation_successor(store, preparation_recovery, intent, attempt, proof)
+        else:
+            intent_write = store.write_intent(run_id, intent)
+            store.write_preparation_attempt(attempt)
         fixture_root = store.run_path(run_id) / "fixtures"
         fixtures: list[ContainmentFixture] = []
         projection_ids = []
@@ -2009,6 +2013,59 @@ def prepare_run(
                         raise publication_error from error
             raise
     return run_id
+
+
+def _startup_record_fields(replacement):
+    return (replacement.run_id, replacement.intent_id, replacement.command_fingerprint,
+            record_id(replacement), replacement.consumed_by_run_id)
+
+
+def _initialize_preparation_successor(store, recovery, intent, attempt, proof):
+    """Reserve exact lineage atomically before fallible successor publication.
+
+    Startup evidence lives with the reservation, so an uncertain successor
+    namespace is never adopted or rewritten to record its initialization error.
+    """
+    reservation = PreparationReplacementV2(
+        recovery.run_id, recovery.intent_id, recovery.command_fingerprint,
+        record_id(recovery), attempt.run_id, proof,
+        successor_intent=json.dumps(intent, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n",
+        successor_attempt=attempt)
+    phase = "consume"
+    try:
+        store.consume_preparation_replacement(recovery, attempt.run_id,
+            process_proof=proof, reservation=reservation)
+        phase = "intent"
+        with store._run_lock(attempt.run_id):
+            if _path_exists_no_follow(store.run_path(attempt.run_id)):
+                raise ContainmentServiceError("reserved successor namespace is no longer fresh")
+            written = store.write_intent(attempt.run_id, intent, require_new=True)
+            phase = "attempt"
+            store.write_preparation_attempt(attempt, require_new=True)
+            phase = "startup-initialized"
+            store.write_preparation_startup_initialized(PreparationStartupInitialized(*_startup_record_fields(reservation)))
+        return written
+    except BaseException as error:
+        try:
+            # Exact observed reservation is evidence, not a claim that an
+            # uncertain publication succeeded or that its objects are ours.
+            observed = store.load_preparation_replacement(recovery.run_id)
+            if observed != reservation:
+                raise ContainmentServiceError("startup reservation is absent, substituted or ambiguous")
+            store.write_preparation_startup_failure(PreparationStartupFailure(
+                *_startup_record_fields(reservation), "CaughtFailure", phase,
+                f"observed {type(error).__name__} during {phase}: {error}",
+                tuple(str(path) for path in _current_effects().freeze().written_paths), ()))
+        except BaseException as publication_error:
+            error.add_note(f"startup failure disposition publication refused: {publication_error}")
+            if isinstance(publication_error, ContainmentStoreOwnershipError):
+                if isinstance(error, ContainmentStoreOwnershipError):
+                    error.ownership = union_retained_ownership(
+                        "startup and failure publication retain live ownership",
+                        prior=error.ownership, owners=publication_error.ownership.owners)
+                    raise error from publication_error
+                raise publication_error from error
+        raise
 
 
 def _new_preparation_attempt(run_id, intent_id, fingerprint, recovery):
@@ -2097,6 +2154,7 @@ def recover_preparation(validation_root: Path, run_id: str) -> PreparationRecove
                 except ContainmentStoreNotFound:
                     prior_attempt = None
                 _preparation_absence_proof(prior_attempt)
+                _reconcile_preparation_startup(store, run_id)
             return existing
         try:
             attempt = store.load_preparation_attempt(run_id)
@@ -4374,6 +4432,16 @@ def _prepare_predecessor_run_ids(
                 unresolved.append(run_id)
             else:
                 _load_preparation_successor(store, replacement, command_fingerprint)
+                if isinstance(replacement, PreparationReplacementV2):
+                    try:
+                        store.load_preparation_startup_failure(run_id)
+                    except ContainmentStoreNotFound:
+                        pass
+                    else:
+                        # A failed reserved identity remains unresolved even if
+                        # death preceded creation of its physical run directory.
+                        # Its disposition is lineage, never another retry grant.
+                        unresolved.append(replacement.consumed_by_run_id)
         for scenario in ContainmentScenario:
             try:
                 authority = store.load_retry_authority(run_id, scenario)
@@ -4453,8 +4521,75 @@ def _prepare_predecessor_run_ids(
     return predecessors
 
 
+def _require_reserved_startup_only(store, replacement):
+    """Observe known startup bytes only; this never grants object ownership."""
+    if _path_exists_no_follow(store.preparation_path(replacement.run_id, "startup-initialized")):
+        raise ContainmentServiceError("startup initialization barrier is present or uncertain")
+    root = store.run_path(replacement.consumed_by_run_id)
+    if not _path_exists_no_follow(root):
+        return
+    store._require_existing_direct_directory(root, "reserved startup root")
+    expected = {
+        store.intent_path(replacement.consumed_by_run_id): replacement.successor_intent.encode("utf-8"),
+        store.preparation_path(replacement.consumed_by_run_id, "attempt"): record_to_bytes(replacement.successor_attempt),
+    }
+    for path in root.iterdir():
+        if path in expected:
+            if store._read(path, "reserved startup evidence") != expected[path]:
+                raise ContainmentServiceError("reserved startup evidence was substituted")
+        elif path.name in {"scenarios", "quarantine"}:
+            store._require_existing_direct_directory(path, "reserved startup scaffold")
+            if tuple(path.iterdir()):
+                raise ContainmentServiceError("reserved startup has started or unknown child evidence")
+        else:
+            raise ContainmentServiceError("reserved startup has fixture or unknown evidence")
+    if (_path_exists_no_follow(store.preparation_path(replacement.consumed_by_run_id, "attempt"))
+            and not _path_exists_no_follow(store.intent_path(replacement.consumed_by_run_id))):
+        raise ContainmentServiceError("reserved startup attempt lacks its intent")
+
+
+def _reconcile_preparation_startup(store, old_run_id):
+    try:
+        replacement = store.load_preparation_replacement(old_run_id)
+    except ContainmentStoreNotFound:
+        return
+    if not isinstance(replacement, PreparationReplacementV2):
+        return  # Historical v1 has no reserved source/native data to invent.
+    try:
+        store.load_preparation_startup_failure(old_run_id)
+    except ContainmentStoreNotFound:
+        pass
+    else:
+        return
+    if _path_exists_no_follow(store.preparation_path(old_run_id, "startup-initialized")):
+        # Not a startup crash. Normal preparation failure/recovery is separate.
+        store.load_preparation_startup_initialized(old_run_id)
+        return
+    with store._run_lock(replacement.consumed_by_run_id):
+        _require_reserved_startup_only(store, replacement)
+        proof = _preparation_absence_proof(replacement.successor_attempt)
+        _require_reserved_startup_only(store, replacement)
+        if store.load_preparation_replacement(old_run_id) != replacement:
+            raise ContainmentServiceError("startup reservation changed during absence proof")
+        store.write_preparation_startup_failure(PreparationStartupFailure(
+            *_startup_record_fields(replacement), "AbandonedStartup", "interrupted-startup",
+            "current reserved-controller and supported-candidate absence; no initialization barrier; no historic exit or object ownership attested",
+            (), proof))
+
+
 def _load_preparation_successor(store, replacement, fingerprint):
     _require_early_preparation(store, replacement.run_id)
+    if isinstance(replacement, PreparationReplacementV2):
+        try:
+            store.load_preparation_startup_failure(replacement.run_id)
+        except ContainmentStoreNotFound:
+            pass
+        else:
+            if replacement.command_fingerprint != fingerprint:
+                raise ContainmentServiceError("failed startup successor command differs")
+            # Exact lineage comes from the old-root reservation, not adoption of
+            # possibly missing/ambiguous physical files under the new namespace.
+            return replacement.successor_attempt
     successor = store.load_preparation_attempt(replacement.consumed_by_run_id)
     intent = store.load_intent(successor.run_id)
     if (successor.replaces_recovery_id != replacement.recovery_id
@@ -4463,6 +4598,10 @@ def _load_preparation_successor(store, replacement, fingerprint):
             or intent["retryOf"] is not None
             or replacement.run_id not in intent["predecessorRunIds"]):
         raise ContainmentServiceError("preparation replacement successor lineage differs")
+    if isinstance(replacement, PreparationReplacementV2):
+        store.load_preparation_startup_initialized(replacement.run_id)
+        if successor != replacement.successor_attempt:
+            raise ContainmentServiceError("successor attempt differs from reservation")
     return successor
 
 

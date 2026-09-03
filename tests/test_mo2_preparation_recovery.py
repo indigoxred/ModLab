@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import uuid
 from unittest.mock import patch
 
 from modlab.validation import mo2_containment_service as service
@@ -67,6 +68,35 @@ def _native_child_failure(source, artifact, steam, validation):
     print(json.dumps({"runId": run_id, "pid": os.getpid()}))
 
 
+def _native_startup_cut(validation, old, phase):
+    """Real process death at the initializer seam, not a full restart driver.
+
+    The parent has established recovery. Its proof is supplied only to this
+    initializer unit seam (the parent Python is intentionally still alive).
+    Production restart's complete candidate reproof is not stubbed or invoked.
+    The new source/controller binding, writes and abrupt exit are all real.
+    """
+    store = ContainmentStore.open_readonly(Path(validation))
+    recovered = store.load_preparation_recovery(old)
+    intent = dict(store.load_intent(old), runId="containment-run:" + uuid.uuid4().hex,
+                  predecessorRunIds=[old])
+    attempt = service._new_preparation_attempt(intent["runId"], service._intent_id_for(intent),
+                                              recovered.command_fingerprint, recovered)
+    method = "consume_preparation_replacement" if phase == "consume" else "write_preparation_attempt"
+    real = getattr(store, method)
+    def cut(*args, **kwargs):
+        if phase != "before-attempt":
+            real(*args, **kwargs)
+        os._exit(73)
+    @service._receipted
+    def initialize():
+        store._effect_recorder = service._current_effects().write
+        with store.command_lock(recovered.command_fingerprint), store._run_lock(old), patch.object(store, method, side_effect=cut):
+            service._initialize_preparation_successor(store, recovered, intent, attempt, recovered.process_proof)
+    initialize()
+    raise AssertionError("native startup cut was not reached")
+
+
 @unittest.skipUnless(os.name == "nt" and os.environ.get("MODLAB_PREPARATION_ARCHIVE") and os.environ.get("MODLAB_PREPARATION_STEAM"),
                      "all-real preparation regression requires explicit read-only archive and Steam inputs")
 class RealPreparationRestartTests(unittest.TestCase):
@@ -97,7 +127,17 @@ class RealPreparationRestartTests(unittest.TestCase):
             old_id = json.loads(child.stdout)["runId"]
             store = ContainmentStore.open_readonly(validation)
             old_attempt = store.load_preparation_attempt(old_id)
-            old_files = {path: path.read_bytes() for path in store.run_path(old_id).glob("*.json")}
+            from modlab.validation.mo2_preparation_recovery import record_id
+            failure = store.load_preparation_failure(old_id)
+            old_paths = list(store.run_path(old_id).glob("*.json"))
+            receipt_ids = []
+            for scenario in service.ContainmentScenario:
+                path = store.preparation_path(old_id, "projection", scenario.value)
+                if path.exists():
+                    receipt_ids.append(record_id(store.load_preparation_projection(old_id, scenario.value)))
+                    old_paths.append(path)
+            self.assertEqual(failure.projection_ids, tuple(receipt_ids))
+            old_files = {path: path.read_bytes() for path in old_paths}
             from modlab.validation.mo2_preparation_recovery import native_process_absent
             self.assertTrue(native_process_absent(old_attempt.controller_pid, old_attempt.controller_creation_time))
             with patch.dict(os.environ, native_environment, clear=True):
@@ -304,6 +344,253 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
         self.assertEqual(observed, link.lstat().st_ino)
         self.assertFalse(store.preparation_path(run_id, "recovery").exists())
         self.assertEqual(b"never change source payload", (target / "marker.txt").read_bytes())
+
+    def test_source_binding_failure_precedes_consumption_without_fresh_effects(self):
+        store, old, *_ = self.failed_fixture()
+        service.recover_preparation(store.root, old)
+        before = {p: p.read_bytes() for p in store.run_path(old).glob("*.json")}
+        with patch.object(service, "_new_preparation_attempt", side_effect=RuntimeError("source binding unavailable")):
+            with self.assertRaisesRegex(service.ContainmentServiceError, "source binding unavailable"):
+                service.restart_preparation(store.root, old)
+        self.assertFalse(store.preparation_path(old, "replacement").exists())
+        self.assertEqual((old,), store.list_run_ids())
+        for path, data in before.items():
+            self.assertEqual(data, path.read_bytes())
+
+    def cut_startup(self, store, old, phase):
+        service.recover_preparation(store.root, old)
+        code = "from tests.test_mo2_preparation_recovery import _native_startup_cut; import sys; _native_startup_cut(*sys.argv[1:])"
+        child = subprocess.run([sys.executable, "-B", "-c", code, str(store.root), old, phase],
+                               capture_output=True, text=True, timeout=30)
+        self.assertEqual(73, child.returncode, child.stdout + child.stderr)
+        return store.load_preparation_replacement(old)
+
+    def test_real_cut_after_consumption_reconciles_only_new_startup(self):
+        self.check_real_startup_cut("consume")
+
+    def test_real_cut_before_attempt_publication_reconciles_only_new_startup(self):
+        self.check_real_startup_cut("before-attempt")
+
+    def test_real_cut_after_attempt_publication_reconciles_only_new_startup(self):
+        self.check_real_startup_cut("attempt")
+
+    def check_real_startup_cut(self, phase):
+        from modlab.validation.mo2_preparation_recovery import native_process_absent, record_id
+        store, old, *_ = self.failed_fixture()
+        replacement = self.cut_startup(store, old, phase)
+        reserved = replacement.successor_attempt
+        self.assertTrue(native_process_absent(reserved.controller_pid, reserved.controller_creation_time))
+        before = {p: p.read_bytes() for p in store.run_path(old).glob("*.json")}
+        new_root = store.run_path(reserved.run_id)
+        fresh_before = {p: p.read_bytes() for p in new_root.glob("*.json")}
+        result = service.recover_preparation(store.root, old)
+        self.assertEqual(store.load_preparation_recovery(old), result.value)
+        failure = store.load_preparation_startup_failure(old)
+        self.assertEqual("AbandonedStartup", failure.disposition)
+        self.assertEqual(record_id(replacement), failure.replacement_id)
+        self.assertEqual(reserved.run_id, failure.successor_run_id)
+        self.assertEqual((reserved.controller_pid, reserved.controller_creation_time),
+                         (failure.process_proof[0].pid, failure.process_proof[0].creation_time))
+        self.assertEqual(reserved, service._load_preparation_successor(store, replacement, replacement.command_fingerprint))
+        with self.assertRaises(service.ContainmentServiceError):
+            service._prepare_predecessor_run_ids(store, replacement.command_fingerprint, None)
+        with self.assertRaises(service.ContainmentServiceError):
+            service.restart_preparation(store.root, old)
+        for path, data in {**before, **fresh_before}.items():
+            self.assertEqual(data, path.read_bytes())
+        self.assertFalse((new_root / "fixtures").exists())
+        self.assertFalse(store.preparation_path(old, "startup-initialized").exists())
+
+    def test_startup_abandonment_refuses_substituted_attempt_and_keeps_its_bytes(self):
+        store, old, *_ = self.failed_fixture()
+        replacement = self.cut_startup(store, old, "attempt")
+        path = store.preparation_path(replacement.consumed_by_run_id, "attempt")
+        substituted = path.read_bytes().replace(b'"source_commit":"', b'"source_commit":"0')
+        path.write_bytes(substituted)
+        with self.assertRaises(service.ContainmentServiceError):
+            service.recover_preparation(store.root, old)
+        self.assertEqual(substituted, path.read_bytes())
+        self.assertFalse(store.preparation_path(old, "startup-failure").exists())
+
+    def test_startup_abandonment_refuses_unknown_child_and_uncertain_barrier(self):
+        store, old, *_ = self.failed_fixture()
+        replacement = self.cut_startup(store, old, "attempt")
+        child = store.run_path(replacement.consumed_by_run_id) / "scenarios" / "unknown.json"
+        child.write_bytes(b"unknown child evidence")
+        with self.assertRaises(service.ContainmentServiceError):
+            service.recover_preparation(store.root, old)
+        self.assertEqual(b"unknown child evidence", child.read_bytes())
+        barrier = store.preparation_path(old, "startup-initialized")
+        barrier.write_bytes(b"uncertain barrier")
+        with self.assertRaises(service.ContainmentServiceError):
+            service.recover_preparation(store.root, old)
+        self.assertEqual(b"uncertain barrier", barrier.read_bytes())
+        self.assertFalse(store.preparation_path(old, "startup-failure").exists())
+
+    def test_startup_abandonment_refuses_uncertain_controller_and_rechecks_state_after_proof(self):
+        store, old, *_ = self.failed_fixture()
+        replacement = self.cut_startup(store, old, "attempt")
+        real = service.native_process_absent
+        def uncertain(pid, created):
+            return False if pid == replacement.successor_attempt.controller_pid else real(pid, created)
+        with patch.object(service, "native_process_absent", side_effect=uncertain):
+            with self.assertRaisesRegex(service.ContainmentServiceError, "live, reused or uncertain"):
+                service.recover_preparation(store.root, old)
+        real_proof = service._preparation_absence_proof
+        def substitute(attempt):
+            proof = real_proof(attempt)
+            if attempt == replacement.successor_attempt:
+                (store.run_path(attempt.run_id) / "unexpected.json").write_bytes(b"late unknown state")
+            return proof
+        with patch.object(service, "_preparation_absence_proof", side_effect=substitute):
+            with self.assertRaisesRegex(service.ContainmentServiceError, "unknown evidence"):
+                service.recover_preparation(store.root, old)
+        self.assertFalse(store.preparation_path(old, "startup-failure").exists())
+
+    def test_startup_abandonment_refuses_real_live_reserved_controller(self):
+        from modlab.validation.mo2_preparation_recovery import PreparationReplacementV2, record_id
+        store, old, *_ = self.failed_fixture()
+        recovered = service.recover_preparation(store.root, old).value
+        intent = dict(store.load_intent(old), runId="containment-run:" + uuid.uuid4().hex, predecessorRunIds=[old])
+        attempt = service._new_preparation_attempt(intent["runId"], service._intent_id_for(intent), recovered.command_fingerprint, recovered)
+        reservation = PreparationReplacementV2(old, recovered.intent_id, recovered.command_fingerprint,
+            record_id(recovered), attempt.run_id, recovered.process_proof,
+            successor_intent=json.dumps(intent, sort_keys=True, separators=(",", ":")) + "\n", successor_attempt=attempt)
+        store.consume_preparation_replacement(recovered, attempt.run_id, reservation=reservation)
+        with self.assertRaisesRegex(service.ContainmentServiceError, "live, reused or uncertain"):
+            service.recover_preparation(store.root, old)
+        self.assertFalse(store.preparation_path(old, "startup-failure").exists())
+
+    def test_ambiguous_attempt_publication_is_not_adopted_or_retried(self):
+        store, old, *_ = self.failed_fixture()
+        real = ContainmentStore.write_preparation_attempt
+        observed = []
+        def ambiguous(instance, attempt, **kwargs):
+            result = real(instance, attempt, **kwargs)
+            observed.append((result.path, result.path.read_bytes()))
+            raise RuntimeError("attempt promoted but acknowledgement uncertain")
+        with patch.object(ContainmentStore, "write_preparation_attempt", new=ambiguous):
+            with self.assertRaisesRegex(service.ContainmentServiceError, "acknowledgement uncertain"):
+                service.restart_preparation(store.root, old)
+        self.assertEqual(1, len(observed))
+        failed = store.load_preparation_startup_failure(old)
+        self.assertEqual("attempt", failed.phase)
+        self.assertEqual("CaughtFailure", failed.disposition)
+        self.assertEqual((), failed.process_proof)
+        self.assertFalse(store.preparation_path(old, "startup-initialized").exists())
+        self.assertFalse((store.run_path(failed.successor_run_id) / "fixtures").exists())
+        with self.assertRaises(service.ContainmentServiceError):
+            service.restart_preparation(store.root, old)
+        self.assertEqual(observed[0][1], observed[0][0].read_bytes())
+
+    def test_same_byte_publication_collision_cannot_be_adopted(self):
+        from modlab.validation import mo2_containment_store as storage
+        store, old, *_ = self.failed_fixture()
+        real = storage.publish_new_pinned
+        collision_bytes = []
+        def collide(path, data, validate):
+            result = real(path, data, validate)
+            if path.name == "preparation-attempt.json":
+                collision_bytes.append((path, data))
+                raise FileExistsError("adversarial same-byte publication collision")
+            return result
+        with patch.object(storage, "publish_new_pinned", side_effect=collide):
+            with self.assertRaisesRegex(service.ContainmentServiceError, "collided"):
+                service.restart_preparation(store.root, old)
+        self.assertEqual(1, len(collision_bytes))
+        self.assertEqual(collision_bytes[0][1], collision_bytes[0][0].read_bytes())
+        self.assertFalse(store.preparation_path(old, "startup-initialized").exists())
+        self.assertEqual("CaughtFailure", store.load_preparation_startup_failure(old).disposition)
+
+    def test_v2_reservation_is_strict_and_cannot_replay_as_v1_or_other_intent(self):
+        from dataclasses import replace
+        from modlab.validation import mo2_preparation_recovery as records
+        store, old, *_ = self.failed_fixture()
+        replacement = self.cut_startup(store, old, "consume")
+        data = records.record_to_bytes(replacement)
+        self.assertEqual(replacement, records.record_from_bytes(data, records.PreparationReplacement))
+        for poisoned in (data.replace(b'"preparationSchemaVersion":2', b'"preparationSchemaVersion":1'),
+                         data.replace(b'"preparationSchemaVersion":2', b'"preparationSchemaVersion":true'), data + b" "):
+            with self.assertRaises(ValueError):
+                records.record_from_bytes(poisoned, records.PreparationReplacement)
+        with self.assertRaises(ValueError):
+            records.record_to_bytes(replace(replacement, successor_attempt=replace(replacement.successor_attempt, source_commit="bad")))
+        with self.assertRaises(ContainmentStoreError):
+            store.consume_preparation_replacement(store.load_preparation_recovery(old), replacement.consumed_by_run_id,
+                                                  process_proof=replacement.process_proof, reservation=replacement)
+        self.assertEqual(data, store.preparation_path(old, "replacement").read_bytes())
+
+    def test_startup_dual_publication_ownership_retains_both_real_native_handles(self):
+        from modlab.platform.windows_exact_fs import pin_direct_object, ExactObjectOwnershipError
+        from modlab.validation.mo2_containment_store import ContainmentStoreOwnershipError
+        store, old, *_ = self.failed_fixture()
+        recovered = service.recover_preparation(store.root, old).value
+        intent = dict(store.load_intent(old), runId="containment-run:" + uuid.uuid4().hex, predecessorRunIds=[old])
+        attempt = service._new_preparation_attempt(intent["runId"], service._intent_id_for(intent), recovered.command_fingerprint, recovered)
+        @service._receipted
+        def initialize():
+            with store.command_lock(recovered.command_fingerprint), store._run_lock(old):
+                service._initialize_preparation_successor(store, recovered, intent, attempt, recovered.process_proof)
+        pins = []
+        try:
+            for name in ("startup-owner", "failure-owner"):
+                path = self.root / name
+                path.write_bytes(b"test-only native ownership")
+                pins.append(pin_direct_object(path, "file"))
+            errors = [ContainmentStoreOwnershipError("injected publication owner",
+                      ExactObjectOwnershipError("real retained test handle", verification=(pin,))) for pin in pins]
+            with patch.object(ContainmentStore, "write_preparation_attempt", side_effect=errors[0]), \
+                    patch.object(ContainmentStore, "write_preparation_startup_failure", side_effect=errors[1]):
+                with self.assertRaises(ContainmentStoreOwnershipError) as raised:
+                    initialize()
+            self.assertEqual({pin.handle for pin in pins},
+                             {owner.pinned.handle for owner in raised.exception.ownership.owners})
+        finally:
+            for pin in pins:
+                pin.close()
+
+    def test_substituted_startup_intent_is_preserved_without_abandonment(self):
+        store, old, *_ = self.failed_fixture()
+        replacement = self.cut_startup(store, old, "before-attempt")
+        path = store.intent_path(replacement.consumed_by_run_id)
+        changed = path.read_bytes() + b" "
+        path.write_bytes(changed)
+        with self.assertRaises(service.ContainmentServiceError):
+            service.recover_preparation(store.root, old)
+        self.assertEqual(changed, path.read_bytes())
+        self.assertFalse(store.preparation_path(old, "startup-failure").exists())
+
+    def test_attempt_publication_failure_has_reserved_failed_successor_lineage(self):
+        store, old, *_ = self.failed_fixture()
+        with patch.object(ContainmentStore, "write_preparation_attempt", side_effect=RuntimeError("attempt publication unavailable")):
+            with self.assertRaisesRegex(service.ContainmentServiceError, "attempt publication unavailable"):
+                service.restart_preparation(store.root, old)
+        replacement = store.load_preparation_replacement(old)
+        self.assertTrue(hasattr(replacement, "successor_attempt"), "consumed marker lacks exact reserved attempt")
+        failed = store.load_preparation_startup_failure(old)
+        self.assertEqual(replacement.consumed_by_run_id, failed.successor_run_id)
+        self.assertEqual("CaughtFailure", failed.disposition)
+        self.assertFalse(store.preparation_path(old, "startup-initialized").exists())
+        self.assertFalse((store.run_path(failed.successor_run_id) / "fixtures").exists())
+        self.assertEqual(replacement.successor_attempt,
+                         service._load_preparation_successor(store, replacement, replacement.command_fingerprint))
+
+    def test_interruption_immediately_after_consumption_keeps_exact_failed_identity(self):
+        store, old, *_ = self.failed_fixture()
+        real = ContainmentStore.consume_preparation_replacement
+        def interrupt(instance, *args, **kwargs):
+            real(instance, *args, **kwargs)
+            raise KeyboardInterrupt("cut after consumption")
+        with patch.object(ContainmentStore, "consume_preparation_replacement", new=interrupt):
+            with self.assertRaises((KeyboardInterrupt, service.ContainmentServiceError)):
+                service.restart_preparation(store.root, old)
+        replacement = store.load_preparation_replacement(old)
+        self.assertTrue(hasattr(replacement, "successor_attempt"), "consumption cut lost reserved attempt")
+        failed = store.load_preparation_startup_failure(old)
+        self.assertEqual(replacement.consumed_by_run_id, failed.successor_run_id)
+        self.assertFalse(store.run_path(failed.successor_run_id).exists())
+        with self.assertRaises(service.ContainmentServiceError):
+            service.restart_preparation(store.root, old)
 
     def test_cross_reference_refusal_does_not_publish_an_immutable_poison_record(self):
         from modlab.validation import mo2_preparation_recovery as records

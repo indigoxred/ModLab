@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .mo2_preparation_recovery import (
     PreparationAttempt, PreparationFailure, PreparationProjection,
+    PreparationReplacementV2, PreparationStartupInitialized, PreparationStartupFailure,
     PreparationRecovery, PreparationReplacement, PreparationCleanup, record_from_bytes,
     record_to_bytes, record_id,
 )
@@ -417,13 +418,14 @@ class ContainmentStore:
         self,
         run_id: str,
         document: dict[str, object],
+        *, require_new: bool = False,
     ) -> ImmutableWrite[dict[str, object]]:
         checked = _intent_document(document, run_id)
         data = _canonical(checked)
         target = self.intent_path(run_id)
         with self._run_lock(run_id):
             self._prepare_run(run_id)
-            existed = self._write_immutable(target, data, "run intent")
+            existed = self._write_immutable(target, data, "run intent", require_new=require_new)
             loaded = self._load_intent_unlocked(run_id)
             if loaded != checked:
                 raise ContainmentStoreError("stored run intent differs after write")
@@ -439,7 +441,7 @@ class ContainmentStore:
             return self._load_intent_unlocked(run_id)
 
     def preparation_path(self, run_id: str, kind: str, scenario: str | None = None) -> Path:
-        if kind not in {"attempt", "failure", "projection", "recovery", "replacement", "cleanup"}:
+        if kind not in {"attempt", "failure", "projection", "recovery", "replacement", "cleanup", "startup-initialized", "startup-failure"}:
             raise ContainmentStoreError("unknown preparation record kind")
         suffix = ""
         if kind in {"projection", "cleanup"}:
@@ -495,7 +497,26 @@ class ContainmentStore:
             if value.recovery_id != record_id(recovery) or not recovery.fresh_run_permitted:
                 raise ContainmentStoreError("preparation replacement recovery differs or refuses replacement")
 
-    def _write_preparation(self, value, kind: str, scenario=None):
+        if isinstance(value, PreparationReplacementV2):
+            intent = _intent_document(json.loads(value.successor_intent), value.consumed_by_run_id)
+            old_intent = self._load_intent_unlocked(run_id)
+            if (intent["retryOf"] is not None or run_id not in intent["predecessorRunIds"]
+                    or any(intent[key] != old_intent[key] for key in
+                           ("mechanism", "sourceWorkspace", "mo2ArtifactId", "steamRoot", "commandFingerprint"))):
+                raise ContainmentStoreError("reserved successor intent lineage differs")
+        if isinstance(value, PreparationStartupInitialized):
+            replacement = self.load_preparation_replacement(run_id)
+            if (not isinstance(replacement, PreparationReplacementV2)
+                    or value.replacement_id != record_id(replacement)
+                    or value.successor_run_id != replacement.consumed_by_run_id):
+                raise ContainmentStoreError("startup record differs from exact v2 reservation")
+            if isinstance(value, PreparationStartupFailure) and value.disposition == "AbandonedStartup":
+                process = value.process_proof[0]
+                attempt = replacement.successor_attempt
+                if (process.pid, process.creation_time) != (attempt.controller_pid, attempt.controller_creation_time):
+                    raise ContainmentStoreError("startup absence differs from reserved controller")
+
+    def _write_preparation(self, value, kind: str, scenario=None, *, require_new=False):
         try:
             data = record_to_bytes(value)
         except (ValueError, TypeError) as error:
@@ -503,12 +524,24 @@ class ContainmentStore:
         with self._run_lock(value.run_id):
             self._validate_preparation_references(value, scenario)
             target = self.preparation_path(value.run_id, kind, scenario)
-            existed = self._write_immutable(target, data, "preparation " + kind)
+            existed = self._write_immutable(target, data, "preparation " + kind, require_new=require_new)
             loaded = self._load_preparation(value.run_id, type(value), kind, scenario)
             return ImmutableWrite(loaded, record_id(loaded), target, existed)
 
-    def write_preparation_attempt(self, value: PreparationAttempt):
-        return self._write_preparation(value, "attempt")
+    def write_preparation_attempt(self, value: PreparationAttempt, *, require_new=False):
+        return self._write_preparation(value, "attempt", require_new=require_new)
+
+    def write_preparation_startup_initialized(self, value: PreparationStartupInitialized):
+        return self._write_preparation(value, "startup-initialized", require_new=True)
+
+    def load_preparation_startup_initialized(self, run_id):
+        return self._load_preparation(run_id, PreparationStartupInitialized, "startup-initialized")
+
+    def write_preparation_startup_failure(self, value: PreparationStartupFailure):
+        return self._write_preparation(value, "startup-failure", require_new=True)
+
+    def load_preparation_startup_failure(self, run_id):
+        return self._load_preparation(run_id, PreparationStartupFailure, "startup-failure")
 
     def load_preparation_attempt(self, run_id: str) -> PreparationAttempt:
         return self._load_preparation(run_id, PreparationAttempt, "attempt")
@@ -540,7 +573,7 @@ class ContainmentStore:
     def load_preparation_replacement(self, run_id: str) -> PreparationReplacement:
         return self._load_preparation(run_id, PreparationReplacement, "replacement")
 
-    def consume_preparation_replacement(self, recovery: PreparationRecovery, new_run_id: str, *, process_proof=None) -> PreparationReplacement:
+    def consume_preparation_replacement(self, recovery: PreparationRecovery, new_run_id: str, *, process_proof=None, reservation=None) -> PreparationReplacement:
         self._run_hex(new_run_id)
         with self._run_lock(recovery.run_id):
             stored = self.load_preparation_recovery(recovery.run_id)
@@ -562,7 +595,13 @@ class ContainmentStore:
             value = PreparationReplacement(recovery.run_id, recovery.intent_id,
                 recovery.command_fingerprint, record_id(recovery), new_run_id,
                 recovery.process_proof if process_proof is None else process_proof)
-            return self._write_preparation(value, "replacement").value
+            if reservation is not None:
+                if (type(reservation) is not PreparationReplacementV2
+                        or any(getattr(reservation, field) != getattr(value, field) for field in
+                               ("run_id", "intent_id", "command_fingerprint", "recovery_id", "consumed_by_run_id", "process_proof"))):
+                    raise ContainmentStoreError("replacement reservation differs from consumption")
+                value = reservation
+            return self._write_preparation(value, "replacement", require_new=True).value
 
     def write_launch_evidence(
         self,
@@ -1726,8 +1765,10 @@ class ContainmentStore:
     def _effect_observation_suffix(detail: str | None) -> str:
         return "" if detail is None else f"; {detail}"
 
-    def _write_immutable(self, target: Path, data: bytes, label: str) -> bool:
+    def _write_immutable(self, target: Path, data: bytes, label: str, *, require_new=False) -> bool:
         if target.exists():
+            if require_new:
+                raise ContainmentStoreError(f"stored {label} already exists; fresh publication required")
             existing = self._read(target, label)
             if existing != data:
                 raise ContainmentStoreError(f"stored {label} path contains different bytes")
@@ -1745,6 +1786,8 @@ class ContainmentStore:
                 self._record_written_path(target)
                 return False
             except FileExistsError:
+                if require_new:
+                    raise ContainmentStoreError(f"stored {label} collided during fresh publication")
                 existing = self._read(target, label)
                 if existing != data:
                     raise ContainmentStoreError(
@@ -1819,6 +1862,8 @@ class ContainmentStore:
                 raise ContainmentStoreError(f"stored {label} differs after atomic promotion")
             return False
         except FileExistsError:
+            if require_new:
+                raise ContainmentStoreError(f"stored {label} collided during fresh publication")
             existing = self._read(target, label)
             if existing != data:
                 raise ContainmentStoreError(f"stored {label} path contains different bytes")

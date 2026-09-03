@@ -98,11 +98,38 @@ class PreparationReplacement:
     process_proof: tuple[PreparationProcess, ...] = ()
 
 
+@dataclass(frozen=True, kw_only=True)
+class PreparationReplacementV2(PreparationReplacement):
+    successor_intent: str
+    successor_attempt: PreparationAttempt
+
+
+@dataclass(frozen=True)
+class PreparationStartupInitialized:
+    run_id: str
+    intent_id: str
+    command_fingerprint: str
+    replacement_id: str
+    successor_run_id: str
+
+
+@dataclass(frozen=True)
+class PreparationStartupFailure(PreparationStartupInitialized):
+    disposition: str
+    phase: str
+    reason: str
+    effects: tuple[str, ...]
+    process_proof: tuple[PreparationProcess, ...]
+
+
 _KINDS = {
     PreparationAttempt: "attempt", PreparationProjection: "projection",
     PreparationFailure: "failure", PreparationRecovery: "recovery",
     PreparationReplacement: "replacement",
     PreparationCleanup: "cleanup",
+    PreparationReplacementV2: "replacement",
+    PreparationStartupInitialized: "startup-initialized",
+    PreparationStartupFailure: "startup-failure",
 }
 
 
@@ -202,6 +229,23 @@ def _validate(value):
             raise ValueError("process proof lacks the exact verifier")
         if any(not Path(path).is_absolute() for path in (*value.cleaned, *value.preserved)):
             raise ValueError("recovery paths must be absolute")
+    elif isinstance(value, PreparationStartupInitialized):
+        _require_id(value.replacement_id, "preparation-replacement-sha256:")
+        _require_id(value.successor_run_id, "containment-run:", 32)
+        if value.successor_run_id == value.run_id:
+            raise ValueError("startup disposition must name the distinct successor")
+        if isinstance(value, PreparationStartupFailure):
+            if (value.disposition not in {"CaughtFailure", "AbandonedStartup"}
+                    or value.phase not in {"consume", "intent", "attempt", "startup-initialized", "interrupted-startup"}
+                    or not value.reason or any(not Path(path).is_absolute() for path in value.effects)):
+                raise ValueError("invalid startup failure disposition")
+            if value.disposition == "CaughtFailure" and value.process_proof:
+                raise ValueError("caught startup failure cannot claim controller absence")
+            if value.disposition == "AbandonedStartup" and (
+                    value.phase != "interrupted-startup" or len(value.process_proof) != 2
+                    or tuple(item.disposition for item in value.process_proof) != ("Absent", "Verifier")
+                    or any(item.pid <= 0 or item.creation_time <= 0 or not item.image for item in value.process_proof)):
+                raise ValueError("abandoned startup requires fresh exact process proof")
     else:
         _require_id(value.recovery_id, "preparation-recovery-sha256:")
         _require_id(value.consumed_by_run_id, "containment-run:", 32)
@@ -213,12 +257,23 @@ def _validate(value):
                 or any(item.pid <= 0 or item.creation_time <= 0 or not item.image
                     or item.disposition not in {"Verifier", "Absent"} for item in value.process_proof)):
             raise ValueError("invalid replacement native process proof")
+        if isinstance(value, PreparationReplacementV2):
+            _validate(value.successor_attempt)
+            attempt = value.successor_attempt
+            intent = json.loads(value.successor_intent, object_pairs_hook=_unique)
+            canonical = json.dumps(intent, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+            if (canonical != value.successor_intent or attempt.run_id != value.consumed_by_run_id
+                    or attempt.command_fingerprint != value.command_fingerprint
+                    or attempt.replaces_recovery_id != value.recovery_id
+                    or attempt.intent_id != "containment-intent-sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()):
+                raise ValueError("replacement reservation differs from exact successor attempt/intent")
     return kind
 
 
 def record_to_bytes(value) -> bytes:
     kind = _validate(value)
-    return (json.dumps({"preparationSchemaVersion": 1, "kind": kind, "record": asdict(value)},
+    version = 2 if isinstance(value, PreparationReplacementV2) else 1
+    return (json.dumps({"preparationSchemaVersion": version, "kind": kind, "record": asdict(value)},
                        sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
 
 
@@ -233,8 +288,12 @@ def _unique(pairs):
 
 def record_from_bytes(data: bytes, record_type):
     document = json.loads(data.decode("utf-8"), object_pairs_hook=_unique)
+    if (type(document) is dict and type(document.get("preparationSchemaVersion")) is int
+            and document["preparationSchemaVersion"] == 2 and record_type is PreparationReplacement):
+        record_type = PreparationReplacementV2
+    version = 2 if record_type is PreparationReplacementV2 else 1
     if (type(document) is not dict or set(document) != {"preparationSchemaVersion", "kind", "record"}
-            or type(document["preparationSchemaVersion"]) is not int or document["preparationSchemaVersion"] != 1
+            or type(document["preparationSchemaVersion"]) is not int or document["preparationSchemaVersion"] != version
             or document["kind"] != _KINDS.get(record_type)):
         raise ValueError("invalid preparation schema or kind")
     result = _typed(document["record"], record_type, decoding=True)
