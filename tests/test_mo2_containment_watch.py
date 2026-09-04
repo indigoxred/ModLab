@@ -2525,13 +2525,26 @@ class MutationWatchTests(unittest.TestCase):
                 windows_watch._close_handle(worker_handle, "reaped-worker test handle")
             )
             handle_owned = False
-            self.assertEqual(
-                ("dead", 0, None),
-                windows_watch._exact_process_status(
+            deadline = time.monotonic() + 5
+            while True:
+                status = windows_watch._exact_process_status(
                     launch.worker_pid,
                     launch.worker_creation_time,
-                ),
-            )
+                )
+                if status[1]:
+                    self.assertIsNone(
+                        windows_watch._close_controller_handle(
+                            status[1],
+                            "fully-reaped worker probe",
+                            evidence,
+                        )
+                    )
+                if status == ("dead", 0, None):
+                    break
+                self.assertEqual("dead", status[0], status)
+                if time.monotonic() >= deadline:
+                    self.fail(f"worker remained queryable after final handle close: {status}")
+                time.sleep(0.02)
 
             receipt = stop_watch(request_path)
             outcome = watch_outcome_from_bytes((evidence / "outcome.json").read_bytes())
