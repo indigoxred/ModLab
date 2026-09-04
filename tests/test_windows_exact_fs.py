@@ -29,6 +29,27 @@ from modlab.platform.windows_exact_fs import (
 
 @unittest.skipUnless(os.name == "nt", "Windows retained-handle APIs are required")
 class WindowsExactFsTests(unittest.TestCase):
+    def test_rooted_directory_initial_descriptor_and_read_control(self):
+        from modlab.validation import windows_vault_security as security
+
+        principal = security.current_vault_principal()
+        descriptor = ctypes.c_void_p()
+        sddl = f'O:{principal.sid}G:{principal.sid}D:P(A;OICI;FA;;;{principal.sid})(A;OICI;FA;;;SY)S:(ML;OICI;NW;;;ME)'
+        self.assertTrue(security._advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None))
+        parent = pin_stable_direct_object(self.root, 'directory', allow_writes=True)
+        child = None
+        try:
+            child = windows_exact_fs.create_pinned_directory_child(self.root / 'secure', parent, initial_security_descriptor=descriptor.value, read_control=True)
+            policy = security._security_policy(child)
+            self.assertEqual(principal.sid, policy.owner)
+            self.assertTrue(policy.protected)
+            self.assertEqual(((17, 3, 1, 'S-1-16-8192'),), policy.labels)
+        finally:
+            if child is not None:
+                child.close()
+            parent.close()
+            security._kernel.LocalFree(descriptor)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="modlab-windows-exact-fs-")
         self.root = Path(self.temporary.name).resolve()

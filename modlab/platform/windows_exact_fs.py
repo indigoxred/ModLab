@@ -614,12 +614,18 @@ def identity_at_path(path: Path) -> PinnedIdentity:
     return identity
 
 
-def pin_direct_object(path: Path, kind: str) -> PinnedObject:
-    """Retain the direct regular file or directory currently named by *path*."""
+def pin_direct_object(
+    path: Path, kind: str, *, delete_access: bool = True,
+) -> PinnedObject:
+    """Retain the direct regular file or directory currently named by *path*.
+
+    Publication parents may omit DELETE access to coexist with a retained
+    rename/delete guard. Mutation-source callers retain DELETE by default.
+    """
     if kind not in {"file", "directory"}:
         raise ExactObjectError(f"unsupported pinned object kind: {kind!r}")
     target = _require_direct_components(path)
-    desired_access = _DELETE | _FILE_READ_ATTRIBUTES | _GENERIC_READ
+    desired_access = (_DELETE if delete_access else 0) | _FILE_READ_ATTRIBUTES | _GENERIC_READ
     if kind == "directory":
         desired_access |= _FILE_LIST_DIRECTORY | _FILE_ADD_FILE | _FILE_ADD_SUBDIRECTORY
     handle = _open_no_follow(target, desired_access)
@@ -757,12 +763,17 @@ def create_pinned_directory_child(
     destination_parent: PinnedObject,
     *,
     identity_at_path_fn: Callable[[Path], PinnedIdentity] | None = None,
+    initial_security_descriptor: int | None = None,
+    read_control: bool = False,
 ) -> PinnedObject:
     """Create one direct directory relative to a retained parent handle.
 
     The native create returns the first handle to the new object.  That handle
     denies rename/delete from the instant the directory exists, so validation
     never crosses a pathname-only ownership gap.
+    ``initial_security_descriptor`` is a caller-owned native descriptor address
+    kept alive through this call; it applies at creation, never after opening.
+    ``read_control`` grants security inspection on the first retained handle.
     """
     _require_windows()
     if identity_at_path_fn is None:
@@ -806,7 +817,7 @@ def create_pinned_directory_child(
         destination_parent.handle,
         ctypes.pointer(object_name),
         _OBJ_CASE_INSENSITIVE,
-        None,
+        initial_security_descriptor,
         None,
     )
     io_status = _IO_STATUS_BLOCK()
@@ -817,6 +828,7 @@ def create_pinned_directory_child(
         status = _ntdll.NtCreateFile(
             ctypes.byref(output_handle),
             _DELETE
+            | (0x00020000 if read_control else 0)
             | _FILE_READ_ATTRIBUTES
             | _FILE_LIST_DIRECTORY
             | _FILE_ADD_FILE
@@ -1187,7 +1199,7 @@ def publish_new_pinned(
     parent = (
         destination_parent
         if borrowed_parent
-        else pin_direct_object(destination.parent, kind="directory")
+        else pin_direct_object(destination.parent, kind="directory", delete_access=False)
     )
     if (
         not isinstance(parent, PinnedObject)
