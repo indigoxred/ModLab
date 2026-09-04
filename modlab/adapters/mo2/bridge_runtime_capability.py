@@ -434,7 +434,6 @@ import json
 import os
 from pathlib import Path
 import re
-import stat
 import sys
 import mobase
 from PyQt6.QtCore import qInfo
@@ -473,15 +472,11 @@ class CapabilityProbe(mobase.IPluginTool):
                     "implementation": sys.implementation.name, "cacheTag": sys.implementation.cache_tag,
                     "bytecodeDisabled": sys.dont_write_bytecode,
                     "executableRelative": executable, "mobaseRelative": mobase_path}
-        if phase == "Guarded" and re.fullmatch(r"[0-9a-f]{32}", nonce) and os.environ.get("MODLAB_CAPABILITY_GUARD") == nonce:
-            job = ROOT / LAYOUT / "jobs" / "Guarded"
-            for path in (job, *job.parents):
-                meta = path.lstat()
-                if not stat.S_ISDIR(meta.st_mode) or stat.S_ISLNK(meta.st_mode) or getattr(meta, "st_file_attributes", 0) & 0x400:
-                    return False
-            with (job / "guarded.json").open("x", encoding="utf-8", newline="\\n") as output:
-                json.dump(observed, output, sort_keys=True, separators=(",", ":"))
-                output.write("\\n")
+        if phase == "Guarded" and (
+            re.fullmatch(r"[0-9a-f]{32}", nonce) is None
+            or os.environ.get("MODLAB_CAPABILITY_GUARD") != nonce
+        ):
+            return False
         qInfo("MODLAB_CAPABILITY_V2 " + json.dumps(observed, sort_keys=True, separators=(",", ":")))
         return True
     def name(self): return "ModLab Capability Probe"

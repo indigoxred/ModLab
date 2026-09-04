@@ -558,25 +558,22 @@ class CandidateRuntimeV2Tests(unittest.TestCase):
                 self.assertEqual("ModOrganizer.exe", observed["executableRelative"])
                 self.assertEqual("plugins/plugin_python/libs/mobase.cp312-win_amd64.pyd", observed["mobaseRelative"])
 
-    def test_guarded_file_matches_same_v2_marker_and_requires_exact_guard_nonce(self):
+    def test_guarded_probe_is_passive_and_requires_exact_guard_nonce(self):
         for layout in ("SingleFile", "Package"):
             with self.subTest(layout=layout), self.probe(layout) as (plugin, messages):
                 job = self.root / layout / "jobs" / "Guarded"
                 for nonce, guard in (("c" * 32, None), ("c" * 32, "d" * 32), ("invalid", "invalid")):
-                    self.assertTrue(self.launch(plugin, "Guarded", nonce, guard))
+                    self.assertFalse(self.launch(plugin, "Guarded", nonce, guard))
                     self.assertEqual([], list(job.iterdir()))
                 messages.clear()
                 self.assertTrue(self.launch(plugin, "Guarded", guard="c" * 32))
-                self.assertEqual(["guarded.json"], [path.name for path in job.iterdir()])
+                self.assertEqual([], list(job.iterdir()))
                 loaded = cap.loaded_from_logs([messages[0].encode()], "Guarded", "c" * 32)
                 self.assertIsNotNone(loaded, "generated guarded evidence did not emit the V2 marker")
                 self.assertEqual(2, loaded.get("schemaVersion"))
                 self.assertEqual("c" * 32, loaded["nonce"])
-                original = (job / "guarded.json").read_bytes()
-                self.assertEqual(loaded, json.loads(original))
-                with self.assertRaises(FileExistsError):
-                    self.launch(plugin, "Guarded", guard="c" * 32)
-                self.assertEqual(original, (job / "guarded.json").read_bytes())
+                self.assertTrue(self.launch(plugin, "Guarded", guard="c" * 32))
+                self.assertEqual([], list(job.iterdir()))
 
 
 class RuntimeV2SchemaTests(unittest.TestCase):
@@ -629,7 +626,7 @@ class CandidateTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(cap, "runtime capability implementation is missing")
 
-    def test_candidate_is_complete_passive_and_only_guarded_init_writes_job_output(self):
+    def test_candidate_is_complete_and_passive_including_guarded_init(self):
         self.assertTrue(hasattr(cap, "candidate_sources"), "candidate generator is missing")
         names = ("init", "name", "localizedName", "author", "description", "version", "requirements",
                  "settings", "displayName", "tooltip", "icon", "setParentWidget", "display")
@@ -650,6 +647,7 @@ class CandidateTests(unittest.TestCase):
             job.mkdir(parents=True)
             sources = cap.candidate_sources(root, "SingleFile")
             self.assertEqual(["modlab_capability_probe.py"], list(sources))
+            self.assertNotIn(b'.open("x")', sources["modlab_capability_probe.py"])
             package = cap.candidate_sources(root, "Package")
             self.assertEqual(["modlab_capability_probe/__init__.py", "modlab_capability_probe/plugin.py"], list(package))
             with patch.dict("sys.modules", {"mobase": mobase, "PyQt6": qt, "PyQt6.QtGui": gui, "PyQt6.QtCore": core}), \
@@ -662,10 +660,9 @@ class CandidateTests(unittest.TestCase):
                     self.assertIsNone(plugin.display())
                 self.assertEqual([], list(job.iterdir()))
                 with patch.dict(os.environ, {"MODLAB_CAPABILITY_PHASE": "Guarded", "MODLAB_CAPABILITY_NONCE": "c" * 32,
-                                             "MODLAB_CAPABILITY_GUARD": "c" * 32}, clear=True):
+                                              "MODLAB_CAPABILITY_GUARD": "c" * 32}, clear=True):
                     self.assertTrue(plugin.init(object()))
-                self.assertEqual(["guarded.json"], [p.name for p in job.iterdir()])
-                self.assertEqual("Guarded", json.loads((job / "guarded.json").read_bytes())["phase"])
+                self.assertEqual([], list(job.iterdir()))
                 self.assertEqual("ModLab Capability Probe", plugin.displayName())
                 self.assertEqual([], plugin.settings())
                 self.assertEqual([], plugin.requirements())
