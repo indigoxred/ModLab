@@ -33,6 +33,7 @@ from modlab.platform.windows_exact_fs import (
     RetainedObjectRole,
     create_pinned_directory_child,
     identity_at_path,
+    normalize_identity_attributes,
     pin_stable_direct_object,
     read_pinned_file,
     union_retained_ownership,
@@ -1207,6 +1208,7 @@ def _mutation_root_observation(
         )
 
     def identity(metadata: os.stat_result) -> tuple[int, ...]:
+        is_directory = stat.S_ISDIR(metadata.st_mode)
         return (
             int(metadata.st_mode),
             int(metadata.st_dev),
@@ -1214,7 +1216,10 @@ def _mutation_root_observation(
             int(metadata.st_size),
             int(metadata.st_mtime_ns),
             int(metadata.st_ctime_ns),
-            int(getattr(metadata, "st_file_attributes", 0)),
+            normalize_identity_attributes(
+                int(getattr(metadata, "st_file_attributes", 0)),
+                is_directory=is_directory,
+            ),
         )
 
     def path_identity(path: Path, metadata: os.stat_result) -> tuple[int, ...]:
@@ -1443,7 +1448,10 @@ def _mutation_root_observation(
             int(metadata.st_size),
             int(metadata.st_mtime_ns),
             int(metadata.st_ctime_ns),
-            int(getattr(metadata, "st_file_attributes", 0)),
+            normalize_identity_attributes(
+                int(getattr(metadata, "st_file_attributes", 0)),
+                is_directory=kind == "directory",
+            ),
             digest,
         )
 

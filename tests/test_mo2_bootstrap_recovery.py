@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from modlab.platform import windows_exact_fs
 from modlab.adapters.mo2.bootstrap_model import (
     BootstrapDisposition,
     BootstrapJobState,
@@ -103,16 +104,18 @@ class Mo2BootstrapRecoveryTests(unittest.TestCase):
         self.assertEqual(BootstrapJobState.ACTIVATED, self._job().state)
 
     def _interrupt_applying(self):
-        replace_path = mo2_bootstrap._replace_path
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
 
-        def crash_activation(source, target):
-            if Path(source) == Path(self._job().stage_root):
+        def crash_activation(source, target, parent, **kwargs):
+            if source.identity.attributes & 0x10 and Path(source.path) == Path(
+                self._job().stage_root
+            ):
                 raise KeyboardInterrupt("fixture crash during activation")
-            return replace_path(source, target)
+            return rename_pinned(source, target, parent, **kwargs)
 
         with patch.object(
-            mo2_bootstrap,
-            "_replace_path",
+            windows_exact_fs,
+            "rename_pinned_no_replace",
             side_effect=crash_activation,
         ):
             with self.assertRaises(KeyboardInterrupt):
@@ -377,16 +380,16 @@ class Mo2BootstrapRecoveryTests(unittest.TestCase):
     def test_restore_rename_failure_is_retryable_from_filesystem_evidence(self):
         self._interrupt_applying()
         job = self._job()
-        replace_path = mo2_bootstrap._replace_path
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
 
-        def fail_restore(source, target):
-            if Path(source) == Path(job.prior_root):
+        def fail_restore(source, target, parent, **kwargs):
+            if Path(source.path) == Path(job.prior_root):
                 raise OSError("fixture restore rename failure")
-            return replace_path(source, target)
+            return rename_pinned(source, target, parent, **kwargs)
 
         with patch.object(
-            mo2_bootstrap,
-            "_replace_path",
+            windows_exact_fs,
+            "rename_pinned_no_replace",
             side_effect=fail_restore,
         ):
             with self.assertRaisesRegex(Mo2BootstrapRefusal, "rename failure"):
@@ -569,17 +572,20 @@ class Mo2BootstrapRecoveryTests(unittest.TestCase):
         self.assertEqual(BootstrapJobState.RECOVERY_REQUIRED, self._job().state)
 
     def test_crash_after_activation_rename_is_finalized_from_applying_evidence(self):
-        replace_path = mo2_bootstrap._replace_path
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
 
-        def activate_then_crash(source, target):
-            result = replace_path(source, target)
-            if Path(source) == Path(self._job().stage_root):
+        def activate_then_crash(source, target, parent, **kwargs):
+            result = rename_pinned(source, target, parent, **kwargs)
+            if (
+                source.identity.attributes & 0x10
+                and Path(target) == self.fixture.layout.skyrim_mo2
+            ):
                 raise KeyboardInterrupt("fixture crash after activation rename")
             return result
 
         with patch.object(
-            mo2_bootstrap,
-            "_replace_path",
+            windows_exact_fs,
+            "rename_pinned_no_replace",
             side_effect=activate_then_crash,
         ):
             with self.assertRaises(KeyboardInterrupt):

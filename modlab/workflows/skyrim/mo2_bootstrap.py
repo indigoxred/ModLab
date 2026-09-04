@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable
 
+from modlab.platform import windows_exact_fs
 from modlab.adapters.mo2.archive import (
     ArchiveListing,
     CommandRunner,
@@ -86,6 +87,7 @@ from modlab.workflows.skyrim.mo2_bootstrap_store import (
     BootstrapReceiptMatch,
     Mo2BootstrapStore,
     Mo2BootstrapStoreError,
+    Mo2BootstrapStoreOwnershipError,
     Mo2BootstrapStorePromotionError,
     StoredBootstrapJournal,
     StoredBootstrapReceipt,
@@ -230,6 +232,11 @@ class _EntryIdentity:
     changed_ns: int | None
 
 
+@dataclass
+class _ExactMoveProgress:
+    moved: bool = False
+
+
 @dataclass(frozen=True)
 class _RecoveryActionState:
     journal_data: bytes
@@ -313,6 +320,8 @@ def prepare_mo2_setup(
         raise _refusal_with_failure(error, failure) from error
     try:
         stored = Mo2BootstrapStore(collected.layout.root).write_plan(collected.plan)
+    except Mo2BootstrapStoreOwnershipError:
+        raise
     except (BootstrapFormatError, Mo2BootstrapStoreError, OSError) as error:
         refusal = Mo2BootstrapRefusal(
             "plan-invalid", f"bootstrap plan could not be retained safely: {error}"
@@ -990,6 +999,11 @@ def recover_mo2_setup(
         )
         raise _refusal_with_failure(error, failure) from error
     except (
+        windows_exact_fs.ExactObjectOwnershipError,
+        Mo2BootstrapStoreOwnershipError,
+    ):
+        raise
+    except (
         BootstrapFormatError,
         Mo2ArchiveError,
         Mo2BootstrapConfigError,
@@ -1291,33 +1305,49 @@ def _relocate_recovery_tree(
 ) -> None:
     source_ancestry = _capture_cleanup_ancestry(source.parent)
     target_ancestry = _capture_cleanup_ancestry(target.parent)
-    identity = _direct_directory_identity(source, label)
-    snapshot = _snapshot_manager_tree(source)
-    if expected_snapshot is not None and snapshot != expected_snapshot:
-        raise Mo2ArchiveError(f"{label} changed before recovery relocation")
-    if expected_inventory is not None and (
-        expected_inventory[1] is None
-        or snapshot.inventory.sha256 != expected_inventory[0]
-        or snapshot.inventory.file_count != expected_inventory[1]
-    ):
-        raise Mo2ArchiveError(f"{label} inventory changed before recovery relocation")
-    if source_validator is not None:
-        source_validator(source)
-    if _lstat_if_exists(target) is not None:
-        raise Mo2ArchiveError(f"{label} recovery destination already exists")
-    _require_tree_identity(source, identity, snapshot, label)
-    _validate_captured_ancestry(source_ancestry)
-    _validate_captured_ancestry(target_ancestry)
-    if _lstat_if_exists(target) is not None:
-        raise Mo2ArchiveError(
-            f"{label} recovery destination appeared before relocation"
-        )
-    _replace_path(source, target)
-    _validate_captured_ancestry(source_ancestry)
-    _validate_captured_ancestry(target_ancestry)
-    if _lstat_if_exists(source) is not None:
-        raise Mo2ArchiveError(f"{label} source remained after relocation")
-    _require_tree_identity(target, identity, snapshot, f"relocated {label}")
+    identity: _EntryIdentity | None = None
+    snapshot: _ManagerSnapshot | None = None
+
+    def validate_before() -> None:
+        nonlocal identity, snapshot
+        identity = _direct_directory_identity(source, label)
+        snapshot = _snapshot_manager_tree(source)
+        if expected_snapshot is not None and snapshot != expected_snapshot:
+            raise Mo2ArchiveError(f"{label} changed before recovery relocation")
+        if expected_inventory is not None and (
+            expected_inventory[1] is None
+            or snapshot.inventory.sha256 != expected_inventory[0]
+            or snapshot.inventory.file_count != expected_inventory[1]
+        ):
+            raise Mo2ArchiveError(
+                f"{label} inventory changed before recovery relocation"
+            )
+        if source_validator is not None:
+            source_validator(source)
+        if _lstat_if_exists(target) is not None:
+            raise Mo2ArchiveError(f"{label} recovery destination already exists")
+        _require_tree_identity(source, identity, snapshot, label)
+        _validate_captured_ancestry(source_ancestry)
+        _validate_captured_ancestry(target_ancestry)
+        if _lstat_if_exists(target) is not None:
+            raise Mo2ArchiveError(
+                f"{label} recovery destination appeared before relocation"
+            )
+
+    def validate_after() -> None:
+        assert identity is not None and snapshot is not None
+        _validate_captured_ancestry(source_ancestry)
+        _validate_captured_ancestry(target_ancestry)
+        if _lstat_if_exists(source) is not None:
+            raise Mo2ArchiveError(f"{label} source remained after relocation")
+        _require_tree_identity(target, identity, snapshot, f"relocated {label}")
+
+    _move_exact_directory(
+        source,
+        target,
+        validate_before=validate_before,
+        validate_after=validate_after,
+    )
 
 
 def _planned_create_target_matches(root: Path, plan: BootstrapPlan) -> bool:
@@ -2346,6 +2376,8 @@ def _apply_create_plan(
     try:
         _require_extraction_inputs_current(collected)
         job = store.create_job(plan, listing=collected.listing)
+    except Mo2BootstrapStoreOwnershipError:
+        raise
     except Mo2BootstrapStorePromotionError as error:
         refusal = Mo2BootstrapRefusal(
             "recovery-required",
@@ -2493,29 +2525,55 @@ def _apply_create_plan(
         if prior_present:
             assert prior_snapshot is not None and prior_identity is not None
             assert manager_ancestry is not None and prior_parent_ancestry is not None
-            _validate_captured_ancestry(manager_ancestry)
-            _validate_captured_ancestry(prior_parent_ancestry)
-            if _lstat_if_exists(prior_root) is not None:
-                raise Mo2BootstrapRefusal(
-                    "target-changed", "bootstrap prior path appeared before preservation"
+
+            def validate_preservation_before() -> None:
+                _validate_captured_ancestry(manager_ancestry)
+                _validate_captured_ancestry(prior_parent_ancestry)
+                if _lstat_if_exists(prior_root) is not None:
+                    raise Mo2BootstrapRefusal(
+                        "target-changed",
+                        "bootstrap prior path appeared before preservation",
+                    )
+                _require_tree_identity(
+                    final_root,
+                    prior_identity,
+                    prior_snapshot,
+                    "empty target",
                 )
-            _require_tree_identity(final_root, prior_identity, prior_snapshot, "empty target")
-            _validate_captured_ancestry(manager_ancestry)
-            _validate_captured_ancestry(prior_parent_ancestry)
-            if _lstat_if_exists(prior_root) is not None:
-                raise Mo2BootstrapRefusal(
-                    "target-changed",
-                    "bootstrap prior path appeared immediately before preservation",
+                _validate_captured_ancestry(manager_ancestry)
+                _validate_captured_ancestry(prior_parent_ancestry)
+                if _lstat_if_exists(prior_root) is not None:
+                    raise Mo2BootstrapRefusal(
+                        "target-changed",
+                        "bootstrap prior path appeared immediately before preservation",
+                    )
+
+            def validate_preservation_after() -> None:
+                _validate_captured_ancestry(manager_ancestry)
+                _validate_captured_ancestry(prior_parent_ancestry)
+                if _lstat_if_exists(final_root) is not None:
+                    raise Mo2BootstrapRefusal(
+                        "target-changed",
+                        "final target remained after prior preservation",
+                    )
+                _require_tree_identity(
+                    prior_root,
+                    prior_identity,
+                    prior_snapshot,
+                    "preserved target",
                 )
-            _replace_path(final_root, prior_root)
-            prior_moved = True
-            _validate_captured_ancestry(manager_ancestry)
-            _validate_captured_ancestry(prior_parent_ancestry)
-            if _lstat_if_exists(final_root) is not None:
-                raise Mo2BootstrapRefusal(
-                    "target-changed", "final target remained after prior preservation"
+
+            preservation = _ExactMoveProgress()
+            try:
+                _move_exact_directory(
+                    final_root,
+                    prior_root,
+                    validate_before=validate_preservation_before,
+                    validate_after=validate_preservation_after,
+                    progress=preservation,
                 )
-            _require_tree_identity(prior_root, prior_identity, prior_snapshot, "preserved target")
+            finally:
+                prior_moved = prior_moved or preservation.moved
         elif _lstat_if_exists(final_root) is not None:
             raise Mo2BootstrapRefusal(
                 "target-changed", "absent MO2 target appeared during activation"
@@ -2523,33 +2581,57 @@ def _apply_create_plan(
 
         assert stage_snapshot is not None and stage_identity is not None
         assert manager_ancestry is not None
-        _validate_captured_ancestry(manager_ancestry)
-        if prior_moved:
-            assert prior_parent_ancestry is not None
-            _validate_captured_ancestry(prior_parent_ancestry)
-            assert prior_snapshot is not None and prior_identity is not None
+        def validate_activation_before() -> None:
+            _validate_captured_ancestry(manager_ancestry)
+            if prior_moved:
+                assert prior_parent_ancestry is not None
+                _validate_captured_ancestry(prior_parent_ancestry)
+                assert prior_snapshot is not None and prior_identity is not None
+                _require_tree_identity(
+                    prior_root,
+                    prior_identity,
+                    prior_snapshot,
+                    "preserved target",
+                )
             _require_tree_identity(
-                prior_root,
-                prior_identity,
-                prior_snapshot,
-                "preserved target",
+                stage_root,
+                stage_identity,
+                stage_snapshot,
+                "staged instance",
             )
-        _require_tree_identity(stage_root, stage_identity, stage_snapshot, "staged instance")
-        _validate_captured_ancestry(manager_ancestry)
-        if prior_moved:
-            assert prior_parent_ancestry is not None
-            _validate_captured_ancestry(prior_parent_ancestry)
-        if _lstat_if_exists(final_root) is not None:
-            raise Mo2BootstrapRefusal(
-                "target-changed", "final target appeared immediately before activation"
+            _validate_captured_ancestry(manager_ancestry)
+            if prior_moved:
+                assert prior_parent_ancestry is not None
+                _validate_captured_ancestry(prior_parent_ancestry)
+            if _lstat_if_exists(final_root) is not None:
+                raise Mo2BootstrapRefusal(
+                    "target-changed",
+                    "final target appeared immediately before activation",
+                )
+
+        def validate_activation_after() -> None:
+            _validate_captured_ancestry(manager_ancestry)
+            if prior_moved:
+                assert prior_parent_ancestry is not None
+                _validate_captured_ancestry(prior_parent_ancestry)
+            _require_tree_identity(
+                final_root,
+                stage_identity,
+                stage_snapshot,
+                "activated instance",
             )
-        _replace_path(stage_root, final_root)
-        activated = True
-        _validate_captured_ancestry(manager_ancestry)
-        if prior_moved:
-            assert prior_parent_ancestry is not None
-            _validate_captured_ancestry(prior_parent_ancestry)
-        _require_tree_identity(final_root, stage_identity, stage_snapshot, "activated instance")
+
+        activation = _ExactMoveProgress()
+        try:
+            _move_exact_directory(
+                stage_root,
+                final_root,
+                validate_before=validate_activation_before,
+                validate_after=validate_activation_after,
+                progress=activation,
+            )
+        finally:
+            activated = activated or activation.moved
         job = _transition_create_job(
             store,
             job,
@@ -2578,6 +2660,8 @@ def _apply_create_plan(
         )
         try:
             stored_receipt = store.write_receipt(receipt)
+        except Mo2BootstrapStoreOwnershipError:
+            raise
         except Mo2BootstrapStorePromotionError as error:
             if error.record_kind != "receipt" or error.record_id != receipt.receipt_id:
                 raise Mo2BootstrapError(
@@ -2635,6 +2719,11 @@ def _apply_create_plan(
             promoted_paths=promoted_paths,
         )
         raise _refusal_with_failure(refusal, failure) from error
+    except (
+        windows_exact_fs.ExactObjectOwnershipError,
+        Mo2BootstrapStoreOwnershipError,
+    ):
+        raise
     except (
         BootstrapFormatError,
         Mo2ArchiveError,
@@ -3019,10 +3108,6 @@ def _restore_create_prior(
     if activated or not prior_moved:
         return None
     try:
-        if _lstat_if_exists(final_root) is not None:
-            raise Mo2ArchiveError(
-                "final target appeared before preserved prior could be restored"
-            )
         if (
             not prior_present
             or prior_identity is None
@@ -3031,34 +3116,46 @@ def _restore_create_prior(
             or prior_parent_ancestry is None
         ):
             raise Mo2ArchiveError("preserved prior evidence is incomplete")
-        _validate_captured_ancestry(manager_ancestry)
-        _validate_captured_ancestry(prior_parent_ancestry)
-        if _lstat_if_exists(final_root) is not None:
-            raise Mo2ArchiveError(
-                "final target appeared before preserved prior could be restored"
+
+        def validate_before() -> None:
+            _validate_captured_ancestry(manager_ancestry)
+            _validate_captured_ancestry(prior_parent_ancestry)
+            if _lstat_if_exists(final_root) is not None:
+                raise Mo2ArchiveError(
+                    "final target appeared before preserved prior could be restored"
+                )
+            _require_tree_identity(
+                prior_root,
+                prior_identity,
+                prior_snapshot,
+                "preserved target",
             )
-        _require_tree_identity(
+            _validate_captured_ancestry(manager_ancestry)
+            _validate_captured_ancestry(prior_parent_ancestry)
+            if _lstat_if_exists(final_root) is not None:
+                raise Mo2ArchiveError(
+                    "final target appeared immediately before preserved prior restoration"
+                )
+
+        def validate_after() -> None:
+            _validate_captured_ancestry(manager_ancestry)
+            _validate_captured_ancestry(prior_parent_ancestry)
+            _require_tree_identity(
+                final_root,
+                prior_identity,
+                prior_snapshot,
+                "restored target",
+            )
+
+        _move_exact_directory(
             prior_root,
-            prior_identity,
-            prior_snapshot,
-            "preserved target",
-        )
-        _validate_captured_ancestry(manager_ancestry)
-        _validate_captured_ancestry(prior_parent_ancestry)
-        if _lstat_if_exists(final_root) is not None:
-            raise Mo2ArchiveError(
-                "final target appeared immediately before preserved prior restoration"
-            )
-        _replace_path(prior_root, final_root)
-        _validate_captured_ancestry(manager_ancestry)
-        _validate_captured_ancestry(prior_parent_ancestry)
-        _require_tree_identity(
             final_root,
-            prior_identity,
-            prior_snapshot,
-            "restored target",
+            validate_before=validate_before,
+            validate_after=validate_after,
         )
         return None
+    except windows_exact_fs.ExactObjectOwnershipError:
+        raise
     except Exception as error:
         return str(error) or type(error).__name__
 
@@ -3098,8 +3195,74 @@ def _mark_create_recovery(
         return observed
 
 
-def _replace_path(source: Path, target: Path) -> None:
-    os.replace(source, target)
+def _move_exact_directory(
+    source: Path,
+    target: Path,
+    *,
+    validate_before: Callable[[], None],
+    validate_after: Callable[[], None],
+    progress: _ExactMoveProgress | None = None,
+) -> None:
+    """Move one retained directory through its retained destination parent."""
+    observed = progress if progress is not None else _ExactMoveProgress()
+    source_owner = None
+    parent_owner = None
+    primary_error: BaseException | None = None
+    try:
+        source_owner = windows_exact_fs.pin_direct_object(source, "directory")
+        parent_owner = windows_exact_fs.pin_direct_object(target.parent, "directory")
+        validate_before()
+        windows_exact_fs.rename_pinned_no_replace(
+            source_owner,
+            target,
+            parent_owner,
+        )
+        observed.moved = True
+        validate_after()
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        if source_owner is not None and _same_path(source_owner.path, target):
+            observed.moved = True
+        cleanup_errors: list[BaseException] = []
+        owners: list[windows_exact_fs.RetainedObjectOwner] = []
+        for owner, role in (
+            (source_owner, windows_exact_fs.RetainedObjectRole.VERIFICATION),
+            (parent_owner, windows_exact_fs.RetainedObjectRole.DESTINATION_PARENT),
+        ):
+            if owner is None:
+                continue
+            try:
+                owner.close()
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+            if owner.handle:
+                owners.append(windows_exact_fs.RetainedObjectOwner(role, owner))
+        prior_ownership = (
+            primary_error
+            if isinstance(primary_error, windows_exact_fs.ExactObjectOwnershipError)
+            else None
+        )
+        if owners or (
+            prior_ownership is not None and prior_ownership.retained_objects
+        ):
+            ownership = windows_exact_fs.union_retained_ownership(
+                "bootstrap exact-directory move retained live ownership: "
+                + "; ".join(str(error) for error in cleanup_errors),
+                prior=prior_ownership,
+                owners=tuple(owners),
+            )
+            if primary_error is not None:
+                raise ownership from primary_error
+            raise ownership from cleanup_errors[0]
+        if primary_error is not None and cleanup_errors:
+            primary_error.add_note(
+                "bootstrap exact-directory owner cleanup completed with errors: "
+                + "; ".join(str(error) for error in cleanup_errors)
+            )
+        elif cleanup_errors:
+            raise cleanup_errors[0]
 
 
 def _remove_preserved_empty_prior(
@@ -3150,6 +3313,8 @@ def _apply_adopt_plan(
     try:
         _require_extraction_inputs_current(collected)
         job = store.create_job(plan, listing=collected.listing)
+    except Mo2BootstrapStoreOwnershipError:
+        raise
     except Mo2BootstrapStorePromotionError as error:
         refusal = Mo2BootstrapRefusal(
             "recovery-required",
@@ -3267,6 +3432,8 @@ def _apply_adopt_plan(
         )
         try:
             stored_receipt = store.write_receipt(receipt)
+        except Mo2BootstrapStoreOwnershipError:
+            raise
         except Mo2BootstrapStorePromotionError as error:
             if error.record_kind != "receipt" or error.record_id != receipt.receipt_id:
                 raise Mo2BootstrapError(
@@ -3301,6 +3468,11 @@ def _apply_adopt_plan(
             promoted_paths=promoted_paths,
         )
         raise _refusal_with_failure(error, failure) from error
+    except (
+        windows_exact_fs.ExactObjectOwnershipError,
+        Mo2BootstrapStoreOwnershipError,
+    ):
+        raise
     except (BootstrapFormatError, Mo2ArchiveError, Mo2BootstrapStoreError, OSError) as error:
         job = _mark_adopt_recovery(store, job, error, clock)
         refusal = Mo2BootstrapRefusal(
@@ -3548,13 +3720,17 @@ def _snapshot_manager_tree(root: Path) -> _ManagerSnapshot:
 
 def _entry_identity(relative_path: str, kind: str, metadata) -> _EntryIdentity:
     is_file = kind == "file"
+    file_attributes = windows_exact_fs.normalize_identity_attributes(
+        int(getattr(metadata, "st_file_attributes", 0)),
+        is_directory=not is_file,
+    )
     return _EntryIdentity(
         relative_path=relative_path,
         kind=kind,
         device=int(getattr(metadata, "st_dev", 0)),
         inode=int(getattr(metadata, "st_ino", 0)),
         mode_type=stat.S_IFMT(metadata.st_mode),
-        file_attributes=int(getattr(metadata, "st_file_attributes", 0)),
+        file_attributes=file_attributes,
         size=int(metadata.st_size) if is_file else None,
         modified_ns=int(metadata.st_mtime_ns) if is_file else None,
         changed_ns=int(metadata.st_ctime_ns) if is_file else None,

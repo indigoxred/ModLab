@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from modlab.platform import windows_exact_fs
+from modlab.platform.windows_exact_fs import RetainedObjectRole
 from modlab.adapters.mo2.bootstrap_model import (
     BootstrapDisposition,
     BootstrapJobState,
@@ -26,7 +28,6 @@ from modlab.workflows.skyrim.mo2_bootstrap_store import (
     Mo2BootstrapStore,
     Mo2BootstrapStoreError,
     Mo2BootstrapStorePromotionError,
-    _promote_no_replace,
 )
 from modlab.workspace import initialize_workspace
 from tests.support.mo2_bootstrap import (
@@ -168,12 +169,19 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
         return stored_receipt, verified
 
     def test_plan_is_content_addressed_idempotent_and_conflict_safe(self):
-        stored = self.store.write_plan(self.plan)
+        with patch.object(
+            windows_exact_fs,
+            "publish_new_pinned",
+            wraps=windows_exact_fs.publish_new_pinned,
+        ) as publish:
+            stored = self.store.write_plan(self.plan)
         repeated = self.store.write_plan(self.plan)
 
         self.assertTrue(stored.changed)
         self.assertFalse(repeated.changed)
         self.assertEqual(plan_to_bytes(self.plan), stored.path.read_bytes())
+        if os.name == "nt":
+            self.assertEqual(1, publish.call_count)
         stored.path.write_bytes(b"changed")
         with self.assertRaisesRegex(Mo2BootstrapStoreError, "different bytes"):
             self.store.write_plan(self.plan)
@@ -472,15 +480,17 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
 
     def test_pre_promotion_failure_leaves_no_target_or_part_file(self):
         target = self.store.plan_path(self.plan.plan_id)
-        with patch(
-            "modlab.workflows.skyrim.mo2_bootstrap_store.os.fsync",
-            side_effect=OSError("flush failed"),
+        with patch.object(
+            windows_exact_fs,
+            "write_pinned_file",
+            side_effect=OSError("write failed"),
         ):
-            with self.assertRaisesRegex(Mo2BootstrapStoreError, "flush failed"):
+            with self.assertRaisesRegex(Mo2BootstrapStoreError, "write failed"):
                 self.store.write_plan(self.plan)
 
         self.assertFalse(target.exists())
         self.assertEqual([], list(self.layout.mo2_bootstrap_jobs.glob("*.part")))
+        self.assertEqual([], list(target.parent.glob(f".{target.name}.*.tmp")))
 
     def test_initial_journal_validation_failure_preserves_promotion_evidence(self):
         self.store.write_plan(self.plan)
@@ -560,15 +570,16 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
 
     def test_immutable_race_never_overwrites_bytes_that_appear_at_target(self):
         target = self.store.plan_path(self.plan.plan_id)
-        real_promote = _promote_no_replace
+        real_publish = windows_exact_fs.publish_new_pinned
 
-        def competing_promotion(source, destination):
+        def competing_publication(destination, data, validator):
             Path(destination).write_bytes(b"racing writer")
-            return real_promote(source, destination)
+            return real_publish(destination, data, validator)
 
-        with patch(
-            "modlab.workflows.skyrim.mo2_bootstrap_store._promote_no_replace",
-            side_effect=competing_promotion,
+        with patch.object(
+            windows_exact_fs,
+            "publish_new_pinned",
+            side_effect=competing_publication,
         ):
             with self.assertRaisesRegex(Mo2BootstrapStoreError, "different bytes"):
                 self.store.write_plan(self.plan)
@@ -652,8 +663,9 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
 
     def test_failed_initial_journal_promotion_removes_only_its_new_empty_job(self):
         self.store.write_plan(self.plan)
-        with patch(
-            "modlab.workflows.skyrim.mo2_bootstrap_store._promote_no_replace",
+        with patch.object(
+            windows_exact_fs,
+            "publish_new_pinned",
             side_effect=OSError("promotion failed"),
         ):
             with self.assertRaisesRegex(Mo2BootstrapStoreError, "promotion failed"):
@@ -663,19 +675,64 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
         self.assertFalse(self.store.stage_root(JOB_ID).exists())
         self.assertEqual([], list(self.layout.mo2_bootstrap_jobs.glob("*.part")))
 
-    def test_cleanup_failure_does_not_damage_or_hide_promoted_document(self):
-        real_unlink = Path.unlink
+    def test_completed_publication_later_reload_failure_keeps_document(self):
+        target = self.store.plan_path(self.plan.plan_id)
+        with patch.object(
+            self.store,
+            "load_plan",
+            side_effect=Mo2BootstrapStoreError("fixture later reload failure"),
+        ):
+            with self.assertRaises(Mo2BootstrapStorePromotionError) as raised:
+                self.store.write_plan(self.plan)
 
-        def fail_part_cleanup(path, *args, **kwargs):
-            if Path(path).suffix == ".part":
-                raise OSError("cleanup failed")
-            return real_unlink(path, *args, **kwargs)
+        self.assertTrue(raised.exception.changed)
+        self.assertEqual(target, raised.exception.path)
+        self.assertEqual(plan_to_bytes(self.plan), target.read_bytes())
+        self.assertEqual([], list(target.parent.glob(f".{target.name}.*.tmp")))
 
-        with patch.object(Path, "unlink", autospec=True, side_effect=fail_part_cleanup):
-            stored = self.store.write_plan(self.plan)
+    @unittest.skipUnless(os.name == "nt", "exact publication requires Windows")
+    def test_immutable_owner_failure_keeps_record_identity_and_live_union(self):
+        target = self.store.plan_path(self.plan.plan_id)
+        rename = windows_exact_fs.rename_pinned_no_replace
+        close = windows_exact_fs.PinnedObject.close
+        fail_ids: set[int] = set()
 
-        self.assertEqual(plan_to_bytes(self.plan), stored.path.read_bytes())
-        self.assertEqual([], list(self.layout.mo2_bootstrap_jobs.glob("*.part")))
+        def arm_published_owners(source, destination, parent, **kwargs):
+            result = rename(source, destination, parent, **kwargs)
+            if Path(destination) == target:
+                fail_ids.update((id(source), id(parent)))
+            return result
+
+        def fail_armed_close(owner):
+            if id(owner) in fail_ids and owner.handle:
+                raise OSError("fixture publication owner close failure")
+            return close(owner)
+
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=arm_published_owners,
+        ), patch.object(
+            windows_exact_fs.PinnedObject,
+            "close",
+            autospec=True,
+            side_effect=fail_armed_close,
+        ):
+            with self.assertRaises(Exception) as raised:
+                self.store.write_plan(self.plan)
+
+        error = raised.exception
+        self.assertIsInstance(error, Mo2BootstrapStoreError)
+        self.assertEqual("plan", error.record_kind)
+        self.assertEqual(self.plan.plan_id, error.record_id)
+        self.assertEqual(target, error.path)
+        self.assertTrue(error.changed)
+        self.assertEqual(
+            {RetainedObjectRole.CANDIDATE, RetainedObjectRole.DESTINATION_PARENT},
+            {owner.role for owner in error.owners},
+        )
+        error.resolve()
+        self.assertFalse(target.exists())
 
     def test_redirected_plan_job_and_receipt_ancestors_are_rejected(self):
         cases = (

@@ -52,6 +52,14 @@ _OBJ_CASE_INSENSITIVE = 0x00000040
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 
+def normalize_identity_attributes(attributes: int, *, is_directory: bool) -> int:
+    """Discard non-safety directory flags while preserving file attributes."""
+    value = int(attributes)
+    if is_directory:
+        return value & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT)
+    return value
+
+
 class ExactObjectError(RuntimeError):
     """A path cannot be proved to name the retained exact object."""
 

@@ -36,6 +36,30 @@ class WindowsExactFsTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_directory_identity_attributes_ignore_transient_bits_while_files_remain_raw(
+        self,
+    ) -> None:
+        directory_attributes = windows_exact_fs._FILE_ATTRIBUTE_DIRECTORY
+        transient_attributes = directory_attributes | 0x10000000
+
+        self.assertEqual(
+            windows_exact_fs.normalize_identity_attributes(
+                directory_attributes,
+                is_directory=True,
+            ),
+            windows_exact_fs.normalize_identity_attributes(
+                transient_attributes,
+                is_directory=True,
+            ),
+        )
+        self.assertEqual(
+            transient_attributes,
+            windows_exact_fs.normalize_identity_attributes(
+                transient_attributes,
+                is_directory=False,
+            ),
+        )
+
     def test_stable_snapshot_pin_denies_write_and_rename_until_close(self) -> None:
         path = self.root / "snapshot.bin"
         renamed = self.root / "renamed.bin"

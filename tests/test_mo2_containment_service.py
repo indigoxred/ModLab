@@ -101,6 +101,83 @@ def retained_relocation_for_test(
 
 @unittest.skipUnless(os.name == "nt", "retained projection tests require Windows")
 class PreparationProjectionRegressionTests(unittest.TestCase):
+    def test_transient_non_identity_directory_attribute_does_not_block_delegated_mutation_observation(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-owner-union-transient-",
+            dir=Path(__file__).resolve().parents[1],
+        ) as directory:
+            base = Path(directory)
+            root = base / "observed"
+            target = root / "source/Protected"
+            target.mkdir(parents=True)
+            (root / "stage").mkdir()
+            unrelated = base / "delegate-owned"
+            unrelated.mkdir()
+            pins = []
+            injected = False
+            operation_called = False
+            real_lstat = Path.lstat
+            real_close = junction._close_handle
+
+            def lstat(path, *args, **kwargs):
+                nonlocal injected
+                metadata = real_lstat(path, *args, **kwargs)
+                if Path(path) != target or injected:
+                    return metadata
+                injected = True
+                return SimpleNamespace(
+                    st_dev=metadata.st_dev,
+                    st_ino=metadata.st_ino,
+                    st_mode=metadata.st_mode,
+                    st_file_attributes=(
+                        int(getattr(metadata, "st_file_attributes", 0)) | 0x10000000
+                    ),
+                    st_size=metadata.st_size,
+                    st_atime_ns=metadata.st_atime_ns,
+                    st_mtime_ns=metadata.st_mtime_ns,
+                    st_ctime_ns=metadata.st_ctime_ns,
+                )
+
+            def close(handle):
+                if any(pin.handle == handle for pin in pins):
+                    raise OSError("injected exact-owner close failure")
+                real_close(handle)
+
+            def operation():
+                nonlocal operation_called
+                operation_called = True
+                owner = junction.create_owned_projection(target, root / "stage/Protected")
+                pins.extend(owner.pins)
+                extra = junction._pin_object(
+                    unrelated,
+                    desired_access=junction._FILE_READ_ATTRIBUTES,
+                    allow_reparse=False,
+                )
+                pins.append(extra)
+                failure = junction.JunctionOwnershipError(
+                    "delegate retains a separate exact owner",
+                    (extra,),
+                )
+                failure.projection_owners = (owner,)
+                raise failure
+
+            token = service._ACTIVE_EFFECTS.set(service._EffectLedger())
+            try:
+                with (
+                    patch.object(Path, "lstat", new=lstat),
+                    patch.object(junction, "_close_handle", side_effect=close),
+                ):
+                    with self.assertRaises(junction.JunctionOwnershipError) as raised:
+                        service._delegated_mutations((root,), operation)
+                self.assertTrue(injected)
+                self.assertTrue(operation_called)
+                self.assertEqual(5, len(raised.exception.pins))
+            finally:
+                service._ACTIVE_EFFECTS.reset(token)
+                junction._close_pinned_objects(tuple(pins), "test owner union")
+
     def test_delegate_and_projection_close_failures_retain_the_union_of_live_owners(self):
         with tempfile.TemporaryDirectory(prefix="modlab-owner-union-", dir=Path(__file__).resolve().parents[1]) as directory:
             base = Path(directory)

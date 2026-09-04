@@ -1,10 +1,18 @@
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from subprocess import CompletedProcess
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from modlab.platform import windows_exact_fs
+from modlab.platform.windows_exact_fs import (
+    ExactObjectOwnershipError,
+    PinnedIdentity,
+    RetainedObjectRole,
+)
 from modlab.adapters.mo2.bootstrap_model import (
     BootstrapDisposition,
     BootstrapJobState,
@@ -71,8 +79,20 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
     def test_create_activates_exact_contained_ready_instance(self):
         plan = self._plan_create()
         before_external = self.fixture.external_state()
+        directory_moves: list[tuple[Path, Path]] = []
+        rename = windows_exact_fs.rename_pinned_no_replace
 
-        result = self._apply(plan.plan_id)
+        def observe_directory_move(source, target, parent, **kwargs):
+            if source.identity.attributes & 0x10:
+                directory_moves.append((Path(source.path), Path(target)))
+            return rename(source, target, parent, **kwargs)
+
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=observe_directory_move,
+        ):
+            result = self._apply(plan.plan_id)
 
         projection = project_mo2_state(
             inspect_skyrim_mo2(
@@ -116,6 +136,54 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
         self.assertEqual(expected_manager_changes, result.manager_changes)
         self.assertTrue(
             all(not Path(path).is_absolute() for path in result.paths_written)
+        )
+        self.assertEqual(2, len(directory_moves))
+
+    def test_transient_non_identity_directory_attribute_does_not_block_exact_activation(
+        self,
+    ):
+        from modlab.workflows.skyrim import mo2_bootstrap
+
+        plan = self._plan_create()
+        direct_cleanup_metadata = mo2_bootstrap._direct_cleanup_metadata
+        injected = False
+
+        def add_transient_staging_attribute(path, label):
+            nonlocal injected
+            metadata = direct_cleanup_metadata(path, label)
+            if label != "staging root" or injected:
+                return metadata
+            injected = True
+            return SimpleNamespace(
+                st_dev=metadata.st_dev,
+                st_ino=metadata.st_ino,
+                st_mode=metadata.st_mode,
+                st_file_attributes=(
+                    int(getattr(metadata, "st_file_attributes", 0)) | 0x10000000
+                ),
+                st_size=metadata.st_size,
+                st_mtime_ns=metadata.st_mtime_ns,
+                st_ctime_ns=metadata.st_ctime_ns,
+            )
+
+        with patch.object(
+            mo2_bootstrap,
+            "_direct_cleanup_metadata",
+            side_effect=add_transient_staging_attribute,
+        ):
+            result = self._apply(plan.plan_id)
+
+        self.assertTrue(injected)
+        self.assertEqual(BootstrapReceiptMode.CREATED, result.receipt.mode)
+        self.assertEqual(BootstrapJobState.VERIFIED, result.journal.state)
+        self.assertTrue(
+            (self.fixture.layout.skyrim_mo2_app / "ModOrganizer.exe").is_file()
+        )
+        self.assertFalse(Path(result.journal.stage_root).exists())
+        self.assertTrue(
+            Mo2BootstrapStore(self.fixture.workspace)
+            .receipt_path(result.receipt.receipt_id)
+            .is_file()
         )
 
     def test_absent_target_is_created_without_inventing_a_prior(self):
@@ -293,20 +361,209 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
         plan = self._plan_create()
         before_target = tree_state(self.fixture.layout.skyrim_mo2)
         before_external = self.fixture.external_state()
-        replace_path = mo2_bootstrap._replace_path
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
 
-        def fail_preserve(source, target):
-            if Path(source) == self.fixture.layout.skyrim_mo2:
+        def fail_preserve(source, target, parent, **kwargs):
+            if Path(source.path) == self.fixture.layout.skyrim_mo2:
                 raise OSError("fixture preserve failure")
-            return replace_path(source, target)
+            return rename_pinned(source, target, parent, **kwargs)
 
-        with patch.object(mo2_bootstrap, "_replace_path", side_effect=fail_preserve):
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=fail_preserve,
+        ):
             with self.assertRaisesRegex(Mo2BootstrapRefusal, "recovery"):
                 self._apply(plan.plan_id)
 
         self.assertEqual(before_target, tree_state(self.fixture.layout.skyrim_mo2))
         self.assertEqual(before_external, self.fixture.external_state())
         self._assert_recovery_required()
+
+    @unittest.skipUnless(os.name == "nt", "retained bootstrap moves require Windows")
+    def test_preservation_moves_the_pinned_source_not_a_substituted_path(self):
+        plan = self._plan_create()
+        before_target = tree_state(self.fixture.layout.skyrim_mo2)
+        unknown = b"substituted owner"
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+        injected = False
+
+        def substitute_source(source, target, parent, **kwargs):
+            nonlocal injected
+            if Path(source.path) == self.fixture.layout.skyrim_mo2:
+                injected = True
+                displaced = Path(source.path).with_name("displaced-empty-target")
+                Path(source.path).rename(displaced)
+                Path(source.path).mkdir()
+                (Path(source.path) / "unknown.txt").write_bytes(unknown)
+            return rename_pinned(source, target, parent, **kwargs)
+
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=substitute_source,
+        ):
+            with self.assertRaises(Mo2BootstrapRefusal):
+                self._apply(plan.plan_id)
+
+        job = self._job()
+        self.assertTrue(injected)
+        self.assertEqual(unknown, (self.fixture.layout.skyrim_mo2 / "unknown.txt").read_bytes())
+        self.assertEqual(before_target, tree_state(Path(job.prior_root)))
+        self.assertEqual(BootstrapJobState.RECOVERY_REQUIRED, job.state)
+
+    @unittest.skipUnless(os.name == "nt", "retained bootstrap moves require Windows")
+    def test_preservation_refuses_a_substituted_destination_parent(self):
+        plan = self._plan_create()
+        before_target = tree_state(self.fixture.layout.skyrim_mo2)
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+        unknown = b"substituted parent owner"
+        displaced_parent: Path | None = None
+
+        def substitute_parent(source, target, parent, **kwargs):
+            nonlocal displaced_parent
+            if Path(source.path) == self.fixture.layout.skyrim_mo2:
+                displaced_parent = Path(parent.path).with_name("displaced-job-parent")
+                Path(parent.path).rename(displaced_parent)
+                Path(parent.path).mkdir()
+                (Path(parent.path) / "unknown.txt").write_bytes(unknown)
+            return rename_pinned(source, target, parent, **kwargs)
+
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=substitute_parent,
+        ):
+            with self.assertRaises(Mo2BootstrapRefusal):
+                self._apply(plan.plan_id)
+
+        self.assertIsNotNone(displaced_parent)
+        assert displaced_parent is not None
+        self.assertEqual(before_target, tree_state(self.fixture.layout.skyrim_mo2))
+        self.assertEqual(
+            unknown,
+            (self.fixture.layout.mo2_bootstrap_jobs / "fedcba9876543210fedcba9876543210" / "unknown.txt").read_bytes(),
+        )
+        self.assertTrue((displaced_parent / "journal.json").exists())
+
+    @unittest.skipUnless(os.name == "nt", "retained bootstrap moves require Windows")
+    def test_activation_case_collision_is_not_replaced(self):
+        plan = self._plan_create()
+        before_target = tree_state(self.fixture.layout.skyrim_mo2)
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+        unknown = b"case-collision owner"
+        injected = False
+
+        def collide_before_activation(source, target, parent, **kwargs):
+            nonlocal injected
+            if source.identity.attributes & 0x10 and Path(source.path) == Path(
+                self._job().stage_root
+            ):
+                injected = True
+                collision = Path(target).with_name(Path(target).name.swapcase())
+                collision.mkdir()
+                (collision / "unknown.txt").write_bytes(unknown)
+            return rename_pinned(source, target, parent, **kwargs)
+
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=collide_before_activation,
+        ):
+            with self.assertRaises(Mo2BootstrapRefusal):
+                self._apply(plan.plan_id)
+
+        job = self._job()
+        self.assertTrue(injected)
+        self.assertEqual(unknown, (self.fixture.layout.skyrim_mo2 / "unknown.txt").read_bytes())
+        self.assertEqual(before_target, tree_state(Path(job.prior_root)))
+        self.assertEqual(BootstrapJobState.RECOVERY_REQUIRED, job.state)
+
+    @unittest.skipUnless(os.name == "nt", "retained bootstrap moves require Windows")
+    def test_post_move_identity_failure_records_activation_as_moved(self):
+        plan = self._plan_create()
+        before_target = tree_state(self.fixture.layout.skyrim_mo2)
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+        injected = False
+
+        def mismatch_after_activation(source, target, parent, **_kwargs):
+            nonlocal injected
+            if not source.identity.attributes & 0x10 or Path(source.path) != Path(
+                self._job().stage_root
+            ):
+                return rename_pinned(source, target, parent)
+            injected = True
+
+            def identity(path):
+                observed = windows_exact_fs.identity_at_path(path)
+                if Path(path) == Path(target) and Path(source.path) == Path(target):
+                    return PinnedIdentity(
+                        observed.volume_serial,
+                        observed.file_id + 1,
+                        observed.attributes,
+                    )
+                return observed
+
+            return rename_pinned(
+                source,
+                target,
+                parent,
+                identity_at_path_fn=identity,
+            )
+
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=mismatch_after_activation,
+        ):
+            with self.assertRaises(Mo2BootstrapRefusal) as raised:
+                self._apply(plan.plan_id)
+
+        job = self._job()
+        self.assertTrue(injected)
+        self.assertEqual("recovery-required", raised.exception.code)
+        self.assertTrue(self.fixture.layout.skyrim_mo2_app.exists())
+        self.assertEqual(before_target, tree_state(Path(job.prior_root)))
+        self.assertEqual(BootstrapJobState.RECOVERY_REQUIRED, job.state)
+
+    @unittest.skipUnless(os.name == "nt", "retained bootstrap moves require Windows")
+    def test_move_close_failure_returns_both_live_owners_without_rollback(self):
+        plan = self._plan_create()
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+        close = windows_exact_fs.PinnedObject.close
+        fail_ids: set[int] = set()
+
+        def arm_after_activation(source, target, parent, **kwargs):
+            result = rename_pinned(source, target, parent, **kwargs)
+            if Path(source.path) == self.fixture.layout.skyrim_mo2:
+                fail_ids.update((id(source), id(parent)))
+            return result
+
+        def fail_move_owner_close(owner):
+            if id(owner) in fail_ids and owner.handle:
+                raise OSError("fixture retained owner close failure")
+            return close(owner)
+
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=arm_after_activation,
+        ), patch.object(
+            windows_exact_fs.PinnedObject,
+            "close",
+            autospec=True,
+            side_effect=fail_move_owner_close,
+        ):
+            with self.assertRaises(ExactObjectOwnershipError) as raised:
+                self._apply(plan.plan_id)
+
+        self.assertEqual(
+            {RetainedObjectRole.VERIFICATION, RetainedObjectRole.DESTINATION_PARENT},
+            {owner.role for owner in raised.exception.owners},
+        )
+        self.assertEqual(2, len(raised.exception.retained_objects))
+        self.assertTrue(self.fixture.layout.skyrim_mo2_app.exists())
+        raised.exception.resolve()
 
     def test_prior_appearing_during_preserve_rehash_is_not_overwritten(self):
         from modlab.workflows.skyrim import mo2_bootstrap
@@ -320,6 +577,8 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
         before_external = self.fixture.external_state()
         require_tree_identity = mo2_bootstrap._require_tree_identity
         injected = False
+        directory_moves = 0
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
 
         def inject_prior(root, expected_root, expected_tree, label):
             nonlocal injected
@@ -334,21 +593,27 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
                 prior_root.mkdir()
             return result
 
+        def observe_directory_move(source, target, parent, **kwargs):
+            nonlocal directory_moves
+            if source.identity.attributes & 0x10:
+                directory_moves += 1
+            return rename_pinned(source, target, parent, **kwargs)
+
         with patch.object(
             mo2_bootstrap,
             "_require_tree_identity",
             side_effect=inject_prior,
         ), patch.object(
-            mo2_bootstrap,
-            "_replace_path",
-            wraps=mo2_bootstrap._replace_path,
-        ) as replace_path:
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=observe_directory_move,
+        ):
             with self.assertRaises(Mo2BootstrapRefusal) as raised:
                 self._apply(plan.plan_id)
 
         self.assertTrue(injected)
         self.assertEqual("target-changed", raised.exception.code)
-        replace_path.assert_not_called()
+        self.assertEqual(0, directory_moves)
         self.assertEqual(before_target, tree_state(self.fixture.layout.skyrim_mo2))
         self.assertEqual((), tree_state(prior_root))
         self.assertEqual(before_external, self.fixture.external_state())
@@ -392,14 +657,20 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
         plan = self._plan_create()
         before_target = tree_state(self.fixture.layout.skyrim_mo2)
         before_external = self.fixture.external_state()
-        replace_path = mo2_bootstrap._replace_path
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
 
-        def fail_activation(source, target):
-            if Path(source) == Path(self._job().stage_root):
+        def fail_activation(source, target, parent, **kwargs):
+            if source.identity.attributes & 0x10 and Path(source.path) == Path(
+                self._job().stage_root
+            ):
                 raise OSError("fixture activation failure")
-            return replace_path(source, target)
+            return rename_pinned(source, target, parent, **kwargs)
 
-        with patch.object(mo2_bootstrap, "_replace_path", side_effect=fail_activation):
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=fail_activation,
+        ):
             with self.assertRaisesRegex(Mo2BootstrapRefusal, "recovery"):
                 self._apply(plan.plan_id)
 
@@ -452,7 +723,7 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
         before_target = tree_state(self.fixture.layout.skyrim_mo2)
         before_external = self.fixture.external_state()
         require_tree_identity = mo2_bootstrap._require_tree_identity
-        replace_path = mo2_bootstrap._replace_path
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
         preserved_rehashes = 0
 
         def inject_target(root, expected_root, expected_tree, label):
@@ -469,18 +740,20 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
                     self.fixture.layout.skyrim_mo2.mkdir()
             return result
 
-        def fail_activation(source, target):
-            if Path(source) == Path(self._job().stage_root):
+        def fail_activation(source, target, parent, **kwargs):
+            if source.identity.attributes & 0x10 and Path(source.path) == Path(
+                self._job().stage_root
+            ):
                 raise OSError("fixture activation failure")
-            return replace_path(source, target)
+            return rename_pinned(source, target, parent, **kwargs)
 
         with patch.object(
             mo2_bootstrap,
             "_require_tree_identity",
             side_effect=inject_target,
         ), patch.object(
-            mo2_bootstrap,
-            "_replace_path",
+            windows_exact_fs,
+            "rename_pinned_no_replace",
             side_effect=fail_activation,
         ):
             with self.assertRaises(Mo2BootstrapRefusal) as raised:
@@ -502,6 +775,8 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
         before_external = self.fixture.external_state()
         validate_ancestry = mo2_bootstrap._validate_captured_ancestry
         rejected = False
+        directory_moves = 0
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
 
         def reject_manager_ancestry(ancestry):
             nonlocal rejected
@@ -513,20 +788,26 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
                 raise Mo2ArchiveError("simulated redirected activation ancestor")
             return validate_ancestry(ancestry)
 
+        def observe_directory_move(source, target, parent, **kwargs):
+            nonlocal directory_moves
+            if source.identity.attributes & 0x10:
+                directory_moves += 1
+            return rename_pinned(source, target, parent, **kwargs)
+
         with patch.object(
             mo2_bootstrap,
             "_validate_captured_ancestry",
             side_effect=reject_manager_ancestry,
         ), patch.object(
-            mo2_bootstrap,
-            "_replace_path",
-            wraps=mo2_bootstrap._replace_path,
-        ) as replace_path:
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=observe_directory_move,
+        ):
             with self.assertRaisesRegex(Mo2BootstrapRefusal, "recovery"):
                 self._apply(plan.plan_id)
 
         self.assertTrue(rejected)
-        replace_path.assert_not_called()
+        self.assertEqual(0, directory_moves)
         self.assertEqual(before_target, tree_state(self.fixture.layout.skyrim_mo2))
         self.assertEqual(before_external, self.fixture.external_state())
         self._assert_recovery_required()

@@ -14,6 +14,7 @@ from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 
+from modlab.platform import windows_exact_fs
 from modlab.adapters.mo2.bootstrap_model import (
     BootstrapDisposition,
     BootstrapJobState,
@@ -63,6 +64,64 @@ class Mo2BootstrapStorePromotionError(Mo2BootstrapStoreError):
         self.path = path
         self.changed = changed
         super().__init__(message)
+
+
+class Mo2BootstrapStoreOwnershipError(Mo2BootstrapStorePromotionError):
+    """An immutable store write retains exact owners with record context."""
+
+    def __init__(
+        self,
+        message: str,
+        ownership: windows_exact_fs.ExactObjectOwnershipError,
+        *,
+        record_kind: str,
+        record_id: str,
+        path: Path,
+        changed: bool,
+    ):
+        self.ownership = ownership
+        super().__init__(
+            message,
+            record_kind=record_kind,
+            record_id=record_id,
+            path=path,
+            changed=changed,
+        )
+
+    @property
+    def owners(self):
+        return self.ownership.owners
+
+    @property
+    def candidate(self):
+        return self.ownership.candidate
+
+    @property
+    def candidates(self):
+        return self.ownership.candidates
+
+    @property
+    def destination_parent(self):
+        return self.ownership.destination_parent
+
+    @property
+    def destination_parents(self):
+        return self.ownership.destination_parents
+
+    @property
+    def verification(self):
+        return self.ownership.verification
+
+    @property
+    def retained_objects(self):
+        return self.ownership.retained_objects
+
+    def resolve(self) -> None:
+        try:
+            self.ownership.resolve()
+        except windows_exact_fs.ExactObjectOwnershipError as unresolved:
+            self.ownership = unresolved
+            raise self from unresolved
 
 
 class _AtomicCreatePromotionError(Mo2BootstrapStoreError):
@@ -283,6 +342,15 @@ class Mo2BootstrapStore:
         target = self.plan_path(plan.plan_id)
         try:
             changed = self._write_immutable(target, data, "plan")
+        except windows_exact_fs.ExactObjectOwnershipError as error:
+            raise Mo2BootstrapStoreOwnershipError(
+                f"bootstrap plan publication retains live exact ownership: {error}",
+                error,
+                record_kind="plan",
+                record_id=plan.plan_id,
+                path=target,
+                changed=bool(error.candidates),
+            ) from error
         except _AtomicCreatePromotionError as error:
             raise Mo2BootstrapStorePromotionError(
                 f"bootstrap plan was promoted but could not be verified: {error}",
@@ -291,7 +359,16 @@ class Mo2BootstrapStore:
                 path=error.path,
                 changed=True,
             ) from error
-        loaded = self.load_plan(plan.plan_id)
+        try:
+            loaded = self.load_plan(plan.plan_id)
+        except (Mo2BootstrapStoreError, Mo2BootstrapNotFoundError) as error:
+            raise Mo2BootstrapStorePromotionError(
+                f"bootstrap plan publication could not be reloaded: {error}",
+                record_kind="plan",
+                record_id=plan.plan_id,
+                path=target,
+                changed=changed,
+            ) from error
         if loaded.plan != plan or loaded.data != data:
             raise Mo2BootstrapStoreError("stored plan differs after write")
         return StoredBootstrapPlan(
@@ -435,6 +512,15 @@ class Mo2BootstrapStore:
                     path=self.journal_path(job_id),
                     changed=True,
                 ) from error
+        except windows_exact_fs.ExactObjectOwnershipError as error:
+            raise Mo2BootstrapStoreOwnershipError(
+                f"bootstrap journal publication retains live exact ownership: {error}",
+                error,
+                record_kind="journal",
+                record_id=job_id,
+                path=self.journal_path(job_id),
+                changed=bool(error.candidates),
+            ) from error
         except Mo2BootstrapStoreError:
             if created_job_directory:
                 self._remove_empty_directory(job_directory)
@@ -535,6 +621,15 @@ class Mo2BootstrapStore:
         target = self.receipt_path(receipt.receipt_id)
         try:
             changed = self._write_immutable(target, data, "receipt")
+        except windows_exact_fs.ExactObjectOwnershipError as error:
+            raise Mo2BootstrapStoreOwnershipError(
+                f"bootstrap receipt publication retains live exact ownership: {error}",
+                error,
+                record_kind="receipt",
+                record_id=receipt.receipt_id,
+                path=target,
+                changed=bool(error.candidates),
+            ) from error
         except _AtomicCreatePromotionError as error:
             raise Mo2BootstrapStorePromotionError(
                 f"bootstrap receipt was promoted but could not be verified: {error}",
@@ -647,12 +742,43 @@ class Mo2BootstrapStore:
         return self._atomic_create(target, data, label)
 
     def _atomic_create(self, target: Path, data: bytes, label: str) -> bool:
+        if os.name == "nt":
+            self._validate_target(target)
+
+            def validate(candidate: bytes) -> bytes:
+                if candidate != data:
+                    raise Mo2BootstrapStoreError(
+                        f"stored {label} differs during exact immutable publication"
+                    )
+                return candidate
+
+            try:
+                windows_exact_fs.publish_new_pinned(target, data, validate)
+                return True
+            except FileExistsError:
+                self._validate_existing_file(target, f"stored {label}")
+                existing = self._read_existing_bytes(target, f"stored {label}")
+                if existing == data:
+                    return False
+                raise Mo2BootstrapStoreError(
+                    f"stored {label} path contains different bytes: {target}"
+                )
+            except windows_exact_fs.ExactObjectOwnershipError:
+                raise
+            except Mo2BootstrapStoreError:
+                raise
+            except (windows_exact_fs.ExactObjectError, OSError) as error:
+                raise Mo2BootstrapStoreError(
+                    f"could not create immutable bootstrap {label} through retained "
+                    f"ownership at {target}: {error}"
+                ) from error
+
         part = self._stage_document(target, data, label)
         promoted = False
         try:
             self._validate_target(target)
             try:
-                _promote_no_replace(part, target)
+                _promote_no_replace_posix(part, target)
             except FileExistsError:
                 self._validate_existing_file(target, f"stored {label}")
                 existing = self._read_existing_bytes(target, f"stored {label}")
@@ -1172,25 +1298,8 @@ class Mo2BootstrapStore:
             pass
 
 
-def _promote_no_replace(source: Path, target: Path) -> None:
-    """Atomically move a staged file only when the destination is absent."""
-    if os.name == "nt":
-        import ctypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.MoveFileExW.argtypes = (
-            ctypes.c_wchar_p,
-            ctypes.c_wchar_p,
-            ctypes.c_uint32,
-        )
-        kernel32.MoveFileExW.restype = ctypes.c_int
-        if kernel32.MoveFileExW(str(source), str(target), 0x00000008):
-            return
-        error = ctypes.get_last_error()
-        if error in {80, 183}:
-            raise FileExistsError(error, "destination already exists", str(target))
-        raise OSError(error, "atomic no-replace promotion failed", str(target))
-
+def _promote_no_replace_posix(source: Path, target: Path) -> None:
+    """Publish a POSIX staging file without replacing an existing destination."""
     os.link(source, target, follow_symlinks=False)
     try:
         source.unlink()
@@ -1209,6 +1318,7 @@ __all__ = [
     "Mo2BootstrapNotFoundError",
     "Mo2BootstrapStore",
     "Mo2BootstrapStoreError",
+    "Mo2BootstrapStoreOwnershipError",
     "Mo2BootstrapStorePromotionError",
     "StoredBootstrapJournal",
     "StoredBootstrapPlan",
