@@ -999,3 +999,106 @@ not source or test code-quality failures.
 This remains implementation-worker evidence awaiting the same independent
 reviewer's third decision. No Task 7B, live MO2/game action, original-attempt
 action, public-main mutation, or push is authorized by this report.
+
+# Fix round 3 — relocation cleanup ownership — 2026-09-04
+
+## Root cause and bounded repair
+
+The third review found three connected ownership-finalization gaps. First,
+`retain_relocation_authority` cleaned only items returned by earlier successful
+pin operations. If the current `_pin_tree` or `_pin_object` raised an operative
+`JunctionOwnershipError` and an earlier retained item also failed to close, the
+cleanup error replaced the current failure and omitted its live pins. The
+acquisition cleanup now includes the current error only when it is an actual
+`JunctionOwnershipError` or `ExactObjectOwnershipError`, then delegates the
+complete set to the existing retained-owner aggregator. Unknown non-owner
+exceptions are never treated as cleanup owners.
+
+Second, `_retained_projection_relocation` used to replace an owner-bearing body
+failure with `authority.close()`'s ownership error. Finalization now extracts
+only a real owner-bearing primary (`JunctionOwnershipError`,
+`ExactObjectOwnershipError`, or a `ContainmentStoreOwnershipError`'s exact
+ownership), combines it with the authority-close error through the existing
+`_close_retained_owners` path, and chains the combined resolvable ownership from
+the primary diagnostic. Identical retained objects remain deduplicated by the
+existing owner normalizers.
+
+Third, `_perform_recovery_cleanup` caught `JunctionOwnershipError` through its
+`ContainmentSafetyError` base and returned an ordinary
+`staging-quarantine-failed` blocker. `recover_scenario` could then publish an
+ordinary refused recovery while no exception retained the retry authority.
+Recovery cleanup now re-raises junction ownership before the ordinary safety
+catch. The public receipt wrapper preserves that same operative error, attaches
+the merged effect receipt consistently with store ownership errors, and leaves
+its `.resolve()` path intact. No recovery or result document is published for
+this owner-bearing failure. Normal non-owner recovery refusals keep their prior
+blocker/publication behavior.
+
+No ownership model, relocation policy, pathname fallback, or path-budget scope
+changed. The preparation-only scope remains `runtimeQualified=false`.
+
+## Strict TDD evidence
+
+The first three-test RED capture, `task-7A-review3-red-01.log` (4,222 bytes,
+SHA-256 `4ab8214ab4b9e32a48f88cc053b9b75a6f380fe59f2323806257a716e9c4de03`),
+is excluded as a complete RED because the finalizer test's admission double
+stopped early with a missing-field `AttributeError`. Its other two failures were
+consistent with the defects, but it is retained as harness-correction evidence
+only.
+
+After correcting only that double to carry the complete production field shape,
+the same command produced the valid RED in `task-7A-review3-red-02.log` (4,557
+bytes, SHA-256
+`7401b8b0926402f3a4dcc3d34d722082ac2c3ef18826df85d2d924e4e58302f8`):
+
+    C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest -v tests.test_mo2_containment_junction.Mo2ContainmentJunctionTests.test_relocation_acquisition_unions_current_and_prior_cleanup_owners tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_relocation_finalizer_unions_primary_and_authority_owners tests.test_mo2_containment_service.ContainmentRecoveryTests.test_recovery_rethrows_relocation_ownership_without_publishing_refusal
+
+All three tests failed for their intended missing behavior: the current
+acquisition owner was omitted, the primary exact owner was omitted during
+authority finalization, and recovery returned rather than re-raising junction
+ownership. Exit was 1.
+
+After the minimal production repair, the identical focused command passed 3/3
+in 0.041 seconds, Exit 0. Its durable capture is
+`task-7A-review3-green-01.log` (728 bytes, SHA-256
+`14f6bc8fd48249a6056946d9c720269aeb4185d8ff9f253dba96eb31dc906611`).
+The tests prove compound current/prior ownership, primary exact plus local
+authority-finalizer ownership, deterministic resolution of every live pin, and
+outer recovery refusal to publish ordinary result/recovery evidence.
+
+## Affected native verification and self-review
+
+The exact two affected modules ran under the verified
+`desktop-947h2kl\\red` token, worktree-owned `TEMP`/`TMP`, with preparation and
+runtime/live archive/Steam opt-ins absent:
+
+    C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest -v tests.test_mo2_containment_junction tests.test_mo2_containment_service
+
+The complete durable capture is `task-7A-review3-affected-01.log` (37,268 bytes,
+SHA-256 `c8480530156759d03ccecdff3b1c46e666845f1af92f8324c3a8a6dd373f0488`):
+
+    Ran 180 tests in 10.374s
+    OK
+    Exit=0
+
+The four exact changed source/test files are recorded before and after in
+`task-7A-review3-source-before.txt` and
+`task-7A-review3-source-after.txt`; the per-path hashes are identical and the
+post-run mismatch count is zero. After exit, scoped
+Python/PythonW/tar/bsdtar/ModOrganizer/nxmhandler/worktree-command process count
+was zero. The short test temp was empty, passed an exact rename round trip, was
+removed, and is absent. The completed log accepted an exclusive read/write open.
+
+Final review found the changes confined to the two ownership finalizers, public
+ownership preservation, and their three focused tests. Existing aggregation is
+used rather than duplicated; unknown exceptions are not probed as owners; all
+operative local and exact owners remain resolvable; ordinary recovery refusal
+semantics are unchanged. `git diff --check` is clean apart from the repository's
+CRLF notices. Per the coordinator's bounded-gate decision, the complete 1,158-
+test suite was not rerun because the change does not expand beyond these two
+ownership-finalization modules. The reviewer report-table wording minor remains
+ledgered/deferred and was not changed here.
+
+This is implementation-worker evidence pending the same reviewer's next
+decision. It grants no Task 7B or live MO2/game authority, and no original
+attempt, push, or merge action occurred.

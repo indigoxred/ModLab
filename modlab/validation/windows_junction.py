@@ -1442,11 +1442,19 @@ def retain_relocation_authority(
         authority.verify()
         return authority
     except BaseException as error:
+        current_ownership = (
+            (error,)
+            if isinstance(error, (JunctionOwnershipError, ExactObjectOwnershipError))
+            else ()
+        )
         try:
             _close_retained_owners(
-                tuple(
-                    item.tree if item.tree is not None else item.pinned
-                    for item in reversed(items)
+                (
+                    *current_ownership,
+                    *(
+                        item.tree if item.tree is not None else item.pinned
+                        for item in reversed(items)
+                    ),
                 ),
                 "retained relocation authority acquisition",
             )

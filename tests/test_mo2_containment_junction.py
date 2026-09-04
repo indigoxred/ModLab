@@ -1450,6 +1450,94 @@ class Mo2ContainmentJunctionTests(unittest.TestCase):
         exact_resolver.assert_called_once_with()
         self.assertEqual(0, local.handle)
 
+    def test_relocation_acquisition_unions_current_and_prior_cleanup_owners(self):
+        # Catches a current pin-acquisition ownership failure being dropped when
+        # cleanup of a previously retained item also leaves a live owner.
+        source = Path(r"C:\source\mods")
+        stage = Path(r"C:\stage\mods")
+        quarantine = Path(r"C:\quarantine")
+        prior_pin = windows_junction._PinnedObject(
+            stage / "First",
+            181,
+            (1, 1),
+        )
+        current_pin = windows_junction._PinnedObject(
+            stage / "Second",
+            182,
+            (1, 2),
+        )
+        prior_error = JunctionOwnershipError(
+            "prior item close retained ownership",
+            (prior_pin,),
+        )
+        current_error = JunctionOwnershipError(
+            "current acquisition retained ownership",
+            (current_pin,),
+        )
+        prior_tree = mock.Mock(
+            root=prior_pin,
+            close=mock.Mock(side_effect=prior_error),
+        )
+        rows = (
+            ("", "directory"),
+            ("First", "directory"),
+            ("Second", "directory"),
+        )
+
+        try:
+            with (
+                mock.patch.object(windows_junction, "_verify_borrowed_parent"),
+                mock.patch.object(
+                    windows_junction,
+                    "_top_level_names",
+                    side_effect=((), ("First", "Second")),
+                ),
+                mock.patch.object(
+                    windows_junction,
+                    "_pin_tree",
+                    side_effect=(prior_tree, current_error),
+                ),
+                mock.patch.object(windows_junction, "_verify_relocation_item"),
+                self.assertRaises(JunctionOwnershipError) as raised,
+            ):
+                windows_junction.retain_relocation_authority(
+                    source_mods=source,
+                    stage_mods=stage,
+                    quarantine_root=quarantine,
+                    source_rows=(("", "directory"),),
+                    stage_rows=rows,
+                    source_names=(),
+                    stage_names=("First", "Second"),
+                    mutation_names=("First", "Second"),
+                    destination_map=(
+                        ("First", (str(quarantine / "First"),)),
+                        ("Second", (str(quarantine / "Second"),)),
+                    ),
+                    quarantine_names=None,
+                    source_parent=object(),
+                    stage_parent=object(),
+                )
+
+            self.assertIs(current_error, raised.exception.__cause__)
+            self.assertEqual(
+                (current_pin, prior_pin),
+                raised.exception.pins,
+            )
+
+            def close_for_retry(pinned):
+                pinned.handle = 0
+
+            with mock.patch.object(
+                windows_junction._PinnedObject,
+                "close",
+                new=close_for_retry,
+            ):
+                raised.exception.resolve()
+            self.assertEqual((0, 0), (current_pin.handle, prior_pin.handle))
+        finally:
+            current_pin.handle = 0
+            prior_pin.handle = 0
+
     def test_pinned_tree_close_attempts_every_pin_and_supports_exact_retry(self):
         for position, failing_handle in (("first", 93), ("middle", 92), ("final", 91)):
             with self.subTest(position=position):

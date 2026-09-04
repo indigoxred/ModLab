@@ -3816,6 +3816,82 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
 
         return invoke()
 
+    def test_relocation_finalizer_unions_primary_and_authority_owners(self):
+        # Catches authority.close() replacing an owner-bearing primary instead
+        # of returning one deterministically resolvable owner union.
+        source = Path(r"C:\source\mods")
+        stage = Path(r"C:\stage\mods")
+        quarantine = Path(r"C:\quarantine")
+        primary_pin = PinnedObject(
+            source / "primary",
+            8101,
+            PinnedIdentity(1, 1, 0),
+        )
+        finalizer_pin = junction._PinnedObject(
+            stage / "finalizer",
+            8102,
+            (1, 2),
+        )
+        primary = ContainmentStoreOwnershipError(
+            "primary retained exact ownership",
+            ExactObjectOwnershipError(
+                "primary owner",
+                verification=(primary_pin,),
+            ),
+        )
+        finalizer = junction.JunctionOwnershipError(
+            "authority close retained ownership",
+            (finalizer_pin,),
+        )
+        authority = SimpleNamespace(close=lambda: (_ for _ in ()).throw(finalizer))
+        record = SimpleNamespace(source_mods=source, stage_mods=stage)
+        expected = SimpleNamespace(
+            source_rows=(("", "directory"),),
+            stage_rows=(("", "directory"),),
+            source_names=(),
+            stage_names=(),
+            mutation_names=(),
+            destination_map=(),
+            quarantine_names=None,
+        )
+
+        try:
+            with (
+                patch.object(
+                    service,
+                    "_require_relocation_admission",
+                    return_value=expected,
+                ),
+                patch.object(
+                    service,
+                    "retain_relocation_authority",
+                    return_value=authority,
+                ),
+                self.assertRaises(junction.JunctionOwnershipError) as raised,
+            ):
+                with service._retained_projection_relocation(
+                    record,
+                    quarantine,
+                    {source: object(), stage: object()},
+                    expected,
+                ):
+                    raise primary
+
+            self.assertIs(primary, raised.exception.__cause__)
+            self.assertEqual(
+                (primary_pin, finalizer_pin),
+                raised.exception.pins,
+            )
+            with (
+                patch.object(windows_exact_fs, "_close_handle"),
+                patch.object(junction, "_close_handle"),
+            ):
+                raised.exception.resolve()
+            self.assertEqual((0, 0), (primary_pin.handle, finalizer_pin.handle))
+        finally:
+            primary_pin.handle = 0
+            finalizer_pin.handle = 0
+
     def test_retained_replacement_outputs_are_canonical_not_acquisition_order(self):
         # Catches breadth-first pinned acquisition order leaking into the exact
         # scenario-output contract consumed by evaluate_scenario.
@@ -6172,6 +6248,73 @@ class ContainmentRecoveryTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_recovery_rethrows_relocation_ownership_without_publishing_refusal(self):
+        # Catches recover_scenario flattening live relocation ownership into an
+        # ordinary refused recovery document that has no operative retry owner.
+        record = fixture_record(self.root, self.journal.scenario)
+        outcome = write_bound_watch_evidence(self.store, self.journal)
+        proof = RecoveryProofEvidence(outcome, protected(), ())
+        receipt = SimpleNamespace(
+            watch_outcome_id=watch_outcome_id_for(outcome),
+            run_id=RUN_ID,
+            scenario=self.journal.scenario,
+            request_id=outcome.request_id,
+            session_id=outcome.session_id,
+            worker_pid=outcome.worker_pid,
+            request_bytes_sha256=outcome.request_sha256,
+        )
+        retained = junction._PinnedObject(
+            record.stage_mods / "retained",
+            8201,
+            (1, 1),
+        )
+        ownership = junction.JunctionOwnershipError(
+            "recovery relocation retained ownership",
+            (retained,),
+        )
+        recovery_path = self.store.scenario_path(
+            RUN_ID,
+            self.journal.scenario,
+        ) / "recovery.json"
+
+        try:
+            with (
+                patch.object(service, "_load_fixture_record", return_value=record),
+                patch.object(service, "_prove_recovery", return_value=proof),
+                patch.object(service, "_delegated_mutation", return_value=receipt),
+                patch.object(
+                    service,
+                    "_retained_relocation_projections",
+                    return_value=nullcontext(()),
+                ),
+                patch.object(
+                    service,
+                    "_delegated_mutations_with_created_root",
+                    side_effect=ownership,
+                ),
+                self.assertRaises(junction.JunctionOwnershipError) as raised,
+            ):
+                recover_scenario(
+                    self.store.root,
+                    RUN_ID,
+                    self.journal.scenario,
+                )
+
+            self.assertIs(ownership, raised.exception)
+            self.assertFalse(recovery_path.exists())
+            self.assertFalse(
+                self.store.result_path(RUN_ID, self.journal.scenario).exists()
+            )
+            self.assertEqual(
+                (self.store.journal_path(RUN_ID, self.journal.scenario),),
+                raised.exception.effects.written_paths,
+            )
+            with patch.object(junction, "_close_handle"):
+                raised.exception.resolve()
+            self.assertEqual(0, retained.handle)
+        finally:
+            retained.handle = 0
 
     def test_scenario_loading_rejects_nonexact_request_schema(self):
         self.store.write_request(

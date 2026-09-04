@@ -1,0 +1,80 @@
+test_relocation_acquisition_unions_current_and_prior_cleanup_owners (tests.test_mo2_containment_junction.Mo2ContainmentJunctionTests.test_relocation_acquisition_unions_current_and_prior_cleanup_owners) ... FAIL
+test_relocation_finalizer_unions_primary_and_authority_owners (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_relocation_finalizer_unions_primary_and_authority_owners) ... FAIL
+test_recovery_rethrows_relocation_ownership_without_publishing_refusal (tests.test_mo2_containment_service.ContainmentRecoveryTests.test_recovery_rethrows_relocation_ownership_without_publishing_refusal) ... FAIL
+
+======================================================================
+FAIL: test_relocation_acquisition_unions_current_and_prior_cleanup_owners (tests.test_mo2_containment_junction.Mo2ContainmentJunctionTests.test_relocation_acquisition_unions_current_and_prior_cleanup_owners)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_junction.py", line 1522, in test_relocation_acquisition_unions_current_and_prior_cleanup_owners
+    self.assertEqual(
+AssertionError: Tuples differ: (_Pin[37 chars]mods/Second'), handle=182, identity=(1, 2)), _[78 chars] 1))) != (_Pin[37 chars]mods/First'), handle=181, identity=(1, 1)),)
+
+First differing element 0:
+_Pinn[16 chars]ndowsPath('C:/stage/mods/Second'), handle=182, identity=(1, 2))
+_Pinn[16 chars]ndowsPath('C:/stage/mods/First'), handle=181, identity=(1, 1))
+
+First tuple contains 1 additional elements.
+First extra element 1:
+_PinnedObject(path=WindowsPath('C:/stage/mods/First'), handle=181, identity=(1, 1))
+
+- (_PinnedObject(path=WindowsPath('C:/stage/mods/Second'),
+-                handle=182,
+-                identity=(1, 2)),
+-  _PinnedObject(path=WindowsPath('C:/stage/mods/First'),
+? ^
+
++ (_PinnedObject(path=WindowsPath('C:/stage/mods/First'),
+? ^
+
+                 handle=181,
+-                identity=(1, 1)))
++                identity=(1, 1)),)
+?                                +
+
+
+======================================================================
+FAIL: test_relocation_finalizer_unions_primary_and_authority_owners (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_relocation_finalizer_unions_primary_and_authority_owners)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 3881, in test_relocation_finalizer_unions_primary_and_authority_owners
+    self.assertEqual(
+AssertionError: Tuples differ: (PinnedObject(path=WindowsPath('C:/source/[181 chars] 2))) != (_PinnedObject(path=WindowsPath('C:/stage/[44 chars]2)),)
+
+First differing element 0:
+PinnedObject(path=WindowsPath('C:/source/[90 chars]s=0))
+_PinnedObject(path=WindowsPath('C:/stage/[42 chars], 2))
+
+First tuple contains 1 additional elements.
+First extra element 1:
+_PinnedObject(path=WindowsPath('C:/stage/mods/finalizer'), handle=8102, identity=(1, 2))
+
+- (PinnedObject(path=WindowsPath('C:/source/mods/primary'),
+-               handle=8101,
+-               identity=PinnedIdentity(volume_serial=1, file_id=1, attributes=0)),
+-  _PinnedObject(path=WindowsPath('C:/stage/mods/finalizer'),
+? ^
+
++ (_PinnedObject(path=WindowsPath('C:/stage/mods/finalizer'),
+? ^
+
+                 handle=8102,
+-                identity=(1, 2)))
++                identity=(1, 2)),)
+?                                +
+
+
+======================================================================
+FAIL: test_recovery_rethrows_relocation_ownership_without_publishing_refusal (tests.test_mo2_containment_service.ContainmentRecoveryTests.test_recovery_rethrows_relocation_ownership_without_publishing_refusal)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 6296, in test_recovery_rethrows_relocation_ownership_without_publishing_refusal
+    self.assertRaises(junction.JunctionOwnershipError) as raised,
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: JunctionOwnershipError not raised
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.048s
+
+FAILED (failures=3)
+Exit=1

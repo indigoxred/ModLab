@@ -1,0 +1,64 @@
+test_relocation_acquisition_unions_current_and_prior_cleanup_owners (tests.test_mo2_containment_junction.Mo2ContainmentJunctionTests.test_relocation_acquisition_unions_current_and_prior_cleanup_owners) ... FAIL
+test_relocation_finalizer_unions_primary_and_authority_owners (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_relocation_finalizer_unions_primary_and_authority_owners) ... ERROR
+test_recovery_rethrows_relocation_ownership_without_publishing_refusal (tests.test_mo2_containment_service.ContainmentRecoveryTests.test_recovery_rethrows_relocation_ownership_without_publishing_refusal) ... FAIL
+
+======================================================================
+ERROR: test_relocation_finalizer_unions_primary_and_authority_owners (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_relocation_finalizer_unions_primary_and_authority_owners)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 3864, in test_relocation_finalizer_unions_primary_and_authority_owners
+    with service._retained_projection_relocation(
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 797, in _retained_projection_relocation
+    source_rows=admission.source_rows,
+                ^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'object' object has no attribute 'source_rows'
+
+======================================================================
+FAIL: test_relocation_acquisition_unions_current_and_prior_cleanup_owners (tests.test_mo2_containment_junction.Mo2ContainmentJunctionTests.test_relocation_acquisition_unions_current_and_prior_cleanup_owners)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_junction.py", line 1522, in test_relocation_acquisition_unions_current_and_prior_cleanup_owners
+    self.assertEqual(
+AssertionError: Tuples differ: (_Pin[37 chars]mods/Second'), handle=182, identity=(1, 2)), _[78 chars] 1))) != (_Pin[37 chars]mods/First'), handle=181, identity=(1, 1)),)
+
+First differing element 0:
+_Pinn[16 chars]ndowsPath('C:/stage/mods/Second'), handle=182, identity=(1, 2))
+_Pinn[16 chars]ndowsPath('C:/stage/mods/First'), handle=181, identity=(1, 1))
+
+First tuple contains 1 additional elements.
+First extra element 1:
+_PinnedObject(path=WindowsPath('C:/stage/mods/First'), handle=181, identity=(1, 1))
+
+- (_PinnedObject(path=WindowsPath('C:/stage/mods/Second'),
+-                handle=182,
+-                identity=(1, 2)),
+-  _PinnedObject(path=WindowsPath('C:/stage/mods/First'),
+? ^
+
++ (_PinnedObject(path=WindowsPath('C:/stage/mods/First'),
+? ^
+
+                 handle=181,
+-                identity=(1, 1)))
++                identity=(1, 1)),)
+?                                +
+
+
+======================================================================
+FAIL: test_recovery_rethrows_relocation_ownership_without_publishing_refusal (tests.test_mo2_containment_service.ContainmentRecoveryTests.test_recovery_rethrows_relocation_ownership_without_publishing_refusal)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 6288, in test_recovery_rethrows_relocation_ownership_without_publishing_refusal
+    self.assertRaises(junction.JunctionOwnershipError) as raised,
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: JunctionOwnershipError not raised
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.057s
+
+FAILED (failures=2, errors=1)
+Exit=1

@@ -815,6 +815,29 @@ def _retained_projection_relocation(
                 authority.close()
             except JunctionOwnershipError as error:
                 if primary is not None:
+                    owner_bearing_primary = (
+                        primary.ownership
+                        if isinstance(primary, ContainmentStoreOwnershipError)
+                        else primary
+                        if isinstance(
+                            primary,
+                            (JunctionOwnershipError, ExactObjectOwnershipError),
+                        )
+                        else None
+                    )
+                    from . import windows_junction as junction
+
+                    try:
+                        junction._close_retained_owners(
+                            tuple(
+                                owner
+                                for owner in (owner_bearing_primary, error)
+                                if owner is not None
+                            ),
+                            "retained projection relocation finalization",
+                        )
+                    except JunctionOwnershipError as ownership_error:
+                        raise ownership_error from primary
                     raise error from primary
                 raise
 
@@ -2173,6 +2196,9 @@ def _receipted(
                     str(error),
                     effects=effects,
                 ) from error
+            if isinstance(error, JunctionOwnershipError):
+                error.effects = effects
+                raise
             if isinstance(error, ContainmentStoreOwnershipError):
                 error.effects = effects
                 raise
@@ -4643,6 +4669,8 @@ def _perform_recovery_cleanup(
                 bind_created_root=_bind_retained_relocation_root,
                 verify_before_operation=_verify_retained_relocation_before_operation,
             )
+    except JunctionOwnershipError:
+        raise
     except (OSError, ValueError, ContainmentSafetyError, ContainmentServiceError):
         blockers.append("staging-quarantine-failed")
         return RecoveryCleanupEvidence(

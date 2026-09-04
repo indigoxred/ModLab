@@ -1,0 +1,9 @@
+test_relocation_acquisition_unions_current_and_prior_cleanup_owners (tests.test_mo2_containment_junction.Mo2ContainmentJunctionTests.test_relocation_acquisition_unions_current_and_prior_cleanup_owners) ... ok
+test_relocation_finalizer_unions_primary_and_authority_owners (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_relocation_finalizer_unions_primary_and_authority_owners) ... ok
+test_recovery_rethrows_relocation_ownership_without_publishing_refusal (tests.test_mo2_containment_service.ContainmentRecoveryTests.test_recovery_rethrows_relocation_ownership_without_publishing_refusal) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.041s
+
+OK
+Exit=0
