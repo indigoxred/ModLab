@@ -1236,6 +1236,161 @@ class MutationWatchTests(unittest.TestCase):
         self.active_requests.append(request_path)
         return request_path, worker_pid
 
+    def _seed_safe_looking_completed_outcome(self, request_path: Path):
+        request = windows_watch._load_request_path(request_path)
+        claim = windows_watch._load_controller_claim(request)
+        launch = windows_watch._load_worker_launch(request)
+        # The summary schema checks only that a completed outcome contains a
+        # positive journal identity; it does not currently compare that value
+        # with the locked raw journal object.
+        journal = windows_watch._JournalEvidence(1, 2, b"", 0, 0)
+        forged_capture = windows_watch._CapturedWatchEvidence(
+            ready=True,
+            opened_root_kinds=windows_watch.ROOT_KINDS,
+            events=(),
+            journal=journal,
+            terminal_bytes_sha256="f" * 64,
+            root_identities_unchanged=True,
+            completion_reasons=(),
+        )
+        forged = windows_watch._watch_outcome(
+            request,
+            claim,
+            launch,
+            completion=WatchEvidenceCompletion.COMPLETED,
+            worker_exit_code=0,
+            reasons=(),
+            captured=forged_capture,
+        )
+        windows_watch._publish_outcome_commit(forged, request, claim, launch)
+        return forged
+
+    def _record_real_watched_event(self, request_path: Path) -> None:
+        watched = request_path.parent.parent / "watched"
+        (watched / "breach.txt").write_bytes(b"protected mutation")
+        events = request_path.parent / "events.ndjson"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and events.stat().st_size == 0:
+            time.sleep(0.02)
+        self.assertGreater(events.stat().st_size, 0)
+
+    def test_local_stop_rejects_precreated_completed_outcome_that_hides_raw_event(self):
+        request_path, _ = self._start_case("local-precreated-outcome")
+        forged = self._seed_safe_looking_completed_outcome(request_path)
+        self._record_real_watched_event(request_path)
+        outcome_path = request_path.parent / "outcome.json"
+        try:
+            with mock.patch.object(
+                windows_watch,
+                "_capture_worker_evidence",
+                wraps=windows_watch._capture_worker_evidence,
+            ) as capture:
+                receipt = stop_watch(request_path)
+            self.assertGreater(capture.call_count, 0)
+            self.assertFalse(receipt.complete)
+            self.assertIsNone(receipt.watch_outcome_id)
+            self.assertEqual(forged, watch_outcome_from_bytes(outcome_path.read_bytes()))
+        finally:
+            if outcome_path.exists():
+                outcome_path.unlink()
+            stop_watch(request_path)
+
+    def test_local_existing_outcome_cannot_bypass_retained_popen_close(self):
+        request_path, _ = self._start_case("local-precreated-after-worker-exit")
+        request = windows_watch._load_request_path(request_path)
+        claim = windows_watch._load_controller_claim(request)
+        launch = windows_watch._load_worker_launch(request)
+        session = windows_watch._LOCAL_SESSIONS[request_path.absolute()]
+        windows_watch._write_new(request.stop_token_path, b"stop\n")
+        self.assertEqual(
+            windows_watch._WAIT_OBJECT_0,
+            windows_watch._kernel32.WaitForSingleObject(
+                windows_watch._popen_process_handle(session.process),
+                10_000,
+            ),
+        )
+        captured = windows_watch._capture_worker_evidence(request, launch)
+        existing = windows_watch._watch_outcome(
+            request,
+            claim,
+            launch,
+            completion=WatchEvidenceCompletion.COMPLETED,
+            worker_exit_code=0,
+            reasons=(),
+            captured=captured,
+        )
+        windows_watch._publish_outcome_commit(existing, request, claim, launch)
+
+        receipt = stop_watch(request_path)
+
+        self.assertTrue(receipt.complete, receipt.error)
+        self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_SESSIONS)
+        self.assertTrue(session.process._handle.closed)
+
+    def test_non_owner_cleanup_rejects_precreated_completed_outcome_that_hides_raw_event(self):
+        controller, evidence, request_path, worker_pid, worker_handle = (
+            self._external_controller_fixture("non-owner-precreated-outcome")
+        )
+        outcome_path = evidence / "outcome.json"
+        try:
+            forged = self._seed_safe_looking_completed_outcome(request_path)
+            self._record_real_watched_event(request_path)
+            controller.terminate()
+            controller.wait(timeout=10)
+            self.assertEqual(
+                windows_watch._WAIT_OBJECT_0,
+                windows_watch._kernel32.WaitForSingleObject(worker_handle, 10_000),
+            )
+
+            receipt = stop_watch(request_path)
+
+            self.assertFalse(receipt.complete)
+            self.assertIsNone(receipt.watch_outcome_id)
+            self.assertEqual(forged, watch_outcome_from_bytes(outcome_path.read_bytes()))
+        finally:
+            if outcome_path.exists():
+                outcome_path.unlink()
+            self._finish_external_fixture(controller, worker_pid, worker_handle)
+
+    def test_publication_collision_rejects_a_different_bound_outcome(self):
+        request = self._request()
+        claim = windows_watch.ControllerClaim(
+            1,
+            windows_watch.watch_request_sha256(request),
+            request.session_id,
+            request.run_id,
+            request.scenario,
+            self.evidence / "request.json",
+            ("python.exe",),
+            101,
+            102,
+        )
+        launch = windows_watch.WorkerLaunch(
+            1,
+            windows_watch.watch_request_sha256(request),
+            request.session_id,
+            request.run_id,
+            request.scenario,
+            103,
+            104,
+        )
+        existing = windows_watch._watch_outcome(
+            request,
+            claim,
+            launch,
+            completion=WatchEvidenceCompletion.INCOMPLETE,
+            worker_exit_code=None,
+            reasons=("existing",),
+            captured=None,
+        )
+        expected = replace(existing, reason_codes=("derived",))
+        self.assertEqual(
+            existing,
+            windows_watch._publish_or_load_outcome(existing, request, claim, launch),
+        )
+        with self.assertRaisesRegex(WatchProtocolError, "differs"):
+            windows_watch._publish_or_load_outcome(expected, request, claim, launch)
+
     def _external_controller_fixture(
         self,
         case_name: str,
@@ -3027,7 +3182,7 @@ class MutationWatchTests(unittest.TestCase):
                         worker_handle,
                     )
 
-    def test_existing_incomplete_outcome_reports_new_cleanup_blocker(self):
+    def test_existing_incomplete_outcome_is_not_used_before_worker_quiescence(self):
         controller, evidence, request_path, worker_pid, worker_handle = (
             self._external_controller_fixture("existing-outcome-cleanup-blocker")
         )
@@ -3082,8 +3237,8 @@ class MutationWatchTests(unittest.TestCase):
                 receipt = stop_watch(request_path)
 
             self.assertFalse(receipt.complete)
-            self.assertEqual(watch_outcome_id_for(seeded), receipt.watch_outcome_id)
-            self.assertIn("worker-cleanup-refused", receipt.error)
+            self.assertIsNone(receipt.watch_outcome_id)
+            self.assertIn("cannot be trusted before exact worker quiescence", receipt.error)
             self.assertEqual(seeded_bytes, (evidence / "outcome.json").read_bytes())
         finally:
             self._finish_external_fixture(controller, worker_pid, worker_handle)

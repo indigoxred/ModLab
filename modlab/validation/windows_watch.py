@@ -2539,6 +2539,36 @@ def _validate_outcome_binding(
     return outcome
 
 
+def _validate_outcome_raw_evidence(
+    outcome: WatchOutcome,
+    request: WatchRequest,
+    claim: ControllerClaim,
+    launch: WorkerLaunch,
+    captured: _CapturedWatchEvidence,
+) -> WatchOutcome:
+    """Bind a published summary to the exact retained worker evidence."""
+    validated = _validate_outcome_binding(outcome, request, claim, launch)
+    derived = _watch_outcome(
+        request,
+        claim,
+        launch,
+        completion=validated.evidence_completion,
+        worker_exit_code=validated.worker_exit_code,
+        reasons=validated.reason_codes,
+        captured=captured,
+    )
+    missing_reasons = tuple(
+        reason
+        for reason in captured.completion_reasons
+        if reason not in validated.reason_codes
+    )
+    if derived != validated or missing_reasons:
+        raise WatchProtocolError(
+            "published watch outcome differs from exact raw worker evidence"
+        )
+    return validated
+
+
 def _publish_outcome_commit(
     outcome: WatchOutcome,
     request: WatchRequest,
@@ -2613,7 +2643,12 @@ def _publish_or_load_outcome(
     try:
         return _publish_outcome_commit(outcome, request, claim, launch)
     except FileExistsError:
-        return _load_published_outcome(request, claim, launch)
+        existing = _load_published_outcome(request, claim, launch)
+        if existing != outcome:
+            raise WatchProtocolError(
+                "existing watch outcome differs from controller-derived outcome"
+            )
+        return existing
 
 
 def _receipt_from_outcome(outcome: WatchOutcome) -> WatchReceipt:
@@ -2671,23 +2706,30 @@ def _stop_local_session(
         claim = session.claim
         launch = session.launch
         outcome_path = request.evidence_root / _OUTCOME_NAME
-        if outcome_path.exists():
+        retained_process_owner = getattr(
+            session.process,
+            "_modlab_close_owner",
+            None,
+        )
+        if (
+            outcome_path.exists()
+            and isinstance(retained_process_owner, _PopenVerificationOwner)
+            and not retained_process_owner.handle
+        ):
             try:
-                existing_outcome = _load_published_outcome(request, claim, launch)
-                if (
-                    existing_outcome.evidence_completion
-                    is WatchEvidenceCompletion.COMPLETED
-                ):
-                    return _receipt_from_outcome(existing_outcome)
-                if "existing-incomplete-outcome" not in session.poison_reasons:
-                    session.poison_reasons.append("existing-incomplete-outcome")
+                existing = _load_existing_outcome_after_worker_quiescence(
+                    request,
+                    claim,
+                    launch,
+                )
+                return _receipt_from_outcome(existing)
             except WatchProtocolOwnershipError as error:
                 _resolve_watch_protocol_ownership(error)
-                if "existing-outcome-invalid" not in session.poison_reasons:
-                    session.poison_reasons.append("existing-outcome-invalid")
             except (OSError, ContainmentFormatError, WatchProtocolError):
-                if "existing-outcome-invalid" not in session.poison_reasons:
-                    session.poison_reasons.append("existing-outcome-invalid")
+                # A live worker or raw-evidence mismatch must continue through
+                # the retained local stop/capture path. The no-replace outcome
+                # collision below will then require exact derived equality.
+                pass
         try:
             observed_request = _load_request_path(request_path)
             observed_claim = _load_controller_claim(observed_request)
@@ -2877,30 +2919,87 @@ def _exact_process_status(
     return "uncertain", 0, detail
 
 
+def _load_existing_outcome_after_worker_quiescence(
+    request: WatchRequest,
+    claim: ControllerClaim,
+    launch: WorkerLaunch,
+) -> WatchOutcome:
+    status, handle, detail = _exact_process_status(
+        launch.worker_pid,
+        launch.worker_creation_time,
+    )
+    if status != "dead":
+        if handle:
+            close_error = _close_controller_handle(
+                handle,
+                f"existing-outcome worker {launch.worker_pid}",
+                request.evidence_root,
+            )
+            if close_error is not None:
+                raise WatchProtocolError(close_error)
+        raise WatchProtocolError(
+            f"existing watch outcome worker is not exactly quiescent: {detail or status}"
+        )
+    observed_exit: int | None = None
+    pending_error: BaseException | None = None
+    try:
+        if handle:
+            _verify_retained_process_handle(
+                handle,
+                launch.worker_pid,
+                launch.worker_creation_time,
+            )
+            observed_exit = _get_process_exit_code(handle)
+            if observed_exit == _STILL_ACTIVE:
+                raise WatchProtocolError(
+                    "existing watch outcome worker is still active"
+                )
+        captured = _capture_worker_evidence(request, launch)
+        outcome = _load_published_outcome(request, claim, launch)
+        _validate_outcome_raw_evidence(
+            outcome,
+            request,
+            claim,
+            launch,
+            captured,
+        )
+        if (
+            observed_exit is not None
+            and outcome.worker_exit_code is not None
+            and outcome.worker_exit_code != observed_exit
+        ):
+            raise WatchProtocolError(
+                "published watch outcome worker exit code differs"
+            )
+        return outcome
+    except BaseException as error:
+        pending_error = error
+        raise
+    finally:
+        if handle:
+            try:
+                close_error = _close_controller_handle(
+                    handle,
+                    f"existing-outcome worker {launch.worker_pid}",
+                    request.evidence_root,
+                )
+            except BaseException as cleanup_error:
+                if pending_error is None:
+                    raise
+                raise _merge_controller_errors(pending_error, cleanup_error)
+            if close_error is not None:
+                close_failure = WatchProtocolError(close_error)
+                if pending_error is None:
+                    raise close_failure
+                raise _merge_controller_errors(pending_error, close_failure)
+
+
 def _stop_non_owner(
     request: WatchRequest,
     claim: ControllerClaim,
     launch: WorkerLaunch,
 ) -> WatchReceipt:
     outcome_path = request.evidence_root / _OUTCOME_NAME
-    existing_outcome: WatchOutcome | None = None
-    if outcome_path.exists():
-        try:
-            existing_outcome = _load_published_outcome(request, claim, launch)
-            if (
-                existing_outcome.evidence_completion
-                is WatchEvidenceCompletion.COMPLETED
-            ):
-                return _receipt_from_outcome(existing_outcome)
-        except WatchProtocolOwnershipError:
-            # The public stop boundary resolves or returns this same owner.
-            raise
-        except (OSError, ContainmentFormatError, WatchProtocolError) as error:
-            return _incomplete_without_outcome(
-                request,
-                launch.worker_pid,
-                f"existing outcome is invalid: {error}",
-            )
     controller_status, controller_handle, controller_error = _exact_process_status(
         claim.controller_pid,
         claim.controller_creation_time,
@@ -2914,8 +3013,28 @@ def _stop_non_owner(
         if close_error is not None:
             return _incomplete_without_outcome(request, launch.worker_pid, close_error)
     if controller_status == "live":
-        if existing_outcome is not None:
-            return _receipt_from_outcome(existing_outcome)
+        if outcome_path.exists() and claim.controller_pid == os.getpid():
+            try:
+                current_pid, current_creation_time = _current_controller_identity()
+                if (
+                    current_pid == claim.controller_pid
+                    and current_creation_time == claim.controller_creation_time
+                ):
+                    return _receipt_from_outcome(
+                        _load_existing_outcome_after_worker_quiescence(
+                            request,
+                            claim,
+                            launch,
+                        )
+                    )
+            except WatchProtocolOwnershipError:
+                raise
+            except (OSError, ContainmentFormatError, WatchProtocolError) as error:
+                return _incomplete_without_outcome(
+                    request,
+                    launch.worker_pid,
+                    f"existing outcome raw validation failed: {error}",
+                )
         return _incomplete_without_outcome(
             request,
             launch.worker_pid,
@@ -2991,37 +3110,69 @@ def _stop_non_owner(
         raise pending_error
     if worker_error is not None and "worker-identity-uncertain" in reasons:
         reasons.append("worker-cleanup-refused")
-    if existing_outcome is not None:
-        outcome = existing_outcome
-    else:
-        if worker_quiescent:
-            try:
-                captured = _capture_worker_evidence(request, launch)
-                reasons.extend(captured.completion_reasons)
-            except _HandleOwnershipError as error:
-                reasons.append("evidence-handle-close-failed")
-                _controller_owner(error, request.evidence_root).resolve()
-            except (WatchProtocolOwnershipError, ExactObjectOwnershipError):
-                raise
-            except (OSError, WatchProtocolError) as error:
-                reasons.append(_worker_evidence_reason(error))
-        outcome = _publish_or_load_outcome(
-            _watch_outcome(
+    if worker_quiescent:
+        try:
+            captured = _capture_worker_evidence(request, launch)
+            reasons.extend(captured.completion_reasons)
+        except _HandleOwnershipError as error:
+            reasons.append("evidence-handle-close-failed")
+            _controller_owner(error, request.evidence_root).resolve()
+        except (WatchProtocolOwnershipError, ExactObjectOwnershipError):
+            raise
+        except (OSError, WatchProtocolError) as error:
+            reasons.append(_worker_evidence_reason(error))
+    if outcome_path.exists():
+        if not worker_quiescent or captured is None:
+            return _incomplete_without_outcome(
                 request,
-                claim,
-                launch,
-                completion=WatchEvidenceCompletion.INCOMPLETE,
-                worker_exit_code=worker_exit_code,
-                reasons=tuple(reasons),
-                captured=captured,
-            ),
+                launch.worker_pid,
+                "existing outcome cannot be trusted before exact worker quiescence and raw capture",
+            )
+        outcome = _load_published_outcome(request, claim, launch)
+        _validate_outcome_raw_evidence(
+            outcome,
+            request,
+            claim,
+            launch,
+            captured,
+        )
+        if (
+            worker_exit_code is not None
+            and outcome.worker_exit_code is not None
+            and outcome.worker_exit_code != worker_exit_code
+        ):
+            raise WatchProtocolError(
+                "published watch outcome worker exit code differs"
+            )
+    else:
+        expected = _watch_outcome(
+            request,
+            claim,
+            launch,
+            completion=WatchEvidenceCompletion.INCOMPLETE,
+            worker_exit_code=worker_exit_code,
+            reasons=tuple(reasons),
+            captured=captured,
+        )
+        outcome = _publish_or_load_outcome(
+            expected,
             request,
             claim,
             launch,
         )
+        if captured is not None:
+            _validate_outcome_raw_evidence(
+                outcome,
+                request,
+                claim,
+                launch,
+                captured,
+            )
     receipt = _receipt_from_outcome(outcome)
-    current_cleanup_blockers = tuple(
-        reason for reason in reasons if reason not in outcome.reason_codes
+    current_cleanup_blockers = (
+        ()
+        if outcome.evidence_completion is WatchEvidenceCompletion.COMPLETED
+        else tuple(reason for reason in reasons if reason not in outcome.reason_codes)
     )
     if current_cleanup_blockers:
         return _force_incomplete(
