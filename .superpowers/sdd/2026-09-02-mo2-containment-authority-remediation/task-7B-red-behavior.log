@@ -1,0 +1,73 @@
+test_create_activates_exact_contained_ready_instance (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_create_activates_exact_contained_ready_instance) ... FAIL
+test_preservation_moves_the_pinned_source_not_a_substituted_path (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_preservation_moves_the_pinned_source_not_a_substituted_path) ... FAIL
+test_preservation_refuses_a_substituted_destination_parent (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_preservation_refuses_a_substituted_destination_parent) ... FAIL
+test_activation_case_collision_is_not_replaced (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_activation_case_collision_is_not_replaced) ... FAIL
+test_post_move_identity_failure_records_activation_as_moved (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_post_move_identity_failure_records_activation_as_moved) ... FAIL
+test_move_close_failure_returns_both_live_owners_without_rollback (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_move_close_failure_returns_both_live_owners_without_rollback) ... FAIL
+test_plan_is_content_addressed_idempotent_and_conflict_safe (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_plan_is_content_addressed_idempotent_and_conflict_safe) ... FAIL
+
+======================================================================
+FAIL: test_create_activates_exact_contained_ready_instance (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_create_activates_exact_contained_ready_instance)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_create.py", line 132, in test_create_activates_exact_contained_ready_instance
+    self.assertEqual(2, rename_pinned.call_count)
+AssertionError: 2 != 0
+
+======================================================================
+FAIL: test_preservation_moves_the_pinned_source_not_a_substituted_path (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_preservation_moves_the_pinned_source_not_a_substituted_path)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_create.py", line 351, in test_preservation_moves_the_pinned_source_not_a_substituted_path
+    with self.assertRaises(Mo2BootstrapRefusal):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Mo2BootstrapRefusal not raised
+
+======================================================================
+FAIL: test_preservation_refuses_a_substituted_destination_parent (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_preservation_refuses_a_substituted_destination_parent)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_create.py", line 382, in test_preservation_refuses_a_substituted_destination_parent
+    with self.assertRaises(Mo2BootstrapRefusal):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Mo2BootstrapRefusal not raised
+
+======================================================================
+FAIL: test_activation_case_collision_is_not_replaced (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_activation_case_collision_is_not_replaced)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_create.py", line 416, in test_activation_case_collision_is_not_replaced
+    with self.assertRaises(Mo2BootstrapRefusal):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Mo2BootstrapRefusal not raised
+
+======================================================================
+FAIL: test_post_move_identity_failure_records_activation_as_moved (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_post_move_identity_failure_records_activation_as_moved)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_create.py", line 460, in test_post_move_identity_failure_records_activation_as_moved
+    with self.assertRaises(Mo2BootstrapRefusal) as raised:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Mo2BootstrapRefusal not raised
+
+======================================================================
+FAIL: test_move_close_failure_returns_both_live_owners_without_rollback (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_move_close_failure_returns_both_live_owners_without_rollback)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_create.py", line 498, in test_move_close_failure_returns_both_live_owners_without_rollback
+    with self.assertRaises(ExactObjectOwnershipError) as raised:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ExactObjectOwnershipError not raised
+
+======================================================================
+FAIL: test_plan_is_content_addressed_idempotent_and_conflict_safe (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_plan_is_content_addressed_idempotent_and_conflict_safe)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_store.py", line 183, in test_plan_is_content_addressed_idempotent_and_conflict_safe
+    self.assertEqual(1, publish.call_count)
+AssertionError: 1 != 0
+
+----------------------------------------------------------------------
+Ran 7 tests in 6.070s
+
+FAILED (failures=7)

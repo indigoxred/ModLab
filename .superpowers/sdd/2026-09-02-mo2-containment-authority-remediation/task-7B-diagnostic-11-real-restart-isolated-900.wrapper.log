@@ -1,0 +1,230 @@
+**********************
+PowerShell transcript start
+Start time: 20260904181127
+Username: DESKTOP-947H2KL\red
+RunAs User: DESKTOP-947H2KL\red
+Configuration Name: 
+Machine: DESKTOP-947H2KL (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\pwsh.dll -NoProfile -Command try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}
+$ErrorActionPreference = 'Stop'
+$repo = 'C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake'
+$python = 'C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+$archive = 'C:\Users\red\Desktop\Modlab\workspace\inbox\Mod.Organizer-2.5.2.7z'
+$steam = 'C:\Users\red\Desktop\Steam'
+$test = 'tests.test_mo2_preparation_recovery.RealPreparationRestartTests.test_foreground_failed_attempt_recovers_once_into_completely_fresh_real_preparation'
+$sdd = Join-Path $repo '.superpowers\sdd\2026-09-02-mo2-containment-authority-remediation'
+$prefix = Join-Path $sdd 'task-7B-diagnostic-11-real-restart-isolated-900'
+$stdoutPath = $prefix + '.stdout.log'
+$stderrPath = $prefix + '.stderr.log'
+$wrapper = $prefix + '.wrapper.log'
+$timeoutSnapshot = $prefix + '.timeout-processes.json'
+$manifest = $prefix + '.sha256'
+foreach ($path in @($stdoutPath, $stderrPath, $wrapper, $timeoutSnapshot, $manifest)) { if (Test-Path -LiteralPath $path) { throw "Refusing to overwrite evidence: $path" } }
+$sourceFiles = @(
+ 'modlab/platform/windows_exact_fs.py',
+ 'modlab/validation/mo2_containment_service.py',
+ 'modlab/workflows/skyrim/mo2_bootstrap.py',
+ 'modlab/workflows/skyrim/mo2_bootstrap_store.py',
+ 'tests/test_mo2_bootstrap_create.py',
+ 'tests/test_mo2_bootstrap_recovery.py',
+ 'tests/test_mo2_bootstrap_store.py',
+ 'tests/test_mo2_containment_service.py',
+ 'tests/test_windows_exact_fs.py'
+)
+foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'MODLAB_*' })) { Remove-Item -LiteralPath ('Env:' + $entry.Name) }
+$env:TEMP = Join-Path $repo 'nt'
+$env:TMP = Join-Path $repo 'nt'
+$env:MODLAB_PREPARATION_ARCHIVE = $archive
+$env:MODLAB_PREPARATION_STEAM = $steam
+Start-Transcript -LiteralPath $wrapper -NoClobber | Out-Null
+Write-Output 'EXECUTION_MODE=require_escalated'
+Write-Output ('HEAD_BEFORE=' + (& git -C $repo rev-parse HEAD))
+Write-Output ('COMMAND=' + $python + ' -B -m unittest -v ' + $test)
+Write-Output ('TEMP=' + $env:TEMP)
+Write-Output ('TMP=' + $env:TMP)
+Write-Output ('MODLAB=' + ((Get-ChildItem Env: | Where-Object { $_.Name -like 'MODLAB_*' } | Sort-Object Name | ForEach-Object { $_.Name + '=' + $_.Value }) -join ';'))
+Write-Output 'SOURCE_HASHES_BEFORE'
+foreach ($file in $sourceFiles) { $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $repo $file)).Hash.ToLowerInvariant(); Write-Output ($hash + '  ' + $file) }
+$prior = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^python(\.exe)?$' -and ($_.CommandLine -like ('*' + $test + '*') -or $_.CommandLine -like '*_native_child_failure*') })
+Write-Output ('RELEVANT_PROCESS_COUNT_BEFORE=' + $prior.Count)
+if ($prior.Count -ne 0) { foreach ($item in $prior) { Write-Output ('EXISTING_PID=' + $item.ProcessId + ' CMD=' + $item.CommandLine) }; throw 'Relevant process already running' }
+$arguments = @('-B', '-m', 'unittest', '-v', $test)
+$startedUtc = [DateTime]::UtcNow
+$timer = [Diagnostics.Stopwatch]::StartNew()
+$process = Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+Write-Output ('TEST_PROCESS_STARTED_UTC=' + $startedUtc.ToString('o'))
+Write-Output ('TEST_PID=' + $process.Id)
+Write-Output ('TEST_START_TIME_UTC=' + $process.StartTime.ToUniversalTime().ToString('o'))
+$known = @([uint32]$process.Id)
+$knownChild = @{}
+$nextSample = 30.0
+$timedOut = $false
+while (-not $process.HasExited) {
+  Start-Sleep -Seconds 2
+  $process.Refresh()
+  $elapsed = $timer.Elapsed.TotalSeconds
+  if ($elapsed -ge 900) { $timedOut = $true; break }
+  if ($elapsed -ge $nextSample) {
+    $cpu = $null
+    try { $cpu = [Math]::Round($process.TotalProcessorTime.TotalSeconds, 3) } catch {}
+    Write-Output ('TEST_SAMPLE elapsed=' + [Math]::Round($elapsed, 3) + ' pid=' + $process.Id + ' cpu=' + $cpu)
+    $direct = @(Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + $process.Id))
+    foreach ($child in $direct) {
+      $childPid = [uint32]$child.ProcessId
+      if (-not $knownChild.ContainsKey($childPid)) {
+        $knownChild[$childPid] = $true
+        $known += $childPid
+        Write-Output ('DIRECT_CHILD_FIRST_SEEN elapsed=' + [Math]::Round($elapsed, 3) + ' pid=' + $childPid + ' creation=' + $child.CreationDate + ' cmd=' + $child.CommandLine)
+      }
+    }
+    $nextSample += 30.0
+  }
+}
+if ($timedOut) {
+  Write-Output ('OUTER_TIMEOUT elapsed=' + [Math]::Round($timer.Elapsed.TotalSeconds, 3))
+  $rootPid = [uint32]$process.Id
+  $all = @(Get-CimInstance Win32_Process)
+  $frontier = @($rootPid)
+  $owned = @()
+  while ($frontier.Count -gt 0) {
+    $next = @()
+    foreach ($candidate in $all) {
+      if ($frontier -contains [uint32]$candidate.ParentProcessId) {
+        $owned += $candidate
+        $next += [uint32]$candidate.ProcessId
+      }
+    }
+    $frontier = @($next)
+  }
+  $snapshot = @()
+  foreach ($item in $owned) { $snapshot += [ordered]@{ pid=[uint32]$item.ProcessId; parent_pid=[uint32]$item.ParentProcessId; creation_date=[string]$item.CreationDate; command_line=[string]$item.CommandLine } }
+  [ordered]@{ root_pid=$rootPid; descendants=$snapshot } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $timeoutSnapshot -Encoding utf8
+  for ($index = $owned.Count - 1; $index -ge 0; $index--) { $ownedPid = [uint32]$owned[$index].ProcessId; $known += $ownedPid; Write-Output ('TERMINATING_DESCENDANT_PID=' + $ownedPid); Stop-Process -Id $ownedPid -Force -ErrorAction SilentlyContinue }
+  Write-Output ('TERMINATING_TEST_PID=' + $rootPid)
+  Stop-Process -Id $rootPid -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 1
+  $exitCode = 124
+} else {
+  $process.WaitForExit()
+  $exitCode = $process.ExitCode
+}
+$timer.Stop()
+Write-Output ('TEST_END_UTC=' + [DateTime]::UtcNow.ToString('o'))
+Write-Output ('DURATION_SECONDS=' + [Math]::Round($timer.Elapsed.TotalSeconds, 3))
+Write-Output ('EXIT_CODE=' + $exitCode)
+Write-Output 'STDOUT_BEGIN'
+if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw }
+Write-Output 'STDOUT_END'
+Write-Output 'STDERR_BEGIN'
+if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw }
+Write-Output 'STDERR_END'
+$remainingKnown = @()
+foreach ($knownPid in @($known | Select-Object -Unique)) { if (Get-Process -Id $knownPid -ErrorAction SilentlyContinue) { $remainingKnown += $knownPid } }
+Write-Output ('KNOWN_PROCESS_REMAINING=' + ($remainingKnown -join ','))
+$relevantAfter = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^python(\.exe)?$' -and ($_.CommandLine -like ('*' + $test + '*') -or $_.CommandLine -like '*_native_child_failure*') })
+Write-Output ('RELEVANT_PROCESS_COUNT_AFTER=' + $relevantAfter.Count)
+foreach ($item in $relevantAfter) { Write-Output ('REMAINING_PID=' + $item.ProcessId + ' PPID=' + $item.ParentProcessId + ' CMD=' + $item.CommandLine) }
+Write-Output ('HEAD_AFTER=' + (& git -C $repo rev-parse HEAD))
+Write-Output 'SOURCE_HASHES_AFTER'
+foreach ($file in $sourceFiles) { $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $repo $file)).Hash.ToLowerInvariant(); Write-Output ($hash + '  ' + $file) }
+Stop-Transcript | Out-Null
+$evidenceFiles = @($stdoutPath, $stderrPath, $wrapper)
+if (Test-Path -LiteralPath $timeoutSnapshot) { $evidenceFiles += $timeoutSnapshot }
+$hashLines = foreach ($path in $evidenceFiles) { $item = Get-Item -LiteralPath $path; $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant(); $hash + '  ' + $item.Name + '  bytes=' + $item.Length }
+$hashLines | Out-File -LiteralPath $manifest -Encoding utf8 -NoClobber
+Write-Output ('MANIFEST_SHA256=' + (Get-FileHash -Algorithm SHA256 -LiteralPath $manifest).Hash.ToLowerInvariant())
+Get-Content -LiteralPath $manifest
+exit $exitCode
+Process ID: 18500
+PSVersion: 7.6.5
+PSEdition: Core
+GitCommitId: 7.6.5
+OS: Microsoft Windows 10.0.26200
+Platform: Win32NT
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1, 6.0, 7.0
+PSRemotingProtocolVersion: 2.4
+SerializationVersion: 1.1.0.1
+WSManStackVersion: 3.0
+**********************
+EXECUTION_MODE=require_escalated
+HEAD_BEFORE=f57aff1be3f843fabd03a73a05a9c3d0cab24085
+COMMAND=C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest -v tests.test_mo2_preparation_recovery.RealPreparationRestartTests.test_foreground_failed_attempt_recovers_once_into_completely_fresh_real_preparation
+TEMP=C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt
+TMP=C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt
+MODLAB=MODLAB_PREPARATION_ARCHIVE=C:\Users\red\Desktop\Modlab\workspace\inbox\Mod.Organizer-2.5.2.7z;MODLAB_PREPARATION_STEAM=C:\Users\red\Desktop\Steam
+SOURCE_HASHES_BEFORE
+cec0fa0bb0672441fef03613c61b103702ac8f4bd8e61de298c046580aaf0feb  modlab/platform/windows_exact_fs.py
+935954bbc8c541cdfe1b383f8831ab243a742fc834943e488b88d5d1e8081577  modlab/validation/mo2_containment_service.py
+9b04ae4883ee3455d6eaae1d43b76cc6c395ffdc09255d1bf75a1e61b57fd89f  modlab/workflows/skyrim/mo2_bootstrap.py
+ebb888bc4ae08680230dbb3ef0769c64bd00ab020338d202ce61266d51beb627  modlab/workflows/skyrim/mo2_bootstrap_store.py
+97bb933703edada3c08f2e3deee233302f26ac611b89dd3c3ed5f0517e4a4005  tests/test_mo2_bootstrap_create.py
+3c838e7d0691ce64f3149e23de6e14ebd7bccf4df25a9893acd62112a4f43012  tests/test_mo2_bootstrap_recovery.py
+4f75be7debea6e2cd58d22e5cdf1df584b07f7852b67d6ae186df59b07d4cb62  tests/test_mo2_bootstrap_store.py
+fce0928d1ca0b4c64f3c60919c95624ef9bcc69571da715bcf62755fab56c979  tests/test_mo2_containment_service.py
+b8d40a75973f05b2af0695e337ce0fb05e78d7b5690211094be50edf8cd0b8a8  tests/test_windows_exact_fs.py
+RELEVANT_PROCESS_COUNT_BEFORE=0
+TEST_PROCESS_STARTED_UTC=2026-09-04T08:11:27.8772343Z
+TEST_PID=19740
+TEST_START_TIME_UTC=2026-09-04T08:11:27.8849286Z
+TEST_SAMPLE elapsed=30.166 pid=19740 cpu=0.641
+DIRECT_CHILD_FIRST_SEEN elapsed=30.166 pid=19708 creation=09/04/2026 18:11:27 cmd=\??\C:\WINDOWS\system32\conhost.exe 0x4
+DIRECT_CHILD_FIRST_SEEN elapsed=30.166 pid=19784 creation=09/04/2026 18:11:28 cmd=C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -c "from tests.test_mo2_preparation_recovery import _native_child_failure; import sys; _native_child_failure(*sys.argv[1:])" C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\t9d archive-sha256:e6376efd87fd5ddd95aee959405e8f067afa526ea6c2c0c5aa03c5108bf4a815 C:\Users\red\Desktop\Steam C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\t9d\runtime\validation\mo2-containment
+TEST_SAMPLE elapsed=60.376 pid=19740 cpu=0.641
+TEST_SAMPLE elapsed=90.518 pid=19740 cpu=0.641
+TEST_SAMPLE elapsed=120.68 pid=19740 cpu=0.641
+TEST_SAMPLE elapsed=150.855 pid=19740 cpu=0.641
+TEST_SAMPLE elapsed=180.994 pid=19740 cpu=3.422
+TEST_SAMPLE elapsed=211.167 pid=19740 cpu=32.891
+TEST_SAMPLE elapsed=241.314 pid=19740 cpu=62.703
+TEST_SAMPLE elapsed=271.468 pid=19740 cpu=83.625
+TEST_SAMPLE elapsed=301.589 pid=19740 cpu=113.641
+TEST_SAMPLE elapsed=331.697 pid=19740 cpu=135.531
+TEST_SAMPLE elapsed=361.863 pid=19740 cpu=164.594
+TEST_SAMPLE elapsed=390.023 pid=19740 cpu=191.719
+TEST_SAMPLE elapsed=420.196 pid=19740 cpu=212.969
+TEST_SAMPLE elapsed=450.342 pid=19740 cpu=242.797
+TEST_SAMPLE elapsed=480.523 pid=19740 cpu=272.766
+TEST_SAMPLE elapsed=510.694 pid=19740 cpu=293.875
+TEST_SAMPLE elapsed=540.864 pid=19740 cpu=323.156
+TEST_SAMPLE elapsed=571.016 pid=19740 cpu=353.188
+TEST_SAMPLE elapsed=601.241 pid=19740 cpu=373.922
+TEST_SAMPLE elapsed=631.395 pid=19740 cpu=403.922
+TEST_SAMPLE elapsed=661.554 pid=19740 cpu=425
+TEST_SAMPLE elapsed=691.723 pid=19740 cpu=454.375
+TEST_SAMPLE elapsed=721.891 pid=19740 cpu=484.234
+TEST_SAMPLE elapsed=750.025 pid=19740 cpu=503.172
+TEST_SAMPLE elapsed=780.177 pid=19740 cpu=533.156
+TEST_SAMPLE elapsed=810.312 pid=19740 cpu=562.234
+DIRECT_CHILD_FIRST_SEEN elapsed=810.312 pid=26768 creation=09/04/2026 18:24:57 cmd=C:\Windows\System32\tar.exe -xf C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\t9d\runtime\validation\mo2-containment\b8954b51f212429c94bb4b796de7b151\fixtures\v2\FomodDependency\t\library\archives\e6\e6376efd87fd5ddd95aee959405e8f067afa526ea6c2c0c5aa03c5108bf4a815\payload.7z -C C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\t9d\runtime\validation\mo2-containment\b8954b51f212429c94bb4b796de7b151\fixtures\v2\FomodDependency\t\tools\mo2\.sen7wxnutwvecxadjsw5xg7v5pu\app
+TEST_SAMPLE elapsed=840.465 pid=19740 cpu=584.25
+TEST_SAMPLE elapsed=870.593 pid=19740 cpu=612.969
+TEST_END_UTC=2026-09-04T08:26:20.5827121Z
+DURATION_SECONDS=892.704
+EXIT_CODE=0
+STDOUT_BEGIN
+STDOUT_END
+STDERR_BEGIN
+test_foreground_failed_attempt_recovers_once_into_completely_fresh_real_preparation (tests.test_mo2_preparation_recovery.RealPreparationRestartTests.test_foreground_failed_attempt_recovers_once_into_completely_fresh_real_preparation) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 891.903s
+
+OK
+STDERR_END
+KNOWN_PROCESS_REMAINING=
+RELEVANT_PROCESS_COUNT_AFTER=0
+HEAD_AFTER=f57aff1be3f843fabd03a73a05a9c3d0cab24085
+SOURCE_HASHES_AFTER
+cec0fa0bb0672441fef03613c61b103702ac8f4bd8e61de298c046580aaf0feb  modlab/platform/windows_exact_fs.py
+935954bbc8c541cdfe1b383f8831ab243a742fc834943e488b88d5d1e8081577  modlab/validation/mo2_containment_service.py
+9b04ae4883ee3455d6eaae1d43b76cc6c395ffdc09255d1bf75a1e61b57fd89f  modlab/workflows/skyrim/mo2_bootstrap.py
+ebb888bc4ae08680230dbb3ef0769c64bd00ab020338d202ce61266d51beb627  modlab/workflows/skyrim/mo2_bootstrap_store.py
+97bb933703edada3c08f2e3deee233302f26ac611b89dd3c3ed5f0517e4a4005  tests/test_mo2_bootstrap_create.py
+3c838e7d0691ce64f3149e23de6e14ebd7bccf4df25a9893acd62112a4f43012  tests/test_mo2_bootstrap_recovery.py
+4f75be7debea6e2cd58d22e5cdf1df584b07f7852b67d6ae186df59b07d4cb62  tests/test_mo2_bootstrap_store.py
+fce0928d1ca0b4c64f3c60919c95624ef9bcc69571da715bcf62755fab56c979  tests/test_mo2_containment_service.py
+b8d40a75973f05b2af0695e337ce0fb05e78d7b5690211094be50edf8cd0b8a8  tests/test_windows_exact_fs.py
+**********************
+PowerShell transcript end
+End time: 20260904182620
+**********************

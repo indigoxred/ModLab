@@ -1,0 +1,13 @@
+EXECUTION_MODE=require_escalated-unsandboxed
+COMMAND=C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest -v tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_mutation_guard_rejects_same_file_id_from_foreign_volume tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_delegated_mutation_reports_root_then_fails_if_delegate_creates_reparse tests.test_mo2_containment_watch.MutationWatchTests.test_guard_chain_closes_new_child_on_every_pretransfer_validation_failure tests.test_mo2_containment_watch.MutationWatchTests.test_root_path_replacement_after_ready_is_incomplete
+test_mutation_guard_rejects_same_file_id_from_foreign_volume (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_mutation_guard_rejects_same_file_id_from_foreign_volume) ... ok
+test_delegated_mutation_reports_root_then_fails_if_delegate_creates_reparse (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_delegated_mutation_reports_root_then_fails_if_delegate_creates_reparse) ... ok
+test_guard_chain_closes_new_child_on_every_pretransfer_validation_failure (tests.test_mo2_containment_watch.MutationWatchTests.test_guard_chain_closes_new_child_on_every_pretransfer_validation_failure) ... ok
+test_root_path_replacement_after_ready_is_incomplete (tests.test_mo2_containment_watch.MutationWatchTests.test_root_path_replacement_after_ready_is_incomplete) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.331s
+
+OK
+GREEN_EXIT_CODE=0
+GREEN_DURATION_SECONDS=0.769

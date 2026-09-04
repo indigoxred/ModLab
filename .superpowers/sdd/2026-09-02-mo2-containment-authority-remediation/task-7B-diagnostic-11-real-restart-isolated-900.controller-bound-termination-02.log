@@ -1,0 +1,58 @@
+**********************
+PowerShell transcript start
+Start time: 20260904182637
+Username: DESKTOP-947H2KL\red
+RunAs User: DESKTOP-947H2KL\red
+Configuration Name: 
+Machine: DESKTOP-947H2KL (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\pwsh.dll -NoProfile -Command try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}
+$ErrorActionPreference = 'Stop'
+$repo = 'C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake'
+$sdd = Join-Path $repo '.superpowers\sdd\2026-09-02-mo2-containment-authority-remediation'
+$prefix = Join-Path $sdd 'task-7B-diagnostic-11-real-restart-isolated-900'
+$terminationLog = $prefix + '.controller-bound-termination-02.log'
+$processJson = $prefix + '.controller-bound-processes-02.json'
+if (Test-Path -LiteralPath $terminationLog) { throw "Refusing to overwrite $terminationLog" }
+if (Test-Path -LiteralPath $processJson) { throw "Refusing to overwrite $processJson" }
+$rootPid = [uint32]19740
+Start-Transcript -LiteralPath $terminationLog -NoClobber | Out-Null
+Write-Output ('CAPTURE_UTC=' + [DateTime]::UtcNow.ToString('o'))
+$root = Get-Process -Id $rootPid -ErrorAction SilentlyContinue
+if (-not $root) { Write-Output 'TEST_PROCESS_ALREADY_ABSENT=True'; Stop-Transcript | Out-Null; exit 0 }
+$root.Refresh()
+Write-Output ('ROOT_PID=' + $rootPid + ' START_UTC=' + $root.StartTime.ToUniversalTime().ToString('o') + ' CPU_SECONDS=' + [Math]::Round($root.TotalProcessorTime.TotalSeconds,3))
+foreach ($suffix in @('.stdout.log','.stderr.log','.wrapper.log')) { $path=$prefix+$suffix; $item=Get-Item -LiteralPath $path; Write-Output ('LOCKED_EVIDENCE_SNAPSHOT bytes=' + $item.Length + ' write_utc=' + $item.LastWriteTimeUtc.ToString('o') + ' path=' + $path) }
+$all = @(Get-CimInstance Win32_Process)
+$frontier = @($rootPid)
+$owned = @()
+while ($frontier.Count -gt 0) { $next=@(); foreach ($candidate in $all) { if ($frontier -contains [uint32]$candidate.ParentProcessId) { $owned += $candidate; $next += [uint32]$candidate.ProcessId } }; $frontier=@($next) }
+$snapshot = @()
+foreach ($item in $owned) { $cpu=$null; $native=Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue; if($native){try{$cpu=[Math]::Round($native.TotalProcessorTime.TotalSeconds,3)}catch{}}; $snapshot += [ordered]@{pid=[uint32]$item.ProcessId;parent_pid=[uint32]$item.ParentProcessId;creation_date=[string]$item.CreationDate;cpu_seconds=$cpu;name=[string]$item.Name;command_line=[string]$item.CommandLine}; Write-Output ('DESCENDANT pid='+$item.ProcessId+' ppid='+$item.ParentProcessId+' creation='+$item.CreationDate+' cpu='+$cpu+' name='+$item.Name+' cmd='+$item.CommandLine) }
+[ordered]@{capture_utc=[DateTime]::UtcNow.ToString('o');root_pid=$rootPid;root_start_utc=$root.StartTime.ToUniversalTime().ToString('o');root_cpu_seconds=[Math]::Round($root.TotalProcessorTime.TotalSeconds,3);descendants=$snapshot}|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $processJson -Encoding utf8
+for($index=$owned.Count-1;$index-ge 0;$index--){$ownedPid=[uint32]$owned[$index].ProcessId;Write-Output ('TERMINATING_DESCENDANT_PID='+$ownedPid);Stop-Process -Id $ownedPid -Force -ErrorAction SilentlyContinue}
+Write-Output ('TERMINATING_TEST_PID='+$rootPid)
+Stop-Process -Id $rootPid -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 1
+$remaining=@();foreach($pidValue in @($owned.ProcessId)+@($rootPid)){if(Get-Process -Id $pidValue -ErrorAction SilentlyContinue){$remaining+=$pidValue}}
+Write-Output ('EXACT_OWNED_PROCESS_REMAINING='+($remaining -join ','))
+Write-Output ('WORKSPACE_T9D_PRESENT='+(Test-Path -LiteralPath (Join-Path $repo 't9d')))
+Stop-Transcript | Out-Null
+Write-Output ('TERMINATION_LOG_SHA256='+(Get-FileHash -Algorithm SHA256 -LiteralPath $terminationLog).Hash.ToLowerInvariant())
+Write-Output ('PROCESS_JSON_SHA256='+(Get-FileHash -Algorithm SHA256 -LiteralPath $processJson).Hash.ToLowerInvariant())
+Process ID: 5904
+PSVersion: 7.6.5
+PSEdition: Core
+GitCommitId: 7.6.5
+OS: Microsoft Windows 10.0.26200
+Platform: Win32NT
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1, 6.0, 7.0
+PSRemotingProtocolVersion: 2.4
+SerializationVersion: 1.1.0.1
+WSManStackVersion: 3.0
+**********************
+CAPTURE_UTC=2026-09-04T08:26:37.0557777Z
+TEST_PROCESS_ALREADY_ABSENT=True
+**********************
+PowerShell transcript end
+End time: 20260904182637
+**********************

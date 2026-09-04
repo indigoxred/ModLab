@@ -1,0 +1,33 @@
+EXECUTION_MODE=require_escalated-unsandboxed
+COMMAND=C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest -v tests.test_windows_exact_fs.WindowsExactFsTests.test_directory_identity_attributes_ignore_transient_bits_while_files_remain_raw tests.test_mo2_containment_service.PreparationProjectionRegressionTests.test_transient_non_identity_directory_attribute_does_not_block_delegated_mutation_observation
+test_directory_identity_attributes_ignore_transient_bits_while_files_remain_raw (tests.test_windows_exact_fs.WindowsExactFsTests.test_directory_identity_attributes_ignore_transient_bits_while_files_remain_raw) ... ERROR
+test_transient_non_identity_directory_attribute_does_not_block_delegated_mutation_observation (tests.test_mo2_containment_service.PreparationProjectionRegressionTests.test_transient_non_identity_directory_attribute_does_not_block_delegated_mutation_observation) ... ERROR
+
+======================================================================
+ERROR: test_directory_identity_attributes_ignore_transient_bits_while_files_remain_raw (tests.test_windows_exact_fs.WindowsExactFsTests.test_directory_identity_attributes_ignore_transient_bits_while_files_remain_raw)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_windows_exact_fs.py", line 46, in test_directory_identity_attributes_ignore_transient_bits_while_files_remain_raw
+    windows_exact_fs.normalize_identity_attributes(
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'modlab.platform.windows_exact_fs' has no attribute 'normalize_identity_attributes'
+
+======================================================================
+ERROR: test_transient_non_identity_directory_attribute_does_not_block_delegated_mutation_observation (tests.test_mo2_containment_service.PreparationProjectionRegressionTests.test_transient_non_identity_directory_attribute_does_not_block_delegated_mutation_observation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 168, in test_transient_non_identity_directory_attribute_does_not_block_delegated_mutation_observation
+    service._delegated_mutations((root,), operation)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 1839, in _delegated_mutations
+    return _delegated_mutations_guarded(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 1665, in _delegated_mutations_guarded
+    raise ContainmentServiceError(
+modlab.validation.mo2_containment_service.ContainmentServiceError: delegated mutation effect observation is unavailable before operation: C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab-owner-union-transient-kcuqo1v7\observed
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.010s
+
+FAILED (errors=2)
+RED_EXIT_CODE=1
+RED_DURATION_SECONDS=0.473

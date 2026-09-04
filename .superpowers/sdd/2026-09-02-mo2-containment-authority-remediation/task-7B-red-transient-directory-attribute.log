@@ -1,0 +1,31 @@
+2026-09-04T16:56:38.7821603+10:00
+f57aff1be3f843fabd03a73a05a9c3d0cab24085
+test_transient_non_identity_directory_attribute_does_not_block_exact_activation (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_transient_non_identity_directory_attribute_does_not_block_exact_activation) ... ERROR
+
+======================================================================
+ERROR: test_transient_non_identity_directory_attribute_does_not_block_exact_activation (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_transient_non_identity_directory_attribute_does_not_block_exact_activation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_create.py", line 174, in test_transient_non_identity_directory_attribute_does_not_block_exact_activation
+    result = self._apply(plan.plan_id)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_create.py", line 69, in _apply
+    return apply_mo2_setup(plan_id, self.fixture.workspace, **arguments)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 714, in apply_mo2_setup
+    raise _refusal_with_failure(error, failure) from error
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2763, in _apply_create_plan
+    raise _refusal_with_failure(refusal, failure) from error
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: MO2 creation requires recovery: staged instance root identity changed: C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmp7r26sl0u\ModLab\workspace\tools\mo2\.s73olvgdwkqzbb7w4xkmhmvbsca
+
+----------------------------------------------------------------------
+Ran 1 test in 0.933s
+
+FAILED (errors=1)
+=== TEST EXIT 1 ===

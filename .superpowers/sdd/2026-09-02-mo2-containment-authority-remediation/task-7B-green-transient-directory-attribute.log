@@ -1,0 +1,17 @@
+2026-09-04T16:57:11.6616378+10:00
+f57aff1be3f843fabd03a73a05a9c3d0cab24085
+test_transient_non_identity_directory_attribute_does_not_block_exact_activation (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_transient_non_identity_directory_attribute_does_not_block_exact_activation) ... FAIL
+
+======================================================================
+FAIL: test_transient_non_identity_directory_attribute_does_not_block_exact_activation (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_transient_non_identity_directory_attribute_does_not_block_exact_activation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_create.py", line 179, in test_transient_non_identity_directory_attribute_does_not_block_exact_activation
+    self.assertTrue(self.fixture.layout.skyrim_mo2_app.is_file())
+AssertionError: False is not true
+
+----------------------------------------------------------------------
+Ran 1 test in 1.179s
+
+FAILED (failures=1)
+=== TEST EXIT 1 ===

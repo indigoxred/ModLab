@@ -1,0 +1,23 @@
+test_create_activates_exact_contained_ready_instance (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_create_activates_exact_contained_ready_instance) ... FAIL
+test_plan_is_content_addressed_idempotent_and_conflict_safe (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_plan_is_content_addressed_idempotent_and_conflict_safe) ... FAIL
+
+======================================================================
+FAIL: test_create_activates_exact_contained_ready_instance (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_create_activates_exact_contained_ready_instance)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_create.py", line 126, in test_create_activates_exact_contained_ready_instance
+    self.assertEqual(2, rename_pinned.call_count)
+AssertionError: 2 != 0
+
+======================================================================
+FAIL: test_plan_is_content_addressed_idempotent_and_conflict_safe (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_plan_is_content_addressed_idempotent_and_conflict_safe)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_store.py", line 183, in test_plan_is_content_addressed_idempotent_and_conflict_safe
+    self.assertEqual(1, publish.call_count)
+AssertionError: 1 != 0
+
+----------------------------------------------------------------------
+Ran 2 tests in 1.173s
+
+FAILED (failures=2)

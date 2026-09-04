@@ -1,0 +1,7 @@
+EXECUTION_MODE=default-sandbox
+COMMAND=C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest -v tests.test_mo2_containment_service.PreparationProjectionRegressionTests.test_delegate_and_projection_close_failures_retain_the_union_of_live_owners
+TEMP=C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt
+TMP=C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt
+test_delegate_and_projection_close_failures_retain_the_union_of_live_owners (tests.test_mo2_containment_service.PreparationProjectionRegressionTests.test_delegate_and_projection_close_failures_retain_the_union_of_live_owners) ... 
+DIAGNOSTIC_EXIT_CODE=-1
+DIAGNOSTIC_DURATION_SECONDS=337.875

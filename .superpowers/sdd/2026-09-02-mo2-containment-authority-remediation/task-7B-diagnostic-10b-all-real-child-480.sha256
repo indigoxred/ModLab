@@ -1,0 +1,7 @@
+65ffb8a09eaf8e6ae3e4736d56de4b4111d34fa37765f288d1dca392ad212052  task-7B-diagnostic-10-child-harness.py  bytes=7610
+cad3385a40623092658354dd6694dcc830486190b7c1c6c96491b6f9d1ae703c  task-7B-diagnostic-10b-all-real-child-480.events.jsonl  bytes=3864
+7e0dba54394fa9b3678ee4641d12cc4d62c192011178c4233cb2f3d40b758439  task-7B-diagnostic-10b-all-real-child-480.failure-record.json  bytes=2165
+79605a890be2fff2f61b8001f0b8a40fcfbbbc85ba33290a8544b902161ccfe4  task-7B-diagnostic-10b-all-real-child-480.result.json  bytes=869
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  task-7B-diagnostic-10b-all-real-child-480.stderr.log  bytes=0
+60314e64132527fbfc4e0e5a5f60ef0df21030266f4f1a014e62b380141b7eae  task-7B-diagnostic-10b-all-real-child-480.stdout.log  bytes=77
+6c044056d91a0ad12908f8cf336e31b9bc1f9db3aad5c1a93afde2c67a4a9186  task-7B-diagnostic-10b-all-real-child-480.wrapper.log  bytes=7114

@@ -1,0 +1,124 @@
+**********************
+PowerShell transcript start
+Start time: 20260904180437
+Username: DESKTOP-947H2KL\red
+RunAs User: DESKTOP-947H2KL\red
+Configuration Name: 
+Machine: DESKTOP-947H2KL (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\pwsh.dll -NoProfile -Command try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}
+$ErrorActionPreference = 'Stop'
+$repo = 'C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake'
+$python = 'C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+$archive = 'C:\Users\red\Desktop\Modlab\workspace\inbox\Mod.Organizer-2.5.2.7z'
+$steam = 'C:\Users\red\Desktop\Steam'
+$sdd = Join-Path $repo '.superpowers\sdd\2026-09-02-mo2-containment-authority-remediation'
+$harness = Join-Path $sdd 'task-7B-diagnostic-10-child-harness.py'
+$prefix = Join-Path $sdd 'task-7B-diagnostic-10b-all-real-child-480'
+$wrapper = $prefix + '.wrapper.log'
+$expected = @($prefix + '.events.jsonl', $prefix + '.result.json', $prefix + '.stdout.log', $prefix + '.stderr.log', $prefix + '.failure-record.json', $prefix + '.timeout-processes.json', $wrapper)
+foreach ($path in $expected) { if (Test-Path -LiteralPath $path) { throw "Refusing to overwrite existing evidence: $path" } }
+foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'MODLAB_*' })) { Remove-Item -LiteralPath ('Env:' + $entry.Name) }
+$env:TEMP = Join-Path $repo 'nt'
+$env:TMP = Join-Path $repo 'nt'
+$env:MODLAB_PREPARATION_ARCHIVE = $archive
+$env:MODLAB_PREPARATION_STEAM = $steam
+$launcher = "import runpy,sys; repo,harness,*args=sys.argv[1:]; sys.path.insert(0,repo); sys.argv=[harness,*args]; runpy.run_path(harness,run_name='__main__')"
+Start-Transcript -LiteralPath $wrapper -NoClobber | Out-Null
+Write-Output 'EXECUTION_MODE=require_escalated'
+Write-Output ('LAUNCH_UTC=' + [DateTime]::UtcNow.ToString('o'))
+Write-Output ('HARNESS_SHA256=' + (Get-FileHash -Algorithm SHA256 -LiteralPath $harness).Hash.ToLowerInvariant())
+Write-Output ('OUTER_MODLAB=' + ((Get-ChildItem Env: | Where-Object { $_.Name -like 'MODLAB_*' } | Sort-Object Name | ForEach-Object { $_.Name + '=' + $_.Value }) -join ';'))
+& $python -B -c $launcher $repo $harness $repo $prefix $archive $steam 2>&1
+$harnessExit = $LASTEXITCODE
+Write-Output ('HARNESS_EXIT=' + $harnessExit)
+Write-Output ('HARNESS_END_UTC=' + [DateTime]::UtcNow.ToString('o'))
+$resultPath = $prefix + '.result.json'
+if (-not (Test-Path -LiteralPath $resultPath)) { throw 'Harness did not produce result JSON' }
+$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+Write-Output ('RESULT_STATUS=' + $result.status)
+if ($result.status -eq 'timeout') {
+  $rootPid = [uint32]$result.child_pid
+  $all = @(Get-CimInstance Win32_Process)
+  $frontier = @($rootPid)
+  $owned = @()
+  while ($frontier.Count -gt 0) {
+    $next = @()
+    foreach ($candidate in $all) {
+      if ($frontier -contains [uint32]$candidate.ParentProcessId) {
+        $owned += $candidate
+        $next += [uint32]$candidate.ProcessId
+      }
+    }
+    $frontier = @($next)
+  }
+  $snapshot = @()
+  foreach ($process in $owned) {
+    $snapshot += [ordered]@{ pid = [uint32]$process.ProcessId; parent_pid = [uint32]$process.ParentProcessId; creation_date = [string]$process.CreationDate; command_line = [string]$process.CommandLine }
+  }
+  [ordered]@{ root_pid = $rootPid; descendants = $snapshot } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath ($prefix + '.timeout-processes.json') -Encoding utf8
+  Write-Output ('TIMEOUT_DESCENDANT_COUNT=' + $owned.Count)
+  foreach ($process in @($owned | Sort-Object ProcessId -Descending)) {
+    Write-Output ('TERMINATING_DESCENDANT_PID=' + $process.ProcessId)
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+  Write-Output ('TERMINATING_CHILD_PID=' + $rootPid)
+  Stop-Process -Id $rootPid -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 500
+  $remaining = @()
+  foreach ($pidValue in @($owned.ProcessId) + @($rootPid)) {
+    if (Get-Process -Id $pidValue -ErrorAction SilentlyContinue) { $remaining += $pidValue }
+  }
+  Write-Output ('OWNED_PROCESS_REMAINING=' + ($remaining -join ','))
+}
+$files = @(
+ 'modlab/platform/windows_exact_fs.py',
+ 'modlab/validation/mo2_containment_service.py',
+ 'modlab/workflows/skyrim/mo2_bootstrap.py',
+ 'modlab/workflows/skyrim/mo2_bootstrap_store.py',
+ 'tests/test_mo2_bootstrap_create.py',
+ 'tests/test_mo2_bootstrap_recovery.py',
+ 'tests/test_mo2_bootstrap_store.py',
+ 'tests/test_mo2_containment_service.py',
+ 'tests/test_windows_exact_fs.py'
+)
+Write-Output 'SOURCE_HASHES_AFTER'
+foreach ($f in $files) { $h = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $repo $f)).Hash.ToLowerInvariant(); Write-Output ($h + '  ' + $f) }
+Write-Output 'EVIDENCE_HASHES_BEFORE_TRANSCRIPT_CLOSE'
+foreach ($path in $expected) { if ((Test-Path -LiteralPath $path) -and $path -ne $wrapper) { $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant(); Write-Output ($h + '  ' + $path) } }
+Stop-Transcript | Out-Null
+$wrapperHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $wrapper).Hash.ToLowerInvariant()
+Write-Output ('WRAPPER_SHA256=' + $wrapperHash)
+exit $harnessExit
+Process ID: 8444
+PSVersion: 7.6.5
+PSEdition: Core
+GitCommitId: 7.6.5
+OS: Microsoft Windows 10.0.26200
+Platform: Win32NT
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1, 6.0, 7.0
+PSRemotingProtocolVersion: 2.4
+SerializationVersion: 1.1.0.1
+WSManStackVersion: 3.0
+**********************
+EXECUTION_MODE=require_escalated
+LAUNCH_UTC=2026-09-04T08:04:37.6188292Z
+HARNESS_SHA256=65ffb8a09eaf8e6ae3e4736d56de4b4111d34fa37765f288d1dca392ad212052
+OUTER_MODLAB=MODLAB_PREPARATION_ARCHIVE=C:\Users\red\Desktop\Modlab\workspace\inbox\Mod.Organizer-2.5.2.7z;MODLAB_PREPARATION_STEAM=C:\Users\red\Desktop\Steam
+HARNESS_EXIT=0
+HARNESS_END_UTC=2026-09-04T08:07:43.4283215Z
+RESULT_STATUS=completed
+SOURCE_HASHES_AFTER
+cec0fa0bb0672441fef03613c61b103702ac8f4bd8e61de298c046580aaf0feb  modlab/platform/windows_exact_fs.py
+935954bbc8c541cdfe1b383f8831ab243a742fc834943e488b88d5d1e8081577  modlab/validation/mo2_containment_service.py
+9b04ae4883ee3455d6eaae1d43b76cc6c395ffdc09255d1bf75a1e61b57fd89f  modlab/workflows/skyrim/mo2_bootstrap.py
+ebb888bc4ae08680230dbb3ef0769c64bd00ab020338d202ce61266d51beb627  modlab/workflows/skyrim/mo2_bootstrap_store.py
+97bb933703edada3c08f2e3deee233302f26ac611b89dd3c3ed5f0517e4a4005  tests/test_mo2_bootstrap_create.py
+3c838e7d0691ce64f3149e23de6e14ebd7bccf4df25a9893acd62112a4f43012  tests/test_mo2_bootstrap_recovery.py
+4f75be7debea6e2cd58d22e5cdf1df584b07f7852b67d6ae186df59b07d4cb62  tests/test_mo2_bootstrap_store.py
+fce0928d1ca0b4c64f3c60919c95624ef9bcc69571da715bcf62755fab56c979  tests/test_mo2_containment_service.py
+b8d40a75973f05b2af0695e337ce0fb05e78d7b5690211094be50edf8cd0b8a8  tests/test_windows_exact_fs.py
+EVIDENCE_HASHES_BEFORE_TRANSCRIPT_CLOSE
+**********************
+PowerShell transcript end
+End time: 20260904180743
+**********************

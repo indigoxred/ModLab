@@ -1,0 +1,492 @@
+=== TASK7B NON-PERTURBING PREFIX DIAGNOSTIC ===
+2026-09-04T16:51:08.8767968+10:00
+f57aff1be3f843fabd03a73a05a9c3d0cab24085
+ M modlab/workflows/skyrim/mo2_bootstrap.py
+ M modlab/workflows/skyrim/mo2_bootstrap_store.py
+ M tests/test_mo2_bootstrap_create.py
+ M tests/test_mo2_bootstrap_recovery.py
+ M tests/test_mo2_bootstrap_store.py
+TEMP=C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt
+=== EXACT ORDERED PREFIX TRACE ===
+TRACE TEST_START target='tests.test_mo2_bootstrap_cli.Mo2BootstrapCliTests.test_create_and_adopt_report_a_receipt_promoted_before_reload_failure' selected_count=57 cwd='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' temp='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' tmp='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt'
+TRACE ORDER index=1 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_active_job_stage_collision_requires_recovery'
+TRACE ORDER index=2 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_archive_listing_drift_refuses_without_plan'
+TRACE ORDER index=3 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_blocked_selected_baseline_retains_blocked_plan'
+TRACE ORDER index=4 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_conflicting_configured_steam_root_refuses_without_plan'
+TRACE ORDER index=5 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_drifted_selected_baseline_retains_blocked_plan'
+TRACE ORDER index=6 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_empty_target_plans_create_and_writes_only_plan'
+TRACE ORDER index=7 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_existing_projection_and_wrong_executable_each_block'
+TRACE ORDER index=8 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_extractor_change_during_stability_reread_refuses_without_plan'
+TRACE ORDER index=9 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_extractor_launch_oserror_is_a_stable_refusal'
+TRACE ORDER index=10 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_failed_extractor_identity_refuses_without_plan'
+TRACE ORDER index=11 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_generated_nxmhandler_settings_are_a_known_adoption_extra'
+TRACE ORDER index=12 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_immutable_package_drift_prevents_already_managed'
+TRACE ORDER index=13 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_invalid_journal_and_orphan_stage_each_retain_blocked_plan'
+TRACE ORDER index=14 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_invalid_skyrim_ccc_refuses_without_plan'
+TRACE ORDER index=15 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_low_disk_space_retains_a_coherent_blocked_plan'
+TRACE ORDER index=16 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_malformed_receipt_retains_blocked_plan'
+TRACE ORDER index=17 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_manager_change_during_stability_reread_refuses_without_plan'
+TRACE ORDER index=18 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_missing_archive_payload_refuses_without_plan'
+TRACE ORDER index=19 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_missing_explicit_steam_root_refuses_without_plan'
+TRACE ORDER index=20 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_missing_extractor_refuses_without_plan'
+TRACE ORDER index=21 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_missing_primary_master_refuses_without_plan'
+TRACE ORDER index=22 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_modified_archive_refuses_without_plan'
+TRACE ORDER index=23 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_nested_archive_redirect_is_refused_before_reading_payload'
+TRACE ORDER index=24 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_new_malformed_receipt_on_stability_reread_refuses_without_plan'
+TRACE ORDER index=25 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_new_unknown_manager_extra_blocks_before_apply'
+TRACE ORDER index=26 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_ready_existing_target_plans_adopt_even_when_process_close_is_required'
+TRACE ORDER index=27 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_receipt_change_during_stability_reread_refuses_without_plan'
+TRACE ORDER index=28 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_redirected_ini_refuses_without_plan'
+TRACE ORDER index=29 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_redirected_workspace_refuses_without_plan'
+TRACE ORDER index=30 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_release_and_artifact_descriptor_mismatch_refuses_without_plan'
+TRACE ORDER index=31 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_same_inputs_return_same_plan_id_and_bytes'
+TRACE ORDER index=32 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_seed_change_during_stability_reread_refuses_without_plan'
+TRACE ORDER index=33 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_target_change_during_stability_reread_refuses_without_plan'
+TRACE ORDER index=34 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_unknown_nonempty_target_retains_blocked_plan'
+TRACE ORDER index=35 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_unknown_process_observation_retains_blocked_plan'
+TRACE ORDER index=36 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_unknown_skyrim_runtime_refuses_without_plan'
+TRACE ORDER index=37 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_unsafe_archive_listing_refuses_without_plan'
+TRACE ORDER index=38 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_unsafe_existing_package_path_blocks_instead_of_downgrading_to_adopt'
+TRACE ORDER index=39 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_unsupported_release_refuses_without_plan'
+TRACE ORDER index=40 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_verified_matching_receipt_is_already_managed_but_profile_drift_is_adopt'
+TRACE ORDER index=41 test='tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_verified_receipt_with_low_space_remains_already_managed'
+TRACE ORDER index=42 test='tests.test_mo2_bootstrap_inventory.Mo2BootstrapInventoryTests.test_bootstrap_inventory_accepts_only_the_exact_receipted_overlay'
+TRACE ORDER index=43 test='tests.test_mo2_bootstrap_inventory.Mo2BootstrapInventoryTests.test_bridge_receipt_must_bind_an_explicit_bootstrap_receipt'
+TRACE ORDER index=44 test='tests.test_mo2_bootstrap_inventory.Mo2BootstrapInventoryTests.test_overlay_presence_and_package_identity_fail_closed'
+TRACE ORDER index=45 test='tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_canonical_documents_are_sorted_utf8_with_one_trailing_newline'
+TRACE ORDER index=46 test='tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_every_document_rejects_duplicates_saves_and_extra_fields'
+TRACE ORDER index=47 test='tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_job_identity_and_state_transition_fields_round_trip'
+TRACE ORDER index=48 test='tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_journal_prior_kind_matches_create_or_adopt_disposition'
+TRACE ORDER index=49 test='tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_plan_identity_excludes_no_fields_except_its_derived_id'
+TRACE ORDER index=50 test='tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_plan_rejects_unsafe_plugin_name_and_nonsemantic_ini_order'
+TRACE ORDER index=51 test='tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_receipt_identity_covers_package_extras_and_profiles'
+TRACE ORDER index=52 test='tests.test_mo2_bootstrap_cli.Mo2BootstrapCliTests.test_apply_and_recover_dispatch_render_service_results'
+TRACE ORDER index=53 test='tests.test_mo2_bootstrap_cli.Mo2BootstrapCliTests.test_apply_rejects_steam_root_without_calling_service'
+TRACE ORDER index=54 test='tests.test_mo2_bootstrap_cli.Mo2BootstrapCliTests.test_artifact_and_apply_are_mutually_exclusive'
+TRACE ORDER index=55 test='tests.test_mo2_bootstrap_cli.Mo2BootstrapCliTests.test_blocked_preview_and_safe_refusals_use_exit_three'
+TRACE ORDER index=56 test='tests.test_mo2_bootstrap_cli.Mo2BootstrapCliTests.test_create_and_adopt_report_a_journal_promoted_before_reload_failure'
+TRACE ORDER index=57 test='tests.test_mo2_bootstrap_cli.Mo2BootstrapCliTests.test_create_and_adopt_report_a_receipt_promoted_before_reload_failure'
+test_active_job_stage_collision_requires_recovery (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_active_job_stage_collision_requires_recovery) ... ok
+test_archive_listing_drift_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_archive_listing_drift_refuses_without_plan) ... ok
+test_blocked_selected_baseline_retains_blocked_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_blocked_selected_baseline_retains_blocked_plan) ... ok
+test_conflicting_configured_steam_root_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_conflicting_configured_steam_root_refuses_without_plan) ... ok
+test_drifted_selected_baseline_retains_blocked_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_drifted_selected_baseline_retains_blocked_plan) ... ok
+test_empty_target_plans_create_and_writes_only_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_empty_target_plans_create_and_writes_only_plan) ... ok
+test_existing_projection_and_wrong_executable_each_block (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_existing_projection_and_wrong_executable_each_block) ... ok
+test_extractor_change_during_stability_reread_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_extractor_change_during_stability_reread_refuses_without_plan) ... ok
+test_extractor_launch_oserror_is_a_stable_refusal (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_extractor_launch_oserror_is_a_stable_refusal) ... ok
+test_failed_extractor_identity_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_failed_extractor_identity_refuses_without_plan) ... ok
+test_generated_nxmhandler_settings_are_a_known_adoption_extra (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_generated_nxmhandler_settings_are_a_known_adoption_extra) ... ok
+test_immutable_package_drift_prevents_already_managed (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_immutable_package_drift_prevents_already_managed) ... ok
+test_invalid_journal_and_orphan_stage_each_retain_blocked_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_invalid_journal_and_orphan_stage_each_retain_blocked_plan) ... ok
+test_invalid_skyrim_ccc_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_invalid_skyrim_ccc_refuses_without_plan) ... ok
+test_low_disk_space_retains_a_coherent_blocked_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_low_disk_space_retains_a_coherent_blocked_plan) ... ok
+test_malformed_receipt_retains_blocked_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_malformed_receipt_retains_blocked_plan) ... ok
+test_manager_change_during_stability_reread_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_manager_change_during_stability_reread_refuses_without_plan) ... ok
+test_missing_archive_payload_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_missing_archive_payload_refuses_without_plan) ... ok
+test_missing_explicit_steam_root_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_missing_explicit_steam_root_refuses_without_plan) ... ok
+test_missing_extractor_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_missing_extractor_refuses_without_plan) ... ok
+test_missing_primary_master_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_missing_primary_master_refuses_without_plan) ... ok
+test_modified_archive_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_modified_archive_refuses_without_plan) ... ok
+test_nested_archive_redirect_is_refused_before_reading_payload (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_nested_archive_redirect_is_refused_before_reading_payload) ... ok
+test_new_malformed_receipt_on_stability_reread_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_new_malformed_receipt_on_stability_reread_refuses_without_plan) ... ok
+test_new_unknown_manager_extra_blocks_before_apply (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_new_unknown_manager_extra_blocks_before_apply) ... ok
+test_ready_existing_target_plans_adopt_even_when_process_close_is_required (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_ready_existing_target_plans_adopt_even_when_process_close_is_required) ... ok
+test_receipt_change_during_stability_reread_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_receipt_change_during_stability_reread_refuses_without_plan) ... ok
+test_redirected_ini_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_redirected_ini_refuses_without_plan) ... skipped "symbolic links unavailable: [WinError 1314] A required privilege is not held by the client: 'C:\\\\Users\\\\red\\\\Desktop\\\\Modlab\\\\.worktrees\\\\mo2-guard-bridge-handshake\\\\nt\\\\tmps8sof3j3\\\\outside.ini' -> 'C:\\\\Users\\\\red\\\\Desktop\\\\Modlab\\\\.worktrees\\\\mo2-guard-bridge-handshake\\\\nt\\\\tmps8sof3j3\\\\Documents\\\\My Games\\\\Skyrim Special Edition\\\\SkyrimCustom.ini'"
+test_redirected_workspace_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_redirected_workspace_refuses_without_plan) ... skipped "symbolic links unavailable: [WinError 1314] A required privilege is not held by the client: 'C:\\\\Users\\\\red\\\\Desktop\\\\Modlab\\\\.worktrees\\\\mo2-guard-bridge-handshake\\\\nt\\\\tmpv2g7el9v\\\\ModLab\\\\workspace' -> 'C:\\\\Users\\\\red\\\\Desktop\\\\Modlab\\\\.worktrees\\\\mo2-guard-bridge-handshake\\\\nt\\\\tmpv2g7el9v\\\\workspace-link'"
+test_release_and_artifact_descriptor_mismatch_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_release_and_artifact_descriptor_mismatch_refuses_without_plan) ... ok
+test_same_inputs_return_same_plan_id_and_bytes (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_same_inputs_return_same_plan_id_and_bytes) ... ok
+test_seed_change_during_stability_reread_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_seed_change_during_stability_reread_refuses_without_plan) ... ok
+test_target_change_during_stability_reread_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_target_change_during_stability_reread_refuses_without_plan) ... ok
+test_unknown_nonempty_target_retains_blocked_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_unknown_nonempty_target_retains_blocked_plan) ... ok
+test_unknown_process_observation_retains_blocked_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_unknown_process_observation_retains_blocked_plan) ... ok
+test_unknown_skyrim_runtime_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_unknown_skyrim_runtime_refuses_without_plan) ... ok
+test_unsafe_archive_listing_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_unsafe_archive_listing_refuses_without_plan) ... ok
+test_unsafe_existing_package_path_blocks_instead_of_downgrading_to_adopt (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_unsafe_existing_package_path_blocks_instead_of_downgrading_to_adopt) ... ok
+test_unsupported_release_refuses_without_plan (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_unsupported_release_refuses_without_plan) ... ok
+test_verified_matching_receipt_is_already_managed_but_profile_drift_is_adopt (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_verified_matching_receipt_is_already_managed_but_profile_drift_is_adopt) ... ok
+test_verified_receipt_with_low_space_remains_already_managed (tests.test_mo2_bootstrap_planning.Mo2BootstrapPlanningTests.test_verified_receipt_with_low_space_remains_already_managed) ... ok
+test_bootstrap_inventory_accepts_only_the_exact_receipted_overlay (tests.test_mo2_bootstrap_inventory.Mo2BootstrapInventoryTests.test_bootstrap_inventory_accepts_only_the_exact_receipted_overlay) ... ok
+test_bridge_receipt_must_bind_an_explicit_bootstrap_receipt (tests.test_mo2_bootstrap_inventory.Mo2BootstrapInventoryTests.test_bridge_receipt_must_bind_an_explicit_bootstrap_receipt) ... ok
+test_overlay_presence_and_package_identity_fail_closed (tests.test_mo2_bootstrap_inventory.Mo2BootstrapInventoryTests.test_overlay_presence_and_package_identity_fail_closed) ... ok
+test_canonical_documents_are_sorted_utf8_with_one_trailing_newline (tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_canonical_documents_are_sorted_utf8_with_one_trailing_newline) ... ok
+test_every_document_rejects_duplicates_saves_and_extra_fields (tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_every_document_rejects_duplicates_saves_and_extra_fields) ... ok
+test_job_identity_and_state_transition_fields_round_trip (tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_job_identity_and_state_transition_fields_round_trip) ... ok
+test_journal_prior_kind_matches_create_or_adopt_disposition (tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_journal_prior_kind_matches_create_or_adopt_disposition) ... ok
+test_plan_identity_excludes_no_fields_except_its_derived_id (tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_plan_identity_excludes_no_fields_except_its_derived_id) ... ok
+test_plan_rejects_unsafe_plugin_name_and_nonsemantic_ini_order (tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_plan_rejects_unsafe_plugin_name_and_nonsemantic_ini_order) ... ok
+test_receipt_identity_covers_package_extras_and_profiles (tests.test_mo2_bootstrap_serialization.BootstrapSerializationTests.test_receipt_identity_covers_package_extras_and_profiles) ... ok
+test_apply_and_recover_dispatch_render_service_results (tests.test_mo2_bootstrap_cli.Mo2BootstrapCliTests.test_apply_and_recover_dispatch_render_service_results) ... ok
+test_apply_rejects_steam_root_without_calling_service (tests.test_mo2_bootstrap_cli.Mo2BootstrapCliTests.test_apply_rejects_steam_root_without_calling_service) ... ok
+usage: modlab skyrim mo2 setup [-h] (--artifact ARTIFACT | --apply PLAN_ID)
+                               [--steam-root STEAM_ROOT]
+                               [--workspace WORKSPACE] [--format {text,json}]
+modlab skyrim mo2 setup: error: argument --apply: not allowed with argument --artifact
+test_artifact_and_apply_are_mutually_exclusive (tests.test_mo2_bootstrap_cli.Mo2BootstrapCliTests.test_artifact_and_apply_are_mutually_exclusive) ... ok
+test_blocked_preview_and_safe_refusals_use_exit_three (tests.test_mo2_bootstrap_cli.Mo2BootstrapCliTests.test_blocked_preview_and_safe_refusals_use_exit_three) ... ok
+test_create_and_adopt_report_a_journal_promoted_before_reload_failure (tests.test_mo2_bootstrap_cli.Mo2BootstrapCliTests.test_create_and_adopt_report_a_journal_promoted_before_reload_failure) ... ok
+test_create_and_adopt_report_a_receipt_promoted_before_reload_failure (tests.test_mo2_bootstrap_cli.Mo2BootstrapCliTests.test_create_and_adopt_report_a_receipt_promoted_before_reload_failure) ... TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921520 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680951746400 st_ctime_ns=1788504680951746400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921519 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680951746400 st_ctime_ns=1788504680950744200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' label='staging ancestor' st_dev=646928465317719174 st_ino=3940649674129780 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681242565000 st_ctime_ns=1788504681239518800
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap' label='staging ancestor' st_dev=646928465317719174 st_ino=8444249301500239 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681239518800 st_ctime_ns=1788504680961591900
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs' label='staging ancestor' st_dev=646928465317719174 st_ino=9288674231632205 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680961591900 st_ctime_ns=1788504680959593500
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime' label='staging ancestor' st_dev=646928465317719174 st_ino=9570149208342855 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680963052800 st_ctime_ns=1788504680958591700
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' label='staging root' st_dev=646928465317719174 st_ino=4222124650840437 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681334735200 st_ctime_ns=1788504681334735200
+TRACE METADATA_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 757, in test_create_and_adopt_report_a_receipt_promoted_before_reload_failure
+    result = self.run_cli(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 329, in run_cli
+    code = main(arguments, stdout, stderr)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\cli.py", line 527, in main
+    return _run_mo2_command(args, output, errors)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\cli.py", line 476, in _run_mo2_command
+    result = apply_mo2_setup(args.plan_id, workspace_root)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1139, in __call__
+    return self._mock_call(*args, **kwargs)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1143, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1204, in _execute_mock_call
+    result = effect(*args, **kwargs)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 358, in _live_apply_service
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2446, in _apply_create_plan
+    stage_identity = _direct_directory_identity(stage_root, "staging root")
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2966, in _direct_directory_identity
+    metadata = _direct_cleanup_metadata(path, label)
+  File "<string>", line 36, in traced_metadata
+
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54\\downloads' label='staged downloads directory' st_dev=646928465317719174 st_ino=3940649674129792 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681348753900 st_ctime_ns=1788504681348753900
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54\\mods' label='staged mods directory' st_dev=646928465317719174 st_ino=3940649674129793 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681348753900 st_ctime_ns=1788504681348753900
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54\\overwrite' label='staged overwrite directory' st_dev=646928465317719174 st_ino=3940649674129794 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681349755300 st_ctime_ns=1788504681349755300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54\\webcache' label='staged webcache directory' st_dev=646928465317719174 st_ino=3940649674129795 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681349755300 st_ctime_ns=1788504681349755300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='empty MO2 target' st_dev=646928465317719174 st_ino=9007199254921521 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680957591000 st_ctime_ns=1788504680951746400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921520 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681334735200 st_ctime_ns=1788504680951746400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921519 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680951746400 st_ctime_ns=1788504680950744200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' label='staging ancestor' st_dev=646928465317719174 st_ino=3940649674129780 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681506893600 st_ctime_ns=1788504681239518800
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap' label='staging ancestor' st_dev=646928465317719174 st_ino=8444249301500239 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504681506893600 st_ctime_ns=1788504680961591900
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs' label='staging ancestor' st_dev=646928465317719174 st_ino=9288674231632205 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680961591900 st_ctime_ns=1788504680959593500
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime' label='staging ancestor' st_dev=646928465317719174 st_ino=9570149208342855 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680963052800 st_ctime_ns=1788504680958591700
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='empty target' st_dev=646928465317719174 st_ino=9007199254921521 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680957591000 st_ctime_ns=1788504680951746400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921520 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681334735200 st_ctime_ns=1788504680951746400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921519 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680951746400 st_ctime_ns=1788504680950744200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' label='staging ancestor' st_dev=646928465317719174 st_ino=3940649674129780 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681506893600 st_ctime_ns=1788504681239518800
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap' label='staging ancestor' st_dev=646928465317719174 st_ino=8444249301500239 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504681506893600 st_ctime_ns=1788504680961591900
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs' label='staging ancestor' st_dev=646928465317719174 st_ino=9288674231632205 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680961591900 st_ctime_ns=1788504680959593500
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime' label='staging ancestor' st_dev=646928465317719174 st_ino=9570149208342855 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680963052800 st_ctime_ns=1788504680958591700
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921520 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681542738700 st_ctime_ns=1788504680951746400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921519 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680951746400 st_ctime_ns=1788504680950744200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' label='staging ancestor' st_dev=646928465317719174 st_ino=3940649674129780 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681542738700 st_ctime_ns=1788504681239518800
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap' label='staging ancestor' st_dev=646928465317719174 st_ino=8444249301500239 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504681506893600 st_ctime_ns=1788504680961591900
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs' label='staging ancestor' st_dev=646928465317719174 st_ino=9288674231632205 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680961591900 st_ctime_ns=1788504680959593500
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime' label='staging ancestor' st_dev=646928465317719174 st_ino=9570149208342855 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680963052800 st_ctime_ns=1788504680958591700
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' st_dev=646928465317719174 st_ino=9007199254921521 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680957591000 st_ctime_ns=1788504680951746400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921520 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681542738700 st_ctime_ns=1788504680951746400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921519 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680951746400 st_ctime_ns=1788504680950744200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' label='staging ancestor' st_dev=646928465317719174 st_ino=3940649674129780 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681542738700 st_ctime_ns=1788504681239518800
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap' label='staging ancestor' st_dev=646928465317719174 st_ino=8444249301500239 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504681506893600 st_ctime_ns=1788504680961591900
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs' label='staging ancestor' st_dev=646928465317719174 st_ino=9288674231632205 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680961591900 st_ctime_ns=1788504680959593500
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime' label='staging ancestor' st_dev=646928465317719174 st_ino=9570149208342855 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680963052800 st_ctime_ns=1788504680958591700
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' st_dev=646928465317719174 st_ino=9007199254921521 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680957591000 st_ctime_ns=1788504680951746400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' label='staged instance' st_dev=646928465317719174 st_ino=4222124650840437 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504681350754400 st_ctime_ns=1788504681334735200
+TRACE METADATA_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 757, in test_create_and_adopt_report_a_receipt_promoted_before_reload_failure
+    result = self.run_cli(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 329, in run_cli
+    code = main(arguments, stdout, stderr)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\cli.py", line 527, in main
+    return _run_mo2_command(args, output, errors)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\cli.py", line 476, in _run_mo2_command
+    result = apply_mo2_setup(args.plan_id, workspace_root)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1139, in __call__
+    return self._mock_call(*args, **kwargs)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1143, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1204, in _execute_mock_call
+    result = effect(*args, **kwargs)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 358, in _live_apply_service
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2626, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3214, in _move_exact_directory
+    validate_before()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2596, in validate_activation_before
+    _require_tree_identity(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2978, in _require_tree_identity
+    if _direct_directory_identity(root, label) != expected_root:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2966, in _direct_directory_identity
+    metadata = _direct_cleanup_metadata(path, label)
+  File "<string>", line 36, in traced_metadata
+
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921520 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681542738700 st_ctime_ns=1788504680951746400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921519 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680951746400 st_ctime_ns=1788504680950744200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' label='staging ancestor' st_dev=646928465317719174 st_ino=3940649674129780 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681542738700 st_ctime_ns=1788504681239518800
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap' label='staging ancestor' st_dev=646928465317719174 st_ino=8444249301500239 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504681506893600 st_ctime_ns=1788504680961591900
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs' label='staging ancestor' st_dev=646928465317719174 st_ino=9288674231632205 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680961591900 st_ctime_ns=1788504680959593500
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime' label='staging ancestor' st_dev=646928465317719174 st_ino=9570149208342855 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680963052800 st_ctime_ns=1788504680958591700
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921520 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681566529400 st_ctime_ns=1788504680951746400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools' label='staging ancestor' st_dev=646928465317719174 st_ino=9007199254921519 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680951746400 st_ctime_ns=1788504680950744200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' label='staging ancestor' st_dev=646928465317719174 st_ino=3940649674129780 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504681542738700 st_ctime_ns=1788504681239518800
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap' label='staging ancestor' st_dev=646928465317719174 st_ino=8444249301500239 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504681506893600 st_ctime_ns=1788504680961591900
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime\\jobs' label='staging ancestor' st_dev=646928465317719174 st_ino=9288674231632205 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680961591900 st_ctime_ns=1788504680959593500
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\runtime' label='staging ancestor' st_dev=646928465317719174 st_ino=9570149208342855 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680963052800 st_ctime_ns=1788504680958591700
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace' label='staging ancestor' st_dev=646928465317719174 st_ino=16607023626109212 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680958591700 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab' label='staging ancestor' st_dev=646928465317719174 st_ino=19421773393215771 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680930407300 st_ctime_ns=1788504680930407300
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz' label='staging ancestor' st_dev=646928465317719174 st_ino=22236523160322330 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788504680967061500 st_ctime_ns=1788504680929403400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt' label='staging ancestor' st_dev=646928465317719174 st_ino=46443371157297496 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504680929403400 st_ctime_ns=1788423055466056200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' label='staging ancestor' st_dev=646928465317719174 st_ino=7036874418101634 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788501364773118600 st_ctime_ns=1788328357323002400
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees' label='staging ancestor' st_dev=646928465317719174 st_ino=19984723346604671 st_mode=16895 st_file_attributes=16 st_size=0 st_mtime_ns=1788328357323002400 st_ctime_ns=1788130403225499000
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab' label='staging ancestor' st_dev=646928465317719174 st_ino=1125899907162052 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788326616564067100 st_ctime_ns=1788075911141757200
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop' label='staging ancestor' st_dev=646928465317719174 st_ino=562949953421844 st_mode=16749 st_file_attributes=17 st_size=8192 st_mtime_ns=1788503997123847000 st_ctime_ns=1788053565644439300
+TRACE METADATA_RETURN path='C:\\Users\\red' label='staging ancestor' st_dev=646928465317719174 st_ino=844424930132489 st_mode=16895 st_file_attributes=16 st_size=8192 st_mtime_ns=1788075882856608700 st_ctime_ns=1788053565642646400
+TRACE METADATA_RETURN path='C:\\Users' label='staging ancestor' st_dev=646928465317719174 st_ino=281474976714401 st_mode=16749 st_file_attributes=17 st_size=4096 st_mtime_ns=1788054538033586400 st_ctime_ns=1711956076184434800
+TRACE METADATA_RETURN path='C:\\' label='staging ancestor' st_dev=646928465317719174 st_ino=1407374883553285 st_mode=16895 st_file_attributes=22 st_size=8192 st_mtime_ns=1788382507878463000 st_ctime_ns=1788125245406314100
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' st_dev=646928465317719174 st_ino=4222124650840437 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504681350754400 st_ctime_ns=1788504681334735200
+TRACE METADATA_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 757, in test_create_and_adopt_report_a_receipt_promoted_before_reload_failure
+    result = self.run_cli(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 329, in run_cli
+    code = main(arguments, stdout, stderr)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\cli.py", line 527, in main
+    return _run_mo2_command(args, output, errors)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\cli.py", line 476, in _run_mo2_command
+    result = apply_mo2_setup(args.plan_id, workspace_root)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1139, in __call__
+    return self._mock_call(*args, **kwargs)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1143, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1204, in _execute_mock_call
+    result = effect(*args, **kwargs)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 358, in _live_apply_service
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2626, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3221, in _move_exact_directory
+    validate_after()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2617, in validate_activation_after
+    _require_tree_identity(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2978, in _require_tree_identity
+    if _direct_directory_identity(root, label) != expected_root:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2966, in _direct_directory_identity
+    metadata = _direct_cleanup_metadata(path, label)
+  File "<string>", line 36, in traced_metadata
+
+TRACE METADATA_RETURN path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\tmp5fw8_2sz\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' st_dev=646928465317719174 st_ino=4222124650840437 st_mode=16895 st_file_attributes=16 st_size=4096 st_mtime_ns=1788504681350754400 st_ctime_ns=1788504681334735200
+TRACE METADATA_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 757, in test_create_and_adopt_report_a_receipt_promoted_before_reload_failure
+    result = self.run_cli(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 329, in run_cli
+    code = main(arguments, stdout, stderr)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\cli.py", line 527, in main
+    return _run_mo2_command(args, output, errors)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\cli.py", line 476, in _run_mo2_command
+    result = apply_mo2_setup(args.plan_id, workspace_root)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1139, in __call__
+    return self._mock_call(*args, **kwargs)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1143, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1204, in _execute_mock_call
+    result = effect(*args, **kwargs)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 358, in _live_apply_service
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2645, in _apply_create_plan
+    existing = _verify_created_instance(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2993, in _verify_created_instance
+    _require_tree_identity(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2978, in _require_tree_identity
+    if _direct_directory_identity(root, label) != expected_root:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2966, in _direct_directory_identity
+    metadata = _direct_cleanup_metadata(path, label)
+  File "<string>", line 36, in traced_metadata
+
+ok
+
+----------------------------------------------------------------------
+Ran 57 tests in 13.344s
+
+OK (skipped=2)
+TRACE TEST_RESULT testsRun=57 failures=0 errors=0 skipped=2 successful=True
+=== TEST EXIT 0 ===

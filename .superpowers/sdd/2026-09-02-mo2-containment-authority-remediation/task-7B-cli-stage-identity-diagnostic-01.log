@@ -1,0 +1,2487 @@
+=== TASK7B DIAGNOSTIC METADATA ===
+2026-09-04T16:45:15.7733754+10:00
+f57aff1be3f843fabd03a73a05a9c3d0cab24085
+ M modlab/workflows/skyrim/mo2_bootstrap.py
+ M modlab/workflows/skyrim/mo2_bootstrap_store.py
+ M tests/test_mo2_bootstrap_create.py
+ M tests/test_mo2_bootstrap_recovery.py
+ M tests/test_mo2_bootstrap_store.py
+=== CURRENT TASK7B DIFF ===
+warning: in the working copy of 'modlab/workflows/skyrim/mo2_bootstrap.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'modlab/workflows/skyrim/mo2_bootstrap_store.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_mo2_bootstrap_create.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_mo2_bootstrap_recovery.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_mo2_bootstrap_store.py', LF will be replaced by CRLF the next time Git touches it
+diff --git a/modlab/workflows/skyrim/mo2_bootstrap.py b/modlab/workflows/skyrim/mo2_bootstrap.py
+index 5e88ee3..bfb570a 100644
+--- a/modlab/workflows/skyrim/mo2_bootstrap.py
++++ b/modlab/workflows/skyrim/mo2_bootstrap.py
+@@ -13,6 +13,7 @@ from datetime import datetime, timezone
+ from pathlib import Path, PurePosixPath, PureWindowsPath
+ from typing import Callable
+ 
++from modlab.platform import windows_exact_fs
+ from modlab.adapters.mo2.archive import (
+     ArchiveListing,
+     CommandRunner,
+@@ -86,6 +87,7 @@ from modlab.workflows.skyrim.mo2_bootstrap_store import (
+     BootstrapReceiptMatch,
+     Mo2BootstrapStore,
+     Mo2BootstrapStoreError,
++    Mo2BootstrapStoreOwnershipError,
+     Mo2BootstrapStorePromotionError,
+     StoredBootstrapJournal,
+     StoredBootstrapReceipt,
+@@ -230,6 +232,11 @@ class _EntryIdentity:
+     changed_ns: int | None
+ 
+ 
++@dataclass
++class _ExactMoveProgress:
++    moved: bool = False
++
++
+ @dataclass(frozen=True)
+ class _RecoveryActionState:
+     journal_data: bytes
+@@ -313,6 +320,8 @@ def prepare_mo2_setup(
+         raise _refusal_with_failure(error, failure) from error
+     try:
+         stored = Mo2BootstrapStore(collected.layout.root).write_plan(collected.plan)
++    except Mo2BootstrapStoreOwnershipError:
++        raise
+     except (BootstrapFormatError, Mo2BootstrapStoreError, OSError) as error:
+         refusal = Mo2BootstrapRefusal(
+             "plan-invalid", f"bootstrap plan could not be retained safely: {error}"
+@@ -989,6 +998,11 @@ def recover_mo2_setup(
+             runner=runner,
+         )
+         raise _refusal_with_failure(error, failure) from error
++    except (
++        windows_exact_fs.ExactObjectOwnershipError,
++        Mo2BootstrapStoreOwnershipError,
++    ):
++        raise
+     except (
+         BootstrapFormatError,
+         Mo2ArchiveError,
+@@ -1291,33 +1305,49 @@ def _relocate_recovery_tree(
+ ) -> None:
+     source_ancestry = _capture_cleanup_ancestry(source.parent)
+     target_ancestry = _capture_cleanup_ancestry(target.parent)
+-    identity = _direct_directory_identity(source, label)
+-    snapshot = _snapshot_manager_tree(source)
+-    if expected_snapshot is not None and snapshot != expected_snapshot:
+-        raise Mo2ArchiveError(f"{label} changed before recovery relocation")
+-    if expected_inventory is not None and (
+-        expected_inventory[1] is None
+-        or snapshot.inventory.sha256 != expected_inventory[0]
+-        or snapshot.inventory.file_count != expected_inventory[1]
+-    ):
+-        raise Mo2ArchiveError(f"{label} inventory changed before recovery relocation")
+-    if source_validator is not None:
+-        source_validator(source)
+-    if _lstat_if_exists(target) is not None:
+-        raise Mo2ArchiveError(f"{label} recovery destination already exists")
+-    _require_tree_identity(source, identity, snapshot, label)
+-    _validate_captured_ancestry(source_ancestry)
+-    _validate_captured_ancestry(target_ancestry)
+-    if _lstat_if_exists(target) is not None:
+-        raise Mo2ArchiveError(
+-            f"{label} recovery destination appeared before relocation"
+-        )
+-    _replace_path(source, target)
+-    _validate_captured_ancestry(source_ancestry)
+-    _validate_captured_ancestry(target_ancestry)
+-    if _lstat_if_exists(source) is not None:
+-        raise Mo2ArchiveError(f"{label} source remained after relocation")
+-    _require_tree_identity(target, identity, snapshot, f"relocated {label}")
++    identity: _EntryIdentity | None = None
++    snapshot: _ManagerSnapshot | None = None
++
++    def validate_before() -> None:
++        nonlocal identity, snapshot
++        identity = _direct_directory_identity(source, label)
++        snapshot = _snapshot_manager_tree(source)
++        if expected_snapshot is not None and snapshot != expected_snapshot:
++            raise Mo2ArchiveError(f"{label} changed before recovery relocation")
++        if expected_inventory is not None and (
++            expected_inventory[1] is None
++            or snapshot.inventory.sha256 != expected_inventory[0]
++            or snapshot.inventory.file_count != expected_inventory[1]
++        ):
++            raise Mo2ArchiveError(
++                f"{label} inventory changed before recovery relocation"
++            )
++        if source_validator is not None:
++            source_validator(source)
++        if _lstat_if_exists(target) is not None:
++            raise Mo2ArchiveError(f"{label} recovery destination already exists")
++        _require_tree_identity(source, identity, snapshot, label)
++        _validate_captured_ancestry(source_ancestry)
++        _validate_captured_ancestry(target_ancestry)
++        if _lstat_if_exists(target) is not None:
++            raise Mo2ArchiveError(
++                f"{label} recovery destination appeared before relocation"
++            )
++
++    def validate_after() -> None:
++        assert identity is not None and snapshot is not None
++        _validate_captured_ancestry(source_ancestry)
++        _validate_captured_ancestry(target_ancestry)
++        if _lstat_if_exists(source) is not None:
++            raise Mo2ArchiveError(f"{label} source remained after relocation")
++        _require_tree_identity(target, identity, snapshot, f"relocated {label}")
++
++    _move_exact_directory(
++        source,
++        target,
++        validate_before=validate_before,
++        validate_after=validate_after,
++    )
+ 
+ 
+ def _planned_create_target_matches(root: Path, plan: BootstrapPlan) -> bool:
+@@ -2346,6 +2376,8 @@ def _apply_create_plan(
+     try:
+         _require_extraction_inputs_current(collected)
+         job = store.create_job(plan, listing=collected.listing)
++    except Mo2BootstrapStoreOwnershipError:
++        raise
+     except Mo2BootstrapStorePromotionError as error:
+         refusal = Mo2BootstrapRefusal(
+             "recovery-required",
+@@ -2493,29 +2525,55 @@ def _apply_create_plan(
+         if prior_present:
+             assert prior_snapshot is not None and prior_identity is not None
+             assert manager_ancestry is not None and prior_parent_ancestry is not None
+-            _validate_captured_ancestry(manager_ancestry)
+-            _validate_captured_ancestry(prior_parent_ancestry)
+-            if _lstat_if_exists(prior_root) is not None:
+-                raise Mo2BootstrapRefusal(
+-                    "target-changed", "bootstrap prior path appeared before preservation"
++
++            def validate_preservation_before() -> None:
++                _validate_captured_ancestry(manager_ancestry)
++                _validate_captured_ancestry(prior_parent_ancestry)
++                if _lstat_if_exists(prior_root) is not None:
++                    raise Mo2BootstrapRefusal(
++                        "target-changed",
++                        "bootstrap prior path appeared before preservation",
++                    )
++                _require_tree_identity(
++                    final_root,
++                    prior_identity,
++                    prior_snapshot,
++                    "empty target",
+                 )
+-            _require_tree_identity(final_root, prior_identity, prior_snapshot, "empty target")
+-            _validate_captured_ancestry(manager_ancestry)
+-            _validate_captured_ancestry(prior_parent_ancestry)
+-            if _lstat_if_exists(prior_root) is not None:
+-                raise Mo2BootstrapRefusal(
+-                    "target-changed",
+-                    "bootstrap prior path appeared immediately before preservation",
++                _validate_captured_ancestry(manager_ancestry)
++                _validate_captured_ancestry(prior_parent_ancestry)
++                if _lstat_if_exists(prior_root) is not None:
++                    raise Mo2BootstrapRefusal(
++                        "target-changed",
++                        "bootstrap prior path appeared immediately before preservation",
++                    )
++
++            def validate_preservation_after() -> None:
++                _validate_captured_ancestry(manager_ancestry)
++                _validate_captured_ancestry(prior_parent_ancestry)
++                if _lstat_if_exists(final_root) is not None:
++                    raise Mo2BootstrapRefusal(
++                        "target-changed",
++                        "final target remained after prior preservation",
++                    )
++                _require_tree_identity(
++                    prior_root,
++                    prior_identity,
++                    prior_snapshot,
++                    "preserved target",
+                 )
+-            _replace_path(final_root, prior_root)
+-            prior_moved = True
+-            _validate_captured_ancestry(manager_ancestry)
+-            _validate_captured_ancestry(prior_parent_ancestry)
+-            if _lstat_if_exists(final_root) is not None:
+-                raise Mo2BootstrapRefusal(
+-                    "target-changed", "final target remained after prior preservation"
++
++            preservation = _ExactMoveProgress()
++            try:
++                _move_exact_directory(
++                    final_root,
++                    prior_root,
++                    validate_before=validate_preservation_before,
++                    validate_after=validate_preservation_after,
++                    progress=preservation,
+                 )
+-            _require_tree_identity(prior_root, prior_identity, prior_snapshot, "preserved target")
++            finally:
++                prior_moved = prior_moved or preservation.moved
+         elif _lstat_if_exists(final_root) is not None:
+             raise Mo2BootstrapRefusal(
+                 "target-changed", "absent MO2 target appeared during activation"
+@@ -2523,33 +2581,57 @@ def _apply_create_plan(
+ 
+         assert stage_snapshot is not None and stage_identity is not None
+         assert manager_ancestry is not None
+-        _validate_captured_ancestry(manager_ancestry)
+-        if prior_moved:
+-            assert prior_parent_ancestry is not None
+-            _validate_captured_ancestry(prior_parent_ancestry)
+-            assert prior_snapshot is not None and prior_identity is not None
++        def validate_activation_before() -> None:
++            _validate_captured_ancestry(manager_ancestry)
++            if prior_moved:
++                assert prior_parent_ancestry is not None
++                _validate_captured_ancestry(prior_parent_ancestry)
++                assert prior_snapshot is not None and prior_identity is not None
++                _require_tree_identity(
++                    prior_root,
++                    prior_identity,
++                    prior_snapshot,
++                    "preserved target",
++                )
+             _require_tree_identity(
+-                prior_root,
+-                prior_identity,
+-                prior_snapshot,
+-                "preserved target",
++                stage_root,
++                stage_identity,
++                stage_snapshot,
++                "staged instance",
+             )
+-        _require_tree_identity(stage_root, stage_identity, stage_snapshot, "staged instance")
+-        _validate_captured_ancestry(manager_ancestry)
+-        if prior_moved:
+-            assert prior_parent_ancestry is not None
+-            _validate_captured_ancestry(prior_parent_ancestry)
+-        if _lstat_if_exists(final_root) is not None:
+-            raise Mo2BootstrapRefusal(
+-                "target-changed", "final target appeared immediately before activation"
++            _validate_captured_ancestry(manager_ancestry)
++            if prior_moved:
++                assert prior_parent_ancestry is not None
++                _validate_captured_ancestry(prior_parent_ancestry)
++            if _lstat_if_exists(final_root) is not None:
++                raise Mo2BootstrapRefusal(
++                    "target-changed",
++                    "final target appeared immediately before activation",
++                )
++
++        def validate_activation_after() -> None:
++            _validate_captured_ancestry(manager_ancestry)
++            if prior_moved:
++                assert prior_parent_ancestry is not None
++                _validate_captured_ancestry(prior_parent_ancestry)
++            _require_tree_identity(
++                final_root,
++                stage_identity,
++                stage_snapshot,
++                "activated instance",
+             )
+-        _replace_path(stage_root, final_root)
+-        activated = True
+-        _validate_captured_ancestry(manager_ancestry)
+-        if prior_moved:
+-            assert prior_parent_ancestry is not None
+-            _validate_captured_ancestry(prior_parent_ancestry)
+-        _require_tree_identity(final_root, stage_identity, stage_snapshot, "activated instance")
++
++        activation = _ExactMoveProgress()
++        try:
++            _move_exact_directory(
++                stage_root,
++                final_root,
++                validate_before=validate_activation_before,
++                validate_after=validate_activation_after,
++                progress=activation,
++            )
++        finally:
++            activated = activated or activation.moved
+         job = _transition_create_job(
+             store,
+             job,
+@@ -2578,6 +2660,8 @@ def _apply_create_plan(
+         )
+         try:
+             stored_receipt = store.write_receipt(receipt)
++        except Mo2BootstrapStoreOwnershipError:
++            raise
+         except Mo2BootstrapStorePromotionError as error:
+             if error.record_kind != "receipt" or error.record_id != receipt.receipt_id:
+                 raise Mo2BootstrapError(
+@@ -2635,6 +2719,11 @@ def _apply_create_plan(
+             promoted_paths=promoted_paths,
+         )
+         raise _refusal_with_failure(refusal, failure) from error
++    except (
++        windows_exact_fs.ExactObjectOwnershipError,
++        Mo2BootstrapStoreOwnershipError,
++    ):
++        raise
+     except (
+         BootstrapFormatError,
+         Mo2ArchiveError,
+@@ -3019,10 +3108,6 @@ def _restore_create_prior(
+     if activated or not prior_moved:
+         return None
+     try:
+-        if _lstat_if_exists(final_root) is not None:
+-            raise Mo2ArchiveError(
+-                "final target appeared before preserved prior could be restored"
+-            )
+         if (
+             not prior_present
+             or prior_identity is None
+@@ -3031,34 +3116,46 @@ def _restore_create_prior(
+             or prior_parent_ancestry is None
+         ):
+             raise Mo2ArchiveError("preserved prior evidence is incomplete")
+-        _validate_captured_ancestry(manager_ancestry)
+-        _validate_captured_ancestry(prior_parent_ancestry)
+-        if _lstat_if_exists(final_root) is not None:
+-            raise Mo2ArchiveError(
+-                "final target appeared before preserved prior could be restored"
++
++        def validate_before() -> None:
++            _validate_captured_ancestry(manager_ancestry)
++            _validate_captured_ancestry(prior_parent_ancestry)
++            if _lstat_if_exists(final_root) is not None:
++                raise Mo2ArchiveError(
++                    "final target appeared before preserved prior could be restored"
++                )
++            _require_tree_identity(
++                prior_root,
++                prior_identity,
++                prior_snapshot,
++                "preserved target",
+             )
+-        _require_tree_identity(
+-            prior_root,
+-            prior_identity,
+-            prior_snapshot,
+-            "preserved target",
+-        )
+-        _validate_captured_ancestry(manager_ancestry)
+-        _validate_captured_ancestry(prior_parent_ancestry)
+-        if _lstat_if_exists(final_root) is not None:
+-            raise Mo2ArchiveError(
+-                "final target appeared immediately before preserved prior restoration"
++            _validate_captured_ancestry(manager_ancestry)
++            _validate_captured_ancestry(prior_parent_ancestry)
++            if _lstat_if_exists(final_root) is not None:
++                raise Mo2ArchiveError(
++                    "final target appeared immediately before preserved prior restoration"
++                )
++
++        def validate_after() -> None:
++            _validate_captured_ancestry(manager_ancestry)
++            _validate_captured_ancestry(prior_parent_ancestry)
++            _require_tree_identity(
++                final_root,
++                prior_identity,
++                prior_snapshot,
++                "restored target",
+             )
+-        _replace_path(prior_root, final_root)
+-        _validate_captured_ancestry(manager_ancestry)
+-        _validate_captured_ancestry(prior_parent_ancestry)
+-        _require_tree_identity(
++
++        _move_exact_directory(
++            prior_root,
+             final_root,
+-            prior_identity,
+-            prior_snapshot,
+-            "restored target",
++            validate_before=validate_before,
++            validate_after=validate_after,
+         )
+         return None
++    except windows_exact_fs.ExactObjectOwnershipError:
++        raise
+     except Exception as error:
+         return str(error) or type(error).__name__
+ 
+@@ -3098,8 +3195,74 @@ def _mark_create_recovery(
+         return observed
+ 
+ 
+-def _replace_path(source: Path, target: Path) -> None:
+-    os.replace(source, target)
++def _move_exact_directory(
++    source: Path,
++    target: Path,
++    *,
++    validate_before: Callable[[], None],
++    validate_after: Callable[[], None],
++    progress: _ExactMoveProgress | None = None,
++) -> None:
++    """Move one retained directory through its retained destination parent."""
++    observed = progress if progress is not None else _ExactMoveProgress()
++    source_owner = None
++    parent_owner = None
++    primary_error: BaseException | None = None
++    try:
++        source_owner = windows_exact_fs.pin_direct_object(source, "directory")
++        parent_owner = windows_exact_fs.pin_direct_object(target.parent, "directory")
++        validate_before()
++        windows_exact_fs.rename_pinned_no_replace(
++            source_owner,
++            target,
++            parent_owner,
++        )
++        observed.moved = True
++        validate_after()
++    except BaseException as error:
++        primary_error = error
++        raise
++    finally:
++        if source_owner is not None and _same_path(source_owner.path, target):
++            observed.moved = True
++        cleanup_errors: list[BaseException] = []
++        owners: list[windows_exact_fs.RetainedObjectOwner] = []
++        for owner, role in (
++            (source_owner, windows_exact_fs.RetainedObjectRole.VERIFICATION),
++            (parent_owner, windows_exact_fs.RetainedObjectRole.DESTINATION_PARENT),
++        ):
++            if owner is None:
++                continue
++            try:
++                owner.close()
++            except BaseException as cleanup_error:
++                cleanup_errors.append(cleanup_error)
++            if owner.handle:
++                owners.append(windows_exact_fs.RetainedObjectOwner(role, owner))
++        prior_ownership = (
++            primary_error
++            if isinstance(primary_error, windows_exact_fs.ExactObjectOwnershipError)
++            else None
++        )
++        if owners or (
++            prior_ownership is not None and prior_ownership.retained_objects
++        ):
++            ownership = windows_exact_fs.union_retained_ownership(
++                "bootstrap exact-directory move retained live ownership: "
++                + "; ".join(str(error) for error in cleanup_errors),
++                prior=prior_ownership,
++                owners=tuple(owners),
++            )
++            if primary_error is not None:
++                raise ownership from primary_error
++            raise ownership from cleanup_errors[0]
++        if primary_error is not None and cleanup_errors:
++            primary_error.add_note(
++                "bootstrap exact-directory owner cleanup completed with errors: "
++                + "; ".join(str(error) for error in cleanup_errors)
++            )
++        elif cleanup_errors:
++            raise cleanup_errors[0]
+ 
+ 
+ def _remove_preserved_empty_prior(
+@@ -3150,6 +3313,8 @@ def _apply_adopt_plan(
+     try:
+         _require_extraction_inputs_current(collected)
+         job = store.create_job(plan, listing=collected.listing)
++    except Mo2BootstrapStoreOwnershipError:
++        raise
+     except Mo2BootstrapStorePromotionError as error:
+         refusal = Mo2BootstrapRefusal(
+             "recovery-required",
+@@ -3267,6 +3432,8 @@ def _apply_adopt_plan(
+         )
+         try:
+             stored_receipt = store.write_receipt(receipt)
++        except Mo2BootstrapStoreOwnershipError:
++            raise
+         except Mo2BootstrapStorePromotionError as error:
+             if error.record_kind != "receipt" or error.record_id != receipt.receipt_id:
+                 raise Mo2BootstrapError(
+@@ -3301,6 +3468,11 @@ def _apply_adopt_plan(
+             promoted_paths=promoted_paths,
+         )
+         raise _refusal_with_failure(error, failure) from error
++    except (
++        windows_exact_fs.ExactObjectOwnershipError,
++        Mo2BootstrapStoreOwnershipError,
++    ):
++        raise
+     except (BootstrapFormatError, Mo2ArchiveError, Mo2BootstrapStoreError, OSError) as error:
+         job = _mark_adopt_recovery(store, job, error, clock)
+         refusal = Mo2BootstrapRefusal(
+diff --git a/modlab/workflows/skyrim/mo2_bootstrap_store.py b/modlab/workflows/skyrim/mo2_bootstrap_store.py
+index 73c260b..92c213d 100644
+--- a/modlab/workflows/skyrim/mo2_bootstrap_store.py
++++ b/modlab/workflows/skyrim/mo2_bootstrap_store.py
+@@ -14,6 +14,7 @@ from dataclasses import dataclass, fields
+ from datetime import datetime, timezone
+ from pathlib import Path, PureWindowsPath
+ 
++from modlab.platform import windows_exact_fs
+ from modlab.adapters.mo2.bootstrap_model import (
+     BootstrapDisposition,
+     BootstrapJobState,
+@@ -65,6 +66,64 @@ class Mo2BootstrapStorePromotionError(Mo2BootstrapStoreError):
+         super().__init__(message)
+ 
+ 
++class Mo2BootstrapStoreOwnershipError(Mo2BootstrapStorePromotionError):
++    """An immutable store write retains exact owners with record context."""
++
++    def __init__(
++        self,
++        message: str,
++        ownership: windows_exact_fs.ExactObjectOwnershipError,
++        *,
++        record_kind: str,
++        record_id: str,
++        path: Path,
++        changed: bool,
++    ):
++        self.ownership = ownership
++        super().__init__(
++            message,
++            record_kind=record_kind,
++            record_id=record_id,
++            path=path,
++            changed=changed,
++        )
++
++    @property
++    def owners(self):
++        return self.ownership.owners
++
++    @property
++    def candidate(self):
++        return self.ownership.candidate
++
++    @property
++    def candidates(self):
++        return self.ownership.candidates
++
++    @property
++    def destination_parent(self):
++        return self.ownership.destination_parent
++
++    @property
++    def destination_parents(self):
++        return self.ownership.destination_parents
++
++    @property
++    def verification(self):
++        return self.ownership.verification
++
++    @property
++    def retained_objects(self):
++        return self.ownership.retained_objects
++
++    def resolve(self) -> None:
++        try:
++            self.ownership.resolve()
++        except windows_exact_fs.ExactObjectOwnershipError as unresolved:
++            self.ownership = unresolved
++            raise self from unresolved
++
++
+ class _AtomicCreatePromotionError(Mo2BootstrapStoreError):
+     """A no-replace promotion succeeded before its readback failed."""
+ 
+@@ -283,6 +342,15 @@ class Mo2BootstrapStore:
+         target = self.plan_path(plan.plan_id)
+         try:
+             changed = self._write_immutable(target, data, "plan")
++        except windows_exact_fs.ExactObjectOwnershipError as error:
++            raise Mo2BootstrapStoreOwnershipError(
++                f"bootstrap plan publication retains live exact ownership: {error}",
++                error,
++                record_kind="plan",
++                record_id=plan.plan_id,
++                path=target,
++                changed=bool(error.candidates),
++            ) from error
+         except _AtomicCreatePromotionError as error:
+             raise Mo2BootstrapStorePromotionError(
+                 f"bootstrap plan was promoted but could not be verified: {error}",
+@@ -291,7 +359,16 @@ class Mo2BootstrapStore:
+                 path=error.path,
+                 changed=True,
+             ) from error
+-        loaded = self.load_plan(plan.plan_id)
++        try:
++            loaded = self.load_plan(plan.plan_id)
++        except (Mo2BootstrapStoreError, Mo2BootstrapNotFoundError) as error:
++            raise Mo2BootstrapStorePromotionError(
++                f"bootstrap plan publication could not be reloaded: {error}",
++                record_kind="plan",
++                record_id=plan.plan_id,
++                path=target,
++                changed=changed,
++            ) from error
+         if loaded.plan != plan or loaded.data != data:
+             raise Mo2BootstrapStoreError("stored plan differs after write")
+         return StoredBootstrapPlan(
+@@ -435,6 +512,15 @@ class Mo2BootstrapStore:
+                     path=self.journal_path(job_id),
+                     changed=True,
+                 ) from error
++        except windows_exact_fs.ExactObjectOwnershipError as error:
++            raise Mo2BootstrapStoreOwnershipError(
++                f"bootstrap journal publication retains live exact ownership: {error}",
++                error,
++                record_kind="journal",
++                record_id=job_id,
++                path=self.journal_path(job_id),
++                changed=bool(error.candidates),
++            ) from error
+         except Mo2BootstrapStoreError:
+             if created_job_directory:
+                 self._remove_empty_directory(job_directory)
+@@ -535,6 +621,15 @@ class Mo2BootstrapStore:
+         target = self.receipt_path(receipt.receipt_id)
+         try:
+             changed = self._write_immutable(target, data, "receipt")
++        except windows_exact_fs.ExactObjectOwnershipError as error:
++            raise Mo2BootstrapStoreOwnershipError(
++                f"bootstrap receipt publication retains live exact ownership: {error}",
++                error,
++                record_kind="receipt",
++                record_id=receipt.receipt_id,
++                path=target,
++                changed=bool(error.candidates),
++            ) from error
+         except _AtomicCreatePromotionError as error:
+             raise Mo2BootstrapStorePromotionError(
+                 f"bootstrap receipt was promoted but could not be verified: {error}",
+@@ -647,12 +742,43 @@ class Mo2BootstrapStore:
+         return self._atomic_create(target, data, label)
+ 
+     def _atomic_create(self, target: Path, data: bytes, label: str) -> bool:
++        if os.name == "nt":
++            self._validate_target(target)
++
++            def validate(candidate: bytes) -> bytes:
++                if candidate != data:
++                    raise Mo2BootstrapStoreError(
++                        f"stored {label} differs during exact immutable publication"
++                    )
++                return candidate
++
++            try:
++                windows_exact_fs.publish_new_pinned(target, data, validate)
++                return True
++            except FileExistsError:
++                self._validate_existing_file(target, f"stored {label}")
++                existing = self._read_existing_bytes(target, f"stored {label}")
++                if existing == data:
++                    return False
++                raise Mo2BootstrapStoreError(
++                    f"stored {label} path contains different bytes: {target}"
++                )
++            except windows_exact_fs.ExactObjectOwnershipError:
++                raise
++            except Mo2BootstrapStoreError:
++                raise
++            except (windows_exact_fs.ExactObjectError, OSError) as error:
++                raise Mo2BootstrapStoreError(
++                    f"could not create immutable bootstrap {label} through retained "
++                    f"ownership at {target}: {error}"
++                ) from error
++
+         part = self._stage_document(target, data, label)
+         promoted = False
+         try:
+             self._validate_target(target)
+             try:
+-                _promote_no_replace(part, target)
++                _promote_no_replace_posix(part, target)
+             except FileExistsError:
+                 self._validate_existing_file(target, f"stored {label}")
+                 existing = self._read_existing_bytes(target, f"stored {label}")
+@@ -1172,25 +1298,8 @@ class Mo2BootstrapStore:
+             pass
+ 
+ 
+-def _promote_no_replace(source: Path, target: Path) -> None:
+-    """Atomically move a staged file only when the destination is absent."""
+-    if os.name == "nt":
+-        import ctypes
+-
+-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+-        kernel32.MoveFileExW.argtypes = (
+-            ctypes.c_wchar_p,
+-            ctypes.c_wchar_p,
+-            ctypes.c_uint32,
+-        )
+-        kernel32.MoveFileExW.restype = ctypes.c_int
+-        if kernel32.MoveFileExW(str(source), str(target), 0x00000008):
+-            return
+-        error = ctypes.get_last_error()
+-        if error in {80, 183}:
+-            raise FileExistsError(error, "destination already exists", str(target))
+-        raise OSError(error, "atomic no-replace promotion failed", str(target))
+-
++def _promote_no_replace_posix(source: Path, target: Path) -> None:
++    """Publish a POSIX staging file without replacing an existing destination."""
+     os.link(source, target, follow_symlinks=False)
+     try:
+         source.unlink()
+@@ -1209,6 +1318,7 @@ __all__ = [
+     "Mo2BootstrapNotFoundError",
+     "Mo2BootstrapStore",
+     "Mo2BootstrapStoreError",
++    "Mo2BootstrapStoreOwnershipError",
+     "Mo2BootstrapStorePromotionError",
+     "StoredBootstrapJournal",
+     "StoredBootstrapPlan",
+diff --git a/tests/test_mo2_bootstrap_create.py b/tests/test_mo2_bootstrap_create.py
+index d885a66..b2115e0 100644
+--- a/tests/test_mo2_bootstrap_create.py
++++ b/tests/test_mo2_bootstrap_create.py
+@@ -1,3 +1,4 @@
++import os
+ import tempfile
+ import unittest
+ from datetime import datetime, timezone
+@@ -5,6 +6,12 @@ from pathlib import Path, PurePosixPath
+ from subprocess import CompletedProcess
+ from unittest.mock import patch
+ 
++from modlab.platform import windows_exact_fs
++from modlab.platform.windows_exact_fs import (
++    ExactObjectOwnershipError,
++    PinnedIdentity,
++    RetainedObjectRole,
++)
+ from modlab.adapters.mo2.bootstrap_model import (
+     BootstrapDisposition,
+     BootstrapJobState,
+@@ -71,8 +78,20 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
+     def test_create_activates_exact_contained_ready_instance(self):
+         plan = self._plan_create()
+         before_external = self.fixture.external_state()
++        directory_moves: list[tuple[Path, Path]] = []
++        rename = windows_exact_fs.rename_pinned_no_replace
+ 
+-        result = self._apply(plan.plan_id)
++        def observe_directory_move(source, target, parent, **kwargs):
++            if source.identity.attributes & 0x10:
++                directory_moves.append((Path(source.path), Path(target)))
++            return rename(source, target, parent, **kwargs)
++
++        with patch.object(
++            windows_exact_fs,
++            "rename_pinned_no_replace",
++            side_effect=observe_directory_move,
++        ):
++            result = self._apply(plan.plan_id)
+ 
+         projection = project_mo2_state(
+             inspect_skyrim_mo2(
+@@ -117,6 +136,7 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
+         self.assertTrue(
+             all(not Path(path).is_absolute() for path in result.paths_written)
+         )
++        self.assertEqual(2, len(directory_moves))
+ 
+     def test_absent_target_is_created_without_inventing_a_prior(self):
+         for child in sorted(
+@@ -293,14 +313,18 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
+         plan = self._plan_create()
+         before_target = tree_state(self.fixture.layout.skyrim_mo2)
+         before_external = self.fixture.external_state()
+-        replace_path = mo2_bootstrap._replace_path
++        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+ 
+-        def fail_preserve(source, target):
+-            if Path(source) == self.fixture.layout.skyrim_mo2:
++        def fail_preserve(source, target, parent, **kwargs):
++            if Path(source.path) == self.fixture.layout.skyrim_mo2:
+                 raise OSError("fixture preserve failure")
+-            return replace_path(source, target)
++            return rename_pinned(source, target, parent, **kwargs)
+ 
+-        with patch.object(mo2_bootstrap, "_replace_path", side_effect=fail_preserve):
++        with patch.object(
++            windows_exact_fs,
++            "rename_pinned_no_replace",
++            side_effect=fail_preserve,
++        ):
+             with self.assertRaisesRegex(Mo2BootstrapRefusal, "recovery"):
+                 self._apply(plan.plan_id)
+ 
+@@ -308,6 +332,191 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
+         self.assertEqual(before_external, self.fixture.external_state())
+         self._assert_recovery_required()
+ 
++    @unittest.skipUnless(os.name == "nt", "retained bootstrap moves require Windows")
++    def test_preservation_moves_the_pinned_source_not_a_substituted_path(self):
++        plan = self._plan_create()
++        before_target = tree_state(self.fixture.layout.skyrim_mo2)
++        unknown = b"substituted owner"
++        rename_pinned = windows_exact_fs.rename_pinned_no_replace
++        injected = False
++
++        def substitute_source(source, target, parent, **kwargs):
++            nonlocal injected
++            if Path(source.path) == self.fixture.layout.skyrim_mo2:
++                injected = True
++                displaced = Path(source.path).with_name("displaced-empty-target")
++                Path(source.path).rename(displaced)
++                Path(source.path).mkdir()
++                (Path(source.path) / "unknown.txt").write_bytes(unknown)
++            return rename_pinned(source, target, parent, **kwargs)
++
++        with patch.object(
++            windows_exact_fs,
++            "rename_pinned_no_replace",
++            side_effect=substitute_source,
++        ):
++            with self.assertRaises(Mo2BootstrapRefusal):
++                self._apply(plan.plan_id)
++
++        job = self._job()
++        self.assertTrue(injected)
++        self.assertEqual(unknown, (self.fixture.layout.skyrim_mo2 / "unknown.txt").read_bytes())
++        self.assertEqual(before_target, tree_state(Path(job.prior_root)))
++        self.assertEqual(BootstrapJobState.RECOVERY_REQUIRED, job.state)
++
++    @unittest.skipUnless(os.name == "nt", "retained bootstrap moves require Windows")
++    def test_preservation_refuses_a_substituted_destination_parent(self):
++        plan = self._plan_create()
++        before_target = tree_state(self.fixture.layout.skyrim_mo2)
++        rename_pinned = windows_exact_fs.rename_pinned_no_replace
++        unknown = b"substituted parent owner"
++        displaced_parent: Path | None = None
++
++        def substitute_parent(source, target, parent, **kwargs):
++            nonlocal displaced_parent
++            if Path(source.path) == self.fixture.layout.skyrim_mo2:
++                displaced_parent = Path(parent.path).with_name("displaced-job-parent")
++                Path(parent.path).rename(displaced_parent)
++                Path(parent.path).mkdir()
++                (Path(parent.path) / "unknown.txt").write_bytes(unknown)
++            return rename_pinned(source, target, parent, **kwargs)
++
++        with patch.object(
++            windows_exact_fs,
++            "rename_pinned_no_replace",
++            side_effect=substitute_parent,
++        ):
++            with self.assertRaises(Mo2BootstrapRefusal):
++                self._apply(plan.plan_id)
++
++        self.assertIsNotNone(displaced_parent)
++        assert displaced_parent is not None
++        self.assertEqual(before_target, tree_state(self.fixture.layout.skyrim_mo2))
++        self.assertEqual(
++            unknown,
++            (self.fixture.layout.mo2_bootstrap_jobs / "fedcba9876543210fedcba9876543210" / "unknown.txt").read_bytes(),
++        )
++        self.assertTrue((displaced_parent / "journal.json").exists())
++
++    @unittest.skipUnless(os.name == "nt", "retained bootstrap moves require Windows")
++    def test_activation_case_collision_is_not_replaced(self):
++        plan = self._plan_create()
++        before_target = tree_state(self.fixture.layout.skyrim_mo2)
++        rename_pinned = windows_exact_fs.rename_pinned_no_replace
++        unknown = b"case-collision owner"
++        injected = False
++
++        def collide_before_activation(source, target, parent, **kwargs):
++            nonlocal injected
++            if source.identity.attributes & 0x10 and Path(source.path) == Path(
++                self._job().stage_root
++            ):
++                injected = True
++                collision = Path(target).with_name(Path(target).name.swapcase())
++                collision.mkdir()
++                (collision / "unknown.txt").write_bytes(unknown)
++            return rename_pinned(source, target, parent, **kwargs)
++
++        with patch.object(
++            windows_exact_fs,
++            "rename_pinned_no_replace",
++            side_effect=collide_before_activation,
++        ):
++            with self.assertRaises(Mo2BootstrapRefusal):
++                self._apply(plan.plan_id)
++
++        job = self._job()
++        self.assertTrue(injected)
++        self.assertEqual(unknown, (self.fixture.layout.skyrim_mo2 / "unknown.txt").read_bytes())
++        self.assertEqual(before_target, tree_state(Path(job.prior_root)))
++        self.assertEqual(BootstrapJobState.RECOVERY_REQUIRED, job.state)
++
++    @unittest.skipUnless(os.name == "nt", "retained bootstrap moves require Windows")
++    def test_post_move_identity_failure_records_activation_as_moved(self):
++        plan = self._plan_create()
++        before_target = tree_state(self.fixture.layout.skyrim_mo2)
++        rename_pinned = windows_exact_fs.rename_pinned_no_replace
++        injected = False
++
++        def mismatch_after_activation(source, target, parent, **_kwargs):
++            nonlocal injected
++            if not source.identity.attributes & 0x10 or Path(source.path) != Path(
++                self._job().stage_root
++            ):
++                return rename_pinned(source, target, parent)
++            injected = True
++
++            def identity(path):
++                observed = windows_exact_fs.identity_at_path(path)
++                if Path(path) == Path(target) and Path(source.path) == Path(target):
++                    return PinnedIdentity(
++                        observed.volume_serial,
++                        observed.file_id + 1,
++                        observed.attributes,
++                    )
++                return observed
++
++            return rename_pinned(
++                source,
++                target,
++                parent,
++                identity_at_path_fn=identity,
++            )
++
++        with patch.object(
++            windows_exact_fs,
++            "rename_pinned_no_replace",
++            side_effect=mismatch_after_activation,
++        ):
++            with self.assertRaises(Mo2BootstrapRefusal) as raised:
++                self._apply(plan.plan_id)
++
++        job = self._job()
++        self.assertTrue(injected)
++        self.assertEqual("recovery-required", raised.exception.code)
++        self.assertTrue(self.fixture.layout.skyrim_mo2_app.exists())
++        self.assertEqual(before_target, tree_state(Path(job.prior_root)))
++        self.assertEqual(BootstrapJobState.RECOVERY_REQUIRED, job.state)
++
++    @unittest.skipUnless(os.name == "nt", "retained bootstrap moves require Windows")
++    def test_move_close_failure_returns_both_live_owners_without_rollback(self):
++        plan = self._plan_create()
++        rename_pinned = windows_exact_fs.rename_pinned_no_replace
++        close = windows_exact_fs.PinnedObject.close
++        fail_ids: set[int] = set()
++
++        def arm_after_activation(source, target, parent, **kwargs):
++            result = rename_pinned(source, target, parent, **kwargs)
++            if Path(source.path) == self.fixture.layout.skyrim_mo2:
++                fail_ids.update((id(source), id(parent)))
++            return result
++
++        def fail_move_owner_close(owner):
++            if id(owner) in fail_ids and owner.handle:
++                raise OSError("fixture retained owner close failure")
++            return close(owner)
++
++        with patch.object(
++            windows_exact_fs,
++            "rename_pinned_no_replace",
++            side_effect=arm_after_activation,
++        ), patch.object(
++            windows_exact_fs.PinnedObject,
++            "close",
++            autospec=True,
++            side_effect=fail_move_owner_close,
++        ):
++            with self.assertRaises(ExactObjectOwnershipError) as raised:
++                self._apply(plan.plan_id)
++
++        self.assertEqual(
++            {RetainedObjectRole.VERIFICATION, RetainedObjectRole.DESTINATION_PARENT},
++            {owner.role for owner in raised.exception.owners},
++        )
++        self.assertEqual(2, len(raised.exception.retained_objects))
++        self.assertTrue(self.fixture.layout.skyrim_mo2_app.exists())
++        raised.exception.resolve()
++
+     def test_prior_appearing_during_preserve_rehash_is_not_overwritten(self):
+         from modlab.workflows.skyrim import mo2_bootstrap
+ 
+@@ -320,6 +529,8 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
+         before_external = self.fixture.external_state()
+         require_tree_identity = mo2_bootstrap._require_tree_identity
+         injected = False
++        directory_moves = 0
++        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+ 
+         def inject_prior(root, expected_root, expected_tree, label):
+             nonlocal injected
+@@ -334,21 +545,27 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
+                 prior_root.mkdir()
+             return result
+ 
++        def observe_directory_move(source, target, parent, **kwargs):
++            nonlocal directory_moves
++            if source.identity.attributes & 0x10:
++                directory_moves += 1
++            return rename_pinned(source, target, parent, **kwargs)
++
+         with patch.object(
+             mo2_bootstrap,
+             "_require_tree_identity",
+             side_effect=inject_prior,
+         ), patch.object(
+-            mo2_bootstrap,
+-            "_replace_path",
+-            wraps=mo2_bootstrap._replace_path,
+-        ) as replace_path:
++            windows_exact_fs,
++            "rename_pinned_no_replace",
++            side_effect=observe_directory_move,
++        ):
+             with self.assertRaises(Mo2BootstrapRefusal) as raised:
+                 self._apply(plan.plan_id)
+ 
+         self.assertTrue(injected)
+         self.assertEqual("target-changed", raised.exception.code)
+-        replace_path.assert_not_called()
++        self.assertEqual(0, directory_moves)
+         self.assertEqual(before_target, tree_state(self.fixture.layout.skyrim_mo2))
+         self.assertEqual((), tree_state(prior_root))
+         self.assertEqual(before_external, self.fixture.external_state())
+@@ -392,14 +609,20 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
+         plan = self._plan_create()
+         before_target = tree_state(self.fixture.layout.skyrim_mo2)
+         before_external = self.fixture.external_state()
+-        replace_path = mo2_bootstrap._replace_path
++        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+ 
+-        def fail_activation(source, target):
+-            if Path(source) == Path(self._job().stage_root):
++        def fail_activation(source, target, parent, **kwargs):
++            if source.identity.attributes & 0x10 and Path(source.path) == Path(
++                self._job().stage_root
++            ):
+                 raise OSError("fixture activation failure")
+-            return replace_path(source, target)
++            return rename_pinned(source, target, parent, **kwargs)
+ 
+-        with patch.object(mo2_bootstrap, "_replace_path", side_effect=fail_activation):
++        with patch.object(
++            windows_exact_fs,
++            "rename_pinned_no_replace",
++            side_effect=fail_activation,
++        ):
+             with self.assertRaisesRegex(Mo2BootstrapRefusal, "recovery"):
+                 self._apply(plan.plan_id)
+ 
+@@ -452,7 +675,7 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
+         before_target = tree_state(self.fixture.layout.skyrim_mo2)
+         before_external = self.fixture.external_state()
+         require_tree_identity = mo2_bootstrap._require_tree_identity
+-        replace_path = mo2_bootstrap._replace_path
++        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+         preserved_rehashes = 0
+ 
+         def inject_target(root, expected_root, expected_tree, label):
+@@ -469,18 +692,20 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
+                     self.fixture.layout.skyrim_mo2.mkdir()
+             return result
+ 
+-        def fail_activation(source, target):
+-            if Path(source) == Path(self._job().stage_root):
++        def fail_activation(source, target, parent, **kwargs):
++            if source.identity.attributes & 0x10 and Path(source.path) == Path(
++                self._job().stage_root
++            ):
+                 raise OSError("fixture activation failure")
+-            return replace_path(source, target)
++            return rename_pinned(source, target, parent, **kwargs)
+ 
+         with patch.object(
+             mo2_bootstrap,
+             "_require_tree_identity",
+             side_effect=inject_target,
+         ), patch.object(
+-            mo2_bootstrap,
+-            "_replace_path",
++            windows_exact_fs,
++            "rename_pinned_no_replace",
+             side_effect=fail_activation,
+         ):
+             with self.assertRaises(Mo2BootstrapRefusal) as raised:
+@@ -502,6 +727,8 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
+         before_external = self.fixture.external_state()
+         validate_ancestry = mo2_bootstrap._validate_captured_ancestry
+         rejected = False
++        directory_moves = 0
++        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+ 
+         def reject_manager_ancestry(ancestry):
+             nonlocal rejected
+@@ -513,20 +740,26 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
+                 raise Mo2ArchiveError("simulated redirected activation ancestor")
+             return validate_ancestry(ancestry)
+ 
++        def observe_directory_move(source, target, parent, **kwargs):
++            nonlocal directory_moves
++            if source.identity.attributes & 0x10:
++                directory_moves += 1
++            return rename_pinned(source, target, parent, **kwargs)
++
+         with patch.object(
+             mo2_bootstrap,
+             "_validate_captured_ancestry",
+             side_effect=reject_manager_ancestry,
+         ), patch.object(
+-            mo2_bootstrap,
+-            "_replace_path",
+-            wraps=mo2_bootstrap._replace_path,
+-        ) as replace_path:
++            windows_exact_fs,
++            "rename_pinned_no_replace",
++            side_effect=observe_directory_move,
++        ):
+             with self.assertRaisesRegex(Mo2BootstrapRefusal, "recovery"):
+                 self._apply(plan.plan_id)
+ 
+         self.assertTrue(rejected)
+-        replace_path.assert_not_called()
++        self.assertEqual(0, directory_moves)
+         self.assertEqual(before_target, tree_state(self.fixture.layout.skyrim_mo2))
+         self.assertEqual(before_external, self.fixture.external_state())
+         self._assert_recovery_required()
+diff --git a/tests/test_mo2_bootstrap_recovery.py b/tests/test_mo2_bootstrap_recovery.py
+index 3e65a61..74f45ff 100644
+--- a/tests/test_mo2_bootstrap_recovery.py
++++ b/tests/test_mo2_bootstrap_recovery.py
+@@ -5,6 +5,7 @@ from datetime import datetime, timezone
+ from pathlib import Path
+ from unittest.mock import patch
+ 
++from modlab.platform import windows_exact_fs
+ from modlab.adapters.mo2.bootstrap_model import (
+     BootstrapDisposition,
+     BootstrapJobState,
+@@ -103,16 +104,18 @@ class Mo2BootstrapRecoveryTests(unittest.TestCase):
+         self.assertEqual(BootstrapJobState.ACTIVATED, self._job().state)
+ 
+     def _interrupt_applying(self):
+-        replace_path = mo2_bootstrap._replace_path
++        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+ 
+-        def crash_activation(source, target):
+-            if Path(source) == Path(self._job().stage_root):
++        def crash_activation(source, target, parent, **kwargs):
++            if source.identity.attributes & 0x10 and Path(source.path) == Path(
++                self._job().stage_root
++            ):
+                 raise KeyboardInterrupt("fixture crash during activation")
+-            return replace_path(source, target)
++            return rename_pinned(source, target, parent, **kwargs)
+ 
+         with patch.object(
+-            mo2_bootstrap,
+-            "_replace_path",
++            windows_exact_fs,
++            "rename_pinned_no_replace",
+             side_effect=crash_activation,
+         ):
+             with self.assertRaises(KeyboardInterrupt):
+@@ -377,16 +380,16 @@ class Mo2BootstrapRecoveryTests(unittest.TestCase):
+     def test_restore_rename_failure_is_retryable_from_filesystem_evidence(self):
+         self._interrupt_applying()
+         job = self._job()
+-        replace_path = mo2_bootstrap._replace_path
++        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+ 
+-        def fail_restore(source, target):
+-            if Path(source) == Path(job.prior_root):
++        def fail_restore(source, target, parent, **kwargs):
++            if Path(source.path) == Path(job.prior_root):
+                 raise OSError("fixture restore rename failure")
+-            return replace_path(source, target)
++            return rename_pinned(source, target, parent, **kwargs)
+ 
+         with patch.object(
+-            mo2_bootstrap,
+-            "_replace_path",
++            windows_exact_fs,
++            "rename_pinned_no_replace",
+             side_effect=fail_restore,
+         ):
+             with self.assertRaisesRegex(Mo2BootstrapRefusal, "rename failure"):
+@@ -569,17 +572,20 @@ class Mo2BootstrapRecoveryTests(unittest.TestCase):
+         self.assertEqual(BootstrapJobState.RECOVERY_REQUIRED, self._job().state)
+ 
+     def test_crash_after_activation_rename_is_finalized_from_applying_evidence(self):
+-        replace_path = mo2_bootstrap._replace_path
+-
+-        def activate_then_crash(source, target):
+-            result = replace_path(source, target)
+-            if Path(source) == Path(self._job().stage_root):
++        rename_pinned = windows_exact_fs.rename_pinned_no_replace
++
++        def activate_then_crash(source, target, parent, **kwargs):
++            result = rename_pinned(source, target, parent, **kwargs)
++            if (
++                source.identity.attributes & 0x10
++                and Path(target) == self.fixture.layout.skyrim_mo2
++            ):
+                 raise KeyboardInterrupt("fixture crash after activation rename")
+             return result
+ 
+         with patch.object(
+-            mo2_bootstrap,
+-            "_replace_path",
++            windows_exact_fs,
++            "rename_pinned_no_replace",
+             side_effect=activate_then_crash,
+         ):
+             with self.assertRaises(KeyboardInterrupt):
+diff --git a/tests/test_mo2_bootstrap_store.py b/tests/test_mo2_bootstrap_store.py
+index 129d0e9..fccd01e 100644
+--- a/tests/test_mo2_bootstrap_store.py
++++ b/tests/test_mo2_bootstrap_store.py
+@@ -8,6 +8,8 @@ from datetime import datetime, timezone
+ from pathlib import Path
+ from unittest.mock import patch
+ 
++from modlab.platform import windows_exact_fs
++from modlab.platform.windows_exact_fs import RetainedObjectRole
+ from modlab.adapters.mo2.bootstrap_model import (
+     BootstrapDisposition,
+     BootstrapJobState,
+@@ -26,7 +28,6 @@ from modlab.workflows.skyrim.mo2_bootstrap_store import (
+     Mo2BootstrapStore,
+     Mo2BootstrapStoreError,
+     Mo2BootstrapStorePromotionError,
+-    _promote_no_replace,
+ )
+ from modlab.workspace import initialize_workspace
+ from tests.support.mo2_bootstrap import (
+@@ -168,12 +169,19 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
+         return stored_receipt, verified
+ 
+     def test_plan_is_content_addressed_idempotent_and_conflict_safe(self):
+-        stored = self.store.write_plan(self.plan)
++        with patch.object(
++            windows_exact_fs,
++            "publish_new_pinned",
++            wraps=windows_exact_fs.publish_new_pinned,
++        ) as publish:
++            stored = self.store.write_plan(self.plan)
+         repeated = self.store.write_plan(self.plan)
+ 
+         self.assertTrue(stored.changed)
+         self.assertFalse(repeated.changed)
+         self.assertEqual(plan_to_bytes(self.plan), stored.path.read_bytes())
++        if os.name == "nt":
++            self.assertEqual(1, publish.call_count)
+         stored.path.write_bytes(b"changed")
+         with self.assertRaisesRegex(Mo2BootstrapStoreError, "different bytes"):
+             self.store.write_plan(self.plan)
+@@ -472,15 +480,17 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
+ 
+     def test_pre_promotion_failure_leaves_no_target_or_part_file(self):
+         target = self.store.plan_path(self.plan.plan_id)
+-        with patch(
+-            "modlab.workflows.skyrim.mo2_bootstrap_store.os.fsync",
+-            side_effect=OSError("flush failed"),
++        with patch.object(
++            windows_exact_fs,
++            "write_pinned_file",
++            side_effect=OSError("write failed"),
+         ):
+-            with self.assertRaisesRegex(Mo2BootstrapStoreError, "flush failed"):
++            with self.assertRaisesRegex(Mo2BootstrapStoreError, "write failed"):
+                 self.store.write_plan(self.plan)
+ 
+         self.assertFalse(target.exists())
+         self.assertEqual([], list(self.layout.mo2_bootstrap_jobs.glob("*.part")))
++        self.assertEqual([], list(target.parent.glob(f".{target.name}.*.tmp")))
+ 
+     def test_initial_journal_validation_failure_preserves_promotion_evidence(self):
+         self.store.write_plan(self.plan)
+@@ -560,15 +570,16 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
+ 
+     def test_immutable_race_never_overwrites_bytes_that_appear_at_target(self):
+         target = self.store.plan_path(self.plan.plan_id)
+-        real_promote = _promote_no_replace
++        real_publish = windows_exact_fs.publish_new_pinned
+ 
+-        def competing_promotion(source, destination):
++        def competing_publication(destination, data, validator):
+             Path(destination).write_bytes(b"racing writer")
+-            return real_promote(source, destination)
++            return real_publish(destination, data, validator)
+ 
+-        with patch(
+-            "modlab.workflows.skyrim.mo2_bootstrap_store._promote_no_replace",
+-            side_effect=competing_promotion,
++        with patch.object(
++            windows_exact_fs,
++            "publish_new_pinned",
++            side_effect=competing_publication,
+         ):
+             with self.assertRaisesRegex(Mo2BootstrapStoreError, "different bytes"):
+                 self.store.write_plan(self.plan)
+@@ -652,8 +663,9 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
+ 
+     def test_failed_initial_journal_promotion_removes_only_its_new_empty_job(self):
+         self.store.write_plan(self.plan)
+-        with patch(
+-            "modlab.workflows.skyrim.mo2_bootstrap_store._promote_no_replace",
++        with patch.object(
++            windows_exact_fs,
++            "publish_new_pinned",
+             side_effect=OSError("promotion failed"),
+         ):
+             with self.assertRaisesRegex(Mo2BootstrapStoreError, "promotion failed"):
+@@ -663,19 +675,64 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
+         self.assertFalse(self.store.stage_root(JOB_ID).exists())
+         self.assertEqual([], list(self.layout.mo2_bootstrap_jobs.glob("*.part")))
+ 
+-    def test_cleanup_failure_does_not_damage_or_hide_promoted_document(self):
+-        real_unlink = Path.unlink
++    def test_completed_publication_later_reload_failure_keeps_document(self):
++        target = self.store.plan_path(self.plan.plan_id)
++        with patch.object(
++            self.store,
++            "load_plan",
++            side_effect=Mo2BootstrapStoreError("fixture later reload failure"),
++        ):
++            with self.assertRaises(Mo2BootstrapStorePromotionError) as raised:
++                self.store.write_plan(self.plan)
++
++        self.assertTrue(raised.exception.changed)
++        self.assertEqual(target, raised.exception.path)
++        self.assertEqual(plan_to_bytes(self.plan), target.read_bytes())
++        self.assertEqual([], list(target.parent.glob(f".{target.name}.*.tmp")))
++
++    @unittest.skipUnless(os.name == "nt", "exact publication requires Windows")
++    def test_immutable_owner_failure_keeps_record_identity_and_live_union(self):
++        target = self.store.plan_path(self.plan.plan_id)
++        rename = windows_exact_fs.rename_pinned_no_replace
++        close = windows_exact_fs.PinnedObject.close
++        fail_ids: set[int] = set()
+ 
+-        def fail_part_cleanup(path, *args, **kwargs):
+-            if Path(path).suffix == ".part":
+-                raise OSError("cleanup failed")
+-            return real_unlink(path, *args, **kwargs)
++        def arm_published_owners(source, destination, parent, **kwargs):
++            result = rename(source, destination, parent, **kwargs)
++            if Path(destination) == target:
++                fail_ids.update((id(source), id(parent)))
++            return result
+ 
+-        with patch.object(Path, "unlink", autospec=True, side_effect=fail_part_cleanup):
+-            stored = self.store.write_plan(self.plan)
++        def fail_armed_close(owner):
++            if id(owner) in fail_ids and owner.handle:
++                raise OSError("fixture publication owner close failure")
++            return close(owner)
+ 
+-        self.assertEqual(plan_to_bytes(self.plan), stored.path.read_bytes())
+-        self.assertEqual([], list(self.layout.mo2_bootstrap_jobs.glob("*.part")))
++        with patch.object(
++            windows_exact_fs,
++            "rename_pinned_no_replace",
++            side_effect=arm_published_owners,
++        ), patch.object(
++            windows_exact_fs.PinnedObject,
++            "close",
++            autospec=True,
++            side_effect=fail_armed_close,
++        ):
++            with self.assertRaises(Exception) as raised:
++                self.store.write_plan(self.plan)
++
++        error = raised.exception
++        self.assertIsInstance(error, Mo2BootstrapStoreError)
++        self.assertEqual("plan", error.record_kind)
++        self.assertEqual(self.plan.plan_id, error.record_id)
++        self.assertEqual(target, error.path)
++        self.assertTrue(error.changed)
++        self.assertEqual(
++            {RetainedObjectRole.CANDIDATE, RetainedObjectRole.DESTINATION_PARENT},
++            {owner.role for owner in error.owners},
++        )
++        error.resolve()
++        self.assertFalse(target.exists())
+ 
+     def test_redirected_plan_job_and_receipt_ancestors_are_rejected(self):
+         cases = (
+=== EXACT SINGLE TEST TRACE ===
+TRACE TEST_START test='tests.test_mo2_bootstrap_cli.Mo2BootstrapRenderingTests.test_real_create_result_satisfies_renderer_contract' cwd='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake' temp='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag' tmp='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag'
+test_real_create_result_satisfies_renderer_contract (tests.test_mo2_bootstrap_cli.Mo2BootstrapRenderingTests.test_real_create_result_satisfies_renderer_contract) ... TRACE PIN_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\plans' kind='directory' raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997653, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504316432928100, 'st_ctime_ns': 1788504316432928100}
+TRACE PIN_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 630, in run
+    self._callSetUp()
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 586, in _callSetUp
+    self.setUp()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 67, in setUp
+    self.preview = self.fixture.prepare()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\support\mo2_bootstrap.py", line 787, in prepare
+    return mo2_bootstrap.prepare_mo2_setup(**arguments)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 322, in prepare_mo2_setup
+    stored = Mo2BootstrapStore(collected.layout.root).write_plan(collected.plan)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 344, in write_plan
+    changed = self._write_immutable(target, data, "plan")
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 742, in _write_immutable
+    return self._atomic_create(target, data, label)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 756, in _atomic_create
+    windows_exact_fs.publish_new_pinned(target, data, validate)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 1102, in publish_new_pinned
+    parent = pin_direct_object(destination.parent, kind="directory")
+  File "<string>", line 92, in traced_pin
+
+TRACE PIN_OUTPUT requested_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\plans' kind='directory' retained_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\plans' identity=PinnedIdentity(volume_serial=4200197254, file_id=3096224743997653, attributes=16) handle=720 raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997653, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504316432928100, 'st_ctime_ns': 1788504316432928100}
+TRACE RENAME_INPUT source_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\plans\\.886235bdb98e34b5f358ecd748d4737e67af56a287648718cb0b5f90868fac47.json.19488.19196.c9c7cf3aa12d9283.tmp' source_identity=PinnedIdentity(volume_serial=4200197254, file_id=3096224743997682, attributes=32) source_handle=852 destination='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\plans\\886235bdb98e34b5f358ecd748d4737e67af56a287648718cb0b5f90868fac47.json' destination_parent_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\plans' destination_parent_identity=PinnedIdentity(volume_serial=4200197254, file_id=3096224743997653, attributes=16) destination_parent_handle=720 source_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997682, 'st_mode': 33206, 'st_file_attributes': 32, 'st_size': 55278, 'st_mtime_ns': 1788504316551668700, 'st_ctime_ns': 1788504316550668800} destination_raw={'error': "FileNotFoundError(2, 'The system cannot find the file specified')"} parent_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997653, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504316550668800, 'st_ctime_ns': 1788504316432928100}
+TRACE RENAME_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 630, in run
+    self._callSetUp()
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 586, in _callSetUp
+    self.setUp()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 67, in setUp
+    self.preview = self.fixture.prepare()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\support\mo2_bootstrap.py", line 787, in prepare
+    return mo2_bootstrap.prepare_mo2_setup(**arguments)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 322, in prepare_mo2_setup
+    stored = Mo2BootstrapStore(collected.layout.root).write_plan(collected.plan)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 344, in write_plan
+    changed = self._write_immutable(target, data, "plan")
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 742, in _write_immutable
+    return self._atomic_create(target, data, label)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 756, in _atomic_create
+    windows_exact_fs.publish_new_pinned(target, data, validate)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 1110, in publish_new_pinned
+    rename_pinned_no_replace(candidate, destination, parent)
+  File "<string>", line 124, in traced_rename
+
+TRACE RENAME_OUTPUT retained_source_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\plans\\886235bdb98e34b5f358ecd748d4737e67af56a287648718cb0b5f90868fac47.json' result=None destination_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997682, 'st_mode': 33206, 'st_file_attributes': 32, 'st_size': 55278, 'st_mtime_ns': 1788504316551668700, 'st_ctime_ns': 1788504316550668800} parent_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997653, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504316554685900, 'st_ctime_ns': 1788504316432928100}
+TRACE PIN_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' kind='directory' raw={'st_dev': 646928465317719174, 'st_ino': 3377699720708339, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504316864000200, 'st_ctime_ns': 1788504316864000200}
+TRACE PIN_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2378, in _apply_create_plan
+    job = store.create_job(plan, listing=collected.listing)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 487, in create_job
+    changed = self._atomic_create(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 756, in _atomic_create
+    windows_exact_fs.publish_new_pinned(target, data, validate)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 1102, in publish_new_pinned
+    parent = pin_direct_object(destination.parent, kind="directory")
+  File "<string>", line 92, in traced_pin
+
+TRACE PIN_OUTPUT requested_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' kind='directory' retained_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' identity=PinnedIdentity(volume_serial=4200197254, file_id=3377699720708339, attributes=16) handle=848 raw={'st_dev': 646928465317719174, 'st_ino': 3377699720708339, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504316864000200, 'st_ctime_ns': 1788504316864000200}
+TRACE RENAME_INPUT source_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\.journal.json.19488.19196.b6be993980379c66.tmp' source_identity=PinnedIdentity(volume_serial=4200197254, file_id=3377699720708340, attributes=32) source_handle=472 destination='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\journal.json' destination_parent_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' destination_parent_identity=PinnedIdentity(volume_serial=4200197254, file_id=3377699720708339, attributes=16) destination_parent_handle=848 source_raw={'st_dev': 646928465317719174, 'st_ino': 3377699720708340, 'st_mode': 33206, 'st_file_attributes': 32, 'st_size': 46215, 'st_mtime_ns': 1788504316869513500, 'st_ctime_ns': 1788504316868512500} destination_raw={'error': "FileNotFoundError(2, 'The system cannot find the file specified')"} parent_raw={'st_dev': 646928465317719174, 'st_ino': 3377699720708339, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504316868512500, 'st_ctime_ns': 1788504316864000200}
+TRACE RENAME_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2378, in _apply_create_plan
+    job = store.create_job(plan, listing=collected.listing)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 487, in create_job
+    changed = self._atomic_create(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 756, in _atomic_create
+    windows_exact_fs.publish_new_pinned(target, data, validate)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 1110, in publish_new_pinned
+    rename_pinned_no_replace(candidate, destination, parent)
+  File "<string>", line 124, in traced_rename
+
+TRACE RENAME_OUTPUT retained_source_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\journal.json' result=None destination_raw={'st_dev': 646928465317719174, 'st_ino': 3377699720708340, 'st_mode': 33206, 'st_file_attributes': 32, 'st_size': 46215, 'st_mtime_ns': 1788504316869513500, 'st_ctime_ns': 1788504316868512500} parent_raw={'st_dev': 646928465317719174, 'st_ino': 3377699720708339, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504316873068700, 'st_ctime_ns': 1788504316864000200}
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' label='staging root' raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504316996720600, 'st_ctime_ns': 1788504316996720600}
+TRACE DIRECT_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2446, in _apply_create_plan
+    stage_identity = _direct_directory_identity(stage_root, "staging root")
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' label='staging root' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3659174697418996, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54\\downloads' label='staged downloads directory' raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997696, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317013279800, 'st_ctime_ns': 1788504317013279800}
+TRACE DIRECT_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2456, in _apply_create_plan
+    _create_staged_empty_directories(stage_root)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2879, in _create_staged_empty_directories
+    _direct_directory_identity(target, f"staged {name} directory")
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54\\downloads' label='staged downloads directory' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3096224743997696, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54\\mods' label='staged mods directory' raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997697, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317013279800, 'st_ctime_ns': 1788504317013279800}
+TRACE DIRECT_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2456, in _apply_create_plan
+    _create_staged_empty_directories(stage_root)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2879, in _create_staged_empty_directories
+    _direct_directory_identity(target, f"staged {name} directory")
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54\\mods' label='staged mods directory' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3096224743997697, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54\\overwrite' label='staged overwrite directory' raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997698, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317014280200, 'st_ctime_ns': 1788504317014280200}
+TRACE DIRECT_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2456, in _apply_create_plan
+    _create_staged_empty_directories(stage_root)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2879, in _create_staged_empty_directories
+    _direct_directory_identity(target, f"staged {name} directory")
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54\\overwrite' label='staged overwrite directory' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3096224743997698, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54\\webcache' label='staged webcache directory' raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997699, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317014280200, 'st_ctime_ns': 1788504317014280200}
+TRACE DIRECT_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2456, in _apply_create_plan
+    _create_staged_empty_directories(stage_root)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2879, in _create_staged_empty_directories
+    _direct_directory_identity(target, f"staged {name} directory")
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54\\webcache' label='staged webcache directory' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3096224743997699, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE SNAPSHOT_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54'
+TRACE SNAPSHOT_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' inventory_sha256='afd30457749eaf0d959322dd6935e8df297cd6ab8df9d8d8852805abbc705224' file_count=24 entries_count=35 root_raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='empty MO2 target' raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE DIRECT_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2504, in _apply_create_plan
+    prior_identity = _direct_directory_identity(final_root, "empty MO2 target")
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='empty MO2 target' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3096224743997642, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE SNAPSHOT_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae'
+TRACE SNAPSHOT_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' inventory_sha256='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945' file_count=0 entries_count=5 root_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE PIN_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' kind='directory' raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE PIN_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2568, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3212, in _move_exact_directory
+    source_owner = windows_exact_fs.pin_direct_object(source, "directory")
+  File "<string>", line 92, in traced_pin
+
+TRACE PIN_OUTPUT requested_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' kind='directory' retained_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' identity=PinnedIdentity(volume_serial=4200197254, file_id=3096224743997642, attributes=16) handle=708 raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE PIN_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' kind='directory' raw={'st_dev': 646928465317719174, 'st_ino': 3377699720708339, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317209915900, 'st_ctime_ns': 1788504316864000200}
+TRACE PIN_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2568, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3213, in _move_exact_directory
+    parent_owner = windows_exact_fs.pin_direct_object(target.parent, "directory")
+  File "<string>", line 92, in traced_pin
+
+TRACE PIN_OUTPUT requested_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' kind='directory' retained_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' identity=PinnedIdentity(volume_serial=4200197254, file_id=3377699720708339, attributes=16) handle=876 raw={'st_dev': 646928465317719174, 'st_ino': 3377699720708339, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317209915900, 'st_ctime_ns': 1788504316864000200}
+TRACE REQUIRE_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='empty target' expected_root=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3096224743997642, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None) expected_inventory_sha256='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945' expected_file_count=0 expected_entries_count=5 raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE REQUIRE_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2568, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3214, in _move_exact_directory
+    validate_before()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2537, in validate_preservation_before
+    _require_tree_identity(
+  File "<string>", line 80, in traced_require
+
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='empty target' raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE DIRECT_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2568, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3214, in _move_exact_directory
+    validate_before()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2537, in validate_preservation_before
+    _require_tree_identity(
+  File "<string>", line 82, in traced_require
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2978, in _require_tree_identity
+    if _direct_directory_identity(root, label) != expected_root:
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='empty target' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3096224743997642, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE SNAPSHOT_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae'
+TRACE SNAPSHOT_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' inventory_sha256='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945' file_count=0 entries_count=5 root_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE REQUIRE_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='empty target' result=None raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE RENAME_INPUT source_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' source_identity=PinnedIdentity(volume_serial=4200197254, file_id=3096224743997642, attributes=16) source_handle=708 destination='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' destination_parent_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef' destination_parent_identity=PinnedIdentity(volume_serial=4200197254, file_id=3377699720708339, attributes=16) destination_parent_handle=876 source_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900} destination_raw={'error': "FileNotFoundError(2, 'The system cannot find the file specified')"} parent_raw={'st_dev': 646928465317719174, 'st_ino': 3377699720708339, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317209915900, 'st_ctime_ns': 1788504316864000200}
+TRACE RENAME_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2568, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3215, in _move_exact_directory
+    windows_exact_fs.rename_pinned_no_replace(
+  File "<string>", line 124, in traced_rename
+
+TRACE RENAME_OUTPUT retained_source_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' result=None destination_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900} parent_raw={'st_dev': 646928465317719174, 'st_ino': 3377699720708339, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317263141700, 'st_ctime_ns': 1788504316864000200}
+TRACE REQUIRE_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' expected_root=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3096224743997642, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None) expected_inventory_sha256='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945' expected_file_count=0 expected_entries_count=5 raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE REQUIRE_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2568, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3221, in _move_exact_directory
+    validate_after()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2559, in validate_preservation_after
+    _require_tree_identity(
+  File "<string>", line 80, in traced_require
+
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE DIRECT_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2568, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3221, in _move_exact_directory
+    validate_after()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2559, in validate_preservation_after
+    _require_tree_identity(
+  File "<string>", line 82, in traced_require
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2978, in _require_tree_identity
+    if _direct_directory_identity(root, label) != expected_root:
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3096224743997642, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE SNAPSHOT_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior'
+TRACE SNAPSHOT_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' inventory_sha256='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945' file_count=0 entries_count=5 root_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE REQUIRE_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' result=None raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE PIN_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' kind='directory' raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE PIN_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2626, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3212, in _move_exact_directory
+    source_owner = windows_exact_fs.pin_direct_object(source, "directory")
+  File "<string>", line 92, in traced_pin
+
+TRACE PIN_OUTPUT requested_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' kind='directory' retained_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' identity=PinnedIdentity(volume_serial=4200197254, file_id=3659174697418996, attributes=16) handle=876 raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE PIN_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2' kind='directory' raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997641, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317263141700, 'st_ctime_ns': 1788504316417976900}
+TRACE PIN_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2626, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3213, in _move_exact_directory
+    parent_owner = windows_exact_fs.pin_direct_object(target.parent, "directory")
+  File "<string>", line 92, in traced_pin
+
+TRACE PIN_OUTPUT requested_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2' kind='directory' retained_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2' identity=PinnedIdentity(volume_serial=4200197254, file_id=3096224743997641, attributes=16) handle=708 raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997641, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317263141700, 'st_ctime_ns': 1788504316417976900}
+TRACE REQUIRE_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' expected_root=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3096224743997642, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None) expected_inventory_sha256='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945' expected_file_count=0 expected_entries_count=5 raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE REQUIRE_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2626, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3214, in _move_exact_directory
+    validate_before()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2590, in validate_activation_before
+    _require_tree_identity(
+  File "<string>", line 80, in traced_require
+
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE DIRECT_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2626, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3214, in _move_exact_directory
+    validate_before()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2590, in validate_activation_before
+    _require_tree_identity(
+  File "<string>", line 82, in traced_require
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2978, in _require_tree_identity
+    if _direct_directory_identity(root, label) != expected_root:
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3096224743997642, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE SNAPSHOT_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior'
+TRACE SNAPSHOT_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' inventory_sha256='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945' file_count=0 entries_count=5 root_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE REQUIRE_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' result=None raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE REQUIRE_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' label='staged instance' expected_root=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3659174697418996, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None) expected_inventory_sha256='afd30457749eaf0d959322dd6935e8df297cd6ab8df9d8d8852805abbc705224' expected_file_count=24 expected_entries_count=35 raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE REQUIRE_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2626, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3214, in _move_exact_directory
+    validate_before()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2596, in validate_activation_before
+    _require_tree_identity(
+  File "<string>", line 80, in traced_require
+
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' label='staged instance' raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE DIRECT_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2626, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3214, in _move_exact_directory
+    validate_before()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2596, in validate_activation_before
+    _require_tree_identity(
+  File "<string>", line 82, in traced_require
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2978, in _require_tree_identity
+    if _direct_directory_identity(root, label) != expected_root:
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' label='staged instance' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3659174697418996, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE SNAPSHOT_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54'
+TRACE SNAPSHOT_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' inventory_sha256='afd30457749eaf0d959322dd6935e8df297cd6ab8df9d8d8852805abbc705224' file_count=24 entries_count=35 root_raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE REQUIRE_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' label='staged instance' result=None raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE RENAME_INPUT source_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\.saerukz4jvpg66ajdivtytk6n54' source_identity=PinnedIdentity(volume_serial=4200197254, file_id=3659174697418996, attributes=16) source_handle=876 destination='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' destination_parent_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2' destination_parent_identity=PinnedIdentity(volume_serial=4200197254, file_id=3096224743997641, attributes=16) destination_parent_handle=708 source_raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600} destination_raw={'error': "FileNotFoundError(2, 'The system cannot find the file specified')"} parent_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997641, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317263141700, 'st_ctime_ns': 1788504316417976900}
+TRACE RENAME_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2626, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3215, in _move_exact_directory
+    windows_exact_fs.rename_pinned_no_replace(
+  File "<string>", line 124, in traced_rename
+
+TRACE RENAME_OUTPUT retained_source_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' result=None destination_raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600} parent_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997641, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317297363400, 'st_ctime_ns': 1788504316417976900}
+TRACE REQUIRE_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' expected_root=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3659174697418996, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None) expected_inventory_sha256='afd30457749eaf0d959322dd6935e8df297cd6ab8df9d8d8852805abbc705224' expected_file_count=24 expected_entries_count=35 raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE REQUIRE_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2626, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3221, in _move_exact_directory
+    validate_after()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2617, in validate_activation_after
+    _require_tree_identity(
+  File "<string>", line 80, in traced_require
+
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE DIRECT_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2626, in _apply_create_plan
+    _move_exact_directory(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3221, in _move_exact_directory
+    validate_after()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2617, in validate_activation_after
+    _require_tree_identity(
+  File "<string>", line 82, in traced_require
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2978, in _require_tree_identity
+    if _direct_directory_identity(root, label) != expected_root:
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3659174697418996, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE SNAPSHOT_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae'
+TRACE SNAPSHOT_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' inventory_sha256='afd30457749eaf0d959322dd6935e8df297cd6ab8df9d8d8852805abbc705224' file_count=24 entries_count=35 root_raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE REQUIRE_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' result=None raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE REQUIRE_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' expected_root=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3659174697418996, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None) expected_inventory_sha256='afd30457749eaf0d959322dd6935e8df297cd6ab8df9d8d8852805abbc705224' expected_file_count=24 expected_entries_count=35 raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE REQUIRE_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2645, in _apply_create_plan
+    existing = _verify_created_instance(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2993, in _verify_created_instance
+    _require_tree_identity(
+  File "<string>", line 80, in traced_require
+
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE DIRECT_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2645, in _apply_create_plan
+    existing = _verify_created_instance(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2993, in _verify_created_instance
+    _require_tree_identity(
+  File "<string>", line 82, in traced_require
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2978, in _require_tree_identity
+    if _direct_directory_identity(root, label) != expected_root:
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3659174697418996, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE SNAPSHOT_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae'
+TRACE SNAPSHOT_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' inventory_sha256='afd30457749eaf0d959322dd6935e8df297cd6ab8df9d8d8852805abbc705224' file_count=24 entries_count=35 root_raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE REQUIRE_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' result=None raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE PIN_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\games\\skyrim-se-ae\\tool-installations\\mo2' kind='directory' raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997639, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504316416977100, 'st_ctime_ns': 1788504316416977100}
+TRACE PIN_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2662, in _apply_create_plan
+    stored_receipt = store.write_receipt(receipt)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 623, in write_receipt
+    changed = self._write_immutable(target, data, "receipt")
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 742, in _write_immutable
+    return self._atomic_create(target, data, label)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 756, in _atomic_create
+    windows_exact_fs.publish_new_pinned(target, data, validate)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 1102, in publish_new_pinned
+    parent = pin_direct_object(destination.parent, kind="directory")
+  File "<string>", line 92, in traced_pin
+
+TRACE PIN_OUTPUT requested_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\games\\skyrim-se-ae\\tool-installations\\mo2' kind='directory' retained_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\games\\skyrim-se-ae\\tool-installations\\mo2' identity=PinnedIdentity(volume_serial=4200197254, file_id=3096224743997639, attributes=16) handle=728 raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997639, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504316416977100, 'st_ctime_ns': 1788504316416977100}
+TRACE RENAME_INPUT source_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\games\\skyrim-se-ae\\tool-installations\\mo2\\.e09a4a7f6d2bb567926dab30964492d9c30eda7d5c36f36e8f7f29cddd8f39a4.json.19488.19196.ad41a7a8e13abe83.tmp' source_identity=PinnedIdentity(volume_serial=4200197254, file_id=4222124650840309, attributes=32) source_handle=688 destination='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\games\\skyrim-se-ae\\tool-installations\\mo2\\e09a4a7f6d2bb567926dab30964492d9c30eda7d5c36f36e8f7f29cddd8f39a4.json' destination_parent_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\games\\skyrim-se-ae\\tool-installations\\mo2' destination_parent_identity=PinnedIdentity(volume_serial=4200197254, file_id=3096224743997639, attributes=16) destination_parent_handle=728 source_raw={'st_dev': 646928465317719174, 'st_ino': 4222124650840309, 'st_mode': 33206, 'st_file_attributes': 32, 'st_size': 4876, 'st_mtime_ns': 1788504317433378600, 'st_ctime_ns': 1788504317433378600} destination_raw={'error': "FileNotFoundError(2, 'The system cannot find the file specified')"} parent_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997639, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317433378600, 'st_ctime_ns': 1788504316416977100}
+TRACE RENAME_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2662, in _apply_create_plan
+    stored_receipt = store.write_receipt(receipt)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 623, in write_receipt
+    changed = self._write_immutable(target, data, "receipt")
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 742, in _write_immutable
+    return self._atomic_create(target, data, label)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 756, in _atomic_create
+    windows_exact_fs.publish_new_pinned(target, data, validate)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 1110, in publish_new_pinned
+    rename_pinned_no_replace(candidate, destination, parent)
+  File "<string>", line 124, in traced_rename
+
+TRACE RENAME_OUTPUT retained_source_path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\games\\skyrim-se-ae\\tool-installations\\mo2\\e09a4a7f6d2bb567926dab30964492d9c30eda7d5c36f36e8f7f29cddd8f39a4.json' result=None destination_raw={'st_dev': 646928465317719174, 'st_ino': 4222124650840309, 'st_mode': 33206, 'st_file_attributes': 32, 'st_size': 4876, 'st_mtime_ns': 1788504317433378600, 'st_ctime_ns': 1788504317433378600} parent_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997639, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 0, 'st_mtime_ns': 1788504317435376700, 'st_ctime_ns': 1788504316416977100}
+TRACE REQUIRE_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' expected_root=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3659174697418996, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None) expected_inventory_sha256='afd30457749eaf0d959322dd6935e8df297cd6ab8df9d8d8852805abbc705224' expected_file_count=24 expected_entries_count=35 raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE REQUIRE_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2675, in _apply_create_plan
+    _require_tree_identity(
+  File "<string>", line 80, in traced_require
+
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE DIRECT_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2675, in _apply_create_plan
+    _require_tree_identity(
+  File "<string>", line 82, in traced_require
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2978, in _require_tree_identity
+    if _direct_directory_identity(root, label) != expected_root:
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3659174697418996, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE SNAPSHOT_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae'
+TRACE SNAPSHOT_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' inventory_sha256='afd30457749eaf0d959322dd6935e8df297cd6ab8df9d8d8852805abbc705224' file_count=24 entries_count=35 root_raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE REQUIRE_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\tools\\mo2\\skyrim-se-ae' label='activated instance' result=None raw={'st_dev': 646928465317719174, 'st_ino': 3659174697418996, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504317018280600, 'st_ctime_ns': 1788504316996720600}
+TRACE REQUIRE_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' expected_root=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3096224743997642, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None) expected_inventory_sha256='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945' expected_file_count=0 expected_entries_count=5 raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE REQUIRE_STACK
+  File "<string>", line 157, in <module>
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\runner.py", line 240, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2798, in _apply_create_plan
+    _remove_preserved_empty_prior(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3273, in _remove_preserved_empty_prior
+    _require_tree_identity(prior_root, expected_root, expected_tree, "preserved target")
+  File "<string>", line 80, in traced_require
+
+TRACE DIRECT_INPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE DIRECT_STACK
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\suite.py", line 122, in run
+    test(result)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 690, in __call__
+    return self.run(*args, **kwds)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 634, in run
+    self._callTestMethod(testMethod)
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\case.py", line 589, in _callTestMethod
+    if method() is not None:
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 270, in test_real_create_result_satisfies_renderer_contract
+    result = self._apply_live_fixture()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_cli.py", line 111, in _apply_live_fixture
+    return apply_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2798, in _apply_create_plan
+    _remove_preserved_empty_prior(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3273, in _remove_preserved_empty_prior
+    _require_tree_identity(prior_root, expected_root, expected_tree, "preserved target")
+  File "<string>", line 82, in traced_require
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2978, in _require_tree_identity
+    if _direct_directory_identity(root, label) != expected_root:
+  File "<string>", line 41, in traced_direct
+
+TRACE DIRECT_OUTPUT path='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' identity=_EntryIdentity(relative_path='.', kind='directory', device=646928465317719174, inode=3096224743997642, mode_type=16384, file_attributes=16, size=None, modified_ns=None, changed_ns=None)
+TRACE SNAPSHOT_INPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior'
+TRACE SNAPSHOT_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' inventory_sha256='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945' file_count=0 entries_count=5 root_raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+TRACE REQUIRE_OUTPUT root='C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\nt\\t7diag\\tmpla08fsc3\\ModLab\\workspace\\runtime\\jobs\\mo2-bootstrap\\0123456789abcdef0123456789abcdef\\prior' label='preserved target' result=None raw={'st_dev': 646928465317719174, 'st_ino': 3096224743997642, 'st_mode': 16895, 'st_file_attributes': 16, 'st_size': 4096, 'st_mtime_ns': 1788504316426502700, 'st_ctime_ns': 1788504316419481900}
+ok
+
+----------------------------------------------------------------------
+Ran 1 test in 1.245s
+
+OK
+TRACE TEST_RESULT testsRun=1 failures=0 errors=0 skipped=0 successful=True
+=== TEST EXIT 0 ===

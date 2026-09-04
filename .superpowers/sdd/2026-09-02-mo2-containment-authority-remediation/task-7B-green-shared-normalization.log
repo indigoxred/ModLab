@@ -1,0 +1,12 @@
+EXECUTION_MODE=require_escalated-unsandboxed
+COMMAND=C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest -v tests.test_windows_exact_fs.WindowsExactFsTests.test_directory_identity_attributes_ignore_transient_bits_while_files_remain_raw tests.test_mo2_containment_service.PreparationProjectionRegressionTests.test_transient_non_identity_directory_attribute_does_not_block_delegated_mutation_observation tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_transient_non_identity_directory_attribute_does_not_block_exact_activation
+test_directory_identity_attributes_ignore_transient_bits_while_files_remain_raw (tests.test_windows_exact_fs.WindowsExactFsTests.test_directory_identity_attributes_ignore_transient_bits_while_files_remain_raw) ... ok
+test_transient_non_identity_directory_attribute_does_not_block_delegated_mutation_observation (tests.test_mo2_containment_service.PreparationProjectionRegressionTests.test_transient_non_identity_directory_attribute_does_not_block_delegated_mutation_observation) ... ok
+test_transient_non_identity_directory_attribute_does_not_block_exact_activation (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_transient_non_identity_directory_attribute_does_not_block_exact_activation) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 1.007s
+
+OK
+GREEN_EXIT_CODE=0
+GREEN_DURATION_SECONDS=1.469

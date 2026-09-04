@@ -1,0 +1,9 @@
+2026-09-04T16:57:43.0318781+10:00
+f57aff1be3f843fabd03a73a05a9c3d0cab24085
+test_transient_non_identity_directory_attribute_does_not_block_exact_activation (tests.test_mo2_bootstrap_create.Mo2BootstrapCreateTests.test_transient_non_identity_directory_attribute_does_not_block_exact_activation) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 1.148s
+
+OK
+=== TEST EXIT 0 ===

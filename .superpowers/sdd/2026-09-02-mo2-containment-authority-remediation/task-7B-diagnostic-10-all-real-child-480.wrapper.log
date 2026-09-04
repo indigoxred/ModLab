@@ -1,0 +1,23 @@
+EXECUTION_MODE=require_escalated-unsandboxed
+SANDBOX_PERMISSIONS=require_escalated
+CHILD_TIMEOUT_SECONDS=480
+HARNESS=C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\.superpowers\sdd\2026-09-02-mo2-containment-authority-remediation\task-7B-diagnostic-10-child-harness.py
+HARNESS_SHA256=65ffb8a09eaf8e6ae3e4736d56de4b4111d34fa37765f288d1dca392ad212052
+COMMAND=C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\.superpowers\sdd\2026-09-02-mo2-containment-authority-remediation\task-7B-diagnostic-10-child-harness.py C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\.superpowers\sdd\2026-09-02-mo2-containment-authority-remediation\task-7B-diagnostic-10-all-real-child-480 C:\Users\red\Desktop\Modlab\workspace\inbox\Mod.Organizer-2.5.2.7z C:\Users\red\Desktop\Steam
+TEMP=C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt
+TMP=C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt
+MODLAB_VARIABLES=MODLAB_PREPARATION_ARCHIVE,MODLAB_PREPARATION_STEAM
+SOURCE_HASH_BEFORE cec0fa0bb0672441fef03613c61b103702ac8f4bd8e61de298c046580aaf0feb modlab/platform/windows_exact_fs.py
+SOURCE_HASH_BEFORE 935954bbc8c541cdfe1b383f8831ab243a742fc834943e488b88d5d1e8081577 modlab/validation/mo2_containment_service.py
+SOURCE_HASH_BEFORE 9b04ae4883ee3455d6eaae1d43b76cc6c395ffdc09255d1bf75a1e61b57fd89f modlab/workflows/skyrim/mo2_bootstrap.py
+SOURCE_HASH_BEFORE ebb888bc4ae08680230dbb3ef0769c64bd00ab020338d202ce61266d51beb627 modlab/workflows/skyrim/mo2_bootstrap_store.py
+SOURCE_HASH_BEFORE 97bb933703edada3c08f2e3deee233302f26ac611b89dd3c3ed5f0517e4a4005 tests/test_mo2_bootstrap_create.py
+SOURCE_HASH_BEFORE 3c838e7d0691ce64f3149e23de6e14ebd7bccf4df25a9893acd62112a4f43012 tests/test_mo2_bootstrap_recovery.py
+SOURCE_HASH_BEFORE 4f75be7debea6e2cd58d22e5cdf1df584b07f7852b67d6ae186df59b07d4cb62 tests/test_mo2_bootstrap_store.py
+SOURCE_HASH_BEFORE fce0928d1ca0b4c64f3c60919c95624ef9bcc69571da715bcf62755fab56c979 tests/test_mo2_containment_service.py
+SOURCE_HASH_BEFORE b8d40a75973f05b2af0695e337ce0fb05e78d7b5690211094be50edf8cd0b8a8 tests/test_windows_exact_fs.py
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\.superpowers\sdd\2026-09-02-mo2-containment-authority-remediation\task-7B-diagnostic-10-child-harness.py", line 14, in <module>
+    from modlab.validation.mo2_containment_store import ContainmentStore
+ModuleNotFoundError: No module named 'modlab'
+HARNESS_EXIT_CODE=1

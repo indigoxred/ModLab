@@ -1,0 +1,13 @@
+DIAGNOSTIC_DISPOSITION=harness-failed-after-child-launch
+HARNESS_ERROR=OperationStopped: Get-OwnedTree generic-list return failed with Argument types do not match
+WORKSPACE=C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\d2bce89
+WORKSPACE_PRESERVED=True
+CHILD_PID=22740
+CHILD_RUNNING_BEFORE_TERMINATION=True
+CHILD_IDENTITY_BEFORE pid=22740 parent=6824 created=09/04/2026 17:57:03 name=python.exe image=C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe command="C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -c "from tests.test_mo2_preparation_recovery import _native_child_failure; import sys; _native_child_failure(*sys.argv[1:])" C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\d2bce89 archive-sha256:e6376efd87fd5ddd95aee959405e8f067afa526ea6c2c0c5aa03c5108bf4a815 C:\Users\red\Desktop\Steam C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\d2bce89\runtime\validation\mo2-containment
+DESCENDANT_IDENTITY_BEFORE pid=6624 parent=22740 created=09/04/2026 17:57:03 name=conhost.exe image=C:\WINDOWS\system32\conhost.exe command=\??\C:\WINDOWS\system32\conhost.exe 0x4
+CHILD_ABSENT_AFTER=True
+DESCENDANTS_REMAINING=
+DESCENDANTS_ABSENT_AFTER=True
+MASTER_LOG_SHA256=f195d4f13d615cf79cd39d8b546663591ed06e9885f454e0454cf917e2c9cf08
+TERMINATION_UTC=2026-09-04T07:57:45.7273259Z
