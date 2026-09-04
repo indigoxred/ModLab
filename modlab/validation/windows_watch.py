@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -240,6 +240,7 @@ class _LocalWatchSession:
     process: subprocess.Popen[bytes]
     lock: threading.Lock
     poison_reasons: list[str]
+    finalized_outcome: WatchOutcome | None = None
 
 
 _LOCAL_SESSIONS: dict[Path, _LocalWatchSession] = {}
@@ -2242,7 +2243,7 @@ def watch_receipt_from_files(
     events_path: Path,
     terminal_path: Path,
 ) -> WatchReceipt:
-    """Reconstruct a receipt exclusively from the immutable outcome snapshot."""
+    """Reload raw evidence; a stored outcome cannot supply its own exit proof."""
     try:
         if not isinstance(request, WatchRequest):
             return _incomplete_without_outcome(
@@ -2292,7 +2293,16 @@ def watch_receipt_from_files(
                 worker_pid if type(worker_pid) is int else 0,
                 "watch outcome binding mismatch",
             )
-        return _receipt_from_outcome(outcome)
+        observed_request = _load_request_path(request.evidence_root / _REQUEST_NAME)
+        if observed_request != request:
+            raise WatchProtocolError("watch request binding mismatch")
+        claim = _load_controller_claim(request)
+        launch = _load_worker_launch(request)
+        return _receipt_from_outcome(
+            _load_existing_outcome_after_worker_quiescence(
+                request, claim, launch, candidate=outcome,
+            )
+        )
     except (WatchProtocolOwnershipError, ExactObjectOwnershipError):
         raise
     except FileNotFoundError:
@@ -2545,27 +2555,62 @@ def _validate_outcome_raw_evidence(
     claim: ControllerClaim,
     launch: WorkerLaunch,
     captured: _CapturedWatchEvidence,
+    *,
+    observed_exit_code: int | None = None,
+    current_reasons: tuple[str, ...] = (),
 ) -> WatchOutcome:
-    """Bind a published summary to the exact retained worker evidence."""
+    """Check raw facts independently; only observed process state can prove success.
+
+    Incomplete outcomes retain historical failure details, never success authority.
+    A reaped process has no observable exit code: the summary cannot replace it.
+    """
     validated = _validate_outcome_binding(outcome, request, claim, launch)
+    reasons = list((*current_reasons, *captured.completion_reasons))
+    loss_path = request.evidence_root / _CONTROLLER_LOSS_NAME
+    try:
+        loss_bytes = _read_exact_regular_file(loss_path, "controller loss")
+    except FileNotFoundError:
+        pass
+    except _HandleOwnershipError as error:
+        raise _controller_owner(error, loss_path)
+    else:
+        loss = controller_loss_from_bytes(loss_bytes, request, claim, launch)
+        if loss_bytes != controller_loss_to_bytes(loss, request, claim, launch):
+            raise WatchProtocolError("controller loss canonical bytes mismatch")
+        reasons.append("controller-session-lost")
+    if observed_exit_code is None:
+        reasons.append("worker-exit-unproven")
+    elif observed_exit_code != 0:
+        reasons.append("worker-exit-nonzero")
     derived = _watch_outcome(
         request,
         claim,
         launch,
-        completion=validated.evidence_completion,
-        worker_exit_code=validated.worker_exit_code,
-        reasons=validated.reason_codes,
+        completion=(WatchEvidenceCompletion.INCOMPLETE if reasons
+                    else WatchEvidenceCompletion.COMPLETED),
+        worker_exit_code=observed_exit_code,
+        reasons=tuple(reasons),
         captured=captured,
     )
-    missing_reasons = tuple(
-        reason
-        for reason in captured.completion_reasons
-        if reason not in validated.reason_codes
+    # Compare every raw field without using the candidate's verdict to derive one.
+    raw_projection = replace(
+        validated,
+        evidence_completion=derived.evidence_completion,
+        worker_exit_code=derived.worker_exit_code,
+        reason_codes=derived.reason_codes,
     )
-    if derived != validated or missing_reasons:
+    if raw_projection != derived:
         raise WatchProtocolError(
             "published watch outcome differs from exact raw worker evidence"
         )
+    if validated.evidence_completion is WatchEvidenceCompletion.COMPLETED:
+        if validated != derived:
+            raise WatchProtocolError(
+                "published watch outcome cannot prove Completed: "
+                + ("; ".join(derived.reason_codes) or "observed verdict differs")
+            )
+    elif any(reason not in validated.reason_codes for reason in captured.completion_reasons):
+        raise WatchProtocolError("published watch outcome omits raw failure evidence")
     return validated
 
 
@@ -2629,9 +2674,10 @@ def _load_published_outcome(
             if error_code != _ERROR_SHARING_VIOLATION or time.monotonic() >= deadline:
                 raise
             time.sleep(0.02)
-    return _validate_outcome_binding(
-        watch_outcome_from_bytes(data), request, claim, launch
-    )
+    outcome = watch_outcome_from_bytes(data)
+    if data != watch_outcome_to_bytes(outcome):
+        raise WatchProtocolError("watch outcome canonical bytes mismatch")
+    return _validate_outcome_binding(outcome, request, claim, launch)
 
 
 def _publish_or_load_outcome(
@@ -2721,6 +2767,7 @@ def _stop_local_session(
                     request,
                     claim,
                     launch,
+                    locally_observed=session.finalized_outcome,
                 )
                 return _receipt_from_outcome(existing)
             except WatchProtocolOwnershipError as error:
@@ -2755,14 +2802,24 @@ def _stop_local_session(
         if forced_reason is not None and forced_reason not in reasons:
             reasons.append(forced_reason)
         try:
+            handle = _popen_process_handle(session.process)
+            _verify_retained_process_handle(handle, session.worker_pid, session.worker_creation_time)
+            before_stop = _kernel32.WaitForSingleObject(handle, 0)
+            if before_stop != _WAIT_TIMEOUT:
+                reasons.append("worker-exited-before-stop" if before_stop == _WAIT_OBJECT_0
+                               else "worker-pre-stop-observation-failed")
+        except (OSError, WatchProtocolError):
+            reasons.append("worker-pre-stop-observation-failed")
+        try:
             _write_new(request.stop_token_path, b"stop\n")
         except FileExistsError:
-            pass
+            reasons.append("stop-token-already-exists")
         except WatchProtocolOwnershipError as error:
             _resolve_watch_protocol_ownership(error)
             reasons.append("stop-token-publication-failed")
         except (OSError, WatchProtocolError):
             reasons.append("stop-token-publication-failed")
+        session.poison_reasons[:] = list(dict.fromkeys(reasons))
         process_handle = 0
         worker_signalled = False
         worker_exit_code: int | None = None
@@ -2841,9 +2898,9 @@ def _stop_local_session(
         )
         publication_error: BaseException | None = None
         try:
-            return _receipt_from_outcome(
-                _publish_or_load_outcome(outcome, request, claim, launch)
-            )
+            published = _publish_or_load_outcome(outcome, request, claim, launch)
+            session.finalized_outcome = outcome
+            return _receipt_from_outcome(published)
         except WatchProtocolOwnershipError as error:
             _resolve_watch_protocol_ownership(error)
             publication_error = error
@@ -2860,9 +2917,9 @@ def _stop_local_session(
                 captured=captured,
             )
             try:
-                return _receipt_from_outcome(
-                    _publish_or_load_outcome(fallback, request, claim, launch)
-                )
+                published = _publish_or_load_outcome(fallback, request, claim, launch)
+                session.finalized_outcome = fallback
+                return _receipt_from_outcome(published)
             except WatchProtocolOwnershipError as fallback_error:
                 _resolve_watch_protocol_ownership(fallback_error)
                 return _incomplete_without_outcome(
@@ -2923,7 +2980,29 @@ def _load_existing_outcome_after_worker_quiescence(
     request: WatchRequest,
     claim: ControllerClaim,
     launch: WorkerLaunch,
+    *,
+    candidate: WatchOutcome | None = None,
+    locally_observed: WatchOutcome | None = None,
 ) -> WatchOutcome:
+    # Only an already-held original session may retain its own exit observation.
+    # Detached readers must observe the process themselves; disk cannot supply it.
+    current_reasons: tuple[str, ...] = ()
+    controller_status, controller_handle, _ = _exact_process_status(
+        claim.controller_pid, claim.controller_creation_time,
+    )
+    if controller_handle:
+        close_error = _close_controller_handle(
+            controller_handle, f"existing-outcome controller {claim.controller_pid}",
+            request.evidence_root,
+        )
+        if close_error is not None:
+            raise WatchProtocolError(close_error)
+    if controller_status != "live":
+        current_reasons = ("controller-session-lost" if controller_status == "dead"
+                           else "controller-identity-uncertain",)
+    if locally_observed is not None:
+        _validate_outcome_binding(locally_observed, request, claim, launch)
+        current_reasons += locally_observed.reason_codes
     status, handle, detail = _exact_process_status(
         launch.worker_pid,
         launch.worker_creation_time,
@@ -2940,7 +3019,7 @@ def _load_existing_outcome_after_worker_quiescence(
         raise WatchProtocolError(
             f"existing watch outcome worker is not exactly quiescent: {detail or status}"
         )
-    observed_exit: int | None = None
+    observed_exit = None if locally_observed is None else locally_observed.worker_exit_code
     pending_error: BaseException | None = None
     try:
         if handle:
@@ -2955,13 +3034,17 @@ def _load_existing_outcome_after_worker_quiescence(
                     "existing watch outcome worker is still active"
                 )
         captured = _capture_worker_evidence(request, launch)
-        outcome = _load_published_outcome(request, claim, launch)
+        outcome = candidate if candidate is not None else _load_published_outcome(request, claim, launch)
+        if locally_observed is not None and outcome != locally_observed:
+            raise WatchProtocolError("published outcome differs from original controller observation")
         _validate_outcome_raw_evidence(
             outcome,
             request,
             claim,
             launch,
             captured,
+            observed_exit_code=observed_exit,
+            current_reasons=current_reasons,
         )
         if (
             observed_exit is not None
@@ -2972,6 +3055,9 @@ def _load_existing_outcome_after_worker_quiescence(
                 "published watch outcome worker exit code differs"
             )
         return outcome
+    except _HandleOwnershipError as error:
+        pending_error = _controller_owner(error, request.evidence_root)
+        raise pending_error from error
     except BaseException as error:
         pending_error = error
         raise
@@ -3135,6 +3221,8 @@ def _stop_non_owner(
             claim,
             launch,
             captured,
+            observed_exit_code=worker_exit_code,
+            current_reasons=tuple(reasons),
         )
         if (
             worker_exit_code is not None
@@ -3167,12 +3255,12 @@ def _stop_non_owner(
                 claim,
                 launch,
                 captured,
+                observed_exit_code=worker_exit_code,
+                current_reasons=tuple(reasons),
             )
     receipt = _receipt_from_outcome(outcome)
-    current_cleanup_blockers = (
-        ()
-        if outcome.evidence_completion is WatchEvidenceCompletion.COMPLETED
-        else tuple(reason for reason in reasons if reason not in outcome.reason_codes)
+    current_cleanup_blockers = tuple(
+        reason for reason in reasons if reason not in outcome.reason_codes
     )
     if current_cleanup_blockers:
         return _force_incomplete(

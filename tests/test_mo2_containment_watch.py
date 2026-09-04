@@ -776,7 +776,12 @@ class MutationWatchTests(unittest.TestCase):
                     self.assertEqual(set(), live_read_handles, "receipt discarded live read handles")
             self.assertEqual(original_bytes, outcome_path.read_bytes())
             self.assertEqual(original_identity, windows_exact_fs.identity_at_path(outcome_path))
-            self.assertEqual(completed, stop_watch(request_path))
+            reloaded = stop_watch(request_path)
+            if route == "local":
+                self.assertEqual(completed, reloaded)
+            else:
+                self.assertFalse(reloaded.complete)
+                self.assertIn("worker-exit-unproven", reloaded.error)
             self.assertEqual(original_bytes, outcome_path.read_bytes())
         finally:
             with windows_watch._LOCAL_SESSIONS_LOCK:
@@ -972,11 +977,16 @@ class MutationWatchTests(unittest.TestCase):
                             if persistent:
                                 self._assert_controller_ownership(report, state)
                             else:
-                                self.assertEqual(expected, report())
+                                self.assertFalse(report().complete)
                                 self.assertEqual(set(), state["live"])
                     self.assertEqual(original, outcome_path.read_bytes())
                     self.assertEqual(identity, windows_exact_fs.identity_at_path(outcome_path))
-                    self.assertEqual(expected, report())
+                    reloaded = report()
+                    self.assertFalse(reloaded.complete)
+                    if complete:
+                        self.assertIn("worker-exit-unproven", reloaded.error)
+                    else:
+                        self.assertEqual(expected, reloaded)
 
     def test_non_owner_preserves_publication_owner_when_worker_close_is_interrupted(self):
         fixture = self._external_controller_fixture("pending-publication-query-owner")
@@ -1323,7 +1333,7 @@ class MutationWatchTests(unittest.TestCase):
 
         receipt = stop_watch(request_path)
 
-        self.assertTrue(receipt.complete, receipt.error)
+        self.assertFalse(receipt.complete)
         self.assertNotIn(request_path.absolute(), windows_watch._LOCAL_SESSIONS)
         self.assertTrue(session.process._handle.closed)
 
@@ -1390,6 +1400,139 @@ class MutationWatchTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(WatchProtocolError, "differs"):
             windows_watch._publish_or_load_outcome(expected, request, claim, launch)
+
+    def test_review_rejects_noncanonical_equivalent_outcome_collision(self):
+        request_path, _ = self._start_case("review-canonical-collision")
+        self.assertTrue(stop_watch(request_path).complete)
+        request = windows_watch._load_request_path(request_path)
+        claim = windows_watch._load_controller_claim(request)
+        launch = windows_watch._load_worker_launch(request)
+        path = request.evidence_root / "outcome.json"
+        canonical = path.read_bytes()
+        outcome = watch_outcome_from_bytes(canonical)
+        variants = (
+            json.dumps(json.loads(canonical), indent=2).encode(),
+            json.dumps(dict(reversed(list(json.loads(canonical).items()))),
+                       separators=(",", ":")).encode() + b"\n",
+        )
+        try:
+            for variant in variants:
+                with self.subTest(variant=variant[:40]):
+                    self.assertNotEqual(canonical, variant)
+                    path.write_bytes(variant)
+                    with self.assertRaisesRegex(WatchProtocolError, "canonical"):
+                        windows_watch._publish_or_load_outcome(
+                            outcome, request, claim, launch,
+                        )
+                    self.assertEqual(variant, path.read_bytes())
+        finally:
+            path.write_bytes(canonical)
+
+    def test_review_early_valid_stop_cannot_complete(self):
+        request_path, _ = self._start_case("review-early-stop")
+        request = windows_watch._load_request_path(request_path)
+        session = windows_watch._LOCAL_SESSIONS[request_path.absolute()]
+        windows_watch._write_new(request.stop_token_path, b"stop\n")
+        self.assertEqual(windows_watch._WAIT_OBJECT_0,
+                         windows_watch._kernel32.WaitForSingleObject(
+                             windows_watch._popen_process_handle(session.process), 10_000))
+        receipt = stop_watch(request_path)
+        self.assertFalse(receipt.complete)
+        self.assertIn("stop", receipt.error)
+
+    def test_review_removed_early_stop_cannot_hide_terminated_worker(self):
+        request_path, _ = self._start_case("review-removed-early-stop")
+        request = windows_watch._load_request_path(request_path)
+        session = windows_watch._LOCAL_SESSIONS[request_path.absolute()]
+        windows_watch._write_new(request.stop_token_path, b"stop\n")
+        self.assertEqual(windows_watch._WAIT_OBJECT_0,
+                         windows_watch._kernel32.WaitForSingleObject(
+                             windows_watch._popen_process_handle(session.process), 10_000))
+        request.stop_token_path.unlink()
+        receipt = stop_watch(request_path)
+        self.assertFalse(receipt.complete)
+        self.assertIn("worker-exited-before-stop", receipt.error)
+
+    def test_review_outcome_only_reconstruction_cannot_complete(self):
+        request_path, worker_pid = self._start_case("review-outcome-only")
+        self.assertTrue(stop_watch(request_path).complete)
+        request = windows_watch._load_request_path(request_path)
+        before = (request.evidence_root / "outcome.json").read_bytes()
+        for name in ("controller-claim.json", "worker-launch.json", "ready.json",
+                     "events.ndjson", "terminal.json"):
+            path = request.evidence_root / name
+            original = path.read_bytes()
+            try:
+                path.unlink()
+                with self.subTest(missing=name):
+                    receipt = watch_receipt_from_files(
+                        request, worker_pid, request.evidence_root / "ready.json",
+                        request.evidence_root / "events.ndjson",
+                        request.evidence_root / "terminal.json",
+                    )
+                    self.assertFalse(receipt.complete)
+                    self.assertEqual(before, (request.evidence_root / "outcome.json").read_bytes())
+            finally:
+                path.write_bytes(original)
+
+    def test_review_raw_validation_cannot_borrow_outcome_exit_verdict(self):
+        request_path, _ = self._start_case("review-self-validation")
+        self.assertTrue(stop_watch(request_path).complete)
+        request = windows_watch._load_request_path(request_path)
+        claim = windows_watch._load_controller_claim(request)
+        launch = windows_watch._load_worker_launch(request)
+        outcome = watch_outcome_from_bytes((request.evidence_root / "outcome.json").read_bytes())
+        captured = windows_watch._capture_worker_evidence(request, launch)
+        with self.assertRaises(WatchProtocolError):
+            windows_watch._validate_outcome_raw_evidence(
+                outcome, request, claim, launch, captured,
+            )
+
+    def test_review_raw_consistent_completed_outcome_cannot_erase_controller_death(self):
+        controller, evidence, request_path, worker_pid, worker_handle = (
+            self._external_controller_fixture("review-controller-loss")
+        )
+        try:
+            request = windows_watch._load_request_path(request_path)
+            claim = windows_watch._load_controller_claim(request)
+            launch = windows_watch._load_worker_launch(request)
+            windows_watch._write_new(request.stop_token_path, b"stop\n")
+            self.assertEqual(windows_watch._WAIT_OBJECT_0,
+                             windows_watch._kernel32.WaitForSingleObject(worker_handle, 10_000))
+            captured = windows_watch._capture_worker_evidence(request, launch)
+            forged = windows_watch._watch_outcome(
+                request, claim, launch, completion=WatchEvidenceCompletion.COMPLETED,
+                worker_exit_code=0, reasons=(), captured=captured,
+            )
+            windows_watch._publish_outcome_commit(forged, request, claim, launch)
+            original = (evidence / "outcome.json").read_bytes()
+            controller.terminate()
+            controller.wait(timeout=10)
+            receipt = stop_watch(request_path)
+            self.assertFalse(receipt.complete)
+            self.assertEqual(original, (evidence / "outcome.json").read_bytes())
+            reconstructed = watch_receipt_from_files(
+                request, worker_pid, evidence / "ready.json",
+                evidence / "events.ndjson", evidence / "terminal.json",
+            )
+            self.assertFalse(reconstructed.complete)
+        finally:
+            self._finish_external_fixture(controller, worker_pid, worker_handle)
+
+    def test_review_raw_reconstruction_preserves_failed_read_close_ownership(self):
+        for label in ("terminal record readback", "event journal readback"):
+            with self.subTest(label=label):
+                request_path, worker_pid = self._start_case("review-raw-owner-" + label)
+                self.assertTrue(stop_watch(request_path).complete)
+                request = windows_watch._load_request_path(request_path)
+                def report():
+                    return watch_receipt_from_files(
+                        request, worker_pid, request.evidence_root / "ready.json",
+                        request.evidence_root / "events.ndjson",
+                        request.evidence_root / "terminal.json",
+                    )
+                with self._controller_close_fault(label, persistent=True) as state:
+                    self._assert_controller_ownership(report, state)
 
     def _external_controller_fixture(
         self,
@@ -1562,56 +1705,20 @@ class MutationWatchTests(unittest.TestCase):
     def test_mutable_evidence_completion_helper_is_removed(self):
         self.assertFalse(hasattr(windows_watch, "_watch_receipt_from_files_impl"))
 
-    def test_completed_outcome_reconstructs_without_evidence_reopen(self):
+    def test_completed_reconstruction_requires_raw_evidence_and_observable_exit(self):
         request_path, worker_pid = self._start()
-        expected = stop_watch(request_path)
-        request = windows_watch._load_request_path(request_path)
-        outcome_path = self.evidence / "outcome.json"
-        real_read = windows_watch._read_exact_regular_file
-        real_path_read_bytes = Path.read_bytes
-
-        def read_outcome_only(path: Path, label: str, **kwargs: object) -> bytes:
-            if Path(path) != outcome_path:
-                self.fail(f"reconstruction reopened mutable authority: {label}")
-            return real_read(path, label, **kwargs)
-
-        def reject_mutable_path_read(path: Path) -> bytes:
-            if path.name in {"ready.json", "terminal.json"}:
-                self.fail(f"reconstruction reopened mutable authority: {path.name}")
-            return real_path_read_bytes(path)
-
-        with (
-            mock.patch.object(
-                windows_watch,
-                "_read_exact_regular_file",
-                side_effect=read_outcome_only,
-            ),
-            mock.patch.object(
-                windows_watch,
-                "_load_worker_launch",
-                side_effect=AssertionError("reconstruction reopened worker launch"),
-            ),
-            mock.patch.object(
-                windows_watch,
-                "_read_exact_journal",
-                side_effect=AssertionError("reconstruction reopened event journal"),
-            ),
-            mock.patch.object(
-                windows_watch,
-                "_process_alive",
-                side_effect=AssertionError("reconstruction reopened worker process"),
-            ),
-            mock.patch.object(Path, "read_bytes", new=reject_mutable_path_read),
-        ):
+        retained_handle, _ = windows_watch._open_process_identity(worker_pid)
+        try:
+            expected = stop_watch(request_path)
+            self.assertTrue(expected.complete, expected.error)
+            request = windows_watch._load_request_path(request_path)
             receipt = watch_receipt_from_files(
-                request,
-                worker_pid,
-                self.evidence / "ready.json",
-                self.evidence / "events.ndjson",
-                self.evidence / "terminal.json",
+                request, worker_pid, self.evidence / "ready.json",
+                self.evidence / "events.ndjson", self.evidence / "terminal.json",
             )
-
-        self.assertEqual(expected, receipt)
+            self.assertEqual(expected, receipt)
+        finally:
+            self.assertIsNone(windows_watch._close_handle(retained_handle, "test retained worker"))
 
     def test_complete_mutation_evidence_is_not_unchanged(self):
         request_path, worker_pid = self._start()
@@ -1630,9 +1737,10 @@ class MutationWatchTests(unittest.TestCase):
             self.evidence / "terminal.json",
         )
 
-        self.assertEqual(expected, receipt)
-        self.assertTrue(receipt.complete, receipt.error)
-        self.assertTrue(receipt.events)
+        self.assertTrue(expected.complete, expected.error)
+        self.assertTrue(expected.events)
+        self.assertFalse(receipt.complete)
+        self.assertIsNone(receipt.watch_outcome_id)
         state = _protected_state("1")
         self.assertFalse(watch_proves_unchanged(receipt, state, state))
 
@@ -3484,7 +3592,12 @@ class MutationWatchTests(unittest.TestCase):
         self.assertIsNone(receipts[0].watch_outcome_id)
         self.assertIn("[Errno 32]", receipts[0].error)
         self.assertEqual(outcome_bytes, outcome_path.read_bytes())
-        self.assertEqual(original.watch_outcome_id, stop_watch(request_path).watch_outcome_id)
+        reloaded = stop_watch(request_path)
+        self.assertFalse(reloaded.complete)
+        self.assertIn("worker-exit-unproven", reloaded.error)
+        self.assertEqual(original.watch_outcome_id, watch_outcome_id_for(
+            watch_outcome_from_bytes(outcome_path.read_bytes()),
+        ))
 
     def test_outcome_non_sharing_open_errors_fail_closed_without_retry(self):
         request_path, _ = self._start_case("outcome-non-sharing-open-error")
@@ -3516,7 +3629,12 @@ class MutationWatchTests(unittest.TestCase):
                 self.assertIsNone(receipt.watch_outcome_id)
                 self.assertIn(f"[Errno {error_code}]", receipt.error)
                 self.assertEqual(outcome_bytes, outcome_path.read_bytes())
-        self.assertEqual(original.watch_outcome_id, stop_watch(request_path).watch_outcome_id)
+        reloaded = stop_watch(request_path)
+        self.assertFalse(reloaded.complete)
+        self.assertIn("worker-exit-unproven", reloaded.error)
+        self.assertEqual(original.watch_outcome_id, watch_outcome_id_for(
+            watch_outcome_from_bytes(outcome_path.read_bytes()),
+        ))
 
     def test_two_cleanup_processes_converge_on_one_incomplete_outcome(self):
         controller, evidence, request_path, worker_pid, worker_handle = (
