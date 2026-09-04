@@ -96,11 +96,16 @@ class ProcessTreeObservation:
     total_processes: int
 
 class ProcessJobOwner:
+    # Read-only properties; process_handle remains valid only while owned.
+    process_handle: int
+    resumed: bool
     def observe(self) -> ProcessTreeObservation: ...
     def close(self) -> None: ...
 ```
 
 Consumes existing suspended launch; produces exact original process/job ownership for Task 3/4. Opt-in retained mode must create private unnamed job, assign and verify before callback/resume, prohibit both breakaway flags, verify exact Low RID, and transfer handles without reopen. Ordinary callers keep existing return/close behavior. Root exit must come from retained process wait+exit query; ActiveProcesses comes from job accounting. Unknown is an error. Guard against use after close, nonowner PID/controller continuation, double transfer and failed closes. No kill-on-job-close. Do not close a live process tree on normal completion path; report still-active so caller retains ownership. Failure before resume may terminate the just-created suspended process using existing cleanup semantics; all incomplete cleanup ownership must remain explicit.
+
+Native caller detail: the retained original `process_handle` supports the existing HWND/process-identity correlation in the gate; do not reopen by PID for that use. The owner marks `resumed` only after verified native resume. An exited root can have a nonzero exit code (including 259); use the wait result to distinguish exit from running. App success policy is separate from tree quiescence. The opt-in before_resume callback requires retained ownership; reject invalid argument combinations before process creation.
 
 - [ ] Write failing native tests for a root that starts a child which starts a grandchild, all writing only in the Low test root. Root exit alone must leave active_processes > 0; only after descendants naturally exit may observation be empty.
 
@@ -120,7 +125,7 @@ self.assertEqual(observation.pid, launch.pid)
 
 **Files:** Modify `modlab/validation/windows_watch.py`, `windows_watch_protocol.py`, containment outcome model/serialization only as required, `tests/test_mo2_containment_watch.py`; add focused protocol tests if existing test file would become less readable.
 
-**Interfaces:** Consumes `EvidenceVault`, `ProcessJobOwner`, `ProcessTreeObservation`. `start_watch` retains a verified vault for the entire session; worker and detached readers independently verify it. Add `admit_watch_launch(request_path: Path, launch: ProcessLaunch) -> None` to call only from before_resume; bind ready/request/controller and process creation identity. Add `complete_watch_launch(request_path: Path, owner: ProcessJobOwner) -> None` to independently query retained ownership and publish canonical quiescence only if exact root exited and job empty. `stop_watch` normal completion uses these retained facts; nonowner/restart stop publishes distinct recovery record and cannot complete. Existing watch-only fixture tests must explicitly admit/complete a disposable child for successful completion rather than synthetic process claims.
+**Interfaces:** Consumes `EvidenceVault`, `ProcessJobOwner`, `ProcessTreeObservation`. `start_watch` retains a verified vault for the entire session; worker and detached readers independently verify it. Add `admit_watch_launch(request_path: Path, launch: ProcessLaunch) -> None` to call only from before_resume; bind ready/request/controller and process creation identity. Add `complete_watch_launch(request_path: Path, owner: ProcessJobOwner | None = None) -> None` to independently query retained ownership and publish canonical quiescence only if exact root exited and job empty. `stop_watch` normal completion uses these retained facts; nonowner/restart stop publishes distinct recovery record and cannot complete. Existing watch-only fixture tests must explicitly admit/complete a disposable child for successful completion rather than synthetic process claims. Admission retains the original owner in the existing local watch session. Service operations that return only a journal can later omit owner in complete_watch_launch; the session supplies its original owner. If supplied, require the identical retained owner. Add an explicit recovery=True option to stop_watch for same-controller cleanup; nonowner stops remain recovery automatically. Normal and recovery stop records cannot substitute for one another.
 
 - [ ] Tests first: Low early stop while watcher still draining must fail; valid normal stop binds exact stop identity/hash into terminal; recovery stop never completes; missing admission/quiescence/worker-exit refuses Completed; altered raw/outcome bytes refuse reconstruction. Fresh legitimate completion must reconstruct after controller has subsequently exited, solely from protected durable observations.
 
@@ -138,11 +143,11 @@ self.assertTrue(receipt.complete)
 - [ ] Retain vault and record pins through operations, enforce actual code/runtime integrity policy, and propagate complete close ownership. Verify collision bytes against exact canonical serialization.
 - [ ] Run watcher/protocol/model tests, including earlier Astra regressions updated only for the new explicit contract. Commit and report.
 
-### Task 4: Task 6 and Round 8 integration
+### Task 4: Task 6 store and service integration
 
-**Files:** Modify containment store/service/preparation recovery and relevant tests; create tracked `tools/mo2_round8_gate.py` and `tests/test_mo2_round8_gate.py`, deriving only necessary flow from historical ignored Round 7 harness; update current docs. Historical ignored harness is read-only reference.
+**Files:** Modify containment store/service/preparation recovery, `modlab/workspace.py`, associated admission paths and relevant tests; update current docs. Preserve disposable fixture paths while introducing explicit authority evidence paths.
 
-**Interfaces:** Store keeps disposable and authority roots explicit, and creates fresh protected run roots using Task 1. Shared watcher calls use Task 3 with before_resume admission and original owner retained until finalization. Task 6 completion and fresh reconstruction consume protected originals and common raw derivation. New gate retains existing phase/evidence behavior needed for the ten-phase matrix, with every verdict input stored in protected evidence tree. Arguments provide fresh authority/disposable roots; existing history is never migrated.
+**Interfaces:** Store keeps disposable and authority roots explicit, and creates fresh protected run roots using Task 1. Shared watcher calls use Task 3 with before_resume admission and original owner retained until finalization. Task 6 completion and fresh reconstruction consume protected originals and common raw derivation. Preserve `run_path` for fixture callers and introduce `evidence_run_path(run_id: str) -> Path` for trusted records; name other new root/path properties explicitly. Existing history is never migrated. Read this plan's `integration-notes.md` for inspected caller locations before editing.
 
 - [ ] Add failing integration tests proving ordinary Medium-but-unverified or Low evidence cannot start a new authoritative watch; store refuses historical adoption, input snapshots are protected new objects, and child/grandchild liveness prevents capture or recovery relocation.
 
@@ -156,4 +161,27 @@ The snippet states required observable behavior; adapt to the actual existing re
 
 - [ ] Integrate scoped roots/ownership/protocol; add a bounded exact capture routine at the store boundary if existing primitives lack bounded read capability. Do not move Low originals into the vault. Expose clear failure text for missing creating SID, unsafe storage, live descendants and missing causal records.
 - [ ] Preserve separate immutable attempt and cleanup results, fail closed for missing original job ownership, and re-derive Task 6 result rather than trusting verdict fields. No unrelated storage/adapter/archive refactor.
-- [ ] Run focused service/recovery/gate tests; run full repository suite with real archive/Steam opt-ins unset, plus isolated Round 8 offline gate. Record skips honestly. Review complete diff and current evidence, fix findings, commit only this scope, export report/patch/verification to task outputs. Leave live validation for a later UI-capable task.
+- [ ] Run focused service/store/recovery/admission tests; record skips honestly. Review diff, commit only this scope and report actual test evidence. The full suite and gate follow Task 5.
+
+### Task 5: Versioned Round 8 gate and complete verification
+
+**Files:** Create tracked `tools/mo2_round8_gate.py` and `tests/test_mo2_round8_gate.py` as maintained copies of the historical ignored harness/suite, with scoped corrections; update only associated path/capability integration and current docs if required. Historical ignored files remain untouched. Inspect this plan's `integration-notes.md`.
+
+**Interfaces:** Use Task 1 security, Task 2 `ProcessLaunch.owner`/`before_resume`, Task 3 admission/quiescence/stop, and protected capture/reconstruction from Task 4. Retain the existing ten-phase matrix, strict schema parsing, operator exchange, plugin/log correlation, runtime policy and immutable failure behavior. Gate config must name separate `run_root` (disposable) and `authority_root` (evidence), bound to the same fresh run identity. No fallback to unprotected legacy roots.
+
+- [ ] Preserve the original source hashes and import baseline separately from changes. Update repository discovery for the new tracked locations. Add real public test entry points rather than changing the old ignored files.
+- [ ] Add failing tests for separate roots and protected originals before launch; attempted Low stop/evidence tampering; retained original process/job owner; missing worker-exit/normal-stop refusing completion; recovery with lost tree ownership refusing relocation; all verdict inputs staying inside the vault. Keep tests independent of real MO2/Steam and do not synthesize production UI evidence.
+
+```python
+config = GateConfig(run_root=disposable, authority_root=authority, **fixture_inputs)
+# Use the existing fake backend to prepare a fresh attempt and enumerate each
+# authoritative original read by its phase/result reconstruction.
+self.assertTrue(all(path.is_relative_to(authority) for path in verdict_inputs))
+self.assertFalse(disposable.is_relative_to(authority))
+```
+
+The test should inspect the actual original paths used by the implementation, not a duplicate hardcoded table. Existing fake backend interfaces supply preparation inputs; do not create a new orchestration abstraction.
+
+- [ ] Replace Low watch/job authority with protected equivalents and a separate disposable child job. Capture screenshot/log bytes into new protected files with bounded exact reads and provenance. Protect preparation, installation, selection, envelope and cleanup inputs as well as phase records. Call the shared causal validator rather than reimplementing its verdict.
+- [ ] Run the adapted offline suite and covering integration tests. Commit task files and report correction diff separately from imported baseline.
+- [ ] After task review, run full repository suite with real archive/Steam opt-ins unset and isolated Round 8 offline gate once. Record all skips and failures. Obtain one final review, address findings, export report/patch/verification to task outputs. Leave real UI validation for a later UI-capable task; no merge or push.
