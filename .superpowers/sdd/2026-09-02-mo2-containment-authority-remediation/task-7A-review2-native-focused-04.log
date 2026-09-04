@@ -1,0 +1,43 @@
+Token=DESKTOP-947H2KL\red
+Python=C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe
+Before modlab\validation\mo2_containment_service.py 01F27D9677033A4CEAB0D4931570A78E6E224AC6C02A5DDADA540D0B369B8448
+Before modlab\validation\windows_junction.py 9C40A85637AAD3A73ABDBD03C3A1B33B2DCD05083E1F1E6396CBAD306D047353
+Before tests\test_mo2_containment_service.py 4A9CE19E9068202DF95979C093A1962C122566E10C3DC9F7E21DDEE0695B437F
+Before tests\test_mo2_path_budget.py 8C412320929891D7141722FDC1E80233ADF7E631A70CE9A0A4319FE777950038
+test_capture_and_recovery_baselines_are_scenario_bound_before_relocation (tests.test_mo2_path_budget.NativePathBudgetTests.test_capture_and_recovery_baselines_are_scenario_bound_before_relocation) ... ok
+test_retained_relocation_races_refuse_before_quarantine_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_retained_relocation_races_refuse_before_quarantine_creation) ... ok
+test_capture_and_recovery_destination_collisions_refuse_before_moves (tests.test_mo2_path_budget.NativePathBudgetTests.test_capture_and_recovery_destination_collisions_refuse_before_moves) ... ok
+test_retained_authority_adopts_then_quarantines_the_same_exact_tree (tests.test_mo2_path_budget.NativePathBudgetTests.test_retained_authority_adopts_then_quarantines_the_same_exact_tree) ... ERROR
+
+======================================================================
+ERROR: test_retained_authority_adopts_then_quarantines_the_same_exact_tree (tests.test_mo2_path_budget.NativePathBudgetTests.test_retained_authority_adopts_then_quarantines_the_same_exact_tree)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 1448, in test_retained_authority_adopts_then_quarantines_the_same_exact_tree
+    adoption = service._delegated_mutations_with_created_root(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 2058, in _delegated_mutations_with_created_root
+    with manager as prepared:
+         ^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 794, in _retained_projection_relocation
+    authority = retain_relocation_authority(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\windows_junction.py", line 1395, in retain_relocation_authority
+    _verify_relocation_item(item)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\windows_junction.py", line 1307, in _verify_relocation_item
+    raise ContainmentSafetyError("relocation retained tree membership changed")
+modlab.validation.windows_junction.ContainmentSafetyError: relocation retained tree membership changed
+
+----------------------------------------------------------------------
+Ran 4 tests in 1.180s
+
+FAILED (errors=1)
+After modlab\validation\mo2_containment_service.py 01F27D9677033A4CEAB0D4931570A78E6E224AC6C02A5DDADA540D0B369B8448
+After modlab\validation\windows_junction.py 9C40A85637AAD3A73ABDBD03C3A1B33B2DCD05083E1F1E6396CBAD306D047353
+After tests\test_mo2_containment_service.py 4A9CE19E9068202DF95979C093A1962C122566E10C3DC9F7E21DDEE0695B437F
+After tests\test_mo2_path_budget.py 8C412320929891D7141722FDC1E80233ADF7E631A70CE9A0A4319FE777950038
+HashMismatchCount=0
+Exit 1

@@ -1,0 +1,126 @@
+test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) ... 
+  test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.NEW_FOLDER: 'NewFolder'>, state='missing') ... FAIL
+  test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.NEW_FOLDER: 'NewFolder'>, state='direct') ... FAIL
+  test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.MERGE_EXISTING: 'MergeExisting'>, state='missing') ... FAIL
+  test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.MERGE_EXISTING: 'MergeExisting'>, state='direct') ... FAIL
+  test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.REPLACE_EXISTING: 'ReplaceExisting'>, state='missing') ... FAIL
+  test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.FOMOD_DEPENDENCY: 'FomodDependency'>, state='missing') ... FAIL
+  test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.FOMOD_DEPENDENCY: 'FomodDependency'>, state='direct') ... FAIL
+
+======================================================================
+FAIL: test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.NEW_FOLDER: 'NewFolder'>, state='missing')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 677, in _retained_relocation_projections
+    metadata = link.lstat()
+               ^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 847, in lstat
+    return self.stat(follow_symlinks=False)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 840, in stat
+    return os.stat(self, follow_symlinks=follow_symlinks)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [WinError 2] The system cannot find the file specified: 'C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\modlab-relocation-baseline-okeh1y_i\\NewFolder\\missing\\Protected Existing'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 603, in test_relocation_baseline_presence_is_scenario_specific
+    self.fail("unqualified baseline must not be admitted")
+AssertionError: unqualified baseline must not be admitted
+
+======================================================================
+FAIL: test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.NEW_FOLDER: 'NewFolder'>, state='direct')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 603, in test_relocation_baseline_presence_is_scenario_specific
+    self.fail("unqualified baseline must not be admitted")
+AssertionError: unqualified baseline must not be admitted
+
+======================================================================
+FAIL: test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.MERGE_EXISTING: 'MergeExisting'>, state='missing')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 677, in _retained_relocation_projections
+    metadata = link.lstat()
+               ^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 847, in lstat
+    return self.stat(follow_symlinks=False)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 840, in stat
+    return os.stat(self, follow_symlinks=follow_symlinks)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [WinError 2] The system cannot find the file specified: 'C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\modlab-relocation-baseline-okeh1y_i\\MergeExisting\\missing\\Protected Existing'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 603, in test_relocation_baseline_presence_is_scenario_specific
+    self.fail("unqualified baseline must not be admitted")
+AssertionError: unqualified baseline must not be admitted
+
+======================================================================
+FAIL: test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.MERGE_EXISTING: 'MergeExisting'>, state='direct')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 603, in test_relocation_baseline_presence_is_scenario_specific
+    self.fail("unqualified baseline must not be admitted")
+AssertionError: unqualified baseline must not be admitted
+
+======================================================================
+FAIL: test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.REPLACE_EXISTING: 'ReplaceExisting'>, state='missing')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 677, in _retained_relocation_projections
+    metadata = link.lstat()
+               ^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 847, in lstat
+    return self.stat(follow_symlinks=False)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 840, in stat
+    return os.stat(self, follow_symlinks=follow_symlinks)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [WinError 2] The system cannot find the file specified: 'C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\modlab-relocation-baseline-okeh1y_i\\ReplaceExisting\\missing\\Protected Existing'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 603, in test_relocation_baseline_presence_is_scenario_specific
+    self.fail("unqualified baseline must not be admitted")
+AssertionError: unqualified baseline must not be admitted
+
+======================================================================
+FAIL: test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.FOMOD_DEPENDENCY: 'FomodDependency'>, state='missing')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 677, in _retained_relocation_projections
+    metadata = link.lstat()
+               ^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 847, in lstat
+    return self.stat(follow_symlinks=False)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 840, in stat
+    return os.stat(self, follow_symlinks=follow_symlinks)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [WinError 2] The system cannot find the file specified: 'C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\modlab-relocation-baseline-okeh1y_i\\FomodDependency\\missing\\Protected Existing'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 603, in test_relocation_baseline_presence_is_scenario_specific
+    self.fail("unqualified baseline must not be admitted")
+AssertionError: unqualified baseline must not be admitted
+
+======================================================================
+FAIL: test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) (scenario=<ContainmentScenario.FOMOD_DEPENDENCY: 'FomodDependency'>, state='direct')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 603, in test_relocation_baseline_presence_is_scenario_specific
+    self.fail("unqualified baseline must not be admitted")
+AssertionError: unqualified baseline must not be admitted
+
+----------------------------------------------------------------------
+Ran 1 test in 0.015s
+
+FAILED (failures=7)
+Exit 1

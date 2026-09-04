@@ -1,0 +1,15 @@
+test_retained_preflight_verifies_before_missing_root_creation (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_preflight_verifies_before_missing_root_creation) ... ERROR
+
+======================================================================
+ERROR: test_retained_preflight_verifies_before_missing_root_creation (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_preflight_verifies_before_missing_root_creation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 3740, in test_retained_preflight_verifies_before_missing_root_creation
+    service._delegated_mutations_with_created_root(
+TypeError: _delegated_mutations_with_created_root() got an unexpected keyword argument 'retained_preflight'
+
+----------------------------------------------------------------------
+Ran 1 test in 0.001s
+
+FAILED (errors=1)
+Exit 1

@@ -1,0 +1,43 @@
+Token=DESKTOP-947H2KL\red
+Python=C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe
+Before modlab\validation\mo2_containment_service.py B424CBD6F3F37226C647F0EDCC982157590802288F585338DB9C90C36325F0CB
+Before modlab\validation\windows_junction.py 9C40A85637AAD3A73ABDBD03C3A1B33B2DCD05083E1F1E6396CBAD306D047353
+Before tests\test_mo2_containment_service.py EE4A48440F403923292B5349FA8C9CA88A548D5C38EF7DD1F1F7348AAC9C6C95
+Before tests\test_mo2_path_budget.py 8C412320929891D7141722FDC1E80233ADF7E631A70CE9A0A4319FE777950038
+test_capture_and_recovery_baselines_are_scenario_bound_before_relocation (tests.test_mo2_path_budget.NativePathBudgetTests.test_capture_and_recovery_baselines_are_scenario_bound_before_relocation) ... ok
+test_retained_relocation_races_refuse_before_quarantine_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_retained_relocation_races_refuse_before_quarantine_creation) ... 
+  test_retained_relocation_races_refuse_before_quarantine_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_retained_relocation_races_refuse_before_quarantine_creation) (phase='adoption') ... FAIL
+
+======================================================================
+FAIL: test_retained_relocation_races_refuse_before_quarantine_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_retained_relocation_races_refuse_before_quarantine_creation) (phase='adoption')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 981, in _mutation_root_guard
+    pinned = pin_stable_direct_object(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 600, in pin_stable_direct_object
+    raise _winerror(f"stable CreateFileW failed for {target}")
+BrokenPipeError: [Errno 32] stable CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab-relocation-race-adoption-pvsr3wcq\source: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+modlab.validation.mo2_containment_service._MutationObservationError: delegated mutation guard rejected C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab-relocation-race-adoption-pvsr3wcq\source: [Errno 32] stable CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab-relocation-race-adoption-pvsr3wcq\source: The process cannot access the file because it is being used by another process.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 1174, in test_retained_relocation_races_refuse_before_quarantine_creation
+    with self.assertRaisesRegex(
+         ^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "membership changed" does not match "delegated mutation guard rejected C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab-relocation-race-adoption-pvsr3wcq\source: [Errno 32] stable CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab-relocation-race-adoption-pvsr3wcq\source: The process cannot access the file because it is being used by another process."
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.286s
+
+FAILED (failures=1)
+After modlab\validation\mo2_containment_service.py B424CBD6F3F37226C647F0EDCC982157590802288F585338DB9C90C36325F0CB
+After modlab\validation\windows_junction.py 9C40A85637AAD3A73ABDBD03C3A1B33B2DCD05083E1F1E6396CBAD306D047353
+After tests\test_mo2_containment_service.py EE4A48440F403923292B5349FA8C9CA88A548D5C38EF7DD1F1F7348AAC9C6C95
+After tests\test_mo2_path_budget.py 8C412320929891D7141722FDC1E80233ADF7E631A70CE9A0A4319FE777950038
+HashMismatchCount=0
+Exit 1

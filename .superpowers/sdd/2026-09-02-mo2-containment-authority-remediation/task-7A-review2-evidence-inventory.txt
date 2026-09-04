@@ -1,0 +1,62 @@
+Task 7A second-review relocation-authority evidence inventory
+Generated: 2026-09-04
+Scope: preparation-only; runtimeQualified=false
+Format: CLASS | BYTES | SHA256 | FILE
+
+VALID_RED | 5243 | 57e9d1dd8c36219959621d1d9b9c7eb0766ea0f74646cdeb2f1990f9c33a3f6c | task-7A-review2-admission-repeat-red-01.log
+VALID_RED | 1053 | 6406d7233c453481adc0e63ff806268cac21130c726b9ea508cb2c623dcf332b | task-7A-review2-authority-lifecycle-red-01.log
+VALID_RED | 11421 | 1c43c365630ea80ef22b320a3297bbbb65720cd12db65a2b8ff3fa5cebf2530d | task-7A-review2-baseline-red-01.log
+VALID_RED | 2481 | 128070a4ae91aa5bace23e90f718d0c72204f0def35600512ec804aa772dcfea | task-7A-review2-borrowed-guard-red-01.log
+VALID_RED | 5366 | 2c7a6695c7435507429e4da579612d79aef2ecfda37d8322a1ce142bba5015d5 | task-7A-review2-collision-red-01.log
+VALID_RED | 4338 | 2948be4346edeb2695560b20e7cc35307bdac34099aa0a752b6bb87eae5c00bc | task-7A-review2-collision-red-02.log
+VALID_RED | 1579 | a1d5933fecde9fb4fcbf38f747ec75056a9153bab8e98bc545e23381717dfc07 | task-7A-review2-partial-tree-red-01.log
+VALID_RED | 991 | df8f697dfc578184b64d55d820cf385fb494ec24671484ddc9e90e2976b2e75c | task-7A-review2-pinned-member-red-01.log
+VALID_RED | 1308 | c2c7ded58e0bd02c1b707aac6b8e5cae34bb5a5f862f26a12f6247ba742e11c2 | task-7A-review2-tree-order-red-01.log
+VALID_PRODUCT_RED | 4184 | 58d76385be70ecf480c6cb6ab1270f96c853fcfa4994324f496b42f6c91ea3a4 | task-7A-review2-native-focused-03.log
+VALID_PRODUCT_RED | 3831 | ecd84175131e3945fd4a24b56acd6ac247605fb3a22027b6466070182ce19c4b | task-7A-review2-native-focused-04.log
+
+VALID_GREEN | 953 | 2a50bdf5a2e63a01b758ef77345a9267d255b68e63637cd5f4ca96e07e801b83 | task-7A-review2-admission-repeat-green-01.log
+VALID_GREEN | 305 | 6d42911c59da3213ce427beebab01bba13d33f5729febd6f3e29948cc755ac30 | task-7A-review2-authority-lifecycle-green-01.log
+VALID_GREEN | 289 | 378f04c5efcc951744a0b93ad2bf2c6f673e1d37c6410b96bfa5ab8caae3793b | task-7A-review2-baseline-green-01.log
+VALID_GREEN | 742 | cdf8e4356d6616cbe5b7e31a36185431cf1e9477ce4cc14bd38615eb94f343e7 | task-7A-review2-borrowed-guard-green-01.log
+VALID_GREEN | 323 | f3725ad327d07986da877a8d5e5a3db278bc4642295267fba2143ef8dc24e910 | task-7A-review2-collision-green-01.log
+VALID_GREEN | 301 | 3552b998097efbcd9b73e5defedb4cdeae9e0350d8ebd4fda23c9c310c78ce1d | task-7A-review2-existing-admission-green-01.log
+VALID_GREEN | 1154 | 153555362503db6885b0cb36aaddd4deea77f371842ec23273be261c7208e76c | task-7A-review2-pure-green-01.log
+VALID_GREEN | 1363 | 8c16f78308fb110742209b4f85f1f922ab91c1556d7e9799701f4df049dc0b36 | task-7A-review2-pure-green-02.log
+VALID_GREEN | 951 | 86511ecd48088ce6cc3ba624939c63e32b2c03689550e5f52f2e55e9ae41b029 | task-7A-review2-tree-order-green-01.log
+VALID_GREEN | 18356 | d39a9fd12f3cb4e40cd7fc0675797c0cfc125b55d593f78ea30f51c2996afd4c | task-7A-review2-nonnative-02.log
+VALID_GREEN | 18768 | 6b07067d10667ce8820857503a15f2425213f60d931c14aedd5e8bbc84254680 | task-7A-review2-nonnative-03.log
+VALID_GREEN | 18979 | 018486f3cadef3c47f94f011c85e064fe0da3865d77c62a13740ac518fd6d6e1 | task-7A-review2-nonnative-04.log
+SUPERSEDED_INTERMEDIATE_GREEN | 19170 | 7c78938d6e221e44d6dbe3760cee746ac0343db9c4f1393bb674917fa7698912 | task-7A-review2-nonnative-05.log
+SUPERSEDED_INTERMEDIATE_GREEN | 924 | 499bd317876f1e8ad604a4a33b1245b2c7d4dfa241241c95589ea3aa660d25eb | task-7A-review2-native-focused-06.log
+SUPERSEDED_INTERMEDIATE_GREEN | 104151 | 2d4b32624b6ee284f59001268a92a230309ac2add21b328ae3ad8880eef9e497 | task-7A-review2-native-affected-02.log
+SUPERSEDED_INTERMEDIATE_GREEN | 216130 | 6f9cd398cb2beedb272521437b53999a045c7c105d49142f73133198f7133d4f | task-7A-review2-full-native-01.log
+VALID_RED | 1343 | 0b65e66eab05309b02806028bb7294b8bad9587ca998f206dad670807051c2e4 | task-7A-review2-output-order-red-01.log
+VALID_GREEN | 321 | 564eb709f49bb55382a0dc4728b1ac3d3d9aa2e08175f4f8cbcc812cfe595a4e | task-7A-review2-output-order-green-01.log
+FINAL_OUTPUT_ORDER_GREEN | 321 | 564eb709f49bb55382a0dc4728b1ac3d3d9aa2e08175f4f8cbcc812cfe595a4e | task-7A-review2-output-order-green-02.log
+FINAL_NONNATIVE_GREEN | 19381 | 8f0d3f5e71e83c6e86070a28b639404d312e1becf4252eefc7f7e5a28cc1d9eb | task-7A-review2-nonnative-06.log
+FINAL_FOCUSED_NATIVE_GREEN | 747 | 303f302e12bec21f2e0da25be62062bc716ddc0fbfca76458e220e500f9dc0c5 | task-7A-review2-native-outer-focused-01.log
+FINAL_AFFECTED_NATIVE_GREEN | 104822 | a61c172a1e42a12cccb3aa21349995fb34a4b046c3994c3b9cdc1ee470bc1b45 | task-7A-review2-native-affected-03.log
+FINAL_FULL_NATIVE_GREEN | 216732 | 84fc9d0530ebde61278d3a6e1748bbbd9249249edd8f3e0584063c0765f08aae | task-7A-review2-full-native-02.log
+
+EXCLUDED_HARNESS_INVALID | 2371 | 8e7a7bc2801150aaced84d2cf060b446ab5230a251e9db756cd40d19e9a0d23e | task-7A-review2-native-focused-01.log
+EXCLUDED_HARNESS_INVALID | 1186 | 292e21b90d54415700cc21f45a6192a835b6771cf030d2b2c0ca108198d0ddea | task-7A-review2-native-focused-02.log
+EXCLUDED_HARNESS_INVALID | 28551 | 4fe7dc7879a6fdeca809cd8f291d4f99858eec87c224c99be0838b69a406220c | task-7A-review2-nonnative-01.log
+EXCLUDED_HARNESS_INVALID | 38333 | 1b820de1ce3a0f61b8c6f67b580bf14eb107cb02c8cf0c7a19e8492ea600c67e | task-7A-review2-native-affected-01.log
+EXCLUDED_FAILED_INTERMEDIATE | 16139 | 3cdf2ff754de4ecae7bc8b6903e070b313e90537c7e0f36f6f72d1a046ad85c9 | task-7A-review2-service-nonnative-01.log
+EXCLUDED_INTERMEDIATE_GREEN | 1923 | 6873c2cdd4ef242e476e62bbdffa265e4a02fc7412b300658851229a5505f3b9 | task-7A-review2-native-focused-05.log
+
+SOURCE_MANIFEST | 419 | 1766cfd0b1393b485e7e96f8279089b9cf879d7c4b6eed69160835f4b6b4e2c2 | task-7A-review2-native-focused-06-before.sha256
+SOURCE_MANIFEST | 419 | 1766cfd0b1393b485e7e96f8279089b9cf879d7c4b6eed69160835f4b6b4e2c2 | task-7A-review2-native-focused-06-after.sha256
+SOURCE_MANIFEST | 419 | 1766cfd0b1393b485e7e96f8279089b9cf879d7c4b6eed69160835f4b6b4e2c2 | task-7A-review2-native-affected-01-after.sha256
+SOURCE_MANIFEST | 419 | 1766cfd0b1393b485e7e96f8279089b9cf879d7c4b6eed69160835f4b6b4e2c2 | task-7A-review2-native-affected-02-after.sha256
+SOURCE_MANIFEST | 419 | 1766cfd0b1393b485e7e96f8279089b9cf879d7c4b6eed69160835f4b6b4e2c2 | task-7A-review2-full-native-01-after.sha256
+SOURCE_MANIFEST | 419 | b253ac89240be0a617573f7c13f605a92e2e10a17ada792913da45ecb378d3b1 | task-7A-review2-native-outer-focused-01-before.sha256
+SOURCE_MANIFEST | 419 | b253ac89240be0a617573f7c13f605a92e2e10a17ada792913da45ecb378d3b1 | task-7A-review2-native-outer-focused-01-after.sha256
+SOURCE_MANIFEST | 419 | b253ac89240be0a617573f7c13f605a92e2e10a17ada792913da45ecb378d3b1 | task-7A-review2-native-affected-03-after.sha256
+SOURCE_MANIFEST | 419 | b253ac89240be0a617573f7c13f605a92e2e10a17ada792913da45ecb378d3b1 | task-7A-review2-full-native-02-after.sha256
+
+Explicit older exclusions required by review:
+- task-7A-self-review-green-01.log: failed test-only accessor state; not GREEN/gate evidence.
+- task-7A-contract-green-01.log: three test errors; not GREEN/gate evidence.
+- All earlier diagnostic setup failures and intentional diagnostic Exit 1 logs named in task-7A-report.md are diagnostic/failed evidence only.

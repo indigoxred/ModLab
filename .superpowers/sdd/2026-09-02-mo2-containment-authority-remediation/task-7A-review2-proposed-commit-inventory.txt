@@ -1,0 +1,71 @@
+Task 7A second-review proposed explicit-path repair commit
+Parent: faa519e8710e7f536a86ef93ac3919a1ebe07e34
+Generated: 2026-09-04
+Do not include progress.md, plan/brief/Task7B files, workspace/runtime state,
+historical owner-union scratch, Python caches, or any other ignored path.
+
+Production (2)
+modlab/validation/mo2_containment_service.py
+modlab/validation/windows_junction.py
+
+Tests (2)
+tests/test_mo2_containment_service.py
+tests/test_mo2_path_budget.py
+
+Report and inventories (3)
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-report.md
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-evidence-inventory.txt
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-proposed-commit-inventory.txt
+
+Review-2 evidence (49)
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-admission-repeat-green-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-admission-repeat-red-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-authority-lifecycle-green-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-authority-lifecycle-red-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-baseline-green-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-baseline-red-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-borrowed-guard-green-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-borrowed-guard-red-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-collision-green-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-collision-red-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-collision-red-02.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-existing-admission-green-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-full-native-01-after.sha256
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-full-native-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-full-native-02-after.sha256
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-full-native-02.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-affected-01-after.sha256
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-affected-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-affected-02-after.sha256
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-affected-02.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-affected-03-after.sha256
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-affected-03.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-focused-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-focused-02.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-focused-03.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-focused-04.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-focused-05.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-focused-06-after.sha256
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-focused-06-before.sha256
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-focused-06.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-outer-focused-01-after.sha256
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-outer-focused-01-before.sha256
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-native-outer-focused-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-nonnative-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-nonnative-02.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-nonnative-03.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-nonnative-04.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-nonnative-05.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-nonnative-06.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-output-order-green-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-output-order-green-02.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-output-order-red-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-partial-tree-red-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-pinned-member-red-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-pure-green-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-pure-green-02.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-service-nonnative-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-tree-order-green-01.log
+.superpowers/sdd/2026-09-02-mo2-containment-authority-remediation/task-7A-review2-tree-order-red-01.log
+
+Total explicit paths: 56

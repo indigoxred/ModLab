@@ -1,0 +1,11 @@
+test_pinned_tree_rejects_stable_name_with_changed_member_identity (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_pinned_tree_rejects_stable_name_with_changed_member_identity) ... ok
+test_retained_relocation_members_compare_in_canonical_evidence_order (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_relocation_members_compare_in_canonical_evidence_order) ... ok
+test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards) ... ok
+test_retained_preflight_verifies_before_missing_root_creation (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_preflight_verifies_before_missing_root_creation) ... ok
+test_retained_preflight_binds_created_owner_then_reverifies_before_operation (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_preflight_binds_created_owner_then_reverifies_before_operation) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.002s
+
+OK
+Exit 0

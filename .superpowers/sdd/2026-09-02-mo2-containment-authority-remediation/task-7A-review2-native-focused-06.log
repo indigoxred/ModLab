@@ -1,0 +1,11 @@
+Token desktop-947h2kl\red
+test_capture_and_recovery_baselines_are_scenario_bound_before_relocation (tests.test_mo2_path_budget.NativePathBudgetTests.test_capture_and_recovery_baselines_are_scenario_bound_before_relocation) ... ok
+test_retained_relocation_races_refuse_before_quarantine_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_retained_relocation_races_refuse_before_quarantine_creation) ... ok
+test_capture_and_recovery_destination_collisions_refuse_before_moves (tests.test_mo2_path_budget.NativePathBudgetTests.test_capture_and_recovery_destination_collisions_refuse_before_moves) ... ok
+test_retained_authority_adopts_then_quarantines_the_same_exact_tree (tests.test_mo2_path_budget.NativePathBudgetTests.test_retained_authority_adopts_then_quarantines_the_same_exact_tree) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 1.295s
+
+OK
+Exit 0

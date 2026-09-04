@@ -1,0 +1,15 @@
+test_pinned_tree_rejects_stable_name_with_changed_member_identity (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_pinned_tree_rejects_stable_name_with_changed_member_identity) ... FAIL
+
+======================================================================
+FAIL: test_pinned_tree_rejects_stable_name_with_changed_member_identity (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_pinned_tree_rejects_stable_name_with_changed_member_identity)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 4111, in test_pinned_tree_rejects_stable_name_with_changed_member_identity
+    self.assertRaisesRegex(
+AssertionError: ContainmentSafetyError not raised
+
+----------------------------------------------------------------------
+Ran 1 test in 0.001s
+
+FAILED (failures=1)
+Exit 1

@@ -1,0 +1,7 @@
+test_retained_preflight_mismatch_refuses_with_existing_root (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_preflight_mismatch_refuses_with_existing_root) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.001s
+
+OK
+Exit 0

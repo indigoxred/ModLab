@@ -1,0 +1,21 @@
+Token=DESKTOP-947H2KL\red
+Python=C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe
+Before modlab\validation\mo2_containment_service.py 01F27D9677033A4CEAB0D4931570A78E6E224AC6C02A5DDADA540D0B369B8448
+Before modlab\validation\windows_junction.py F33EDB0147A89A742D991125F6750B0D98AB3343ECAB7F96FE65E260D96C0ACE
+Before tests\test_mo2_containment_service.py 6AB378217A20C32173135518F4CC2EA6BAFDFC60579202B0E31B0091A4BC117B
+Before tests\test_mo2_path_budget.py 8C412320929891D7141722FDC1E80233ADF7E631A70CE9A0A4319FE777950038
+test_capture_and_recovery_baselines_are_scenario_bound_before_relocation (tests.test_mo2_path_budget.NativePathBudgetTests.test_capture_and_recovery_baselines_are_scenario_bound_before_relocation) ... ok
+test_retained_relocation_races_refuse_before_quarantine_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_retained_relocation_races_refuse_before_quarantine_creation) ... ok
+test_capture_and_recovery_destination_collisions_refuse_before_moves (tests.test_mo2_path_budget.NativePathBudgetTests.test_capture_and_recovery_destination_collisions_refuse_before_moves) ... ok
+test_retained_authority_adopts_then_quarantines_the_same_exact_tree (tests.test_mo2_path_budget.NativePathBudgetTests.test_retained_authority_adopts_then_quarantines_the_same_exact_tree) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 1.251s
+
+OK
+After modlab\validation\mo2_containment_service.py 01F27D9677033A4CEAB0D4931570A78E6E224AC6C02A5DDADA540D0B369B8448
+After modlab\validation\windows_junction.py F33EDB0147A89A742D991125F6750B0D98AB3343ECAB7F96FE65E260D96C0ACE
+After tests\test_mo2_containment_service.py 6AB378217A20C32173135518F4CC2EA6BAFDFC60579202B0E31B0091A4BC117B
+After tests\test_mo2_path_budget.py 8C412320929891D7141722FDC1E80233ADF7E631A70CE9A0A4319FE777950038
+HashMismatchCount=0
+Exit 0

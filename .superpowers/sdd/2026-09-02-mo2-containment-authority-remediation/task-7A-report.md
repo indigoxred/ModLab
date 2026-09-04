@@ -778,3 +778,224 @@ validation, or original-attempt action occurred.
 This is implementation-worker evidence only. Task 7A remains preparation-only
 with `runtimeQualified=false`; it does not authorize Task 7B or live MO2 work
 until the same independent reviewer approves the complete repaired range.
+
+# Second independent-review relocation-authority repair — 2026-09-04
+
+## Scope and reviewed defects
+
+This bounded repair addresses only the second review's three relocation findings.
+It does not expand the versioned preparation-operation admission into a general
+runtime guarantee: the machine-readable scope remains preparation-only and
+`runtimeQualified=false`.
+
+1. **Scenario-blind persisted projection.** The old observer admitted a missing
+   or direct `Protected Existing` baseline in every scenario. The repaired
+   observer requires the exact persisted owner-bound projection in NewFolder,
+   MergeExisting, and FomodDependency. ReplaceExisting alone may carry the exact
+   admitted direct regular replacement tree. Missing or substituted baselines
+   refuse before quarantine-root creation.
+2. **Late destination collision detection.** Adoption-name and existing
+   quarantine-destination collisions were previously left to low-level mutation
+   code, after a quarantine root or stage movement could already occur. Guarded
+   preflight now rejects exact and casefold source collisions for the scenario's
+   adoption destination, and rejects every pre-existing quarantine destination
+   collision. MergeExisting and ReplaceExisting retain their intentional
+   `Protected Existing` destination policy.
+3. **Descriptive rather than operative admission.** The old relocation record
+   described rows and a digest, but mutation reopened/re-enumerated pathnames.
+   The repaired authority retains the exact admitted source/stage root, every
+   moveable member/tree object, and destination parents. Mutation consumes only
+   this admitted name/object mapping through the existing shared retained-handle,
+   same-volume, no-replace rename primitive. No pathname-authority fallback or
+   second rename algorithm was added.
+
+## Baseline and collision matrix
+
+| Scenario | Required admitted baseline | Adoption destination | Collision rule |
+| --- | --- | --- | --- |
+| NewFolder | Exact persisted owner-bound projection | `ModLab Spike New` | Exact/casefold source destination and any existing quarantine destination refuse |
+| MergeExisting | Exact persisted owner-bound projection | None; intentional existing `Protected Existing` destination | Any other baseline or quarantine collision refuses |
+| ReplaceExisting | Exact admitted direct regular `Protected Existing` tree | None; exact replacement is quarantined | Missing, redirected, or substituted direct baseline and any quarantine collision refuse |
+| FomodDependency | Exact persisted owner-bound projection | `ModLab Spike FOMOD` | Exact/casefold source destination and any existing quarantine destination refuse |
+
+The same matrix is enforced in capture and recovery. A quarantine root is either
+absent or an exact direct directory. When it exists, its canonical top-level
+names must be collision-free and must not collide, including by casefold, with
+any admitted mutation destination. Tests bind source/stage bytes and verify that
+invalid missing/direct/substituted baselines, source collisions, quarantine
+collisions, and injected membership changes produce no move. Refusal at the
+pre-create boundary leaves an absent quarantine root absent.
+
+## Immutable repeat and retained authority
+
+Both existing-root and missing-root guarded branches call `preflight()` exactly
+once. That exact immutable admission value is passed to retained preflight;
+`_require_relocation_admission` re-observes and requires equality with it before
+authority retention. A mismatch cannot be silently replaced by a freshly valid
+record and refuses before root creation or movement.
+
+Persisted projection ownership already holds restrictive pins on the source or
+stage parent. Acquiring a second incompatible root handle would fail on Windows.
+The mutation guard therefore borrows only candidates derived from an exact
+`OwnedProjection`: the owner is verified, canonical path spelling must match its
+target-parent or link-parent evidence, and native identity is revalidated. The
+wrapper records borrowed and newly opened guards separately; it closes only its
+new acquisitions, while the projection lifecycle closes the borrowed owner.
+
+The authority-only move path is:
+
+    capture/recovery
+      -> _delegated_mutations_with_created_root
+      -> _preflight_projection_relocation
+      -> _retained_projection_relocation
+      -> _require_relocation_admission (exact equality)
+      -> retain_relocation_authority
+      -> authority.verify (after the injected race boundary)
+      -> bind created/existing quarantine parent and authority.verify
+      -> _finalize_projection or recovery relocation
+      -> adopt_retained_relocation / quarantine_retained_relocation /
+         quarantine_retained_replacement
+      -> _rename_pinned_object
+      -> shared rename_pinned_no_replace
+
+Fresh verification may enumerate to prove that the admitted membership and
+identities remain exact, but it does not select a different mutation name or
+object. The retired service pathname relocation functions and imports have no
+remaining call sites. Stable-name member substitution is rejected by the
+restored per-member pinned identity check. A partial retained tree carried by a
+pin rejection is deterministically closed, and cleanup ownership errors are
+unioned without masking the primary refusal.
+
+## Race boundary and exact guarantee
+
+After immutable admission equality is established under the outer guards, the
+service retains source/stage/member owners and the destination parent. The test
+hook runs at that boundary, followed by `authority.verify()` before any missing
+quarantine component is created. Thus a membership addition, substitution, or
+collision injected there refuses with source/stage bytes unchanged and an absent
+quarantine root still absent. If that check succeeds, exact root creation returns
+the final-root pinned owner directly to the authority; a second verification runs
+immediately before the first rename. Failure at this second check performs zero
+renames and honestly receipts the already-created empty job-owned root.
+
+These handles and last-boundary checks do **not** claim immunity from an
+adversarial change in the final gap between verification and the NT rename call.
+The shared exact pinned no-replace primitive prevents overwriting a destination
+or moving a substituted pinned object, but no oplock or child-membership freeze
+was introduced or inferred.
+
+## Review-2 TDD and regression evidence
+
+The complete filename, byte length, classification, and SHA-256 inventory is
+preserved in `task-7A-review2-evidence-inventory.txt`. Valid focused RED evidence
+includes the baseline-policy, collision, authority-lifecycle, borrowed-guard,
+canonical-order, stable-name member-identity, partial-tree cleanup, and immutable
+repeat failures. The valid native product REDs are
+`task-7A-review2-native-focused-03.log` (incompatible double acquisition) and
+`task-7A-review2-native-focused-04.log` (admitted/retained order mismatch).
+
+The pure/non-native checkpoint after the final inspection correction was 95/95
+in 7.663 seconds, Exit 0, `task-7A-review2-nonnative-06.log` (SHA-256
+`8f0d3f5e71e83c6e86070a28b639404d312e1becf4252eefc7f7e5a28cc1d9eb`).
+
+Primary inspection found that the retained replacement helper returned file
+names in breadth-first pin-acquisition order, while the established replacement
+effect contract requires canonical lexical order. The focused RED
+`task-7A-review2-output-order-red-01.log` proves the mismatch with a root sibling
+and nested files. The correction sorts only the returned `output_names`; pinned
+tree acquisition, identity verification, and mutation order remain unchanged.
+`task-7A-review2-output-order-green-02.log` is the final focused pure GREEN for
+that contract. The earlier complete suite did not expose the defect because the
+direct junction test exercised the retired pathname helper, the service-level
+Replace test supplied the canonical mocked return, and the live all-scenario
+integration remained correctly skipped without runtime/live opt-ins.
+
+Two genuine outer-call-path tests now prove that `capture_scenario` and
+`_perform_recovery_cleanup` route baseline-missing, exact/casefold adoption
+collision, and injected post-retention membership races through the real
+retained relocation pipeline. The exhaustive direct matrix remains the
+all-scenario policy proof; these representative outer tests additionally prove
+zero quarantine creation/moves, unchanged source/stage bytes and native
+identities, capture never reaching `_finalize_projection`, recovery never
+reaching later normalization, and handle closure. Together with the output-order
+test they passed 3/3 in 0.274 seconds under `desktop-947h2kl\\red`, Exit 0, in
+`task-7A-review2-native-outer-focused-01.log` (SHA-256
+`303f302e12bec21f2e0da25be62062bc716ddc0fbfca76458e220e500f9dc0c5`).
+
+The final authoritative affected native set passed 520/520 in 959.363 seconds
+with five explicit skips, Exit 0, in
+`task-7A-review2-native-affected-03.log` (SHA-256
+`a61c172a1e42a12cccb3aa21349995fb34a4b046c3994c3b9cdc1ee470bc1b45`).
+The final authoritative complete suite used bundled Python, worktree-owned
+TEMP/TMP, only the exact preparation archive/Steam opt-ins, and no runtime/live
+opt-ins:
+
+    C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest discover -s tests -v
+
+Its direct durable capture is `task-7A-review2-full-native-02.log` (SHA-256
+`84fc9d0530ebde61278d3a6e1748bbbd9249249edd8f3e0584063c0765f08aae`):
+
+    Ran 1158 tests in 1010.802s
+    OK (skipped=10)
+    Exit 0
+
+The exact four-file production/test manifest is unchanged before and after every
+final native stage. The manifest-file SHA-256 is
+`b253ac89240be0a617573f7c13f605a92e2e10a17ada792913da45ecb378d3b1`;
+the post-run mismatch count is zero. Final scoped and system
+Python/PythonW/tar/bsdtar/watcher/child inventories were empty, the temp-root
+rename probe passed, and the completed log admitted an exclusive open.
+
+`task-7A-review2-nonnative-05.log`,
+`task-7A-review2-native-focused-06.log`,
+`task-7A-review2-native-affected-02.log`, and
+`task-7A-review2-full-native-01.log` remain valid intermediate GREEN evidence,
+but are superseded checkpoints and are not the current authoritative gates.
+
+## Explicit evidence exclusions
+
+Filename wording does not override outcome. The following files are preserved
+but excluded from all GREEN and gate claims:
+
+- `task-7A-review2-native-focused-01.log`: test-only `RUN_ID` fixture failure;
+- `task-7A-review2-native-focused-02.log`: WindowsApps alias launched no Python;
+- `task-7A-review2-nonnative-01.log`: overlong TEMP made the harness inadmissible;
+- `task-7A-review2-native-affected-01.log`: the affected harness TEMP prefix was
+  itself over budget;
+- `task-7A-review2-service-nonnative-01.log`: intermediate failed regression;
+- `task-7A-review2-native-focused-03.log` and `-04.log`: valid product REDs, not
+  GREEN evidence;
+- `task-7A-review2-native-focused-05.log`: historical intermediate GREEN before
+  the final source freeze, not the final focused or complete gate;
+- `task-7A-self-review-green-01.log`: failed test-only accessor state despite its
+  name, superseded by `task-7A-self-review-green-02.log`;
+- `task-7A-contract-green-01.log`: three errors despite its name, superseded by
+  `task-7A-contract-green-02.log`;
+- all earlier diagnostic setup failures described above, including the initial
+  watcher Tee failure, sandbox-token watcher diagnostics, the invalid first
+  prefix diagnostic, the first publication/input diagnostic harness attempts,
+  and intentional diagnostic Exit 1 captures. They remain diagnostic or failed
+  evidence only and are not counted as GREEN/gate evidence.
+
+The job-owned empty temp roots `nt\\a2`, `nt\\f2`, `nt\\a3`, `nt\\f3`, and
+`nt\\task7a-review2-focused-temp` were verified as direct, non-reparse, empty
+directories and removed by exact literal path. A post-removal real-token process
+inventory found zero external command lines referencing those paths, and all
+five paths are absent. No historical scratch or other temp path was touched.
+
+The ordinary unstaged source/test/report `git diff --check` was clean apart from
+the repository's CRLF conversion notices. After adding the complete immutable
+evidence package, cached `diff --check` reports trailing whitespace at exactly
+`task-7A-review2-baseline-red-01.log:1`,
+`task-7A-review2-collision-red-01.log:1`,
+`task-7A-review2-collision-red-02.log:1`,
+`task-7A-review2-native-focused-01.log:6`,
+`task-7A-review2-native-focused-03.log:8`, and
+`task-7A-review2-nonnative-01.log:19`. Those six raw test-output lines are
+intentionally preserved byte-for-byte, with their sizes and SHA-256 values
+verified against the evidence inventory; they are evidence-format exceptions,
+not source or test code-quality failures.
+
+This remains implementation-worker evidence awaiting the same independent
+reviewer's third decision. No Task 7B, live MO2/game action, original-attempt
+action, public-main mutation, or push is authorized by this report.

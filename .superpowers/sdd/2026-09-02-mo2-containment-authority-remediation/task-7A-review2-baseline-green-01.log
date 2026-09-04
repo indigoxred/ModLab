@@ -1,0 +1,7 @@
+test_relocation_baseline_presence_is_scenario_specific (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_baseline_presence_is_scenario_specific) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.005s
+
+OK
+Exit 0

@@ -1,0 +1,26 @@
+test_retained_replacement_outputs_are_canonical_not_acquisition_order (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_replacement_outputs_are_canonical_not_acquisition_order) ... FAIL
+
+======================================================================
+FAIL: test_retained_replacement_outputs_are_canonical_not_acquisition_order (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_replacement_outputs_are_canonical_not_acquisition_order)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 3867, in test_retained_replacement_outputs_are_canonical_not_acquisition_order
+    self.assertEqual(
+AssertionError: Tuples differ: ('meshes/canary.bin', 'meshes/new.bin', 'meta.ini') != ('meta.ini', 'meshes/canary.bin', 'meshes/new.bin')
+
+First differing element 0:
+'meshes/canary.bin'
+'meta.ini'
+
+- ('meshes/canary.bin', 'meshes/new.bin', 'meta.ini')
+?                                       ------------
+
++ ('meta.ini', 'meshes/canary.bin', 'meshes/new.bin')
+?  ++++++++++++
+
+
+----------------------------------------------------------------------
+Ran 1 test in 0.001s
+
+FAILED (failures=1)
+Exit 1

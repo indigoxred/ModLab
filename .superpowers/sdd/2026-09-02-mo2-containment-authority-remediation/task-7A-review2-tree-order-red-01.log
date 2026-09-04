@@ -1,0 +1,17 @@
+test_retained_relocation_members_compare_in_canonical_evidence_order (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_relocation_members_compare_in_canonical_evidence_order) ... ERROR
+
+======================================================================
+ERROR: test_retained_relocation_members_compare_in_canonical_evidence_order (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_relocation_members_compare_in_canonical_evidence_order)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 4077, in test_retained_relocation_members_compare_in_canonical_evidence_order
+    junction._verify_relocation_item(item)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\windows_junction.py", line 1307, in _verify_relocation_item
+    raise ContainmentSafetyError("relocation retained tree membership changed")
+modlab.validation.windows_junction.ContainmentSafetyError: relocation retained tree membership changed
+
+----------------------------------------------------------------------
+Ran 1 test in 0.001s
+
+FAILED (errors=1)
+Exit 1

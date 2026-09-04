@@ -4,7 +4,7 @@ from __future__ import annotations
 from modlab.adapters.mo2.path_budget import PathBudget, PlannedPath, admit_paths, publication_paths
 
 from contextvars import ContextVar
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from functools import partial, wraps
 import hashlib
@@ -97,12 +97,16 @@ from .windows_integrity import (
 )
 from .windows_junction import (
     ContainmentSafetyError,
-    adopt_unique_staged_mod,
+    JunctionOwnershipError,
+    OwnedProjection,
+    RetainedRelocationAuthority,
+    adopt_retained_relocation,
     create_mod_projection,
     ensure_direct_subdirectory,
     inspect_junction,
-    quarantine_exact_object,
-    quarantine_replacement_tree,
+    quarantine_retained_relocation,
+    quarantine_retained_replacement,
+    retain_relocation_authority,
     stable_tree_identity,
 )
 from . import windows_watch as _windows_watch
@@ -348,6 +352,9 @@ _ACTIVE_GUARDED_MUTATION_ROOTS: ContextVar[tuple[Path, ...]] = ContextVar(
     "mo2_containment_guarded_mutation_roots",
     default=(),
 )
+_ACTIVE_RELOCATION_AUTHORITIES: ContextVar[
+    tuple[RetainedRelocationAuthority, ...]
+] = ContextVar("mo2_containment_relocation_authorities", default=())
 
 
 def _current_effects() -> _EffectLedger:
@@ -390,6 +397,7 @@ class _RelocationAdmission:
     changed_names: tuple[str, ...]
     mutation_names: tuple[str, ...]
     destination_map: tuple[tuple[str, tuple[str, ...]], ...]
+    quarantine_names: tuple[str, ...] | None
     source_volume: int
     stage_volume: int
     destination_volume: int
@@ -407,6 +415,7 @@ class _RelocationAdmission:
                 "changedNames": self.changed_names,
                 "mutationNames": self.mutation_names,
                 "destinationMap": self.destination_map,
+                "quarantineNames": self.quarantine_names,
                 "sourceVolume": self.source_volume,
                 "stageVolume": self.stage_volume,
                 "destinationVolume": self.destination_volume,
@@ -418,6 +427,28 @@ class _RelocationAdmission:
             sort_keys=True,
         ).encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
+
+
+@dataclass
+class _RetainedRelocation:
+    admission: _RelocationAdmission
+    authority: RetainedRelocationAuthority
+    expected_projections: tuple = ()
+
+    def verify(self, *, require_quarantine_parent: bool = False) -> None:
+        if (
+            _relocation_projection_rows(self.expected_projections)
+            != self.admission.projection_rows
+        ):
+            raise ContainmentServiceError(
+                "relocation expected projection ownership changed"
+            )
+        self.authority.verify(
+            require_quarantine_parent=require_quarantine_parent,
+        )
+
+    def bind_quarantine_parent(self, owner: object) -> None:
+        self.authority.bind_quarantine_parent(owner)
 
 
 def _canonical_relocation_rows(
@@ -552,6 +583,63 @@ def _relocation_projection_rows(
     return tuple(rows)
 
 
+def _reject_relocation_destination_collisions(
+    record,
+    quarantine: Path,
+    mutation_names: tuple[str, ...],
+    source_names: tuple[str, ...],
+) -> tuple[str, ...] | None:
+    """Reject known destination collisions before any quarantine root creation."""
+    mutation_folds = {name.casefold() for name in mutation_names}
+    if record.scenario in _EXPECTED_OUTPUTS:
+        expected = _EXPECTED_NEW[record.scenario]
+        if (
+            expected.casefold() in mutation_folds
+            and any(name.casefold() == expected.casefold() for name in source_names)
+        ):
+            raise ContainmentServiceError(
+                f"relocation destination collision in source mods for {expected!r}"
+            )
+
+    destination = Path(quarantine)
+    try:
+        metadata = destination.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ContainmentServiceError(
+            "relocation quarantine destination is unavailable"
+        ) from error
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
+        or not stat.S_ISDIR(metadata.st_mode)
+    ):
+        raise ContainmentServiceError(
+            "relocation quarantine destination is not a direct directory"
+        )
+    try:
+        names = _direct_names(destination)
+    except OSError as error:
+        raise ContainmentServiceError(
+            "relocation quarantine destination is unavailable"
+        ) from error
+    folded = tuple(name.casefold() for name in names)
+    if len(folded) != len(set(folded)):
+        raise ContainmentServiceError(
+            "relocation quarantine destination contains a case-insensitive collision"
+        )
+    collision = next(
+        (name for name in names if name.casefold() in mutation_folds),
+        None,
+    )
+    if collision is not None:
+        raise ContainmentServiceError(
+            f"relocation destination collision in quarantine for {collision!r}"
+        )
+    return names
+
+
 def _preflight_projection_relocation(
     record,
     quarantine: Path,
@@ -607,6 +695,12 @@ def _preflight_projection_relocation(
 
     unexpected = tuple(name for name in stage_names if name not in record.before_names)
     mutation_names = tuple(dict.fromkeys((*changed_names, *unexpected)))
+    quarantine_names = _reject_relocation_destination_collisions(
+        record,
+        Path(quarantine),
+        mutation_names,
+        source_names,
+    )
     expected = _EXPECTED_NEW[record.scenario]
     destination_map = []
     for name in mutation_names:
@@ -644,6 +738,7 @@ def _preflight_projection_relocation(
         changed_names,
         mutation_names,
         tuple(destination_map),
+        quarantine_names,
         source_volume,
         stage_volume,
         destination_volume,
@@ -670,14 +765,89 @@ def _require_relocation_admission(
 
 
 @contextmanager
+def _retained_projection_relocation(
+    record,
+    quarantine: Path,
+    guards_by_path: Mapping[Path, object],
+    expected: _RelocationAdmission,
+    *,
+    expected_projections: tuple = (),
+):
+    """Bind one immutable relocation admission to live exact-object owners."""
+    admission = _require_relocation_admission(
+        record,
+        quarantine,
+        expected,
+        expected_projections=expected_projections,
+    )
+    source_parent = guards_by_path.get(Path(record.source_mods))
+    stage_parent = guards_by_path.get(Path(record.stage_mods))
+    quarantine_parent = guards_by_path.get(Path(quarantine))
+    if source_parent is None or stage_parent is None:
+        raise ContainmentServiceError(
+            "relocation mutation-root owners are unavailable"
+        )
+    authority = None
+    primary = None
+    try:
+        authority = retain_relocation_authority(
+            source_mods=record.source_mods,
+            stage_mods=record.stage_mods,
+            quarantine_root=Path(quarantine),
+            source_rows=admission.source_rows,
+            stage_rows=admission.stage_rows,
+            source_names=admission.source_names,
+            stage_names=admission.stage_names,
+            mutation_names=admission.mutation_names,
+            destination_map=admission.destination_map,
+            quarantine_names=admission.quarantine_names,
+            source_parent=source_parent,
+            stage_parent=stage_parent,
+            quarantine_parent=quarantine_parent,
+        )
+        yield _RetainedRelocation(admission, authority, expected_projections)
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        if authority is not None:
+            try:
+                authority.close()
+            except JunctionOwnershipError as error:
+                if primary is not None:
+                    raise error from primary
+                raise
+
+
+def _verify_retained_relocation_before_creation(
+    relocation: _RetainedRelocation,
+) -> None:
+    relocation.verify()
+
+
+def _bind_retained_relocation_root(
+    relocation: _RetainedRelocation,
+    owner: object,
+) -> None:
+    relocation.bind_quarantine_parent(owner)
+
+
+def _verify_retained_relocation_before_operation(
+    relocation: _RetainedRelocation,
+) -> None:
+    relocation.verify(require_quarantine_parent=True)
+
+
+@contextmanager
 def _retained_relocation_projections(store, run_id: str, record):
     """Retain the one admitted baseline projection when it is still present."""
     link = record.stage_mods / _PROTECTED_NAME
     try:
         metadata = link.lstat()
     except FileNotFoundError:
-        yield ()
-        return
+        raise ContainmentServiceError(
+            "relocation baseline projection is missing"
+        )
     except OSError as error:
         raise ContainmentServiceError(
             "relocation baseline projection identity is unavailable"
@@ -686,8 +856,15 @@ def _retained_relocation_projections(store, run_id: str, record):
         getattr(metadata, "st_file_attributes", 0) & 0x400
     )
     if not redirected:
-        yield ()
-        return
+        if (
+            record.scenario is ContainmentScenario.REPLACE_EXISTING
+            and stat.S_ISDIR(metadata.st_mode)
+        ):
+            yield ()
+            return
+        raise ContainmentServiceError(
+            "relocation baseline projection is not the exact prepared object"
+        )
     try:
         projection = store.load_preparation_projection(
             run_id,
@@ -819,11 +996,31 @@ def _mutation_root_guard(
         expected_pinned_identity = pinned.identity
     assert pinned is not None
     try:
+        def identity_pair(value: object) -> tuple[int, int]:
+            if isinstance(value, PinnedIdentity):
+                return (value.volume_serial, value.file_id)
+            if (
+                type(value) is tuple
+                and len(value) == 2
+                and all(type(part) is int for part in value)
+            ):
+                return value
+            raise _MutationObservationError(
+                f"delegated mutation guard identity is malformed at {existing}"
+            )
+
+        pinned_identity_matches = (
+            expected_pinned_identity == pinned.identity
+            if isinstance(expected_pinned_identity, PinnedIdentity)
+            else identity_pair(expected_pinned_identity)
+            == identity_pair(pinned.identity)
+        )
         if (
             pinned.identity is None
             or expected_pinned_identity is None
-            or expected_pinned_identity != pinned.identity
-            or identity_at_path(existing) != pinned.identity
+            or not pinned_identity_matches
+            or identity_pair(identity_at_path(existing))
+            != identity_pair(pinned.identity)
         ):
             raise _MutationObservationError(
                 f"delegated mutation guard pinned a changed identity at {existing}"
@@ -1069,6 +1266,10 @@ def _mutation_root_observation(
         if path in pinned_direct:
             verify_projections()
             return pinned_direct[path]
+        for authority in _ACTIVE_RELOCATION_AUTHORITIES.get():
+            pinned = authority.pin_for_path(path)
+            if pinned is not None:
+                return pinned
         if path in _ACTIVE_GUARDED_MUTATION_ROOTS.get():
             return None
         pinned = pin_stable_direct_object(path, kind)
@@ -1364,6 +1565,48 @@ def _projection_relevant_to_root(root: Path, owner) -> bool:
     return any(path == root or _beneath(root, path) for path in paths)
 
 
+def _borrowed_projection_root_guards(
+    expected_projections: tuple,
+    roots: tuple[Path, ...],
+) -> dict[Path, object]:
+    """Borrow only exact persisted-projection parent pins for matching roots."""
+    if type(expected_projections) is not tuple or any(
+        type(owner) is not OwnedProjection for owner in expected_projections
+    ):
+        raise _MutationObservationError(
+            "expected projections must be exact retained owners"
+        )
+    exact_by_spelling = {str(Path(root)): Path(root) for root in roots}
+    borrowed: dict[Path, object] = {}
+    for owner in expected_projections:
+        try:
+            owner.verify()
+        except (ContainmentSafetyError, OSError) as error:
+            raise _MutationObservationError(str(error)) from error
+        target_parent = owner.pins[2]
+        link_parent = owner.pins[3]
+        expected = (
+            (target_parent, Path(owner.evidence.target_path).parent),
+            (link_parent, Path(owner.evidence.link_path).parent),
+        )
+        for pinned, evidence_path in expected:
+            pinned_path = Path(pinned.path)
+            if str(pinned_path) != str(evidence_path):
+                raise _MutationObservationError(
+                    "persisted projection parent path binding differs"
+                )
+            root = exact_by_spelling.get(str(pinned_path))
+            if root is None:
+                continue
+            prior = borrowed.get(root)
+            if prior is not None and prior is not pinned:
+                raise _MutationObservationError(
+                    f"multiple retained projection parents claim {root}"
+                )
+            borrowed[root] = pinned
+    return borrowed
+
+
 def _delegated_mutations_guarded(
     roots: tuple[Path, ...],
     operation: Callable[[], _V],
@@ -1550,15 +1793,20 @@ def _delegated_mutations(
     operation: Callable[[], _V],
     *,
     expected_projections: tuple = (),
+    guarded_operation: Callable[[Mapping[Path, object]], _V] | None = None,
 ) -> _V:
     exact_roots = _unique_paths(roots)
+    borrowed_guards = _borrowed_projection_root_guards(
+        expected_projections,
+        exact_roots,
+    )
     guards: list[object] = []
     primary: BaseException | None = None
     try:
         for root in exact_roots:
             guard = _mutation_root_guard(
                 root,
-                tuple(guards),
+                (*borrowed_guards.values(), *guards),
                 require_target_existing=True,
             )
             if guard is not None:
@@ -1567,7 +1815,16 @@ def _delegated_mutations(
         try:
             return _delegated_mutations_guarded(
                 exact_roots,
-                operation,
+                (
+                    operation
+                    if guarded_operation is None
+                    else lambda: guarded_operation(
+                        {
+                            **borrowed_guards,
+                            **{Path(guard.path): guard for guard in guards},
+                        }
+                    )
+                ),
                 expected_projections=expected_projections,
             )
         finally:
@@ -1703,6 +1960,12 @@ def _delegated_mutations_with_created_root(
     *,
     require_absent: bool = False,
     expected_projections: tuple = (),
+    retained_preflight: Callable[
+        [Mapping[Path, object], _P], object
+    ] | None = None,
+    verify_before_create: Callable[[_P], None] | None = None,
+    bind_created_root: Callable[[_P, object], None] | None = None,
+    verify_before_operation: Callable[[_P], None] | None = None,
 ) -> _V:
     """Create and retain each missing direct root component before delegating."""
     target = Path(created_root)
@@ -1716,16 +1979,49 @@ def _delegated_mutations_with_created_root(
             raise _MutationObservationError(
                 f"fresh service-controlled mutation root already exists: {target}"
             )
+        def run_existing(guards_by_path: Mapping[Path, object]) -> _V:
+            expected = preflight()
+            manager = (
+                retained_preflight(guards_by_path, expected)
+                if retained_preflight is not None
+                else nullcontext(expected)
+            )
+            with manager as prepared:
+                authority_token = None
+                if isinstance(prepared, _RetainedRelocation):
+                    authority_token = _ACTIVE_RELOCATION_AUTHORITIES.set(
+                        (*_ACTIVE_RELOCATION_AUTHORITIES.get(), prepared.authority)
+                    )
+                try:
+                    if bind_created_root is not None:
+                        bind_created_root(prepared, guards_by_path[target])
+                    if verify_before_create is not None:
+                        verify_before_create(prepared)
+                    if verify_before_operation is not None:
+                        verify_before_operation(prepared)
+                    return operation(prepared)
+                finally:
+                    if authority_token is not None:
+                        _ACTIVE_RELOCATION_AUTHORITIES.reset(authority_token)
+
         return _delegated_mutations(
             exact_roots,
             lambda: operation(preflight()),
             expected_projections=expected_projections,
+            guarded_operation=run_existing,
         )
 
+    borrowed_guards = _borrowed_projection_root_guards(
+        expected_projections,
+        exact_roots,
+    )
     guards: list[object] = []
     primary: BaseException | None = None
     try:
-        ancestor_guard = _mutation_root_guard(target)
+        ancestor_guard = _mutation_root_guard(
+            target,
+            tuple(borrowed_guards.values()),
+        )
         if ancestor_guard is not None:
             guards.append(ancestor_guard)
             ancestor = Path(ancestor_guard.path)
@@ -1742,92 +2038,117 @@ def _delegated_mutations_with_created_root(
                 continue
             guard = _mutation_root_guard(
                 root,
-                tuple(guards),
+                (*borrowed_guards.values(), *guards),
                 require_target_existing=True,
             )
             if guard is not None:
                 guards.append(guard)
 
+        guards_by_path = {
+            **borrowed_guards,
+            **{Path(guard.path): guard for guard in guards},
+        }
         preflight_token = _ACTIVE_GUARDED_MUTATION_ROOTS.set(exact_roots)
         try:
-            prepared = preflight()
+            expected = preflight()
+            manager = (
+                retained_preflight(guards_by_path, expected)
+                if retained_preflight is not None
+                else nullcontext(expected)
+            )
+            with manager as prepared:
+                authority_token = None
+                if isinstance(prepared, _RetainedRelocation):
+                    authority_token = _ACTIVE_RELOCATION_AUTHORITIES.set(
+                        (*_ACTIVE_RELOCATION_AUTHORITIES.get(), prepared.authority)
+                    )
+                try:
+                    if _direct_directory_present(target):
+                        _current_effects().child_mutation_root(target)
+                        raise _MutationObservationError(
+                            "service-controlled preflight mutated its delegated root: "
+                            f"{target}"
+                        )
+                    if verify_before_create is not None:
+                        verify_before_create(prepared)
+
+                    try:
+                        relative = target.relative_to(ancestor)
+                    except ValueError as error:
+                        raise _MutationObservationError(
+                            "service-controlled mutation root escapes its retained "
+                            f"ancestor: {target}"
+                        ) from error
+                    if os.name != "nt" or not guards:
+                        raise _MutationObservationError(
+                            "exact service-controlled directory creation is unavailable "
+                            "outside the Windows retained-handle authority path"
+                        )
+                    current = ancestor
+                    creation_parent = guards[0]
+                    for part in relative.parts:
+                        current /= part
+                        try:
+                            guard = create_pinned_directory_child(current, creation_parent)
+                        except FileExistsError as error:
+                            raise _MutationObservationError(
+                                "service-controlled mutation root appeared before exact "
+                                f"creation: {current}"
+                            ) from error
+                        except ExactDirectoryCreationOwnershipError as error:
+                            _receipt_exact_directory_creation_failure(
+                                error,
+                                current,
+                                creation_parent,
+                            )
+                            raise ContainmentStoreOwnershipError(
+                                "service-controlled directory creation retained exact ownership",
+                                error,
+                            ) from error
+                        except ExactObjectOwnershipError as error:
+                            raise ContainmentStoreOwnershipError(
+                                "service-controlled directory creation retained exact ownership",
+                                error,
+                            ) from error
+                        except ExactDirectoryCreationError as error:
+                            _receipt_exact_directory_creation_failure(
+                                error,
+                                current,
+                                creation_parent,
+                            )
+                            raise _MutationObservationError(
+                                "service-controlled mutation root creation returned an "
+                                f"unowned or rejected native outcome: {current}"
+                            ) from error
+                        except ExactObjectError as error:
+                            raise _MutationObservationError(
+                                "service-controlled mutation root creation was rejected: "
+                                f"{current}"
+                            ) from error
+                        except OSError as error:
+                            raise _MutationObservationError(
+                                "service-controlled mutation root creation failed: "
+                                f"{current}"
+                            ) from error
+                        guards.append(guard)
+                        guards_by_path[Path(guard.path)] = guard
+                        _current_effects().child_mutation_root(current)
+                        creation_parent = guard
+
+                    if bind_created_root is not None:
+                        bind_created_root(prepared, creation_parent)
+                    if verify_before_operation is not None:
+                        verify_before_operation(prepared)
+                    return _delegated_mutations_guarded(
+                        exact_roots,
+                        lambda: operation(prepared),
+                        expected_projections=expected_projections,
+                    )
+                finally:
+                    if authority_token is not None:
+                        _ACTIVE_RELOCATION_AUTHORITIES.reset(authority_token)
         finally:
             _ACTIVE_GUARDED_MUTATION_ROOTS.reset(preflight_token)
-        if _direct_directory_present(target):
-            _current_effects().child_mutation_root(target)
-            raise _MutationObservationError(
-                "service-controlled preflight mutated its delegated root: "
-                f"{target}"
-            )
-
-        try:
-            relative = target.relative_to(ancestor)
-        except ValueError as error:
-            raise _MutationObservationError(
-                f"service-controlled mutation root escapes its retained ancestor: {target}"
-            ) from error
-        if os.name != "nt" or not guards:
-            raise _MutationObservationError(
-                "exact service-controlled directory creation is unavailable "
-                "outside the Windows retained-handle authority path"
-            )
-        current = ancestor
-        creation_parent = guards[0]
-        for part in relative.parts:
-            current /= part
-            try:
-                guard = create_pinned_directory_child(current, creation_parent)
-            except FileExistsError as error:
-                raise _MutationObservationError(
-                    "service-controlled mutation root appeared before exact "
-                    f"creation: {current}"
-                ) from error
-            except ExactDirectoryCreationOwnershipError as error:
-                _receipt_exact_directory_creation_failure(
-                    error,
-                    current,
-                    creation_parent,
-                )
-                raise ContainmentStoreOwnershipError(
-                    "service-controlled directory creation retained exact ownership",
-                    error,
-                ) from error
-            except ExactObjectOwnershipError as error:
-                raise ContainmentStoreOwnershipError(
-                    "service-controlled directory creation retained exact ownership",
-                    error,
-                ) from error
-            except ExactDirectoryCreationError as error:
-                _receipt_exact_directory_creation_failure(
-                    error,
-                    current,
-                    creation_parent,
-                )
-                raise _MutationObservationError(
-                    "service-controlled mutation root creation returned an "
-                    f"unowned or rejected native outcome: {current}"
-                ) from error
-            except ExactObjectError as error:
-                raise _MutationObservationError(
-                    f"service-controlled mutation root creation was rejected: {current}"
-                ) from error
-            except OSError as error:
-                raise _MutationObservationError(
-                    f"service-controlled mutation root creation failed: {current}"
-                ) from error
-            guards.append(guard)
-            _current_effects().child_mutation_root(current)
-            creation_parent = guard
-
-        token = _ACTIVE_GUARDED_MUTATION_ROOTS.set(exact_roots)
-        try:
-            return _delegated_mutations_guarded(
-                exact_roots,
-                lambda: operation(prepared),
-                expected_projections=expected_projections,
-            )
-        finally:
-            _ACTIVE_GUARDED_MUTATION_ROOTS.reset(token)
     except BaseException as error:
         primary = error
         raise
@@ -3288,6 +3609,15 @@ def capture_scenario(
                 expected_projections=projections,
             ),
             expected_projections=projections,
+            retained_preflight=partial(
+                _retained_projection_relocation,
+                record,
+                projection_quarantine,
+                expected_projections=projections,
+            ),
+            verify_before_create=_verify_retained_relocation_before_creation,
+            bind_created_root=_bind_retained_relocation_root,
+            verify_before_operation=_verify_retained_relocation_before_operation,
         )
     store.write_protected_state(
         run_id,
@@ -4050,7 +4380,7 @@ def _finalize_projection(
     post_mo2: ProtectedState,
     *,
     quarantine_root: Path | None = None,
-    relocation: _RelocationAdmission | None = None,
+    relocation: _RetainedRelocation | None = None,
     expected_projections: tuple = (),
 ) -> _ProjectionEvidence:
     incomplete: list[str] = []
@@ -4060,20 +4390,14 @@ def _finalize_projection(
         else Path(quarantine_root)
     )
     if relocation is None:
-        relocation = _preflight_projection_relocation(
-            record,
-            prospective_quarantine,
-            expected_projections=expected_projections,
+        raise ContainmentServiceError(
+            "retained relocation authority is required before projection mutation"
         )
-    relocation = _require_relocation_admission(
-        record,
-        prospective_quarantine,
-        relocation,
-        expected_projections=expected_projections,
-    )
-    stage_names = relocation.stage_names
-    source_names = relocation.source_names
-    changed_snapshot = relocation.changed_names
+    relocation.verify(require_quarantine_parent=True)
+    admitted = relocation.admission
+    stage_names = admitted.stage_names
+    source_names = admitted.source_names
+    changed_snapshot = admitted.changed_names
     staging_complete = True
     production_complete = True
     production_backups = tuple(name for name in source_names if name not in record.before_names)
@@ -4113,20 +4437,20 @@ def _finalize_projection(
         adoption = None
         if post_mo2 != before:
             safety.append("protected-state-changed-before-adoption")
-            quarantine_names = relocation.mutation_names if staging_complete else ()
-            for name in quarantine_names:
-                try:
-                    _quarantine_exact(record.stage_mods / name, quarantine)
-                except (OSError, ContainmentSafetyError):
-                    incomplete.append("staging-quarantine-failed")
+            quarantine_names = admitted.mutation_names if staging_complete else ()
+            try:
+                quarantine_retained_relocation(
+                    relocation.authority,
+                    quarantine_names,
+                )
+            except (OSError, ContainmentSafetyError):
+                incomplete.append("staging-quarantine-failed")
         else:
             try:
-                adoption = adopt_unique_staged_mod(
-                    stage_mods=record.stage_mods,
-                    source_mods=record.source_mods,
+                adoption = adopt_retained_relocation(
+                    relocation.authority,
                     expected_name=expected,
                     before_names=record.before_names,
-                    quarantine_root=quarantine,
                 )
                 candidate_integrity = to_integrity_observation(
                     adoption.final_integrity
@@ -4143,7 +4467,11 @@ def _finalize_projection(
             finally:
                 if adoption is not None and _exists_no_follow(adoption.destination_path):
                     try:
-                        _quarantine_exact(adoption.destination_path, quarantine)
+                        quarantine_retained_relocation(
+                            relocation.authority,
+                            (expected,),
+                            verify=False,
+                        )
                     except (OSError, ContainmentSafetyError):
                         incomplete.append("adopted-source-quarantine-failed")
         final = _capture_protected(record)
@@ -4159,10 +4487,9 @@ def _finalize_projection(
         if replacement_candidate:
             replacement = record.stage_mods / _PROTECTED_NAME
             try:
-                replacement_evidence = quarantine_replacement_tree(
-                    stage_mods=record.stage_mods,
+                replacement_evidence = quarantine_retained_replacement(
+                    relocation.authority,
                     expected_name=_PROTECTED_NAME,
-                    quarantine_root=quarantine,
                 )
                 outputs = replacement_evidence.output_names
                 output_complete = True
@@ -4184,12 +4511,14 @@ def _finalize_projection(
         else:
             if unexpected or changed:
                 safety.append("unexpected-staging-backup")
-            quarantine_names = relocation.mutation_names if staging_complete else ()
-            for name in quarantine_names:
-                try:
-                    _quarantine_exact(record.stage_mods / name, quarantine)
-                except (OSError, ContainmentSafetyError):
-                    incomplete.append("staging-quarantine-failed")
+            quarantine_names = admitted.mutation_names if staging_complete else ()
+            try:
+                quarantine_retained_relocation(
+                    relocation.authority,
+                    quarantine_names,
+                )
+            except (OSError, ContainmentSafetyError):
+                incomplete.append("staging-quarantine-failed")
         if record.scenario is ContainmentScenario.REPLACE_EXISTING:
             if not projection_complete:
                 incomplete.append("projection-observation-unavailable")
@@ -4278,17 +4607,14 @@ def _perform_recovery_cleanup(
     )
 
     def quarantine_recovery(
-        prepared: _RelocationAdmission,
+        prepared: _RetainedRelocation,
         projections: tuple,
     ) -> None:
-        admitted = _require_relocation_admission(
-            record,
-            recovery_quarantine,
-            prepared,
-            expected_projections=projections,
+        prepared.verify(require_quarantine_parent=True)
+        quarantine_retained_relocation(
+            prepared.authority,
+            prepared.admission.mutation_names,
         )
-        for name in admitted.mutation_names:
-            _quarantine_exact(record.stage_mods / name, recovery_quarantine)
 
     try:
         with _retained_relocation_projections(
@@ -4307,6 +4633,15 @@ def _perform_recovery_cleanup(
                 ),
                 partial(quarantine_recovery, projections=projections),
                 expected_projections=projections,
+                retained_preflight=partial(
+                    _retained_projection_relocation,
+                    record,
+                    recovery_quarantine,
+                    expected_projections=projections,
+                ),
+                verify_before_create=_verify_retained_relocation_before_creation,
+                bind_created_root=_bind_retained_relocation_root,
+                verify_before_operation=_verify_retained_relocation_before_operation,
             )
     except (OSError, ValueError, ContainmentSafetyError, ContainmentServiceError):
         blockers.append("staging-quarantine-failed")
@@ -4744,10 +5079,6 @@ def _relative_files(root: Path) -> tuple[str, ...]:
                 raise ContainmentSafetyError("adopted output contains a reparse file")
             rows.append(path.relative_to(root).as_posix())
     return tuple(sorted(rows))
-
-
-def _quarantine_exact(source: Path, quarantine: Path) -> None:
-    quarantine_exact_object(source, quarantine)
 
 
 def _exists_no_follow(path: Path) -> bool:

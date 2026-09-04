@@ -1,0 +1,10 @@
+Token desktop-947h2kl\red
+test_retained_replacement_outputs_are_canonical_not_acquisition_order (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_replacement_outputs_are_canonical_not_acquisition_order) ... ok
+test_capture_scenario_routes_real_relocation_refusals_before_mutation (tests.test_mo2_path_budget.NativePathBudgetTests.test_capture_scenario_routes_real_relocation_refusals_before_mutation) ... ok
+test_recovery_cleanup_routes_real_relocation_refusals_before_mutation (tests.test_mo2_path_budget.NativePathBudgetTests.test_recovery_cleanup_routes_real_relocation_refusals_before_mutation) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.274s
+
+OK
+Exit 0

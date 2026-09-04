@@ -1,0 +1,29 @@
+test_retained_authority_closes_partial_tree_carried_by_pin_rejection (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_authority_closes_partial_tree_carried_by_pin_rejection) ... FAIL
+
+======================================================================
+FAIL: test_retained_authority_closes_partial_tree_carried_by_pin_rejection (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_authority_closes_partial_tree_carried_by_pin_rejection)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 4159, in test_retained_authority_closes_partial_tree_carried_by_pin_rejection
+    self.assertEqual(
+AssertionError: Tuples differ: ((_PinnedTree(root=namespace(path=WindowsPa[172 chars]ion') != ((), 'retained relocation authority acquisition')
+
+First differing element 0:
+(_PinnedTree(root=namespace(path=WindowsPa[126 chars]')),)
+()
+
+- ((_PinnedTree(root=namespace(path=WindowsPath('C:/fixture/stage/Candidate'),
+-                              handle=1,
+-                              identity=(1, 3)),
+-               entries=[],
+-               current_path=WindowsPath('C:/fixture/stage/Candidate')),),
+-  'retained relocation authority acquisition')
++ ((), 'retained relocation authority acquisition')
+? ++++
+
+
+----------------------------------------------------------------------
+Ran 1 test in 0.002s
+
+FAILED (failures=1)
+Exit 1

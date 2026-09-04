@@ -1,0 +1,7 @@
+test_relocation_preflight_rejects_source_and_quarantine_name_collisions (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_preflight_rejects_source_and_quarantine_name_collisions) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.015s
+
+OK
+Exit 0

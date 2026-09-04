@@ -1,0 +1,13 @@
+Token=DESKTOP-947H2KL\red
+Python=C:\Users\red\AppData\Local\Microsoft\WindowsApps\python.exe
+Before modlab\validation\mo2_containment_service.py B424CBD6F3F37226C647F0EDCC982157590802288F585338DB9C90C36325F0CB
+Before modlab\validation\windows_junction.py 9C40A85637AAD3A73ABDBD03C3A1B33B2DCD05083E1F1E6396CBAD306D047353
+Before tests\test_mo2_containment_service.py EE4A48440F403923292B5349FA8C9CA88A548D5C38EF7DD1F1F7348AAC9C6C95
+Before tests\test_mo2_path_budget.py 8C412320929891D7141722FDC1E80233ADF7E631A70CE9A0A4319FE777950038
+Python was not found; run without arguments to install from the Microsoft Store, or disable this shortcut from Settings > Apps > Advanced app settings > App execution aliases.
+After modlab\validation\mo2_containment_service.py B424CBD6F3F37226C647F0EDCC982157590802288F585338DB9C90C36325F0CB
+After modlab\validation\windows_junction.py 9C40A85637AAD3A73ABDBD03C3A1B33B2DCD05083E1F1E6396CBAD306D047353
+After tests\test_mo2_containment_service.py EE4A48440F403923292B5349FA8C9CA88A548D5C38EF7DD1F1F7348AAC9C6C95
+After tests\test_mo2_path_budget.py 8C412320929891D7141722FDC1E80233ADF7E631A70CE9A0A4319FE777950038
+HashMismatchCount=0
+Exit 9009

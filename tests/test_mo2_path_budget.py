@@ -1012,6 +1012,812 @@ class PathBudgetPolicyTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "native bounded preparation consumers require Windows")
 class NativePathBudgetTests(unittest.TestCase):
+    def _outer_relocation_case(self, root, kind, *, case_variant=False):
+        from modlab.validation import mo2_containment_service as service
+        from modlab.validation import windows_junction as junction
+
+        scenario = service.ContainmentScenario.NEW_FOLDER
+        run_root = root / ("a" * 32)
+        run_id = "containment-run:" + run_root.name
+        fixture = run_root / "fixtures" / "v2" / scenario.value
+        source_root = fixture / "s"
+        stage_root = fixture / "t"
+        source = source_root / "tools" / "mo2" / "skyrim-se-ae" / "mods"
+        stage = stage_root / "tools" / "mo2" / "skyrim-se-ae" / "mods"
+        protected = source / "Protected Existing"
+        link = stage / "Protected Existing"
+        protected.mkdir(parents=True)
+        source_marker = protected / "marker.txt"
+        source_marker.write_bytes(b"protected\n")
+        stage.mkdir(parents=True)
+
+        projection = None
+        candidate = None
+        collision = None
+        tracked = [protected, source_marker]
+        if kind != "baseline-missing":
+            owner = junction.create_owned_projection(protected, link)
+            projection = SimpleNamespace(
+                run_id=run_id,
+                scenario=scenario.value,
+                identities=tuple(
+                    SimpleNamespace(
+                        path=str(pin.path),
+                        volume=pin.identity[0],
+                        file_id=pin.identity[1],
+                    )
+                    for pin in owner.pins
+                ),
+                payload_hex=owner.payload.hex(),
+            )
+            owner.close()
+            tracked.append(link)
+            candidate = stage / "ModLab Spike New"
+            candidate.mkdir()
+            candidate_marker = candidate / "candidate.txt"
+            candidate_marker.write_bytes(b"candidate\n")
+            tracked.extend((candidate, candidate_marker))
+        if kind == "source-collision":
+            spelling = "ModLab Spike New"
+            if case_variant:
+                spelling = spelling.swapcase()
+            collision = source / spelling
+            collision.mkdir()
+            collision_marker = collision / "existing.txt"
+            collision_marker.write_bytes(b"existing\n")
+            tracked.extend((collision, collision_marker))
+
+        record = service.FixtureRecord(
+            scenario,
+            run_root,
+            source_root,
+            stage_root,
+            fixture / "archive.zip",
+            source,
+            stage,
+            source_root / "profiles" / "lab.txt",
+            source_root / "profiles" / "play.txt",
+            source_root / "downloads",
+            source_root / "overwrite",
+            fixture / "game",
+            stage_root / "app",
+            stage_root / "downloads",
+            stage_root / "profiles",
+            stage_root / "overwrite",
+            stage_root / "cache",
+            stage_root / "logs",
+            {},
+            (),
+            ("Protected Existing",),
+        )
+        quarantine_parent = root / "quarantine"
+        store = SimpleNamespace(
+            root=root / "validation",
+            run_path=lambda _run_id: run_root,
+            quarantine_path=lambda _run_id: quarantine_parent,
+            load_preparation_projection=lambda _run_id, _scenario: projection,
+        )
+        return SimpleNamespace(
+            scenario=scenario,
+            run_id=run_id,
+            record=record,
+            store=store,
+            source=source,
+            stage=stage,
+            candidate=candidate,
+            collision=collision,
+            tracked=tuple(tracked),
+            quarantine_parent=quarantine_parent,
+        )
+
+    def _exact_relocation_snapshot(self, paths):
+        from modlab.validation import windows_junction as junction
+
+        return tuple(
+            (
+                str(path),
+                junction._identity_at_path(path),
+                path.read_bytes() if path.is_file() else None,
+            )
+            for path in paths
+        )
+
+    def _assert_relocation_handles_closed(self, case):
+        for original in (case.stage, case.source):
+            moved = original.with_name(original.name + "-closed-probe")
+            original.rename(moved)
+            moved.rename(original)
+
+    def test_capture_scenario_routes_real_relocation_refusals_before_mutation(self):
+        from contextlib import nullcontext
+        from unittest.mock import patch
+        from modlab.validation import mo2_containment_service as service
+
+        cases = (
+            ("baseline-missing", False, "baseline projection"),
+            ("source-collision", False, "destination collision"),
+            ("membership-race", False, "membership changed"),
+        )
+        for kind, case_variant, message in cases:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(
+                prefix="m2o-capture-",
+                dir=Path(__file__).resolve().parents[1],
+            ) as temporary:
+                case = self._outer_relocation_case(
+                    Path(temporary), kind, case_variant=case_variant
+                )
+                before = self._exact_relocation_snapshot(case.tracked)
+                protected = object()
+                journal = SimpleNamespace(
+                    state=service.ScenarioState.LAUNCHED,
+                    mo2_pid=41,
+                    protected_before=protected,
+                )
+                outcome = SimpleNamespace(
+                    request_id="request",
+                    session_id="session",
+                    worker_pid=42,
+                    request_sha256="a" * 64,
+                )
+                receipt = SimpleNamespace(
+                    watch_outcome_id="outcome",
+                    run_id=case.run_id,
+                    scenario=case.scenario,
+                    request_id=outcome.request_id,
+                    session_id=outcome.session_id,
+                    worker_pid=outcome.worker_pid,
+                    request_bytes_sha256=outcome.request_sha256,
+                )
+                case.store.load_journal = lambda _run_id, _scenario: journal
+                case.store.load_launch_evidence = lambda _run_id, _scenario: {
+                    "pid": 41,
+                    "creationTime": 101,
+                }
+                case.store.watch_path = (
+                    lambda _run_id, _scenario: Path(temporary) / "watch"
+                )
+                case.store.load_watch_outcome = (
+                    lambda _run_id, _scenario, _outcome_id: outcome
+                )
+                injected = case.stage / "Injected"
+                real_verify = service._verify_retained_relocation_before_creation
+
+                def inject_then_verify(prepared):
+                    injected.mkdir()
+                    (injected / "foreign.txt").write_bytes(b"foreign\n")
+                    real_verify(prepared)
+
+                verifier = (
+                    patch.object(
+                        service,
+                        "_verify_retained_relocation_before_creation",
+                        side_effect=inject_then_verify,
+                    )
+                    if kind == "membership-race"
+                    else nullcontext()
+                )
+                with (
+                    verifier,
+                    patch.object(service, "_effect_store", return_value=case.store),
+                    patch.object(service, "_require_current_execution_policy"),
+                    patch.object(service, "_load_fixture_record", return_value=case.record),
+                    patch.object(
+                        service,
+                        "inspect_mo2_processes",
+                        return_value=SimpleNamespace(complete=True, relevant=()),
+                    ),
+                    patch.object(
+                        service,
+                        "_load_launch_process",
+                        return_value=SimpleNamespace(pid=41),
+                    ),
+                    patch.object(service, "_exact_process_absent", return_value=True),
+                    patch.object(service, "_delegated_mutation", return_value=receipt),
+                    patch.object(service, "_capture_protected", return_value=protected),
+                    patch.object(
+                        service,
+                        "_finalize_projection",
+                        side_effect=AssertionError("finalization must not begin"),
+                    ) as finalize,
+                    self.assertRaisesRegex(service.ContainmentOperationError, message),
+                ):
+                    service.capture_scenario(
+                        case.store.root,
+                        case.run_id,
+                        case.scenario,
+                    )
+
+                finalize.assert_not_called()
+                self.assertEqual(before, self._exact_relocation_snapshot(case.tracked))
+                self.assertFalse(
+                    (case.quarantine_parent / case.scenario.value).exists()
+                )
+                if kind == "membership-race":
+                    self.assertEqual(
+                        b"foreign\n", (injected / "foreign.txt").read_bytes()
+                    )
+                self._assert_relocation_handles_closed(case)
+
+    def test_recovery_cleanup_routes_real_relocation_refusals_before_mutation(self):
+        from contextlib import nullcontext
+        from unittest.mock import patch
+        from modlab.validation import mo2_containment_service as service
+
+        cases = (
+            ("baseline-missing", False),
+            ("source-collision", True),
+            ("membership-race", False),
+        )
+        for kind, case_variant in cases:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(
+                prefix="m2o-recovery-",
+                dir=Path(__file__).resolve().parents[1],
+            ) as temporary:
+                root = Path(temporary)
+                case = self._outer_relocation_case(
+                    root, kind, case_variant=case_variant
+                )
+                before = self._exact_relocation_snapshot(case.tracked)
+                protected = object()
+                watch_root = root / "watch"
+                watch_root.mkdir()
+                (watch_root / "request.json").write_bytes(b"request\n")
+                outcome = SimpleNamespace(
+                    request_id="request",
+                    session_id="session",
+                    worker_pid=42,
+                    request_sha256="a" * 64,
+                )
+                receipt = SimpleNamespace(
+                    watch_outcome_id="outcome",
+                    run_id=case.run_id,
+                    scenario=case.scenario,
+                    request_id=outcome.request_id,
+                    session_id=outcome.session_id,
+                    worker_pid=outcome.worker_pid,
+                    request_bytes_sha256=outcome.request_sha256,
+                )
+                case.store.watch_path = lambda _run_id, _scenario: watch_root
+                case.store.load_watch_outcome = (
+                    lambda _run_id, _scenario, _outcome_id: outcome
+                )
+                journal = SimpleNamespace(
+                    run_id=case.run_id,
+                    scenario=case.scenario,
+                    protected_before=protected,
+                )
+                proof = SimpleNamespace(
+                    watch_outcome=outcome,
+                    protected_after=protected,
+                )
+                injected = case.stage / "Injected"
+                real_verify = service._verify_retained_relocation_before_creation
+
+                def inject_then_verify(prepared):
+                    injected.mkdir()
+                    (injected / "foreign.txt").write_bytes(b"foreign\n")
+                    real_verify(prepared)
+
+                verifier = (
+                    patch.object(
+                        service,
+                        "_verify_retained_relocation_before_creation",
+                        side_effect=inject_then_verify,
+                    )
+                    if kind == "membership-race"
+                    else nullcontext()
+                )
+                ledger = service._EffectLedger()
+                token = service._ACTIVE_EFFECTS.set(ledger)
+                try:
+                    with (
+                        verifier,
+                        patch.object(
+                            service,
+                            "_delegated_mutation",
+                            return_value=receipt,
+                        ),
+                        patch.object(
+                            service,
+                            "set_low_integrity_tree",
+                            side_effect=AssertionError(
+                                "later normalization must not begin"
+                            ),
+                        ) as normalize,
+                    ):
+                        result = service._perform_recovery_cleanup(
+                            case.store,
+                            case.record,
+                            journal,
+                            proof=proof,
+                        )
+                finally:
+                    service._ACTIVE_EFFECTS.reset(token)
+
+                self.assertIn("staging-quarantine-failed", result.blockers)
+                normalize.assert_not_called()
+                self.assertEqual(before, self._exact_relocation_snapshot(case.tracked))
+                self.assertFalse(
+                    (
+                        case.quarantine_parent
+                        / ("Recovery-" + case.scenario.value)
+                    ).exists()
+                )
+                if kind == "membership-race":
+                    self.assertEqual(
+                        b"foreign\n", (injected / "foreign.txt").read_bytes()
+                    )
+                self._assert_relocation_handles_closed(case)
+
+    def test_capture_and_recovery_baselines_are_scenario_bound_before_relocation(self):
+        from modlab.validation import mo2_containment_service as service
+        from modlab.validation import windows_junction as junction
+
+        for phase in ("capture", "recovery"):
+            for scenario in service.ContainmentScenario:
+                for state in ("missing", "direct", "substituted"):
+                    with self.subTest(
+                        phase=phase,
+                        scenario=scenario,
+                        state=state,
+                    ), tempfile.TemporaryDirectory(
+                        prefix="modlab-baseline-policy-",
+                        dir=Path(__file__).resolve().parents[1],
+                    ) as temporary:
+                        root = Path(temporary)
+                        run_root = root / ("a" * 32)
+                        run_id = "containment-run:" + run_root.name
+                        fixture = run_root / "fixtures" / "v2" / scenario.value
+                        source = (
+                            fixture
+                            / "s"
+                            / "tools"
+                            / "mo2"
+                            / "skyrim-se-ae"
+                            / "mods"
+                        )
+                        stage = (
+                            fixture
+                            / "t"
+                            / "tools"
+                            / "mo2"
+                            / "skyrim-se-ae"
+                            / "mods"
+                        )
+                        protected = source / "Protected Existing"
+                        link = stage / "Protected Existing"
+                        protected.mkdir(parents=True)
+                        source_marker = protected / "marker.txt"
+                        source_marker.write_bytes(b"source\n")
+                        stage.mkdir(parents=True)
+                        projection = None
+                        if state == "direct":
+                            link.mkdir()
+                            (link / "replacement.txt").write_bytes(b"replacement\n")
+                        elif state == "substituted":
+                            owner = junction.create_owned_projection(protected, link)
+                            projection = SimpleNamespace(
+                                run_id=run_id,
+                                scenario=scenario.value,
+                                identities=tuple(
+                                    SimpleNamespace(
+                                        path=str(pin.path),
+                                        volume=pin.identity[0],
+                                        file_id=pin.identity[1],
+                                    )
+                                    for pin in owner.pins
+                                ),
+                                payload_hex=owner.payload.hex(),
+                            )
+                            owner.close()
+                            link.rmdir()
+                            foreign = root / "foreign" / "Protected Existing"
+                            foreign.mkdir(parents=True)
+                            substitute = junction.create_owned_projection(foreign, link)
+                            substitute.close()
+                        store = SimpleNamespace(
+                            run_path=lambda _run_id: run_root,
+                            load_preparation_projection=(
+                                lambda _run_id, _scenario: projection
+                            ),
+                        )
+                        record = SimpleNamespace(
+                            scenario=scenario,
+                            source_mods=source,
+                            stage_mods=stage,
+                            before_names=("Protected Existing",),
+                        )
+                        quarantine = root / "quarantine" / (
+                            ("Recovery-" if phase == "recovery" else "")
+                            + scenario.value
+                        )
+                        accepted = (
+                            scenario is service.ContainmentScenario.REPLACE_EXISTING
+                            and state == "direct"
+                        )
+                        if accepted:
+                            with service._retained_relocation_projections(
+                                store,
+                                projection.run_id if projection else run_id,
+                                record,
+                            ) as owners:
+                                self.assertEqual((), owners)
+                        else:
+                            with self.assertRaises(service.ContainmentServiceError):
+                                with service._retained_relocation_projections(
+                                    store,
+                                    projection.run_id if projection else run_id,
+                                    record,
+                                ):
+                                    self.fail("unqualified baseline must not proceed")
+                        self.assertEqual(b"source\n", source_marker.read_bytes())
+                        if state == "direct":
+                            self.assertEqual(
+                                b"replacement\n",
+                                (link / "replacement.txt").read_bytes(),
+                            )
+                        self.assertFalse(quarantine.exists())
+
+    def test_retained_relocation_races_refuse_before_quarantine_creation(self):
+        from functools import partial
+        from modlab.validation import mo2_containment_service as service
+        from modlab.validation import windows_junction as junction
+
+        cases = (
+            ("adoption", service.ContainmentScenario.NEW_FOLDER, "ModLab Spike New"),
+            ("quarantine", service.ContainmentScenario.MERGE_EXISTING, "Foreign"),
+            ("recovery", service.ContainmentScenario.NEW_FOLDER, "ModLab Spike New"),
+        )
+        for phase, scenario, candidate_name in cases:
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory(
+                prefix=f"modlab-relocation-race-{phase}-",
+                dir=Path(__file__).resolve().parents[1],
+            ) as temporary:
+                root = Path(temporary)
+                source = root / "source"
+                stage = root / "stage"
+                protected = source / "Protected Existing"
+                protected.mkdir(parents=True)
+                (protected / "marker.txt").write_bytes(b"protected\n")
+                stage.mkdir()
+                owner = junction.create_owned_projection(
+                    protected,
+                    stage / "Protected Existing",
+                )
+                candidate = stage / candidate_name
+                candidate.mkdir()
+                marker = candidate / "marker.txt"
+                marker.write_bytes(b"candidate\n")
+                record = SimpleNamespace(
+                    scenario=scenario,
+                    source_mods=source,
+                    stage_mods=stage,
+                    before_names=("Protected Existing",),
+                )
+                quarantine = root / "quarantine" / (
+                    ("Recovery-" if phase == "recovery" else "")
+                    + scenario.value
+                )
+                injected = stage / "Injected"
+
+                def inject_then_verify(prepared):
+                    injected.mkdir()
+                    (injected / "foreign.txt").write_bytes(b"foreign\n")
+                    service._verify_retained_relocation_before_creation(prepared)
+
+                ledger = service._EffectLedger()
+                token = service._ACTIVE_EFFECTS.set(ledger)
+                try:
+                    with self.assertRaisesRegex(
+                        (service.ContainmentServiceError, junction.ContainmentSafetyError),
+                        "membership changed",
+                    ):
+                        service._delegated_mutations_with_created_root(
+                            quarantine,
+                            (source, stage),
+                            partial(
+                                service._preflight_projection_relocation,
+                                record,
+                                quarantine,
+                                expected_projections=(owner,),
+                            ),
+                            lambda _prepared: self.fail("relocation must not begin"),
+                            expected_projections=(owner,),
+                            retained_preflight=partial(
+                                service._retained_projection_relocation,
+                                record,
+                                quarantine,
+                                expected_projections=(owner,),
+                            ),
+                            verify_before_create=inject_then_verify,
+                            bind_created_root=service._bind_retained_relocation_root,
+                            verify_before_operation=(
+                                service._verify_retained_relocation_before_operation
+                            ),
+                        )
+                finally:
+                    service._ACTIVE_EFFECTS.reset(token)
+                    owner.close()
+                self.assertEqual(b"candidate\n", marker.read_bytes())
+                self.assertEqual(b"foreign\n", (injected / "foreign.txt").read_bytes())
+                self.assertFalse(quarantine.exists())
+                self.assertEqual((), ledger.freeze().child_mutation_roots)
+
+    def test_capture_and_recovery_destination_collisions_refuse_before_moves(self):
+        from functools import partial
+        from modlab.validation import mo2_containment_service as service
+        from modlab.validation import windows_junction as junction
+
+        source_collision_scenarios = (
+            service.ContainmentScenario.NEW_FOLDER,
+            service.ContainmentScenario.FOMOD_DEPENDENCY,
+        )
+        for phase in ("capture", "recovery"):
+            for scenario in source_collision_scenarios:
+                for case_variant in (False, True):
+                    with self.subTest(
+                        kind="source",
+                        phase=phase,
+                        scenario=scenario,
+                        case_variant=case_variant,
+                    ), tempfile.TemporaryDirectory(
+                        prefix="modlab-source-destination-collision-",
+                        dir=Path(__file__).resolve().parents[1],
+                    ) as temporary:
+                        root = Path(temporary)
+                        source = root / "source"
+                        stage = root / "stage"
+                        protected = source / "Protected Existing"
+                        protected.mkdir(parents=True)
+                        stage.mkdir()
+                        owner = junction.create_owned_projection(
+                            protected,
+                            stage / "Protected Existing",
+                        )
+                        expected = service._EXPECTED_NEW[scenario]
+                        candidate = stage / expected
+                        candidate.mkdir()
+                        candidate_marker = candidate / "candidate.txt"
+                        candidate_marker.write_bytes(b"candidate\n")
+                        collision_name = expected.swapcase() if case_variant else expected
+                        collision = source / collision_name
+                        collision.mkdir()
+                        collision_marker = collision / "existing.txt"
+                        collision_marker.write_bytes(b"existing\n")
+                        record = SimpleNamespace(
+                            scenario=scenario,
+                            source_mods=source,
+                            stage_mods=stage,
+                            before_names=("Protected Existing",),
+                        )
+                        quarantine = root / "quarantine" / (
+                            ("Recovery-" if phase == "recovery" else "")
+                            + scenario.value
+                        )
+                        ledger = service._EffectLedger()
+                        token = service._ACTIVE_EFFECTS.set(ledger)
+                        try:
+                            with self.assertRaisesRegex(
+                                service.ContainmentServiceError,
+                                "destination collision",
+                            ):
+                                service._delegated_mutations_with_created_root(
+                                    quarantine,
+                                    (source, stage),
+                                    partial(
+                                        service._preflight_projection_relocation,
+                                        record,
+                                        quarantine,
+                                        expected_projections=(owner,),
+                                    ),
+                                    lambda _prepared: self.fail("move must not begin"),
+                                    expected_projections=(owner,),
+                                    retained_preflight=partial(
+                                        service._retained_projection_relocation,
+                                        record,
+                                        quarantine,
+                                        expected_projections=(owner,),
+                                    ),
+                                    verify_before_create=(
+                                        service._verify_retained_relocation_before_creation
+                                    ),
+                                    bind_created_root=service._bind_retained_relocation_root,
+                                    verify_before_operation=(
+                                        service._verify_retained_relocation_before_operation
+                                    ),
+                                )
+                        finally:
+                            service._ACTIVE_EFFECTS.reset(token)
+                            owner.close()
+                        self.assertEqual(b"candidate\n", candidate_marker.read_bytes())
+                        self.assertEqual(b"existing\n", collision_marker.read_bytes())
+                        self.assertFalse(quarantine.exists())
+                        self.assertEqual((), ledger.freeze().child_mutation_roots)
+
+        scenario_candidates = {
+            service.ContainmentScenario.NEW_FOLDER: "ModLab Spike New",
+            service.ContainmentScenario.MERGE_EXISTING: "Foreign",
+            service.ContainmentScenario.REPLACE_EXISTING: "Protected Existing",
+            service.ContainmentScenario.FOMOD_DEPENDENCY: "ModLab Spike FOMOD",
+        }
+        for phase in ("capture", "recovery"):
+            for scenario, candidate_name in scenario_candidates.items():
+                for case_variant in (False, True):
+                    with self.subTest(
+                        kind="quarantine",
+                        phase=phase,
+                        scenario=scenario,
+                        case_variant=case_variant,
+                    ), tempfile.TemporaryDirectory(
+                        prefix="modlab-quarantine-destination-collision-",
+                        dir=Path(__file__).resolve().parents[1],
+                    ) as temporary:
+                        root = Path(temporary)
+                        source = root / "source"
+                        stage = root / "stage"
+                        protected = source / "Protected Existing"
+                        protected.mkdir(parents=True)
+                        stage.mkdir()
+                        owner = None
+                        if scenario is service.ContainmentScenario.REPLACE_EXISTING:
+                            candidate = stage / candidate_name
+                            candidate.mkdir()
+                        else:
+                            owner = junction.create_owned_projection(
+                                protected,
+                                stage / "Protected Existing",
+                            )
+                            candidate = stage / candidate_name
+                            if candidate_name == "Protected Existing":
+                                self.fail("non-replace candidate overlaps baseline")
+                            candidate.mkdir()
+                        candidate_marker = candidate / "candidate.txt"
+                        candidate_marker.write_bytes(b"candidate\n")
+                        record = SimpleNamespace(
+                            scenario=scenario,
+                            source_mods=source,
+                            stage_mods=stage,
+                            before_names=("Protected Existing",),
+                        )
+                        quarantine = root / "quarantine" / (
+                            ("Recovery-" if phase == "recovery" else "")
+                            + scenario.value
+                        )
+                        quarantine.mkdir(parents=True)
+                        collision_name = (
+                            candidate_name.swapcase() if case_variant else candidate_name
+                        )
+                        collision = quarantine / collision_name
+                        collision.mkdir()
+                        collision_marker = collision / "existing.txt"
+                        collision_marker.write_bytes(b"existing\n")
+                        projections = () if owner is None else (owner,)
+                        ledger = service._EffectLedger()
+                        token = service._ACTIVE_EFFECTS.set(ledger)
+                        try:
+                            with self.assertRaisesRegex(
+                                service.ContainmentServiceError,
+                                "destination collision",
+                            ):
+                                service._delegated_mutations_with_created_root(
+                                    quarantine,
+                                    (source, stage),
+                                    partial(
+                                        service._preflight_projection_relocation,
+                                        record,
+                                        quarantine,
+                                        expected_projections=projections,
+                                    ),
+                                    lambda _prepared: self.fail("move must not begin"),
+                                    expected_projections=projections,
+                                    retained_preflight=partial(
+                                        service._retained_projection_relocation,
+                                        record,
+                                        quarantine,
+                                        expected_projections=projections,
+                                    ),
+                                    verify_before_create=(
+                                        service._verify_retained_relocation_before_creation
+                                    ),
+                                    bind_created_root=service._bind_retained_relocation_root,
+                                    verify_before_operation=(
+                                        service._verify_retained_relocation_before_operation
+                                    ),
+                                )
+                        finally:
+                            service._ACTIVE_EFFECTS.reset(token)
+                            if owner is not None:
+                                owner.close()
+                        self.assertEqual(b"candidate\n", candidate_marker.read_bytes())
+                        self.assertEqual(b"existing\n", collision_marker.read_bytes())
+                        self.assertEqual((), ledger.freeze().child_mutation_roots)
+
+    def test_retained_authority_adopts_then_quarantines_the_same_exact_tree(self):
+        from functools import partial
+        from modlab.validation import mo2_containment_service as service
+        from modlab.validation import windows_junction as junction
+
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-retained-adoption-",
+            dir=Path(__file__).resolve().parents[1],
+        ) as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            stage = root / "stage"
+            protected = source / "Protected Existing"
+            protected.mkdir(parents=True)
+            (protected / "marker.txt").write_bytes(b"protected\n")
+            stage.mkdir()
+            owner = junction.create_owned_projection(
+                protected,
+                stage / "Protected Existing",
+            )
+            expected = "ModLab Spike New"
+            candidate = stage / expected
+            (candidate / "meshes").mkdir(parents=True)
+            marker = candidate / "meshes" / "new-folder.bin"
+            marker.write_bytes(b"candidate\n")
+            (candidate / "meta.ini").write_bytes(b"[General]\n")
+            record = SimpleNamespace(
+                scenario=service.ContainmentScenario.NEW_FOLDER,
+                source_mods=source,
+                stage_mods=stage,
+                before_names=("Protected Existing",),
+            )
+            quarantine = root / "quarantine" / "NewFolder"
+
+            def operate(prepared):
+                adoption = junction.adopt_retained_relocation(
+                    prepared.authority,
+                    expected_name=expected,
+                    before_names=record.before_names,
+                )
+                junction.quarantine_retained_relocation(
+                    prepared.authority,
+                    (expected,),
+                    verify=False,
+                )
+                return adoption
+
+            ledger = service._EffectLedger()
+            token = service._ACTIVE_EFFECTS.set(ledger)
+            try:
+                adoption = service._delegated_mutations_with_created_root(
+                    quarantine,
+                    (source, stage),
+                    partial(
+                        service._preflight_projection_relocation,
+                        record,
+                        quarantine,
+                        expected_projections=(owner,),
+                    ),
+                    operate,
+                    expected_projections=(owner,),
+                    retained_preflight=partial(
+                        service._retained_projection_relocation,
+                        record,
+                        quarantine,
+                        expected_projections=(owner,),
+                    ),
+                    verify_before_create=(
+                        service._verify_retained_relocation_before_creation
+                    ),
+                    bind_created_root=service._bind_retained_relocation_root,
+                    verify_before_operation=(
+                        service._verify_retained_relocation_before_operation
+                    ),
+                )
+            finally:
+                service._ACTIVE_EFFECTS.reset(token)
+                owner.close()
+            self.assertEqual(expected, adoption.adopted_name)
+            self.assertFalse(candidate.exists())
+            self.assertFalse((source / expected).exists())
+            self.assertEqual(
+                b"candidate\n",
+                (quarantine / expected / "meshes" / "new-folder.bin").read_bytes(),
+            )
+
     @staticmethod
     def _sized_path(base: Path, units: int) -> Path:
         path = base

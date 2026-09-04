@@ -1,0 +1,7 @@
+test_retained_preflight_verifies_before_missing_root_creation (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_preflight_verifies_before_missing_root_creation) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.000s
+
+OK
+Exit 0

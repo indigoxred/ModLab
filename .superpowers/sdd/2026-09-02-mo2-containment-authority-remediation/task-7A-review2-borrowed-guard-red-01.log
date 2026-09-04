@@ -1,0 +1,29 @@
+test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards) ... FAIL
+
+======================================================================
+FAIL: test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 4002, in test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards
+    service._delegated_mutations_with_created_root(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 1962, in _delegated_mutations_with_created_root
+    guard = _mutation_root_guard(
+            ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1139, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1143, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1204, in _execute_mock_call
+    result = effect(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 3974, in guard
+    self.assertIn(expected, existing_guards)
+AssertionError: <tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards.<locals>.FakePin object at 0x0000023E874D3EF0> not found in (<tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards.<locals>.FakePin object at 0x0000023E8A0EC080>,)
+
+----------------------------------------------------------------------
+Ran 1 test in 0.002s
+
+FAILED (failures=1)
+Exit 1

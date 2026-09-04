@@ -1,0 +1,27 @@
+Token=DESKTOP-947H2KL\red
+Before modlab\validation\mo2_containment_service.py B424CBD6F3F37226C647F0EDCC982157590802288F585338DB9C90C36325F0CB
+Before modlab\validation\windows_junction.py 9C40A85637AAD3A73ABDBD03C3A1B33B2DCD05083E1F1E6396CBAD306D047353
+Before tests\test_mo2_containment_service.py EE4A48440F403923292B5349FA8C9CA88A548D5C38EF7DD1F1F7348AAC9C6C95
+Before tests\test_mo2_path_budget.py CADBE01E280823F08FA232F6AA34B4058063D830D1402520A369FA5483C9F4EF
+test_capture_and_recovery_baselines_are_scenario_bound_before_relocation (tests.test_mo2_path_budget.NativePathBudgetTests.test_capture_and_recovery_baselines_are_scenario_bound_before_relocation) ... 
+  test_capture_and_recovery_baselines_are_scenario_bound_before_relocation (tests.test_mo2_path_budget.NativePathBudgetTests.test_capture_and_recovery_baselines_are_scenario_bound_before_relocation) (phase='capture', scenario=<ContainmentScenario.NEW_FOLDER: 'NewFolder'>, state='missing') ... ERROR
+
+======================================================================
+ERROR: test_capture_and_recovery_baselines_are_scenario_bound_before_relocation (tests.test_mo2_path_budget.NativePathBudgetTests.test_capture_and_recovery_baselines_are_scenario_bound_before_relocation) (phase='capture', scenario=<ContainmentScenario.NEW_FOLDER: 'NewFolder'>, state='missing')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 1111, in test_capture_and_recovery_baselines_are_scenario_bound_before_relocation
+    projection.run_id if projection else RUN_ID,
+                                         ^^^^^^
+NameError: name 'RUN_ID' is not defined
+
+----------------------------------------------------------------------
+Ran 1 test in 0.114s
+
+FAILED (errors=1)
+After modlab\validation\mo2_containment_service.py B424CBD6F3F37226C647F0EDCC982157590802288F585338DB9C90C36325F0CB
+After modlab\validation\windows_junction.py 9C40A85637AAD3A73ABDBD03C3A1B33B2DCD05083E1F1E6396CBAD306D047353
+After tests\test_mo2_containment_service.py EE4A48440F403923292B5349FA8C9CA88A548D5C38EF7DD1F1F7348AAC9C6C95
+After tests\test_mo2_path_budget.py CADBE01E280823F08FA232F6AA34B4058063D830D1402520A369FA5483C9F4EF
+HashMismatchCount=0
+Exit 1

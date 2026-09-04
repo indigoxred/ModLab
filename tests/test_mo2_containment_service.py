@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -76,6 +77,26 @@ WATCH_ROOT_KINDS = (
     "ExternalTempLow",
 )
 RUN_ID = "containment-run:0123456789abcdef0123456789abcdef"
+
+
+def retained_relocation_for_test(
+    *,
+    source_names=("Protected Existing",),
+    stage_names=("Protected Existing",),
+    changed_names=(),
+    mutation_names=(),
+):
+    authority = SimpleNamespace()
+    return SimpleNamespace(
+        admission=SimpleNamespace(
+            source_names=tuple(source_names),
+            stage_names=tuple(stage_names),
+            changed_names=tuple(changed_names),
+            mutation_names=tuple(mutation_names),
+        ),
+        authority=authority,
+        verify=lambda **_kwargs: None,
+    )
 
 
 @unittest.skipUnless(os.name == "nt", "retained projection tests require Windows")
@@ -561,6 +582,125 @@ def evidence(
 
 
 class ContainmentServiceTests(unittest.TestCase):
+    def test_relocation_baseline_presence_is_scenario_specific(self):
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-relocation-baseline-",
+            dir=Path(__file__).resolve().parents[1],
+        ) as directory:
+            root = Path(directory)
+            store = SimpleNamespace()
+            for scenario in ContainmentScenario:
+                for state in ("missing", "direct"):
+                    with self.subTest(scenario=scenario, state=state):
+                        stage = root / scenario.value / state
+                        stage.mkdir(parents=True)
+                        protected = stage / "Protected Existing"
+                        if state == "direct":
+                            protected.mkdir()
+                        record = SimpleNamespace(
+                            scenario=scenario,
+                            stage_mods=stage,
+                        )
+                        if (
+                            scenario is ContainmentScenario.REPLACE_EXISTING
+                            and state == "direct"
+                        ):
+                            with service._retained_relocation_projections(
+                                store,
+                                RUN_ID,
+                                record,
+                            ) as projections:
+                                self.assertEqual((), projections)
+                        else:
+                            with self.assertRaisesRegex(
+                                service.ContainmentServiceError,
+                                "baseline projection",
+                            ):
+                                with service._retained_relocation_projections(
+                                    store,
+                                    RUN_ID,
+                                    record,
+                                ):
+                                    self.fail("unqualified baseline must not be admitted")
+
+    def test_relocation_preflight_rejects_source_and_quarantine_name_collisions(self):
+        def rows(*names):
+            ordered = tuple(sorted(names, key=lambda name: (name.casefold(), name)))
+            return (
+                (".", "directory", 7, 1, 0, 0, 0, 0, 0, None),
+                *(
+                    (name, "directory", 7, index, 0, 0, 0, 0, 0, None)
+                    for index, name in enumerate(ordered, 2)
+                ),
+            )
+
+        with tempfile.TemporaryDirectory(
+            prefix="modlab-relocation-collision-",
+            dir=Path(__file__).resolve().parents[1],
+        ) as directory:
+            root = Path(directory)
+            source = root / "source"
+            stage = root / "stage"
+            source.mkdir()
+            stage.mkdir()
+            record = SimpleNamespace(
+                scenario=ContainmentScenario.NEW_FOLDER,
+                source_mods=source,
+                stage_mods=stage,
+                before_names=("Protected Existing",),
+            )
+            expected = "ModLab Spike New"
+            stage_rows = rows("Protected Existing", expected)
+
+            for spelling in (expected, expected.swapcase()):
+                with self.subTest(destination="source", spelling=spelling):
+                    quarantine = root / ("source-" + spelling) / "NewFolder"
+                    with (
+                        patch.object(
+                            service,
+                            "_mutation_root_observation",
+                            side_effect=(rows("Protected Existing", spelling), stage_rows),
+                        ),
+                        patch.object(
+                            service,
+                            "_relocation_destination_volume",
+                            return_value=7,
+                        ),
+                        self.assertRaisesRegex(
+                            service.ContainmentServiceError,
+                            "destination collision",
+                        ),
+                    ):
+                        service._preflight_projection_relocation(record, quarantine)
+                    self.assertFalse(quarantine.exists())
+
+            for index, spelling in enumerate((expected, expected.swapcase())):
+                with self.subTest(destination="quarantine", spelling=spelling):
+                    quarantine = root / f"quarantine-{index}" / "NewFolder"
+                    quarantine.mkdir(parents=True)
+                    collision = quarantine / spelling
+                    collision.mkdir()
+                    marker = collision / "marker.txt"
+                    marker.write_bytes(b"pre-existing\n")
+                    with (
+                        patch.object(
+                            service,
+                            "_mutation_root_observation",
+                            side_effect=(rows("Protected Existing"), stage_rows),
+                        ),
+                        patch.object(
+                            service,
+                            "_relocation_destination_volume",
+                            return_value=7,
+                        ),
+                        self.assertRaisesRegex(
+                            service.ContainmentServiceError,
+                            "destination collision",
+                        ),
+                    ):
+                        service._preflight_projection_relocation(record, quarantine)
+                    self.assertEqual(b"pre-existing\n", marker.read_bytes())
+
     def test_historical_result_load_returns_all_changes_without_write_effects(self):
         with tempfile.TemporaryDirectory(prefix="modlab-result-effects-") as directory:
             store = ContainmentStore(Path(directory))
@@ -685,12 +825,30 @@ class ContainmentServiceTests(unittest.TestCase):
                 after_tree=tree("b"),
                 final_integrity=service.IntegrityLevel.MEDIUM,
             )
-            def adopt_for_test(**_kwargs):
+            relocation = retained_relocation_for_test(
+                stage_names=("Protected Existing", "ModLab Spike New"),
+                mutation_names=("ModLab Spike New",),
+            )
+
+            def adopt_for_test(_authority, **_kwargs):
                 destination.mkdir()
                 return adoption
+
+            def quarantine_for_test(_authority, names, **_kwargs):
+                self.assertEqual(("ModLab Spike New",), names)
+                destination.rename(
+                    store.quarantine_path(RUN_ID)
+                    / record.scenario.value
+                    / destination.name
+                )
             with (
                 patch.object(service, "_projection_state", return_value=(1, True, True)),
-                patch.object(service, "adopt_unique_staged_mod", side_effect=adopt_for_test),
+                patch.object(service, "adopt_retained_relocation", side_effect=adopt_for_test),
+                patch.object(
+                    service,
+                    "quarantine_retained_relocation",
+                    side_effect=quarantine_for_test,
+                ),
                 patch.object(service, "_relative_files", side_effect=OSError("inspect failed")),
                 patch.object(service, "_capture_protected", return_value=protected()),
             ):
@@ -700,6 +858,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     record,
                     protected(),
                     protected(),
+                    relocation=relocation,
                 )
             quarantined = store.quarantine_path(RUN_ID) / record.scenario.value / destination.name
             self.assertFalse(destination.exists())
@@ -768,6 +927,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 )
                 store = ContainmentStore(root / "validation")
                 store.prepare_run_root(RUN_ID)
+                relocation = retained_relocation_for_test()
                 effect = inspection if isinstance(inspection, BaseException) else None
                 with (
                     patch.object(
@@ -776,6 +936,7 @@ class ContainmentServiceTests(unittest.TestCase):
                         side_effect=effect,
                         return_value=None if effect else inspection,
                     ),
+                    patch.object(service, "quarantine_retained_relocation"),
                     patch.object(service, "_capture_protected", return_value=protected()),
                 ):
                     projection = service._finalize_projection(
@@ -784,6 +945,7 @@ class ContainmentServiceTests(unittest.TestCase):
                         record,
                         protected(),
                         protected(),
+                        relocation=relocation,
                     )
                 evaluated = evaluate_scenario(
                     evidence(
@@ -841,25 +1003,32 @@ class ContainmentServiceTests(unittest.TestCase):
             source_before = tuple(path.name for path in source.iterdir())
             stage_before = tuple(path.name for path in stage.iterdir())
             quarantine = store.quarantine_path(RUN_ID) / record.scenario.value
-            with (
-                patch.object(
-                    service,
-                    "_mutation_root_observation",
-                    side_effect=(
-                        source_rows,
-                        stage_rows,
-                        source_rows,
-                        None,
-                    ),
+            admission = SimpleNamespace(
+                source_names=("Protected Existing",),
+                stage_names=("Protected Existing",),
+                changed_names=(),
+                mutation_names=(),
+            )
+            relocation = SimpleNamespace(
+                admission=admission,
+                authority=SimpleNamespace(),
+                verify=lambda **_kwargs: (_ for _ in ()).throw(
+                    service.ContainmentServiceError(
+                        "relocation immutable admission changed"
+                    )
                 ),
-                patch.object(service, "_relocation_destination_volume", return_value=7),
-                self.assertRaisesRegex(
-                    service.ContainmentServiceError,
-                    "relocation tree observation is unavailable",
-                ),
+            )
+            with self.assertRaisesRegex(
+                service.ContainmentServiceError,
+                "relocation immutable admission changed",
             ):
                 service._finalize_projection(
-                    store, RUN_ID, record, protected(), protected()
+                    store,
+                    RUN_ID,
+                    record,
+                    protected(),
+                    protected(),
+                    relocation=relocation,
                 )
             self.assertFalse(quarantine.exists())
             self.assertEqual(source_before, tuple(path.name for path in source.iterdir()))
@@ -888,6 +1057,11 @@ class ContainmentServiceTests(unittest.TestCase):
             store = ContainmentStore(root / "validation")
             store.prepare_run_root(RUN_ID)
             restored = False
+            relocation = retained_relocation_for_test(
+                stage_names=("Protected Existing",),
+                changed_names=("Protected Existing",),
+                mutation_names=("Protected Existing",),
+            )
 
             def inspect_for_test(_path):
                 if not restored:
@@ -902,12 +1076,29 @@ class ContainmentServiceTests(unittest.TestCase):
                 restored = True
                 return SimpleNamespace(target_path=source_mod)
 
+            def quarantine_for_test(_authority, *, expected_name):
+                quarantine = store.quarantine_path(RUN_ID) / record.scenario.value
+                replacement.rename(quarantine / expected_name)
+                return SimpleNamespace(
+                    destination_path=quarantine / expected_name,
+                    output_names=(
+                        "meshes/canary.bin",
+                        "meshes/new.bin",
+                        "meta.ini",
+                    ),
+                )
+
             with (
                 patch.object(service, "inspect_junction", side_effect=inspect_for_test),
                 patch.object(
                     service,
                     "create_mod_projection",
                     side_effect=restore_for_test,
+                ),
+                patch.object(
+                    service,
+                    "quarantine_retained_replacement",
+                    side_effect=quarantine_for_test,
                 ),
                 patch.object(service, "_capture_protected", return_value=protected()),
             ):
@@ -917,6 +1108,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     record,
                     protected(),
                     protected(),
+                    relocation=relocation,
                 )
 
             quarantine = store.quarantine_path(RUN_ID) / record.scenario.value
@@ -974,13 +1166,18 @@ class ContainmentServiceTests(unittest.TestCase):
             )
             store = ContainmentStore(root / "validation")
             store.write_request(RUN_ID, {"runId": RUN_ID})
+            relocation = retained_relocation_for_test(
+                stage_names=("Protected Existing", "ModLab Spike New"),
+                mutation_names=("ModLab Spike New",),
+            )
             with (
                 patch.object(service, "_projection_state", return_value=(1, True, True)),
                 patch.object(
                     service,
-                    "adopt_unique_staged_mod",
+                    "adopt_retained_relocation",
                     side_effect=AssertionError("must not adopt after protected delta"),
                 ) as adopt,
+                patch.object(service, "quarantine_retained_relocation"),
                 patch.object(service, "_capture_protected", return_value=protected("b")),
             ):
                 result = service._finalize_projection(
@@ -989,6 +1186,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     record,
                     protected(),
                     protected("b"),
+                    relocation=relocation,
                 )
             adopt.assert_not_called()
             self.assertEqual(protected("b"), result.protected_after)
@@ -1680,11 +1878,27 @@ class ContainmentServiceTests(unittest.TestCase):
                 safety_reasons=(),
                 incomplete_reasons=(),
             )
+
+            def fake_relocation(created_root, _roots, _preflight, operation, **_kwargs):
+                created_root.mkdir(parents=True)
+                service._current_effects().child_mutation_root(created_root)
+                return operation(retained_relocation_for_test())
+
             with (
                 patch.object(service, "_load_fixture_record", return_value=record),
                 patch.object(service, "inspect_mo2_processes", return_value=SimpleNamespace(complete=True, relevant=())),
                 patch.object(service, "stop_watch", side_effect=fake_stop),
                 patch.object(service, "_capture_protected", return_value=protected()),
+                patch.object(
+                    service,
+                    "_retained_relocation_projections",
+                    return_value=nullcontext(()),
+                ),
+                patch.object(
+                    service,
+                    "_delegated_mutations_with_created_root",
+                    side_effect=fake_relocation,
+                ),
                 patch.object(service, "_finalize_projection", return_value=projection),
                 patch.object(service, "_integrity_observation", side_effect=(IntegrityObservation.MEDIUM, IntegrityObservation.LOW)),
                 patch.object(service, "_exact_process_absent", return_value=True),
@@ -1919,6 +2133,12 @@ class ContainmentServiceTests(unittest.TestCase):
                 protected(), 1, True, True, (), True, (), True, (), True,
                 None, None, None, True, (), (),
             )
+
+            def fake_relocation(created_root, _roots, _preflight, operation, **_kwargs):
+                created_root.mkdir(parents=True)
+                service._current_effects().child_mutation_root(created_root)
+                return operation(retained_relocation_for_test())
+
             real_transition = ContainmentStore.transition
 
             def fail_after_captured(self, observed, new_state, **kwargs):
@@ -1939,6 +2159,16 @@ class ContainmentServiceTests(unittest.TestCase):
                 patch.object(service, "_exact_process_absent", return_value=True),
                 patch.object(service, "stop_watch", side_effect=fake_stop),
                 patch.object(service, "_capture_protected", return_value=protected()),
+                patch.object(
+                    service,
+                    "_retained_relocation_projections",
+                    return_value=nullcontext(()),
+                ),
+                patch.object(
+                    service,
+                    "_delegated_mutations_with_created_root",
+                    side_effect=fake_relocation,
+                ),
                 patch.object(service, "_finalize_projection", return_value=projection),
                 patch.object(
                     service,
@@ -3585,6 +3815,517 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
             return service._delegated_mutation(root, operation)
 
         return invoke()
+
+    def test_retained_replacement_outputs_are_canonical_not_acquisition_order(self):
+        # Catches breadth-first pinned acquisition order leaking into the exact
+        # scenario-output contract consumed by evaluate_scenario.
+        entries = [
+            SimpleNamespace(
+                relative_path="meshes",
+                is_directory=True,
+                pinned=SimpleNamespace(identity=(1, 1)),
+            ),
+            SimpleNamespace(
+                relative_path="meta.ini",
+                is_directory=False,
+                pinned=SimpleNamespace(identity=(1, 2)),
+            ),
+            SimpleNamespace(
+                relative_path="meshes/canary.bin",
+                is_directory=False,
+                pinned=SimpleNamespace(identity=(1, 3)),
+            ),
+            SimpleNamespace(
+                relative_path="meshes/new.bin",
+                is_directory=False,
+                pinned=SimpleNamespace(identity=(1, 4)),
+            ),
+        ]
+        tree = SimpleNamespace(
+            entries=entries,
+            current_path=Path(r"C:\quarantine\Protected Existing"),
+            close_descendants=lambda: None,
+        )
+        authority = SimpleNamespace(
+            mutation_names=("Protected Existing",),
+            quarantine_root=Path(r"C:\quarantine"),
+            quarantine_parent=object(),
+            verify=lambda **_kwargs: None,
+            _item=lambda _name: SimpleNamespace(tree=tree),
+        )
+
+        with (
+            patch.object(junction, "_stable_pinned_tree_identity", return_value=object()),
+            patch.object(junction, "_quarantine_pinned_tree"),
+            patch.object(junction, "_pin_descendants"),
+        ):
+            result = junction.quarantine_retained_replacement(
+                authority,
+                expected_name="Protected Existing",
+            )
+
+        self.assertEqual(
+            ("meshes/canary.bin", "meshes/new.bin", "meta.ini"),
+            result.output_names,
+        )
+
+    def test_retained_preflight_verifies_before_missing_root_creation(self):
+        base = Path(r"C:\fixture")
+        target = base / "quarantine" / "NewFolder"
+        guard = SimpleNamespace(path=base, close=lambda: None)
+        events = []
+        expected = object()
+
+        class RetainedPreflight:
+            def __enter__(self):
+                events.append("enter")
+                return expected
+
+            def __exit__(self, *_args):
+                events.append("exit")
+
+        def refuse_before_create(prepared):
+            self.assertIs(expected, prepared)
+            events.append("verify")
+            raise service.ContainmentServiceError("injected membership change")
+
+        def retained_preflight(_guards, supplied):
+            self.assertIs(expected, supplied)
+            events.append("repeat")
+            return RetainedPreflight()
+
+        with (
+            patch.object(service, "_direct_directory_present", return_value=False),
+            patch.object(service, "_mutation_root_guard", return_value=guard),
+            patch.object(
+                service,
+                "create_pinned_directory_child",
+                side_effect=AssertionError("root creation must not begin"),
+            ) as create,
+            self.assertRaisesRegex(
+                service.ContainmentServiceError,
+                "membership change",
+            ),
+        ):
+            service._delegated_mutations_with_created_root(
+                target,
+                (),
+                lambda: events.append("initial") or expected,
+                lambda _prepared: self.fail("operation must not run"),
+                retained_preflight=retained_preflight,
+                verify_before_create=refuse_before_create,
+            )
+
+        self.assertEqual(["initial", "repeat", "enter", "verify", "exit"], events)
+        create.assert_not_called()
+
+    def test_retained_preflight_binds_created_owner_then_reverifies_before_operation(self):
+        base = Path(r"C:\fixture")
+        target = base / "quarantine" / "NewFolder"
+        ancestor = SimpleNamespace(path=base, close=lambda: None)
+        events = []
+        created = []
+        expected = object()
+
+        class RetainedPreflight:
+            def __enter__(self):
+                events.append("enter")
+                return expected
+
+            def __exit__(self, *_args):
+                events.append("exit")
+
+        def create(path, _parent):
+            owner = SimpleNamespace(path=Path(path), close=lambda: None)
+            created.append(owner)
+            events.append("create:" + Path(path).name)
+            return owner
+
+        def bind(prepared, owner):
+            self.assertIs(expected, prepared)
+            self.assertIs(created[-1], owner)
+            events.append("bind:" + owner.path.name)
+
+        def retained_preflight(_guards, supplied):
+            self.assertIs(expected, supplied)
+            events.append("repeat")
+            return RetainedPreflight()
+
+        ledger = service._EffectLedger()
+        token = service._ACTIVE_EFFECTS.set(ledger)
+        try:
+            with (
+                patch.object(service, "_direct_directory_present", return_value=False),
+                patch.object(service, "_mutation_root_guard", return_value=ancestor),
+                patch.object(service, "create_pinned_directory_child", side_effect=create),
+                patch.object(
+                    service,
+                    "_delegated_mutations_guarded",
+                    side_effect=lambda _roots, operation, **_kwargs: operation(),
+                ),
+            ):
+                result = service._delegated_mutations_with_created_root(
+                    target,
+                    (),
+                    lambda: events.append("initial") or expected,
+                    lambda prepared: events.append("operation") or prepared,
+                    retained_preflight=retained_preflight,
+                    verify_before_create=lambda prepared: (
+                        self.assertIs(expected, prepared),
+                        events.append("preverify"),
+                    )[-1],
+                    bind_created_root=bind,
+                    verify_before_operation=lambda prepared: (
+                        self.assertIs(expected, prepared),
+                        events.append("opverify"),
+                    )[-1],
+                )
+        finally:
+            service._ACTIVE_EFFECTS.reset(token)
+
+        self.assertIs(expected, result)
+        self.assertEqual(
+            [
+                "initial",
+                "repeat",
+                "enter",
+                "preverify",
+                "create:quarantine",
+                "create:NewFolder",
+                "bind:NewFolder",
+                "opverify",
+                "operation",
+                "exit",
+            ],
+            events,
+        )
+
+    def test_retained_preflight_mismatch_refuses_before_missing_root_creation(self):
+        base = Path(r"C:\fixture")
+        target = base / "quarantine" / "NewFolder"
+        guard = SimpleNamespace(path=base, close=lambda: None)
+        expected = object()
+        calls = []
+
+        class Mismatch:
+            def __enter__(self):
+                raise service.ContainmentServiceError(
+                    "relocation immutable admission changed"
+                )
+
+            def __exit__(self, *_args):
+                self.fail("failed context entry must not exit")
+
+        def retained_preflight(_guards, supplied):
+            self.assertIs(expected, supplied)
+            calls.append("repeat")
+            return Mismatch()
+
+        with (
+            patch.object(service, "_direct_directory_present", return_value=False),
+            patch.object(service, "_mutation_root_guard", return_value=guard),
+            patch.object(
+                service,
+                "create_pinned_directory_child",
+                side_effect=AssertionError("root creation must not begin"),
+            ) as create,
+            self.assertRaisesRegex(
+                service.ContainmentServiceError,
+                "immutable admission changed",
+            ),
+        ):
+            service._delegated_mutations_with_created_root(
+                target,
+                (),
+                lambda: calls.append("initial") or expected,
+                lambda _prepared: self.fail("operation must not run"),
+                retained_preflight=retained_preflight,
+            )
+
+        self.assertEqual(["initial", "repeat"], calls)
+        create.assert_not_called()
+
+    def test_retained_preflight_mismatch_refuses_with_existing_root(self):
+        target = Path(r"C:\fixture\quarantine\NewFolder")
+        guard = SimpleNamespace(path=target, close=lambda: None)
+        expected = object()
+        calls = []
+
+        class Mismatch:
+            def __enter__(self):
+                raise service.ContainmentServiceError(
+                    "relocation immutable admission changed"
+                )
+
+            def __exit__(self, *_args):
+                self.fail("failed context entry must not exit")
+
+        def retained_preflight(_guards, supplied):
+            self.assertIs(expected, supplied)
+            calls.append("repeat")
+            return Mismatch()
+
+        with (
+            patch.object(service, "_direct_directory_present", return_value=True),
+            patch.object(service, "_mutation_root_guard", return_value=guard),
+            patch.object(
+                service,
+                "_delegated_mutations_guarded",
+                side_effect=lambda _roots, operation, **_kwargs: operation(),
+            ),
+            patch.object(
+                service,
+                "create_pinned_directory_child",
+                side_effect=AssertionError("existing-root path must not create"),
+            ) as create,
+            self.assertRaisesRegex(
+                service.ContainmentServiceError,
+                "immutable admission changed",
+            ),
+        ):
+            service._delegated_mutations_with_created_root(
+                target,
+                (),
+                lambda: calls.append("initial") or expected,
+                lambda _prepared: self.fail("operation must not run"),
+                retained_preflight=retained_preflight,
+            )
+
+        self.assertEqual(["initial", "repeat"], calls)
+        create.assert_not_called()
+
+    def test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards(self):
+        from modlab.validation import windows_junction as junction
+
+        base = Path(r"C:\fixture")
+        source = base / "source"
+        stage = base / "stage"
+        target = base / "quarantine" / "NewFolder"
+
+        class FakePin:
+            def __init__(self, path, identity):
+                self.path = Path(path)
+                self.identity = identity
+                self.handle = 1
+                self.close_count = 0
+
+            def close(self):
+                self.close_count += 1
+                self.handle = 0
+
+        link = FakePin(stage / "Protected Existing", (1, 1))
+        protected = FakePin(source / "Protected Existing", (1, 2))
+        source_parent = FakePin(source, (1, 3))
+        stage_parent = FakePin(stage, (1, 4))
+        owner = junction.OwnedProjection(
+            SimpleNamespace(
+                link_path=link.path,
+                target_path=protected.path,
+            ),
+            (link, protected, source_parent, stage_parent),
+            b"projection",
+        )
+        ancestor = FakePin(base, service.PinnedIdentity(1, 5, 0x10))
+        observed_guards = []
+
+        def guard(path, existing_guards=(), **_kwargs):
+            path = Path(path)
+            observed_guards.append((path, tuple(existing_guards)))
+            if path == target:
+                return ancestor
+            expected = source_parent if path == source else stage_parent
+            self.assertIn(expected, existing_guards)
+            return None
+
+        class RetainedPreflight:
+            def __enter__(self):
+                return "admission"
+
+            def __exit__(self, *_args):
+                return None
+
+        expected_admission = object()
+
+        def retained_preflight(guards, supplied):
+            self.assertIs(expected_admission, supplied)
+            self.assertIs(source_parent, guards[source])
+            self.assertIs(stage_parent, guards[stage])
+            self.assertTrue(source_parent.handle)
+            self.assertTrue(stage_parent.handle)
+            return RetainedPreflight()
+
+        with (
+            patch.object(junction.OwnedProjection, "verify", return_value=None),
+            patch.object(service, "_direct_directory_present", return_value=False),
+            patch.object(service, "_mutation_root_guard", side_effect=guard),
+            patch.object(
+                service,
+                "create_pinned_directory_child",
+                side_effect=AssertionError("root creation must not begin"),
+            ),
+            self.assertRaisesRegex(service.ContainmentServiceError, "stop before create"),
+        ):
+            service._delegated_mutations_with_created_root(
+                target,
+                (source, stage),
+                lambda: expected_admission,
+                lambda _prepared: self.fail("operation must not run"),
+                expected_projections=(owner,),
+                retained_preflight=retained_preflight,
+                verify_before_create=lambda _prepared: (_ for _ in ()).throw(
+                    service.ContainmentServiceError("stop before create")
+                ),
+            )
+
+        self.assertEqual(1, ancestor.close_count)
+        self.assertEqual((0, 0), (source_parent.close_count, stage_parent.close_count))
+        self.assertTrue(source_parent.handle)
+        self.assertTrue(stage_parent.handle)
+        owner.close()
+        self.assertEqual((1, 1), (source_parent.close_count, stage_parent.close_count))
+        self.assertEqual(0, source_parent.handle)
+        self.assertEqual(0, stage_parent.handle)
+        self.assertEqual((target, source, stage), tuple(path for path, _ in observed_guards))
+
+    def test_retained_relocation_members_compare_in_canonical_evidence_order(self):
+        from modlab.validation import windows_junction as junction
+
+        name = "ModLab Spike New"
+        root = Path(r"C:\fixture\stage") / name
+        root_pin = SimpleNamespace(path=root, handle=1, identity=(1, 1))
+
+        def entry(relative, is_directory, file_id):
+            return junction._PinnedEntry(
+                relative,
+                is_directory,
+                SimpleNamespace(
+                    path=root.joinpath(*relative.split("/")),
+                    handle=1,
+                    identity=(1, file_id),
+                ),
+            )
+
+        # _PinnedTree records acquisition order: every sibling before recursion.
+        entries = [
+            entry("meshes", True, 2),
+            entry("meta.ini", False, 3),
+            entry("meshes/new-folder.bin", False, 4),
+        ]
+        tree = junction._PinnedTree(root_pin, entries, root)
+
+        def row(relative, kind):
+            digest = None if kind == "directory" else "a" * 64
+            return (relative, kind, 1, 1, 0, 0, 0, 0, 0, digest)
+
+        expected_rows = (
+            row(name, "directory"),
+            row(name + "/meshes", "directory"),
+            row(name + "/meshes/new-folder.bin", "file"),
+            row(name + "/meta.ini", "file"),
+        )
+        item = junction._RetainedRelocationItem(
+            name,
+            expected_rows,
+            root_pin,
+            tree,
+        )
+        verified = []
+        with (
+            patch.object(junction, "_assert_pinned_tree"),
+            patch.object(
+                junction,
+                "_verify_relocation_pin",
+                side_effect=lambda pinned, expected, _row, **_kwargs: verified.append(
+                    (pinned.path, expected)
+                ),
+            ),
+        ):
+            junction._verify_relocation_item(item)
+
+        self.assertEqual(
+            tuple(root.joinpath(*relative.split("/")) for relative in (
+                "",
+                "meshes",
+                "meshes/new-folder.bin",
+                "meta.ini",
+            )),
+            tuple(expected for _pinned, expected in verified),
+        )
+
+    def test_pinned_tree_rejects_stable_name_with_changed_member_identity(self):
+        from modlab.validation import windows_junction as junction
+
+        root = Path(r"C:\fixture\tree")
+        child = root / "member.txt"
+        root_pin = SimpleNamespace(path=root, handle=1, identity=(1, 1))
+        tree = junction._PinnedTree(
+            root_pin,
+            [
+                junction._PinnedEntry(
+                    "member.txt",
+                    False,
+                    SimpleNamespace(path=child, handle=1, identity=(1, 2)),
+                )
+            ],
+            root,
+        )
+        observed = SimpleNamespace(name="member.txt", path=str(child))
+        with (
+            patch.object(junction, "_assert_pinned_root_path"),
+            patch.object(junction.os, "scandir", return_value=(observed,)),
+            patch.object(junction, "_identity_at_path", return_value=(1, 3)),
+            self.assertRaisesRegex(
+                junction.ContainmentSafetyError,
+                "member identity changed",
+            ),
+        ):
+            junction._assert_pinned_tree(tree)
+
+    def test_retained_authority_closes_partial_tree_carried_by_pin_rejection(self):
+        from modlab.validation import windows_junction as junction
+
+        source = Path(r"C:\fixture\source")
+        stage = Path(r"C:\fixture\stage")
+        quarantine = Path(r"C:\fixture\quarantine")
+        name = "Candidate"
+        root_pin = SimpleNamespace(path=stage / name, handle=1, identity=(1, 3))
+        tree = junction._PinnedTree(root_pin, [], root_pin.path)
+        rejection = junction._PinnedTreeRejected("reparse descendant", tree)
+        root_row = (name, "directory", 1, 3, 0, 0, 0, 0, 0, None)
+
+        with (
+            patch.object(junction, "_verify_borrowed_parent"),
+            patch.object(
+                junction,
+                "_top_level_names",
+                side_effect=((), (name,)),
+            ),
+            patch.object(junction, "_pin_tree", side_effect=rejection),
+            patch.object(junction, "_close_retained_owners") as close,
+            self.assertRaisesRegex(
+                junction.ContainmentSafetyError,
+                "reparse descendant",
+            ),
+        ):
+            junction.retain_relocation_authority(
+                source_mods=source,
+                stage_mods=stage,
+                quarantine_root=quarantine,
+                source_rows=(),
+                stage_rows=((".", "directory", 1, 1, 0, 0, 0, 0, 0, None), root_row),
+                source_names=(),
+                stage_names=(name,),
+                mutation_names=(name,),
+                destination_map=((name, (str(quarantine / name),)),),
+                quarantine_names=None,
+                source_parent=SimpleNamespace(path=source, handle=1, identity=(1, 1)),
+                stage_parent=SimpleNamespace(path=stage, handle=1, identity=(1, 2)),
+            )
+
+        self.assertEqual(
+            ((tree,), "retained relocation authority acquisition"),
+            close.call_args.args,
+        )
 
     @unittest.skipUnless(os.name == "nt", "Windows stable-root guards are required")
     def test_absent_root_never_enters_ordinary_delegated_mutation_unpinned(self):

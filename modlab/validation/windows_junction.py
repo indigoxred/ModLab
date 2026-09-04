@@ -282,6 +282,107 @@ class _PinnedTree:
             self.entries = [entry for entry in self.entries if entry.pinned.handle]
 
 
+@dataclass
+class _RetainedRelocationItem:
+    name: str
+    expected_rows: tuple[tuple[object, ...], ...]
+    pinned: _PinnedObject
+    tree: _PinnedTree | None
+
+
+@dataclass
+class RetainedRelocationAuthority:
+    """Exact movable objects and borrowed destination parents for one relocation."""
+
+    source_mods: Path
+    stage_mods: Path
+    quarantine_root: Path
+    source_names: tuple[str, ...]
+    stage_names: tuple[str, ...]
+    mutation_names: tuple[str, ...]
+    destination_map: tuple[tuple[str, tuple[str, ...]], ...]
+    source_parent: object
+    stage_parent: object
+    items: tuple[_RetainedRelocationItem, ...]
+    quarantine_names: tuple[str, ...] | None
+    quarantine_parent: object | None = None
+
+    def pin_for_path(self, path: Path) -> object | None:
+        candidate = Path(path)
+        for item in self.items:
+            pins = (
+                (item.pinned,)
+                if item.tree is None
+                else (
+                    item.tree.root,
+                    *(entry.pinned for entry in item.tree.entries),
+                )
+            )
+            for pinned in pins:
+                if pinned.path == candidate and pinned.handle:
+                    return pinned
+        return None
+
+    def _item(self, name: str) -> _RetainedRelocationItem:
+        found = tuple(item for item in self.items if item.name == name)
+        if len(found) != 1:
+            raise ContainmentSafetyError(
+                f"relocation name is not retained exactly once: {name!r}"
+            )
+        return found[0]
+
+    def bind_quarantine_parent(self, parent: object) -> None:
+        if self.quarantine_parent is not None and self.quarantine_parent is not parent:
+            raise ContainmentSafetyError(
+                "relocation quarantine parent was already bound to another owner"
+            )
+        _verify_borrowed_parent(parent, self.quarantine_root)
+        if self.quarantine_names is None:
+            self.quarantine_names = ()
+        self.quarantine_parent = parent
+
+    def verify(self, *, require_quarantine_parent: bool = False) -> None:
+        _verify_borrowed_parent(self.source_parent, self.source_mods)
+        _verify_borrowed_parent(self.stage_parent, self.stage_mods)
+        if _top_level_names(self.source_mods) != self.source_names:
+            raise ContainmentSafetyError("relocation source membership changed")
+        if _top_level_names(self.stage_mods) != self.stage_names:
+            raise ContainmentSafetyError("relocation staging membership changed")
+        if tuple(item.name for item in self.items) != self.mutation_names:
+            raise ContainmentSafetyError("relocation retained name set changed")
+        for item in self.items:
+            _verify_relocation_item(item)
+        if self.quarantine_parent is None:
+            if require_quarantine_parent:
+                raise ContainmentSafetyError(
+                    "relocation quarantine destination parent is unbound"
+                )
+            if _exists_no_follow(self.quarantine_root):
+                raise ContainmentSafetyError(
+                    "relocation quarantine destination appeared before creation"
+                )
+            return
+        _verify_borrowed_parent(self.quarantine_parent, self.quarantine_root)
+        observed = _top_level_names(self.quarantine_root)
+        if observed != self.quarantine_names:
+            raise ContainmentSafetyError(
+                "relocation quarantine destination membership changed"
+            )
+        destination_names = {name.casefold() for name in self.mutation_names}
+        if any(name.casefold() in destination_names for name in observed):
+            raise ContainmentSafetyError(
+                "relocation quarantine destination collision appeared"
+            )
+
+    def close(self) -> None:
+        _close_retained_owners(
+            tuple(
+                item.tree if item.tree is not None else item.pinned
+                for item in reversed(self.items)
+            ),
+            "retained relocation authority close",
+        )
+
 class _PinnedTreeRejected(ContainmentSafetyError):
     def __init__(self, message: str, tree: _PinnedTree) -> None:
         super().__init__(message)
@@ -1117,6 +1218,243 @@ def _assert_pinned_tree(tree: _PinnedTree) -> None:
                 )
 
 
+def _identity_pair(identity: object) -> tuple[int, int]:
+    if hasattr(identity, "volume_serial") and hasattr(identity, "file_id"):
+        return int(identity.volume_serial), int(identity.file_id)
+    try:
+        volume, file_id = identity
+    except (TypeError, ValueError) as error:
+        raise ContainmentSafetyError("retained identity is malformed") from error
+    return int(volume), int(file_id)
+
+
+def _verify_borrowed_parent(owner: object, expected_path: Path) -> None:
+    path = Path(getattr(owner, "path", ""))
+    handle = getattr(owner, "handle", 0)
+    if path != Path(expected_path) or not handle:
+        raise ContainmentSafetyError("relocation destination parent owner is unbound")
+    expected = _identity_pair(getattr(owner, "identity", None))
+    if (
+        _file_identity(_handle_information(handle, path)) != expected
+        or _identity_at_path(path) != expected
+    ):
+        raise ContainmentSafetyError("relocation destination parent identity changed")
+    attributes, tag = _attribute_tag_for_handle(handle, path)
+    if _is_reparse(attributes, tag) or not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+        raise ContainmentSafetyError(
+            "relocation destination parent is not a direct directory"
+        )
+
+
+def _top_level_names(root: Path) -> tuple[str, ...]:
+    return tuple(path.name for path in _top_level_entries(root))
+
+
+def _verify_relocation_pin(
+    pinned: _PinnedObject,
+    expected_path: Path,
+    row: tuple[object, ...],
+    *,
+    is_directory: bool,
+) -> None:
+    if not pinned.handle or pinned.path != expected_path:
+        raise ContainmentSafetyError("relocation retained path owner changed")
+    expected_identity = (int(row[2]), int(row[3]))
+    if (
+        pinned.identity != expected_identity
+        or _file_identity(_handle_information(pinned.handle, pinned.path))
+        != expected_identity
+        or _identity_at_path(pinned.path) != expected_identity
+    ):
+        raise ContainmentSafetyError("relocation retained native identity changed")
+    attributes, tag = _attribute_tag_for_handle(pinned.handle, pinned.path)
+    if _is_reparse(attributes, tag):
+        raise ContainmentSafetyError("relocation retained object became reparse")
+    if bool(attributes & _FILE_ATTRIBUTE_DIRECTORY) != is_directory:
+        raise ContainmentSafetyError("relocation retained object type changed")
+    metadata = pinned.path.lstat()
+    if (
+        int(metadata.st_mode),
+        int(metadata.st_size),
+        int(metadata.st_mtime_ns),
+        int(metadata.st_ctime_ns),
+        int(getattr(metadata, "st_file_attributes", 0)),
+    ) != tuple(int(value) for value in row[4:9]):
+        raise ContainmentSafetyError("relocation retained metadata changed")
+    if is_directory:
+        if row[9] is not None:
+            raise ContainmentSafetyError("relocation directory digest is malformed")
+    elif _hash_pinned_file(pinned)[0] != row[9]:
+        raise ContainmentSafetyError("relocation retained file content changed")
+
+
+def _verify_relocation_item(item: _RetainedRelocationItem) -> None:
+    if not item.expected_rows or item.expected_rows[0][0] != item.name:
+        raise ContainmentSafetyError("relocation retained rows are malformed")
+    root_row = item.expected_rows[0]
+    root_is_directory = root_row[1] == "directory"
+    _verify_relocation_pin(
+        item.pinned,
+        item.pinned.path,
+        root_row,
+        is_directory=root_is_directory,
+    )
+    if not root_is_directory:
+        if item.tree is not None or len(item.expected_rows) != 1:
+            raise ContainmentSafetyError("relocation file has unexpected members")
+        return
+    if item.tree is None or item.tree.root is not item.pinned:
+        raise ContainmentSafetyError("relocation directory tree owner is unavailable")
+    _assert_pinned_tree(item.tree)
+    expected_members = {
+        str(row[0]).removeprefix(item.name + "/"): row
+        for row in item.expected_rows[1:]
+    }
+    retained_members: dict[str, _PinnedEntry] = {}
+    retained_folded: set[str] = set()
+    for entry in item.tree.entries:
+        folded = entry.relative_path.casefold()
+        if entry.relative_path in retained_members or folded in retained_folded:
+            raise ContainmentSafetyError(
+                "relocation retained tree membership is not unique"
+            )
+        retained_members[entry.relative_path] = entry
+        retained_folded.add(folded)
+    expected_order = tuple(expected_members)
+    canonical_retained = tuple(
+        sorted(retained_members, key=lambda path: (path.casefold(), path))
+    )
+    if expected_order != canonical_retained:
+        raise ContainmentSafetyError("relocation retained tree membership changed")
+    for relative_path, row in expected_members.items():
+        entry = retained_members[relative_path]
+        if (row[1] == "directory") != entry.is_directory:
+            raise ContainmentSafetyError("relocation retained member type changed")
+        _verify_relocation_pin(
+            entry.pinned,
+            item.pinned.path.joinpath(*entry.relative_path.split("/")),
+            row,
+            is_directory=entry.is_directory,
+        )
+
+
+def retain_relocation_authority(
+    *,
+    source_mods: Path,
+    stage_mods: Path,
+    quarantine_root: Path,
+    source_rows: tuple[tuple[object, ...], ...],
+    stage_rows: tuple[tuple[object, ...], ...],
+    source_names: tuple[str, ...],
+    stage_names: tuple[str, ...],
+    mutation_names: tuple[str, ...],
+    destination_map: tuple[tuple[str, tuple[str, ...]], ...],
+    quarantine_names: tuple[str, ...] | None,
+    source_parent: object,
+    stage_parent: object,
+    quarantine_parent: object | None = None,
+) -> RetainedRelocationAuthority:
+    """Retain the exact already-admitted movable objects without reclassifying them."""
+    source = Path(source_mods)
+    stage = Path(stage_mods)
+    quarantine = Path(quarantine_root)
+    _verify_borrowed_parent(source_parent, source)
+    _verify_borrowed_parent(stage_parent, stage)
+    if _top_level_names(source) != source_names:
+        raise ContainmentSafetyError("relocation source membership changed before pinning")
+    if _top_level_names(stage) != stage_names:
+        raise ContainmentSafetyError("relocation staging membership changed before pinning")
+    if tuple(name for name, _destinations in destination_map) != mutation_names:
+        raise ContainmentSafetyError("relocation destination map name set changed")
+    for name, destinations in destination_map:
+        if str(quarantine / name) not in destinations:
+            raise ContainmentSafetyError("relocation quarantine destination is unbound")
+        for destination in destinations:
+            path = Path(destination)
+            if path.name != name or path.parent not in {source, quarantine}:
+                raise ContainmentSafetyError("relocation destination escaped its parent")
+
+    items: list[_RetainedRelocationItem] = []
+    try:
+        for name in mutation_names:
+            expected_rows = tuple(
+                row
+                for row in stage_rows[1:]
+                if row[0] == name or str(row[0]).startswith(name + "/")
+            )
+            if not expected_rows:
+                raise ContainmentSafetyError(
+                    f"relocation admitted name has no observed source object: {name!r}"
+                )
+            root_row = expected_rows[0]
+            if root_row[0] != name or root_row[1] not in {"directory", "file"}:
+                raise ContainmentSafetyError(
+                    f"relocation admitted root is not direct and regular: {name!r}"
+                )
+            path = stage / name
+            if root_row[1] == "directory":
+                try:
+                    tree = _pin_tree(path)
+                except _PinnedTreeRejected as error:
+                    items.append(
+                        _RetainedRelocationItem(
+                            name,
+                            expected_rows,
+                            error.tree.root,
+                            error.tree,
+                        )
+                    )
+                    raise
+                item = _RetainedRelocationItem(
+                    name,
+                    expected_rows,
+                    tree.root,
+                    tree,
+                )
+            else:
+                pinned = _pin_object(
+                    path,
+                    desired_access=_DELETE | _GENERIC_READ,
+                    allow_reparse=False,
+                )
+                item = _RetainedRelocationItem(
+                    name,
+                    expected_rows,
+                    pinned,
+                    None,
+                )
+            items.append(item)
+            _verify_relocation_item(item)
+        authority = RetainedRelocationAuthority(
+            source,
+            stage,
+            quarantine,
+            source_names,
+            stage_names,
+            mutation_names,
+            destination_map,
+            source_parent,
+            stage_parent,
+            tuple(items),
+            quarantine_names,
+            quarantine_parent,
+        )
+        authority.verify()
+        return authority
+    except BaseException as error:
+        try:
+            _close_retained_owners(
+                tuple(
+                    item.tree if item.tree is not None else item.pinned
+                    for item in reversed(items)
+                ),
+                "retained relocation authority acquisition",
+            )
+        except JunctionOwnershipError as ownership_error:
+            raise ownership_error from error
+        raise
+
+
 def _assert_pinned_root_path(tree: _PinnedTree) -> None:
     if _identity_at_path(tree.current_path) != tree.root.identity:
         raise ContainmentSafetyError("pinned tree root identity changed")
@@ -1321,9 +1659,17 @@ def _exists_no_follow(path: Path) -> bool:
 def _quarantine_pinned_objects(
     pinned_entries: tuple[_PinnedObject, ...],
     quarantine_root: Path,
+    *,
+    retained_parent: object | None = None,
 ) -> None:
     quarantine = _require_direct_directory(quarantine_root)
-    parent_pin = _pin_parent_directory(quarantine)
+    parent_pin = (
+        _pin_parent_directory(quarantine)
+        if retained_parent is None
+        else retained_parent
+    )
+    owns_parent = retained_parent is None
+    _verify_borrowed_parent(parent_pin, quarantine)
     ownership_error: JunctionOwnershipError | None = None
     try:
         for pinned in pinned_entries:
@@ -1347,20 +1693,32 @@ def _quarantine_pinned_objects(
         ownership_error = error
         raise
     finally:
-        try:
-            _close_retained_owners(
-                (ownership_error, parent_pin),
-                "quarantine object finalizer",
-            )
-        except JunctionOwnershipError as finalizer_error:
-            if ownership_error is not None:
-                raise finalizer_error from ownership_error
-            raise
+        if owns_parent:
+            try:
+                _close_retained_owners(
+                    (ownership_error, parent_pin),
+                    "quarantine object finalizer",
+                )
+            except JunctionOwnershipError as finalizer_error:
+                if ownership_error is not None:
+                    raise finalizer_error from ownership_error
+                raise
 
 
-def _quarantine_pinned_tree(tree: _PinnedTree, quarantine_root: Path) -> None:
+def _quarantine_pinned_tree(
+    tree: _PinnedTree,
+    quarantine_root: Path,
+    *,
+    retained_parent: object | None = None,
+) -> None:
     quarantine = _require_direct_directory(quarantine_root)
-    parent_pin = _pin_parent_directory(quarantine)
+    parent_pin = (
+        _pin_parent_directory(quarantine)
+        if retained_parent is None
+        else retained_parent
+    )
+    owns_parent = retained_parent is None
+    _verify_borrowed_parent(parent_pin, quarantine)
     ownership_error: JunctionOwnershipError | None = None
     try:
         source = tree.current_path
@@ -1388,15 +1746,195 @@ def _quarantine_pinned_tree(tree: _PinnedTree, quarantine_root: Path) -> None:
         ownership_error = error
         raise
     finally:
-        try:
-            _close_retained_owners(
-                (ownership_error, parent_pin),
-                "quarantine tree finalizer",
+        if owns_parent:
+            try:
+                _close_retained_owners(
+                    (ownership_error, parent_pin),
+                    "quarantine tree finalizer",
+                )
+            except JunctionOwnershipError as finalizer_error:
+                if ownership_error is not None:
+                    raise finalizer_error from ownership_error
+                raise
+
+
+def quarantine_retained_relocation(
+    authority: RetainedRelocationAuthority,
+    names: tuple[str, ...],
+    *,
+    verify: bool = True,
+) -> tuple[Path, ...]:
+    """Quarantine exactly the retained admitted objects, in admitted order."""
+    if tuple(names) != tuple(
+        name for name in authority.mutation_names if name in set(names)
+    ):
+        raise ContainmentSafetyError("relocation quarantine names are not admitted order")
+    if verify:
+        authority.verify(require_quarantine_parent=True)
+    parent = authority.quarantine_parent
+    assert parent is not None
+    moved = []
+    for name in names:
+        item = authority._item(name)
+        if item.tree is not None:
+            item.tree.close_descendants()
+            _quarantine_pinned_tree(
+                item.tree,
+                authority.quarantine_root,
+                retained_parent=parent,
             )
-        except JunctionOwnershipError as finalizer_error:
-            if ownership_error is not None:
-                raise finalizer_error from ownership_error
+            moved.append(item.tree.current_path)
+        else:
+            _quarantine_pinned_objects(
+                (item.pinned,),
+                authority.quarantine_root,
+                retained_parent=parent,
+            )
+            moved.append(item.pinned.path)
+    return tuple(moved)
+
+
+def adopt_retained_relocation(
+    authority: RetainedRelocationAuthority,
+    *,
+    expected_name: str,
+    before_names: tuple[str, ...],
+) -> AdoptionEvidence:
+    """Adopt the one retained admitted tree without pathname reclassification."""
+    expected = _safe_name(expected_name, "expected name")
+    validated_before = tuple(_safe_name(name, "before name") for name in before_names)
+    new_names = tuple(name for name in authority.stage_names if name not in validated_before)
+    authority.verify(require_quarantine_parent=True)
+    if new_names != (expected,) or authority.mutation_names != (expected,):
+        quarantine_retained_relocation(authority, authority.mutation_names)
+        raise ContainmentSafetyError(
+            "exactly one retained expected staging entry is required for adoption"
+        )
+    item = authority._item(expected)
+    if item.tree is None:
+        quarantine_retained_relocation(authority, (expected,))
+        raise ContainmentSafetyError("retained adoption candidate is not a directory")
+    tree = item.tree
+    destinations = dict(authority.destination_map)[expected]
+    destination = authority.source_mods / expected
+    if str(destination) not in destinations:
+        raise ContainmentSafetyError("retained adoption destination is unbound")
+    quarantined = False
+    try:
+        _assert_pinned_tree(tree)
+        before_tree = _stable_pinned_tree_identity(tree, required_equal_passes=2)
+        pinned_paths = (tree.root.path,) + tuple(
+            entry.pinned.path for entry in tree.entries
+        )
+        set_medium_integrity_entries(pinned_paths)
+        _require_pinned_tree_integrity(tree, IntegrityLevel.MEDIUM)
+        tree.close_descendants()
+        try:
+            _rename_pinned_object(tree.root, destination, authority.source_parent)
+        except FileExistsError as error:
+            raise ContainmentSafetyError(
+                "destination already exists at retained adoption rename boundary"
+            ) from error
+        tree.current_path = destination
+        _pin_descendants(tree)
+        after_tree = _stable_pinned_tree_identity(tree, required_equal_passes=2)
+        if after_tree != before_tree:
+            raise ContainmentSafetyError("adopted retained tree identity changed")
+        _require_pinned_tree_integrity(tree, IntegrityLevel.MEDIUM)
+        final_attributes, final_tag = _attribute_tag_for_handle(
+            tree.root.handle,
+            destination,
+        )
+        final_is_reparse = _is_reparse(final_attributes, final_tag)
+        if final_is_reparse:
+            raise ContainmentSafetyError("adopted destination became reparse")
+        final_integrity = inspect_path_integrity(destination)
+        if final_integrity is not IntegrityLevel.MEDIUM:
+            raise ContainmentSafetyError("adopted destination integrity is not Medium")
+        return AdoptionEvidence(
+            adopted_name=expected,
+            destination_path=destination,
+            before_tree=before_tree,
+            after_tree=after_tree,
+            final_integrity=final_integrity,
+            final_is_reparse=final_is_reparse,
+        )
+    except BaseException as error:
+        if not quarantined:
+            try:
+                tree.close_descendants()
+                _quarantine_pinned_tree(
+                    tree,
+                    authority.quarantine_root,
+                    retained_parent=authority.quarantine_parent,
+                )
+                quarantined = True
+            except BaseException as quarantine_error:
+                if isinstance(quarantine_error, JunctionOwnershipError):
+                    raise
+                raise ContainmentSafetyError(
+                    "retained adoption failed and quarantine also failed: "
+                    f"{quarantine_error}"
+                ) from error
+        if isinstance(error, ContainmentSafetyError):
             raise
+        raise ContainmentSafetyError(
+            f"retained adoption failed safely: {error}"
+        ) from error
+
+
+def quarantine_retained_replacement(
+    authority: RetainedRelocationAuthority,
+    *,
+    expected_name: str,
+) -> ReplacementQuarantineEvidence:
+    """Quarantine the exact retained replacement tree and its admitted members."""
+    expected = _safe_name(expected_name, "expected name")
+    authority.verify(require_quarantine_parent=True)
+    if authority.mutation_names != (expected,):
+        raise ContainmentSafetyError("retained replacement name set is not exact")
+    item = authority._item(expected)
+    if item.tree is None:
+        raise ContainmentSafetyError("retained replacement is not a directory tree")
+    tree = item.tree
+    before_tree = _stable_pinned_tree_identity(tree, required_equal_passes=2)
+    before_members = tuple(
+        (entry.relative_path, entry.is_directory, entry.pinned.identity)
+        for entry in tree.entries
+    )
+    output_names = tuple(
+        sorted(
+            entry.relative_path
+            for entry in tree.entries
+            if not entry.is_directory
+        )
+    )
+    tree.close_descendants()
+    _quarantine_pinned_tree(
+        tree,
+        authority.quarantine_root,
+        retained_parent=authority.quarantine_parent,
+    )
+    _pin_descendants(tree)
+    after_members = tuple(
+        (entry.relative_path, entry.is_directory, entry.pinned.identity)
+        for entry in tree.entries
+    )
+    if after_members != before_members:
+        raise ContainmentSafetyError(
+            "retained replacement member identity changed across quarantine"
+        )
+    after_tree = _stable_pinned_tree_identity(tree, required_equal_passes=2)
+    if after_tree != before_tree:
+        raise ContainmentSafetyError(
+            "retained replacement tree identity changed across quarantine"
+        )
+    return ReplacementQuarantineEvidence(
+        destination_path=tree.current_path,
+        output_names=output_names,
+        before_tree=before_tree,
+        after_tree=after_tree,
+    )
 
 
 def ensure_direct_subdirectory(parent: Path, name: str) -> Path:
@@ -1844,16 +2382,21 @@ __all__ = [
     "IO_REPARSE_TAG_MOUNT_POINT",
     "JunctionEvidence",
     "OwnedProjection",
+    "RetainedRelocationAuthority",
     "ReplacementQuarantineEvidence",
     "adopt_unique_staged_mod",
+    "adopt_retained_relocation",
     "build_projection",
     "create_mod_projection",
     "create_owned_projection",
     "ensure_direct_subdirectory",
     "inspect_junction",
     "quarantine_exact_object",
+    "quarantine_retained_relocation",
+    "quarantine_retained_replacement",
     "quarantine_replacement_tree",
     "reject_reparse_tree",
     "require_tree_integrity",
+    "retain_relocation_authority",
     "stable_tree_identity",
 ]

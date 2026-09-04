@@ -1,0 +1,43 @@
+test_relocation_preflight_rejects_source_and_quarantine_name_collisions (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_preflight_rejects_source_and_quarantine_name_collisions) ... 
+  test_relocation_preflight_rejects_source_and_quarantine_name_collisions (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_preflight_rejects_source_and_quarantine_name_collisions) (destination='source', spelling='ModLab Spike New') ... FAIL
+  test_relocation_preflight_rejects_source_and_quarantine_name_collisions (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_preflight_rejects_source_and_quarantine_name_collisions) (destination='source', spelling='mODlAB sPIKE nEW') ... FAIL
+  test_relocation_preflight_rejects_source_and_quarantine_name_collisions (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_preflight_rejects_source_and_quarantine_name_collisions) (destination='quarantine', spelling='ModLab Spike New') ... FAIL
+  test_relocation_preflight_rejects_source_and_quarantine_name_collisions (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_preflight_rejects_source_and_quarantine_name_collisions) (destination='quarantine', spelling='mODlAB sPIKE nEW') ... FAIL
+
+======================================================================
+FAIL: test_relocation_preflight_rejects_source_and_quarantine_name_collisions (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_preflight_rejects_source_and_quarantine_name_collisions) (destination='source', spelling='ModLab Spike New')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 648, in test_relocation_preflight_rejects_source_and_quarantine_name_collisions
+    self.assertRaisesRegex(
+AssertionError: ContainmentServiceError not raised
+
+======================================================================
+FAIL: test_relocation_preflight_rejects_source_and_quarantine_name_collisions (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_preflight_rejects_source_and_quarantine_name_collisions) (destination='source', spelling='mODlAB sPIKE nEW')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 648, in test_relocation_preflight_rejects_source_and_quarantine_name_collisions
+    self.assertRaisesRegex(
+AssertionError: ContainmentServiceError not raised
+
+======================================================================
+FAIL: test_relocation_preflight_rejects_source_and_quarantine_name_collisions (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_preflight_rejects_source_and_quarantine_name_collisions) (destination='quarantine', spelling='ModLab Spike New')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 675, in test_relocation_preflight_rejects_source_and_quarantine_name_collisions
+    self.assertRaisesRegex(
+AssertionError: ContainmentServiceError not raised
+
+======================================================================
+FAIL: test_relocation_preflight_rejects_source_and_quarantine_name_collisions (tests.test_mo2_containment_service.ContainmentServiceTests.test_relocation_preflight_rejects_source_and_quarantine_name_collisions) (destination='quarantine', spelling='mODlAB sPIKE nEW')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 675, in test_relocation_preflight_rejects_source_and_quarantine_name_collisions
+    self.assertRaisesRegex(
+AssertionError: ContainmentServiceError not raised
+
+----------------------------------------------------------------------
+Ran 1 test in 0.008s
+
+FAILED (failures=4)
+Exit 1

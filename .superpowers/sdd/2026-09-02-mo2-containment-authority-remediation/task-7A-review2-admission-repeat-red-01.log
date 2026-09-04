@@ -1,0 +1,51 @@
+test_retained_preflight_verifies_before_missing_root_creation (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_preflight_verifies_before_missing_root_creation) ... ERROR
+test_retained_preflight_binds_created_owner_then_reverifies_before_operation (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_preflight_binds_created_owner_then_reverifies_before_operation) ... ERROR
+test_retained_preflight_mismatch_refuses_before_missing_root_creation (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_preflight_mismatch_refuses_before_missing_root_creation) ... ERROR
+test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards) ... ERROR
+
+======================================================================
+ERROR: test_retained_preflight_verifies_before_missing_root_creation (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_preflight_verifies_before_missing_root_creation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 3857, in test_retained_preflight_verifies_before_missing_root_creation
+    service._delegated_mutations_with_created_root(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 2051, in _delegated_mutations_with_created_root
+    retained_preflight(guards_by_path)
+TypeError: Task4ExactEffectsFixTests.test_retained_preflight_verifies_before_missing_root_creation.<locals>.retained_preflight() missing 1 required positional argument: 'supplied'
+
+======================================================================
+ERROR: test_retained_preflight_binds_created_owner_then_reverifies_before_operation (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_preflight_binds_created_owner_then_reverifies_before_operation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 3914, in test_retained_preflight_binds_created_owner_then_reverifies_before_operation
+    result = service._delegated_mutations_with_created_root(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 2051, in _delegated_mutations_with_created_root
+    retained_preflight(guards_by_path)
+TypeError: Task4ExactEffectsFixTests.test_retained_preflight_binds_created_owner_then_reverifies_before_operation.<locals>.retained_preflight() missing 1 required positional argument: 'supplied'
+
+======================================================================
+ERROR: test_retained_preflight_mismatch_refuses_before_missing_root_creation (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_retained_preflight_mismatch_refuses_before_missing_root_creation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 3984, in test_retained_preflight_mismatch_refuses_before_missing_root_creation
+    service._delegated_mutations_with_created_root(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 2051, in _delegated_mutations_with_created_root
+    retained_preflight(guards_by_path)
+TypeError: Task4ExactEffectsFixTests.test_retained_preflight_mismatch_refuses_before_missing_root_creation.<locals>.retained_preflight() missing 1 required positional argument: 'supplied'
+
+======================================================================
+ERROR: test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards (tests.test_mo2_containment_service.Task4ExactEffectsFixTests.test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_service.py", line 4066, in test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards
+    service._delegated_mutations_with_created_root(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 2051, in _delegated_mutations_with_created_root
+    retained_preflight(guards_by_path)
+TypeError: Task4ExactEffectsFixTests.test_persisted_projection_parent_pins_are_borrowed_as_mutation_guards.<locals>.retained_preflight() missing 1 required positional argument: 'supplied'
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.003s
+
+FAILED (errors=4)
+Exit 1
