@@ -143,6 +143,7 @@ class ExactDirectoryCreationOutcome:
     status: int | None
     information: int
     has_valid_handle: bool
+    delete_access: bool = True
 
     @property
     def proven_created(self) -> bool:
@@ -152,7 +153,7 @@ class ExactDirectoryCreationOutcome:
     @property
     def owns_created_candidate(self) -> bool:
         """Whether a retained handle carries exact candidate cleanup authority."""
-        return self.proven_created and self.has_valid_handle
+        return self.proven_created and self.has_valid_handle and self.delete_access
 
 
 class ExactDirectoryCreationError(ExactObjectError):
@@ -765,6 +766,7 @@ def create_pinned_directory_child(
     identity_at_path_fn: Callable[[Path], PinnedIdentity] | None = None,
     initial_security_descriptor: int | None = None,
     read_control: bool = False,
+    delete_access: bool = True,
 ) -> PinnedObject:
     """Create one direct directory relative to a retained parent handle.
 
@@ -774,6 +776,9 @@ def create_pinned_directory_child(
     ``initial_security_descriptor`` is a caller-owned native descriptor address
     kept alive through this call; it applies at creation, never after opening.
     ``read_control`` grants security inspection on the first retained handle.
+    ``delete_access=False`` allows concurrent readers that also deny deletion.
+    Such handles have close-only cleanup ownership: validation failure leaves
+    the created directory in place, without acquiring deletion authority later.
     """
     _require_windows()
     if identity_at_path_fn is None:
@@ -827,7 +832,7 @@ def create_pinned_directory_child(
     try:
         status = _ntdll.NtCreateFile(
             ctypes.byref(output_handle),
-            _DELETE
+            (_DELETE if delete_access else 0)
             | (0x00020000 if read_control else 0)
             | _FILE_READ_ATTRIBUTES
             | _FILE_LIST_DIRECTORY
@@ -859,6 +864,7 @@ def create_pinned_directory_child(
         status=status,
         information=int(io_status.Information),
         has_valid_handle=has_valid_handle,
+        delete_access=delete_access,
     )
     if native_error is not None:
         # Information alone is not a reliable native result.  An interrupted
@@ -905,7 +911,7 @@ def create_pinned_directory_child(
             "rooted directory creation returned no ownership handle",
             outcome,
         )
-    if not outcome.owns_created_candidate:
+    if not outcome.proven_created:
         raise _directory_creation_ownership(
             "rooted directory creation did not prove a newly created object",
             outcome,
@@ -946,7 +952,10 @@ def create_pinned_directory_child(
     except BaseException as error:
         cleanup_error: BaseException | None = None
         try:
-            delete_pinned_object(candidate)
+            if delete_access:
+                delete_pinned_object(candidate)
+            else:
+                candidate.close()
         except BaseException as candidate_cleanup_error:
             cleanup_error = candidate_cleanup_error
         if candidate.handle:
@@ -955,7 +964,8 @@ def create_pinned_directory_child(
                 f"cleanup failed: {cleanup_error}",
                 outcome,
                 prior=error,
-                candidate=candidate,
+                candidate=candidate if delete_access else None,
+                verification=() if delete_access else (candidate,),
             ) from error
         if not isinstance(error, Exception):
             raise

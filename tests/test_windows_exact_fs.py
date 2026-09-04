@@ -29,6 +29,60 @@ from modlab.platform.windows_exact_fs import (
 
 @unittest.skipUnless(os.name == "nt", "Windows retained-handle APIs are required")
 class WindowsExactFsTests(unittest.TestCase):
+    def test_rooted_directory_close_only_creation_guards_with_concurrent_reader(self):
+        parent = pin_direct_object(self.root, 'directory')
+        child = reader = None
+        try:
+            child = windows_exact_fs.create_pinned_directory_child(
+                self.root / 'guarded', parent, delete_access=False,
+            )
+            from modlab.validation import windows_vault_security as security
+            reader = security._pin(child.path)
+            with self.assertRaises(OSError):
+                child.path.rename(self.root / 'moved')
+            child.close()
+            with self.assertRaises(OSError):
+                reader.path.rmdir()
+        finally:
+            if reader is not None:
+                reader.close()
+            if child is not None:
+                child.close()
+            parent.close()
+
+    def test_rooted_directory_without_delete_retains_only_close_ownership_on_failure(self):
+        parent = pin_direct_object(self.root, 'directory')
+        target = self.root / 'close-only'
+        original = RuntimeError('validation failed')
+        real_close = PinnedObject.close
+        ownership = None
+        def inspect(path):
+            if path == target:
+                raise original
+            return identity_at_path(path)
+        def fail_child_close(pinned):
+            if pinned.path == target:
+                raise OSError('close failed')
+            return real_close(pinned)
+        try:
+            with mock.patch.object(PinnedObject, 'close', new=fail_child_close):
+                with self.assertRaises(ExactObjectOwnershipError) as raised:
+                    windows_exact_fs.create_pinned_directory_child(
+                        target, parent, delete_access=False, identity_at_path_fn=inspect,
+                    )
+            ownership = raised.exception
+            self.assertIs(original, ownership.__cause__)
+            self.assertTrue(ownership.outcome.proven_created)
+            self.assertFalse(ownership.outcome.owns_created_candidate)
+            self.assertIsNone(ownership.candidate)
+            self.assertEqual(1, len(ownership.verification))
+            ownership.resolve()
+            self.assertTrue(target.is_dir())
+        finally:
+            if ownership is not None:
+                ownership.resolve()
+            parent.close()
+
     def test_rooted_directory_initial_descriptor_and_read_control(self):
         from modlab.validation import windows_vault_security as security
 

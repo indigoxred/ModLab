@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -91,6 +92,66 @@ class WindowsVaultSecurityTests(unittest.TestCase):
                 vault.path.rename(self.root / 'renamed')
         with open_vault(self.root / 'authority') as reopened:
             self.assertEqual(reopened.creator_sid, current_vault_principal().sid)
+
+    def test_reopened_vault_continuously_denies_root_rename_and_delete(self):
+        for operation in ('rename', 'delete'):
+            with self.subTest(operation=operation):
+                path = self.root / operation
+                with create_vault(path):
+                    pass
+                with open_vault(path) as vault:
+                    with self.assertRaises(OSError):
+                        if operation == 'rename':
+                            path.rename(self.root / 'moved')
+                        else:
+                            path.rmdir()
+                    vault.verify()
+
+    def test_watcher_and_creator_guards_coexist_and_survive_independent_close(self):
+        path = self.root / 'authority'
+        ready = self.root / 'watcher-ready'
+        controller = create_vault(path)
+        code = '''
+from pathlib import Path
+import sys
+from modlab.validation.windows_vault_security import open_vault
+with open_vault(Path(sys.argv[1])) as watcher:
+    Path(sys.argv[2]).write_text('ready')
+    if sys.stdin.readline().strip() != 'stop':
+        raise RuntimeError('missing stop')
+    watcher.verify()
+'''
+        worker = subprocess.Popen([sys.executable, '-B', '-c', code, str(path), str(ready)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 15
+            while not ready.exists() and worker.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), 'watcher did not acquire its independent guard')
+            controller.verify()
+            # Each remaining owner must independently keep the root guarded.
+            with self.assertRaises(OSError):
+                path.rename(self.root / 'moved')
+            controller.close()
+            with self.assertRaises(OSError):
+                path.rename(self.root / 'moved')
+            with self.assertRaises(OSError):
+                path.rmdir()
+            with open_vault(path) as another_controller:
+                another_controller.verify()
+                stdout, stderr = worker.communicate('stop\n', timeout=15)
+                self.assertEqual(0, worker.returncode, stderr)
+                with self.assertRaises(OSError):
+                    path.rename(self.root / 'moved')
+            # The final close releases the guard, rather than permanently locking it.
+            path.rename(self.root / 'moved')
+        finally:
+            if worker.poll() is None:
+                try:
+                    worker.communicate('stop\n', timeout=15)
+                except subprocess.TimeoutExpired:
+                    worker.kill()
+                    worker.communicate(timeout=15)
+            controller.close()
 
     def test_exact_medium_and_mandatory_policy_are_required(self):
         principal = current_vault_principal()

@@ -284,8 +284,10 @@ def _validate_policy(pinned, creator=None, *, root=False):
 
 
 def _pin(path):
-    # Ancestors need not grant DELETE; denying FILE_SHARE_DELETE is the guard.
-    handle = exact._kernel32.CreateFileW(str(path), _READ_CONTROL | 0x80, 3, None, 3, 0x02200000, None)
+    # Metadata-only opens do not participate in Windows share-access checks.
+    # LIST_DIRECTORY / READ_DATA makes the no-SHARE_DELETE guard effective.
+    # No DELETE desired access permits independent controller/watcher guards.
+    handle = exact._kernel32.CreateFileW(str(path), _READ_CONTROL | 0x80 | 0x1, 3, None, 3, 0x02200000, None)
     if handle == exact._INVALID_HANDLE_VALUE:
         raise _error(f'vault direct open failed for {path}')
     pinned = exact.PinnedObject(path, handle, None)
@@ -381,7 +383,7 @@ def _acquire(path, *, create, expected_creator_sid=None):
             if not _advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None):
                 raise _error('vault initial security descriptor failed')
             try:
-                root = exact.create_pinned_directory_child(target, pins[-1], initial_security_descriptor=descriptor.value, read_control=True)
+                root = exact.create_pinned_directory_child(target, pins[-1], initial_security_descriptor=descriptor.value, read_control=True, delete_access=False)
             finally:
                 _kernel.LocalFree(descriptor)
         else:
