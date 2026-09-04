@@ -2849,7 +2849,10 @@ def _exact_process_status(
         _controller_owner(error, Path(f"process {pid}")).resolve()
         return "uncertain", 0, detail
     except OSError as error:
-        if getattr(error, "winerror", None) == _ERROR_INVALID_PARAMETER:
+        error_code = getattr(error, "winerror", None)
+        if error_code is None:
+            error_code = error.errno
+        if error_code == _ERROR_INVALID_PARAMETER:
             return "dead", 0, None
         return "uncertain", 0, str(error)
     except WatchProtocolError as error:
@@ -2963,12 +2966,13 @@ def _stop_non_owner(
                     reasons.append("worker-cleanup-refused")
             else:
                 reasons.append("worker-cleanup-refused")
-        elif worker_status == "dead" and worker_handle:
+        elif worker_status == "dead":
             worker_quiescent = True
-            try:
-                worker_exit_code = _get_process_exit_code(worker_handle)
-            except OSError:
-                reasons.append("worker-cleanup-refused")
+            if worker_handle:
+                try:
+                    worker_exit_code = _get_process_exit_code(worker_handle)
+                except OSError:
+                    reasons.append("worker-cleanup-refused")
     except BaseException as error:
         pending_error = _controller_owner(error, request.evidence_root)
     if worker_handle:

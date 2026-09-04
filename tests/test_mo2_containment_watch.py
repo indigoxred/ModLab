@@ -2351,6 +2351,51 @@ class MutationWatchTests(unittest.TestCase):
         finally:
             self._finish_external_fixture(controller, worker_pid, worker_handle)
 
+    def test_non_owner_captures_complete_evidence_after_worker_is_fully_reaped(self):
+        controller, evidence, request_path, worker_pid, worker_handle = (
+            self._external_controller_fixture("dead-controller-reaped-worker")
+        )
+        handle_owned = True
+        try:
+            request = windows_watch._load_request_path(request_path)
+            claim = windows_watch._load_controller_claim(request)
+            launch = windows_watch._load_worker_launch(request)
+            controller.terminate()
+            controller.wait(timeout=10)
+            self.assertEqual(
+                windows_watch._WAIT_OBJECT_0,
+                windows_watch._kernel32.WaitForSingleObject(worker_handle, 10_000),
+            )
+            self.assertIsNone(
+                windows_watch._close_handle(worker_handle, "reaped-worker test handle")
+            )
+            handle_owned = False
+            self.assertEqual(
+                ("dead", 0, None),
+                windows_watch._exact_process_status(
+                    launch.worker_pid,
+                    launch.worker_creation_time,
+                ),
+            )
+
+            receipt = stop_watch(request_path)
+            outcome = watch_outcome_from_bytes((evidence / "outcome.json").read_bytes())
+
+            self.assertFalse(receipt.complete)
+            self.assertEqual(("controller-session-lost",), outcome.reason_codes)
+            self.assertTrue(outcome.ready)
+            self.assertEqual(windows_watch.ROOT_KINDS, outcome.opened_root_kinds)
+            self.assertTrue(outcome.root_identities_unchanged)
+            self.assertEqual((), outcome.events)
+            self.assertEqual(outcome, windows_watch._load_published_outcome(request, claim, launch))
+        finally:
+            if handle_owned:
+                self._finish_external_fixture(
+                    controller,
+                    worker_pid,
+                    worker_handle,
+                )
+
     def test_bound_event_survives_exact_controller_death_as_incomplete(self):
         controller, evidence, request_path, worker_pid, worker_handle = (
             self._external_controller_fixture("dead-controller-bound-event")
