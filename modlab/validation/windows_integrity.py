@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 import hashlib
 import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 from typing import Callable, Mapping
 
 from modlab.validation.mo2_containment_model import IntegrityObservation
+from modlab.validation.windows_process_job import ProcessJobOwner
 
 
 class IntegrityLevel(IntEnum):
@@ -32,6 +34,7 @@ class ProcessLaunch:
     working_directory: str
     integrity: IntegrityLevel
     creation_time: int
+    owner: ProcessJobOwner | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -662,6 +665,37 @@ def _set_token_integrity(token: int, level: IntegrityLevel) -> None:
         _advapi32.FreeSid(sid)
 
 
+def _verify_exact_low_process(token: int) -> None:
+    """Verify exact Low RID on the original process token, without reopening PID."""
+    needed = wintypes.DWORD()
+    ctypes.set_last_error(0)
+    if _advapi32.GetTokenInformation(
+        token, _TOKEN_INTEGRITY_LEVEL, None, 0, ctypes.byref(needed)
+    ):
+        raise OSError("GetTokenInformation unexpectedly accepted empty buffer")
+    if (
+        ctypes.get_last_error() != _ERROR_INSUFFICIENT_BUFFER
+        or needed.value < ctypes.sizeof(_TOKEN_MANDATORY_LABEL)
+    ):
+        raise _winerror("GetTokenInformation sizing failed for retained child")
+    buffer = ctypes.create_string_buffer(needed.value)
+    if not _advapi32.GetTokenInformation(
+        token, _TOKEN_INTEGRITY_LEVEL, buffer, needed, ctypes.byref(needed)
+    ):
+        raise _winerror("GetTokenInformation failed for retained child")
+    label = ctypes.cast(buffer, ctypes.POINTER(_TOKEN_MANDATORY_LABEL)).contents
+    if not label.Label.Sid:
+        raise OSError("retained child has empty integrity SID")
+    count = _advapi32.GetSidSubAuthorityCount(label.Label.Sid)
+    if not count or count[0] != 1:
+        raise OSError("retained child has invalid integrity SID")
+    rid = _advapi32.GetSidSubAuthority(label.Label.Sid, 0)
+    if not rid or rid[0] != int(IntegrityLevel.LOW):
+        raise OSError("retained child is not exact Low RID")
+    if not _token_mandatory_policy(token) & _TOKEN_MANDATORY_POLICY_NO_WRITE_UP:
+        raise OSError("retained child mandatory policy does not enforce no-write-up")
+
+
 def _environment_block(environment: Mapping[str, str]) -> ctypes.Array[ctypes.c_wchar]:
     entries: dict[str, tuple[str, str]] = {}
     for key, value in environment.items():
@@ -727,8 +761,26 @@ def launch_low_integrity_process(
     environment: Mapping[str, str],
     *,
     on_created: Callable[[int], None] | None = None,
+    retain_owner: bool = False,
+    before_resume: Callable[[ProcessLaunch], None] | None = None,
 ) -> ProcessLaunch:
+    """Launch suspended, verify Low, and optionally retain a private process job.
+
+    ``before_resume`` requires ``retain_owner`` and receives the verified launch
+    while its root is suspended. A retained launch failure exposes ``error.owner``
+    even when cleanup fails; keep that owner and retry ``close`` after quiescence.
+    A false ``resumed`` flag means resume was not verified, not that the process
+    is necessarily still suspended. Owners and launches containing them cannot
+    be serialized; persist the receipt's scalar fields explicitly.
+    """
     _require_windows()
+    if not isinstance(retain_owner, bool):
+        raise TypeError("retain_owner must be bool")
+    if before_resume is not None:
+        if not callable(before_resume):
+            raise TypeError("before_resume must be callable")
+        if not retain_owner:
+            raise ValueError("before_resume requires retained ownership")
     if on_created is not None and not callable(on_created):
         raise TypeError("process creation callback must be callable")
     executable_path = Path(executable)
@@ -764,7 +816,13 @@ def launch_low_integrity_process(
 
     child_token = wintypes.HANDLE()
     resumed = False
+    resume_attempted = False
+    owner = None
     try:
+        if retain_owner:
+            owner = ProcessJobOwner._take_created(process_information)
+        process_handle = owner.process_handle if owner else process_information.hProcess
+        thread_handle = owner._thread if owner else process_information.hThread
         created_pid = int(process_information.dwProcessId)
         if created_pid <= 0:
             raise OSError("CreateProcessW returned an invalid process ID")
@@ -772,48 +830,80 @@ def launch_low_integrity_process(
             on_created(created_pid)
         try:
             if not _advapi32.OpenProcessToken(
-                process_information.hProcess,
+                process_handle,
                 _TOKEN_QUERY | _TOKEN_ADJUST_DEFAULT,
                 ctypes.byref(child_token),
             ):
                 raise _winerror("OpenProcessToken failed for suspended child")
+            if owner:
+                owner._token = child_token.value
             _set_token_integrity(child_token, IntegrityLevel.LOW)
+            if owner:
+                _verify_exact_low_process(child_token)
         finally:
-            _close_handle(child_token.value)
+            if owner:
+                primary = sys.exc_info()[1]
+                try:
+                    owner._close_token()
+                except BaseException as cleanup_error:
+                    if primary is None:
+                        raise
+                    primary.add_note(f"retained token close failed: {cleanup_error}")
+            else:
+                _close_handle(child_token.value)
 
-        observed = inspect_process_integrity(created_pid)
+        observed = IntegrityLevel.LOW if owner else inspect_process_integrity(created_pid)
         if observed is not IntegrityLevel.LOW:
             raise OSError(
                 f"suspended process {created_pid} was {observed.name}, not LOW"
             )
         creation_time = _process_creation_time(
-            process_information.hProcess,
+            process_handle,
             created_pid,
         )
-        _resume_verified_child(
-            process_information.hProcess,
-            process_information.hThread,
-            created_pid,
-        )
-        resumed = True
-        return ProcessLaunch(
+        if owner:
+            owner._admit(creation_time)
+        launch = ProcessLaunch(
             pid=created_pid,
             executable=str(executable_path),
             arguments=args,
             working_directory=str(working_directory),
             integrity=observed,
             creation_time=creation_time,
+            owner=owner,
         )
+        if before_resume is not None:
+            before_resume(launch)
+        resume_attempted = True
+        _resume_verified_child(process_handle, thread_handle, created_pid)
+        resumed = True
+        if owner:
+            owner._mark_resumed()
+        return launch
     except BaseException as error:
-        if not resumed:
+        if owner:
+            error.owner = owner
+        # A failed resume verification may mean code is already running. Never
+        # kill a retained tree after attempting resume; preserve the owner for
+        # explicit recovery, even if its verified `resumed` flag remains false.
+        if not resumed and not (owner and resume_attempted):
             try:
-                _terminate_created_process(process_information.hProcess)
+                _terminate_created_process(
+                    owner.process_handle if owner else process_information.hProcess
+                )
             except BaseException as cleanup_error:
                 if hasattr(error, "add_note"):
                     error.add_note(
                         "created-process termination cleanup failed: "
                         f"{cleanup_error}"
                     )
+        if owner:
+            try:
+                owner.close()
+            except BaseException as cleanup_error:
+                error.add_note(
+                    f"retained process ownership cleanup incomplete: {cleanup_error}"
+                )
         raise
     finally:
         _close_handle(process_information.hThread)
