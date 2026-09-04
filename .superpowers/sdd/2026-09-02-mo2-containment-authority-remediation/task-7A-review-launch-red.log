@@ -1,0 +1,28 @@
+EE
+======================================================================
+ERROR: test_recording_runner_records_only_created_processes_and_preserves_order (tests.test_mo2_archive.Mo2ArchiveTests.test_recording_runner_records_only_created_processes_and_preserves_order)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_archive.py", line 53, in test_recording_runner_records_only_created_processes_and_preserves_order
+    self.assertEqual(0, runner.run(version).returncode)
+                        ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 247, in run
+    return self._runner.run(args)
+           ^^^^^^^^^^^^^^^^^^^^^^
+TypeError: Mo2ArchiveTests.test_recording_runner_records_only_created_processes_and_preserves_order.<locals>.ObservedRunner.run() missing 1 required keyword-only argument: 'on_created'
+
+======================================================================
+ERROR: test_recording_runner_keeps_successful_repeated_launches (tests.test_mo2_archive.Mo2ArchiveTests.test_recording_runner_keeps_successful_repeated_launches)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_archive.py", line 79, in test_recording_runner_keeps_successful_repeated_launches
+    runner.run(args)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 247, in run
+    return self._runner.run(args)
+           ^^^^^^^^^^^^^^^^^^^^^^
+TypeError: Mo2ArchiveTests.test_recording_runner_keeps_successful_repeated_launches.<locals>.RepeatedRunner.run() missing 1 required keyword-only argument: 'on_created'
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.062s
+
+FAILED (errors=2)

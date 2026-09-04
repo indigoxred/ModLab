@@ -1,0 +1,80 @@
+EEF
+======================================================================
+ERROR: test_containment_budget_names_exact_records_replacements_and_quarantine (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_containment_budget_names_exact_records_replacements_and_quarantine)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 362, in test_containment_budget_names_exact_records_replacements_and_quarantine
+    budget = service._preflight_preparation(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: _preflight_preparation() takes 4 positional arguments but 5 were given
+
+======================================================================
+ERROR: test_fixture_admission_includes_every_external_input_and_source_adoption_path (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_fixture_admission_includes_every_external_input_and_source_adoption_path)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 416, in test_fixture_admission_includes_every_external_input_and_source_adoption_path
+    admission = fixtures.preflight_containment_fixture(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: preflight_containment_fixture() got an unexpected keyword argument 'version_reader'
+
+======================================================================
+FAIL: test_outer_admission_rejects_changed_fixture_input_snapshot (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_outer_admission_rejects_changed_fixture_input_snapshot)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3818, in _observe_artifact
+    _require_direct_file_under(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 4694, in _require_direct_file_under
+    metadata = current.lstat()
+               ^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 847, in lstat
+    return self.stat(follow_symlinks=False)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\pathlib.py", line 840, in stat
+    return os.stat(self, follow_symlinks=follow_symlinks)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [WinError 2] The system cannot find the file specified: 'C:\\Users\\red\\AppData\\Local\\Temp\\tmppnq2aj5e\\source\\library\\metadata\\artifacts'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_fixtures.py", line 357, in _fixture_inputs
+    observed = _observe_artifact(source_layout, mo2_artifact_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 3831, in _observe_artifact
+    raise Mo2BootstrapRefusal(
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: retained archive metadata is missing: C:\Users\red\AppData\Local\Temp\tmppnq2aj5e\source\library\metadata\artifacts\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 1428, in invoke
+    value = operation(*args, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 2075, in prepare_run
+    _delegated_mutations_with_created_root(
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 1338, in _delegated_mutations_with_created_root
+    prepared = preflight()
+               ^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_fixtures.py", line 325, in preflight_containment_fixture
+    inputs = _fixture_inputs(
+             ^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_fixtures.py", line 360, in _fixture_inputs
+    raise ContainmentFixtureError("exact MO2 artifact is unavailable in source vault") from error
+modlab.validation.mo2_containment_fixtures.ContainmentFixtureError: exact MO2 artifact is unavailable in source vault
+
+The above exception was the direct cause of the following exception:
+
+modlab.validation.mo2_containment_service.ContainmentOperationError: exact MO2 artifact is unavailable in source vault
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 456, in test_outer_admission_rejects_changed_fixture_input_snapshot
+    self.assertRaisesRegex(service.ContainmentServiceError, "input.*changed|admission.*changed"),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "input.*changed|admission.*changed" does not match "exact MO2 artifact is unavailable in source vault"
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.343s
+
+FAILED (failures=1, errors=2)

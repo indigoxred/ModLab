@@ -1,7 +1,7 @@
 """Crash-safe orchestration and fail-closed adjudication for MO2 containment."""
 
 from __future__ import annotations
-from modlab.adapters.mo2.path_budget import PlannedPath, admit_paths, publication_paths
+from modlab.adapters.mo2.path_budget import PathBudget, PlannedPath, admit_paths, publication_paths
 
 from contextvars import ContextVar
 from contextlib import contextmanager
@@ -10,7 +10,7 @@ from functools import partial, wraps
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import secrets
 import stat
@@ -41,7 +41,11 @@ from modlab.workspace import workspace_layout
 
 from .mo2_containment_fixtures import (
     ContainmentFixture,
+    FixtureAdmission,
     PROTECTED_MOD_FILES,
+    REPLACEMENT_OUTPUT_FILES,
+    SCENARIO_ADOPTION_NAMES,
+    SCENARIO_OUTPUT_FILES,
     preflight_containment_fixture,
     prepare_containment_fixture,
 )
@@ -130,25 +134,9 @@ _FIXTURE_POLICY = "disposable-shell-environment-v3"
 _PREVIOUS_FIXTURE_POLICY = "disposable-shell-environment-v2"
 _OPERATOR_POLICY = "foreground-interactive-confirmation-v1"
 _PROTECTED_NAME = "Protected Existing"
-_EXPECTED_NEW = {
-    ContainmentScenario.NEW_FOLDER: "ModLab Spike New",
-    ContainmentScenario.MERGE_EXISTING: _PROTECTED_NAME,
-    ContainmentScenario.REPLACE_EXISTING: _PROTECTED_NAME,
-    ContainmentScenario.FOMOD_DEPENDENCY: "ModLab Spike FOMOD",
-}
-_EXPECTED_OUTPUTS = {
-    ContainmentScenario.NEW_FOLDER: ("meshes/new-folder.bin", "meta.ini"),
-    ContainmentScenario.FOMOD_DEPENDENCY: (
-        "always.txt",
-        "dependency-seen.txt",
-        "meta.ini",
-    ),
-}
-_EXPECTED_REPLACEMENT_OUTPUTS = (
-    "meshes/canary.bin",
-    "meshes/new.bin",
-    "meta.ini",
-)
+_EXPECTED_NEW = SCENARIO_ADOPTION_NAMES
+_EXPECTED_OUTPUTS = SCENARIO_OUTPUT_FILES
+_EXPECTED_REPLACEMENT_OUTPUTS = REPLACEMENT_OUTPUT_FILES
 
 
 _P = TypeVar("_P")
@@ -393,6 +381,341 @@ class _MutationObservationOwnershipError(ContainmentStoreOwnershipError):
         self.completed_observation = completed_observation
 
 
+@dataclass(frozen=True)
+class _RelocationAdmission:
+    source_rows: tuple[tuple[object, ...], ...]
+    stage_rows: tuple[tuple[object, ...], ...]
+    source_names: tuple[str, ...]
+    stage_names: tuple[str, ...]
+    changed_names: tuple[str, ...]
+    mutation_names: tuple[str, ...]
+    destination_map: tuple[tuple[str, tuple[str, ...]], ...]
+    source_volume: int
+    stage_volume: int
+    destination_volume: int
+    projection_rows: tuple[tuple[object, ...], ...]
+    budget: PathBudget
+
+    @property
+    def sha256(self) -> str:
+        canonical = json.dumps(
+            {
+                "sourceRows": self.source_rows,
+                "stageRows": self.stage_rows,
+                "sourceNames": self.source_names,
+                "stageNames": self.stage_names,
+                "changedNames": self.changed_names,
+                "mutationNames": self.mutation_names,
+                "destinationMap": self.destination_map,
+                "sourceVolume": self.source_volume,
+                "stageVolume": self.stage_volume,
+                "destinationVolume": self.destination_volume,
+                "projectionRows": self.projection_rows,
+                "budget": self.budget.sha256,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+
+def _canonical_relocation_rows(
+    root: Path,
+    rows: tuple[tuple[object, ...], ...] | None,
+) -> tuple[tuple[object, ...], ...]:
+    if not rows or len(rows[0]) != 10 or rows[0][0] != ".":
+        raise ContainmentServiceError(
+            f"relocation tree observation is unavailable: {root}"
+        )
+    identities: set[str] = set()
+    prior_key: tuple[str, str] | None = None
+    for index, row in enumerate(rows):
+        if not row or not isinstance(row[0], str):
+            raise ContainmentServiceError("relocation tree contains a malformed row")
+        relative = row[0]
+        if index:
+            path = PurePosixPath(relative)
+            if (
+                path.is_absolute()
+                or path.as_posix() != relative
+                or any(part in {"", ".", ".."} for part in path.parts)
+            ):
+                raise ContainmentServiceError(
+                    f"relocation tree contains an unsafe relative path: {relative!r}"
+                )
+            identity = relative.casefold()
+            if identity in identities:
+                raise ContainmentServiceError(
+                    "relocation tree contains a case-insensitive collision"
+                )
+            identities.add(identity)
+            key = (identity, relative)
+            if prior_key is not None and key < prior_key:
+                raise ContainmentServiceError(
+                    "relocation tree observation is not canonically ordered"
+                )
+            prior_key = key
+        if len(row) == 10 and row[1] in {"directory", "file"}:
+            if not all(isinstance(value, int) for value in row[2:9]):
+                raise ContainmentServiceError(
+                    "relocation tree contains malformed direct identity"
+                )
+            digest = row[-1]
+            if row[1] == "file":
+                if (
+                    not isinstance(digest, str)
+                    or len(digest) != 64
+                    or any(character not in "0123456789abcdef" for character in digest)
+                ):
+                    raise ContainmentServiceError(
+                        "relocation tree contains malformed file identity"
+                    )
+            elif digest is not None:
+                raise ContainmentServiceError(
+                    "relocation tree contains malformed directory identity"
+                )
+        elif not (
+            index
+            and len(row) == 10
+            and row[1] == "junction"
+            and all(isinstance(value, int) for value in row[2:4])
+            and all(value is None for value in row[4:9])
+            and isinstance(row[9], str)
+            and len(row[9]) == 64
+            and all(character in "0123456789abcdef" for character in row[9])
+        ):
+            raise ContainmentServiceError("relocation tree contains a malformed row")
+    return rows
+
+
+def _top_level_relocation_names(
+    rows: tuple[tuple[object, ...], ...],
+) -> tuple[str, ...]:
+    names: dict[str, str] = {}
+    for row in rows[1:]:
+        name = PurePosixPath(row[0]).parts[0]
+        prior = names.setdefault(name.casefold(), name)
+        if prior != name:
+            raise ContainmentServiceError(
+                "relocation tree contains a case-insensitive collision"
+            )
+    return tuple(sorted(names.values(), key=lambda item: (item.casefold(), item)))
+
+
+def _relocation_destination_volume(destination: Path) -> int:
+    ancestor = _nearest_existing_direct_directory(Path(destination))
+    identity = identity_at_path(ancestor)
+    if hasattr(identity, "volume_serial"):
+        return int(identity.volume_serial)
+    return int(identity[0])
+
+
+def _changed_relocation_names(
+    rows: tuple[tuple[object, ...], ...],
+    before_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    top_level = {
+        row[0]: row
+        for row in rows[1:]
+        if len(PurePosixPath(row[0]).parts) == 1
+    }
+    return tuple(
+        name
+        for name in before_names
+        if name in top_level and top_level[name][1] != "junction"
+    )
+
+
+def _relocation_projection_rows(
+    expected_projections: tuple,
+) -> tuple[tuple[object, ...], ...]:
+    rows = []
+    for owner in expected_projections:
+        try:
+            owner.verify()
+            rows.append(
+                (
+                    str(owner.evidence.link_path),
+                    str(owner.evidence.target_path),
+                    hashlib.sha256(owner.payload).hexdigest(),
+                    tuple(
+                        (str(pin.path), int(pin.identity[0]), int(pin.identity[1]))
+                        for pin in owner.pins
+                    ),
+                )
+            )
+        except (AttributeError, IndexError, TypeError, ValueError) as error:
+            raise ContainmentServiceError(
+                "relocation expected projection evidence is malformed"
+            ) from error
+    return tuple(rows)
+
+
+def _preflight_projection_relocation(
+    record,
+    quarantine: Path,
+    *,
+    expected_projections: tuple = (),
+) -> _RelocationAdmission:
+    source_rows = _canonical_relocation_rows(
+        record.source_mods,
+        _mutation_root_observation(
+            record.source_mods,
+            expected_projections=expected_projections,
+        ) if expected_projections else _mutation_root_observation(record.source_mods),
+    )
+    stage_rows = _canonical_relocation_rows(
+        record.stage_mods,
+        _mutation_root_observation(
+            record.stage_mods,
+            expected_projections=expected_projections,
+        ) if expected_projections else _mutation_root_observation(record.stage_mods),
+    )
+    source_names = _top_level_relocation_names(source_rows)
+    stage_names = _top_level_relocation_names(stage_rows)
+    changed_names = _changed_relocation_names(stage_rows, record.before_names)
+    if any(name not in stage_names for name in changed_names):
+        raise ContainmentServiceError(
+            "relocation changed-name evidence is outside the observed staging tree"
+        )
+    source_volume = int(source_rows[0][2])
+    stage_volume = int(stage_rows[0][2])
+    if (
+        any(int(row[2]) != source_volume for row in source_rows)
+        or any(int(row[2]) != stage_volume for row in stage_rows)
+    ):
+        raise ContainmentServiceError(
+            "relocation tree crosses a native volume boundary"
+        )
+    destination_volume = _relocation_destination_volume(quarantine)
+    if source_volume != stage_volume or stage_volume != destination_volume:
+        raise ContainmentServiceError(
+            "relocation source and destination must remain on one volume"
+        )
+    projection_rows = _relocation_projection_rows(expected_projections)
+
+    rows: list[PlannedPath] = []
+    for label, root, observed in (
+        ("relocation-source", record.source_mods, source_rows),
+        ("relocation-stage", record.stage_mods, stage_rows),
+    ):
+        for row in observed:
+            relative = row[0]
+            path = root if relative == "." else root.joinpath(*relative.split("/"))
+            rows.append(PlannedPath(label, "preparation-wide", str(path)))
+
+    unexpected = tuple(name for name in stage_names if name not in record.before_names)
+    mutation_names = tuple(dict.fromkeys((*changed_names, *unexpected)))
+    expected = _EXPECTED_NEW[record.scenario]
+    destination_map = []
+    for name in mutation_names:
+        members = tuple(
+            row[0].removeprefix(name + "/")
+            for row in stage_rows[1:]
+            if row[0].startswith(name + "/")
+        )
+        destinations = []
+        if (
+            record.scenario in _EXPECTED_OUTPUTS
+            and name == expected
+            and name not in record.before_names
+        ):
+            destinations.append(record.source_mods / name)
+        destinations.append(Path(quarantine) / name)
+        destination_map.append((name, tuple(str(path) for path in destinations)))
+        for destination in destinations:
+            rows.append(
+                PlannedPath("relocation-destination", "preparation-wide", str(destination))
+            )
+            rows.extend(
+                PlannedPath(
+                    "relocation-destination:member",
+                    "preparation-wide",
+                    str(destination.joinpath(*member.split("/"))),
+                )
+                for member in members
+            )
+    return _RelocationAdmission(
+        source_rows,
+        stage_rows,
+        source_names,
+        stage_names,
+        changed_names,
+        mutation_names,
+        tuple(destination_map),
+        source_volume,
+        stage_volume,
+        destination_volume,
+        projection_rows,
+        admit_paths(rows),
+    )
+
+
+def _require_relocation_admission(
+    record,
+    quarantine: Path,
+    expected: _RelocationAdmission,
+    *,
+    expected_projections: tuple = (),
+) -> _RelocationAdmission:
+    current = _preflight_projection_relocation(
+        record,
+        quarantine,
+        expected_projections=expected_projections,
+    )
+    if current != expected:
+        raise ContainmentServiceError("relocation immutable admission changed")
+    return current
+
+
+@contextmanager
+def _retained_relocation_projections(store, run_id: str, record):
+    """Retain the one admitted baseline projection when it is still present."""
+    link = record.stage_mods / _PROTECTED_NAME
+    try:
+        metadata = link.lstat()
+    except FileNotFoundError:
+        yield ()
+        return
+    except OSError as error:
+        raise ContainmentServiceError(
+            "relocation baseline projection identity is unavailable"
+        ) from error
+    redirected = link.is_symlink() or bool(
+        getattr(metadata, "st_file_attributes", 0) & 0x400
+    )
+    if not redirected:
+        yield ()
+        return
+    try:
+        projection = store.load_preparation_projection(
+            run_id,
+            record.scenario.value,
+        )
+        owner = _pin_preparation_projection(store, projection)
+    except BaseException as error:
+        raise ContainmentServiceError(
+            "relocation baseline projection is not the exact prepared object"
+        ) from error
+    primary = None
+    try:
+        if owner.evidence.link_path != link:
+            raise ContainmentServiceError(
+                "relocation baseline projection path differs from the fixture"
+            )
+        yield (owner,)
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        _close_preparation_owners(
+            (owner,),
+            "relocation baseline projection",
+            primary,
+        )
+
+
 def _path_component_identity(metadata: os.stat_result) -> tuple[int, ...]:
     """Stable pathname-component identity, separate from subtree contents."""
     return (
@@ -633,10 +956,21 @@ def _mutation_root_observation(
         try:
             owner.verify()
             link = owner.evidence.link_path
-            if not _beneath(root, link) or link == root or link in projections:
+            link_beneath = _beneath(root, link) and link != root
+            relevant_pins = tuple(
+                pin
+                for pin in owner.pins[1:]
+                if pin.path == root or _beneath(root, pin.path)
+            )
+            if not link_beneath and not relevant_pins:
                 raise ContainmentSafetyError("expected projection is outside observation or duplicated")
-            projections[link] = owner
-            owned_direct.update((pin.path, pin) for pin in owner.pins[1:])
+            if link_beneath:
+                if link in projections:
+                    raise ContainmentSafetyError(
+                        "expected projection is outside observation or duplicated"
+                    )
+                projections[link] = owner
+            owned_direct.update((pin.path, pin) for pin in relevant_pins)
         except (ContainmentSafetyError, OSError) as error:
             raise _MutationObservationError(str(error)) from error
 
@@ -727,14 +1061,19 @@ def _mutation_root_observation(
                 + "; ".join(str(error) for error in close_errors)
             ) from close_errors[0]
 
+    pinned_direct = dict(owned_direct)
+
     def stable_pin(path: Path, kind: str) -> object | None:
         if os.name != "nt":
             return None
-        if path in owned_direct:
+        if path in pinned_direct:
             verify_projections()
-            return owned_direct[path]
+            return pinned_direct[path]
+        if path in _ACTIVE_GUARDED_MUTATION_ROOTS.get():
+            return None
         pinned = pin_stable_direct_object(path, kind)
         retained.append(pinned)
+        pinned_direct[path] = pinned
         return pinned
 
     def require_direct_directory(
@@ -858,10 +1197,30 @@ def _mutation_root_observation(
         path: Path,
         metadata: os.stat_result,
     ) -> tuple[object, ...]:
+        kind = "directory" if stat.S_ISDIR(metadata.st_mode) else "file"
+        digest = file_digest(path, metadata)
+        pinned = stable_pin(path, kind)
+        if os.name == "nt":
+            native = identity_at_path(path) if pinned is None else pinned.identity
+            if hasattr(native, "volume_serial"):
+                volume_serial = int(native.volume_serial)
+                file_id = int(native.file_id)
+            else:
+                volume_serial, file_id = (int(value) for value in native)
+        else:
+            volume_serial = int(metadata.st_dev)
+            file_id = int(metadata.st_ino)
         return (
             relative,
-            *identity(metadata),
-            file_digest(path, metadata),
+            kind,
+            volume_serial,
+            file_id,
+            int(metadata.st_mode),
+            int(metadata.st_size),
+            int(metadata.st_mtime_ns),
+            int(metadata.st_ctime_ns),
+            int(getattr(metadata, "st_file_attributes", 0)),
+            digest,
         )
 
     try:
@@ -912,8 +1271,28 @@ def _mutation_root_observation(
             if child_path in projections:
                 verify_projections()
                 owner = projections[child_path]
-                rows.append((child_relative.as_posix(), "junction", owner.pins[0].identity,
-                             owner.evidence.reparse_payload_sha256))
+                link_identity = owner.pins[0].identity
+                if hasattr(link_identity, "volume_serial"):
+                    volume_serial = int(link_identity.volume_serial)
+                    file_id = int(link_identity.file_id)
+                else:
+                    volume_serial, file_id = (
+                        int(value) for value in link_identity
+                    )
+                rows.append(
+                    (
+                        child_relative.as_posix(),
+                        "junction",
+                        volume_serial,
+                        file_id,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        owner.evidence.reparse_payload_sha256,
+                    )
+                )
                 continue
             if redirected(metadata):
                 raise _MutationObservationError(
@@ -972,6 +1351,19 @@ def _mutation_root_observation(
     return completed
 
 
+def _projection_relevant_to_root(root: Path, owner) -> bool:
+    try:
+        paths = (
+            owner.evidence.link_path,
+            *(pin.path for pin in owner.pins[1:]),
+        )
+    except (AttributeError, TypeError) as error:
+        raise _MutationObservationError(
+            "expected projection evidence is malformed"
+        ) from error
+    return any(path == root or _beneath(root, path) for path in paths)
+
+
 def _delegated_mutations_guarded(
     roots: tuple[Path, ...],
     operation: Callable[[], _V],
@@ -983,7 +1375,16 @@ def _delegated_mutations_guarded(
     before_rows: list[tuple[tuple[object, ...], ...] | None] = []
     try:
         for root in exact_roots:
-            before_rows.append(_mutation_root_observation(root))
+            owners = tuple(
+                owner
+                for owner in expected_projections
+                if _projection_relevant_to_root(root, owner)
+            )
+            before_rows.append(
+                _mutation_root_observation(root, expected_projections=owners)
+                if owners
+                else _mutation_root_observation(root)
+            )
     except _MutationObservationError as error:
         raise ContainmentServiceError(
             f"delegated mutation effect observation rejected before operation: {error}"
@@ -1005,7 +1406,11 @@ def _delegated_mutations_guarded(
         ownership_after: list[tuple[Path, ContainmentStoreOwnershipError]] = []
         for root, prior in zip(exact_roots, before, strict=True):
             try:
-                owners = tuple(owner for owner in expected_projections if _beneath(root, owner.evidence.link_path))
+                owners = tuple(
+                    owner
+                    for owner in expected_projections
+                    if _projection_relevant_to_root(root, owner)
+                )
                 current = (_mutation_root_observation(root, expected_projections=owners)
                            if owners else _mutation_root_observation(root))
             except ContainmentStoreOwnershipError as error:
@@ -1143,6 +1548,8 @@ def _delegated_mutations_guarded(
 def _delegated_mutations(
     roots: tuple[Path, ...],
     operation: Callable[[], _V],
+    *,
+    expected_projections: tuple = (),
 ) -> _V:
     exact_roots = _unique_paths(roots)
     guards: list[object] = []
@@ -1158,7 +1565,11 @@ def _delegated_mutations(
                 guards.append(guard)
         token = _ACTIVE_GUARDED_MUTATION_ROOTS.set(exact_roots)
         try:
-            return _delegated_mutations_guarded(exact_roots, operation)
+            return _delegated_mutations_guarded(
+                exact_roots,
+                operation,
+                expected_projections=expected_projections,
+            )
         finally:
             _ACTIVE_GUARDED_MUTATION_ROOTS.reset(token)
     except BaseException as error:
@@ -1291,6 +1702,7 @@ def _delegated_mutations_with_created_root(
     operation: Callable[[_P], _V],
     *,
     require_absent: bool = False,
+    expected_projections: tuple = (),
 ) -> _V:
     """Create and retain each missing direct root component before delegating."""
     target = Path(created_root)
@@ -1307,6 +1719,7 @@ def _delegated_mutations_with_created_root(
         return _delegated_mutations(
             exact_roots,
             lambda: operation(preflight()),
+            expected_projections=expected_projections,
         )
 
     guards: list[object] = []
@@ -1335,7 +1748,11 @@ def _delegated_mutations_with_created_root(
             if guard is not None:
                 guards.append(guard)
 
-        prepared = preflight()
+        preflight_token = _ACTIVE_GUARDED_MUTATION_ROOTS.set(exact_roots)
+        try:
+            prepared = preflight()
+        finally:
+            _ACTIVE_GUARDED_MUTATION_ROOTS.reset(preflight_token)
         if _direct_directory_present(target):
             _current_effects().child_mutation_root(target)
             raise _MutationObservationError(
@@ -1407,6 +1824,7 @@ def _delegated_mutations_with_created_root(
             return _delegated_mutations_guarded(
                 exact_roots,
                 lambda: operation(prepared),
+                expected_projections=expected_projections,
             )
         finally:
             _ACTIVE_GUARDED_MUTATION_ROOTS.reset(token)
@@ -1894,11 +2312,13 @@ def load_decision(
 class _PreparationCommandRunner:
     """Receipt a real process as soon as its native creation has succeeded."""
 
-    def run(self, args):
+    def run(self, args, *, on_created=None):
         with subprocess.Popen(list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 shell=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)) as process:
             _current_effects().preparation_process(f"{args[0]} [{args[1]}] PID: {process.pid}")
             try:
+                if on_created is not None:
+                    on_created()
                 stdout, stderr = process.communicate()
             except BaseException:
                 process.kill()
@@ -1907,7 +2327,25 @@ class _PreparationCommandRunner:
             return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
-def _preflight_preparation(source, artifact_id, validation, run_id):
+@dataclass(frozen=True)
+class _PreparationAdmission:
+    budget: PathBudget
+    fixtures: tuple[tuple[ContainmentScenario, FixtureAdmission], ...]
+
+    @property
+    def paths(self):
+        return self.budget.paths
+
+    def fixture(self, scenario: ContainmentScenario) -> FixtureAdmission:
+        try:
+            return dict(self.fixtures)[scenario]
+        except KeyError as error:
+            raise ContainmentServiceError(
+                f"path budget: missing fixture admission for {scenario.value}"
+            ) from error
+
+
+def _preflight_preparation(source, artifact_id, steam, validation, run_id):
     """Read-only admission for all four fixtures and their service-owned paths.
 
     This does not qualify native MO2 runtime outputs. The returned policy's
@@ -1917,12 +2355,20 @@ def _preflight_preparation(source, artifact_id, validation, run_id):
         raise ContainmentServiceError("path budget: invalid future run identity")
     root = Path(validation) / run_id.split(":")[1]
     rows = []
+    fixtures = []
     for scenario in ContainmentScenario:
         fixture = root / "fixtures/v2" / scenario.value
-        budget = preflight_containment_fixture(source, artifact_id, validation,
-                                               scenario, fixture_parent=fixture,
-                                               command_runner=_PreparationCommandRunner())
-        rows.extend(budget.paths)
+        admission = preflight_containment_fixture(
+            source,
+            artifact_id,
+            steam,
+            validation,
+            scenario,
+            fixture_parent=fixture,
+            command_runner=_PreparationCommandRunner(),
+        )
+        fixtures.append((scenario, admission))
+        rows.extend(admission.paths)
         scenario_root = root / "scenarios" / scenario.value
         record_names = (
             "journal.json", "result.json", "retry.json", "retry-consumption.json",
@@ -1973,7 +2419,30 @@ def _preflight_preparation(source, artifact_id, validation, run_id):
                  "preparation-failure.json", "preparation-recovery.json", "preparation-replacement.json",
                  "preparation-startup-initialized.json", "preparation-startup-failure.json"):
         rows.extend(publication_paths(root / name, "containment-run-record"))
-    return admit_paths(rows)
+    return _PreparationAdmission(admit_paths(rows), tuple(fixtures))
+
+
+def _repeat_fixture_admission(
+    expected: FixtureAdmission,
+    source: Path,
+    artifact_id: str,
+    steam: Path,
+    validation: Path,
+    scenario: ContainmentScenario,
+    fixture_parent: Path,
+) -> FixtureAdmission:
+    observed = preflight_containment_fixture(
+        source,
+        artifact_id,
+        steam,
+        validation,
+        scenario,
+        fixture_parent=fixture_parent,
+        command_runner=_PreparationCommandRunner(),
+    )
+    if observed != expected:
+        raise ContainmentServiceError("fixture immutable input admission changed")
+    return observed
 
 
 @_receipted
@@ -1986,6 +2455,7 @@ def prepare_run(
     retry_of: ScenarioRecovery | None = None,
     preparation_recovery: PreparationRecovery | None = None,
     _admitted_run_id: str | None = None,
+    _admitted_preparation: _PreparationAdmission | None = None,
 ) -> str:
     """Create four independent disposable fixtures and one immutable request."""
     source = Path(source_workspace).expanduser().absolute()
@@ -1993,15 +2463,27 @@ def prepare_run(
     expected_validation = workspace_layout(source).mo2_containment_validation
     if not _same_path(validation, expected_validation):
         raise ContainmentServiceError("validation root must be the workspace containment root")
+    steam = Path(steam_root).expanduser().absolute()
     run_id = _admitted_run_id or ("containment-run:" + uuid.uuid4().hex)
     # Read-only complete future operation admission precedes store creation,
     # cleanup, scenario retry consumption, or one-use preparation replacement.
-    _preflight_preparation(source, mo2_artifact_id, validation, run_id)
+    observed_admission = _preflight_preparation(
+        source, mo2_artifact_id, steam, validation, run_id
+    )
+    if (
+        _admitted_preparation is not None
+        and observed_admission != _admitted_preparation
+    ):
+        raise ContainmentServiceError("preparation immutable input admission changed")
+    admission = observed_admission
     store = _effect_store(validation)
-    steam = Path(steam_root).expanduser().absolute()
     command_fingerprint = _command_fingerprint(source, mo2_artifact_id, steam)
     with store.command_lock(command_fingerprint):
-        _preflight_preparation(source, mo2_artifact_id, validation, run_id)
+        repeated_admission = _preflight_preparation(
+            source, mo2_artifact_id, steam, validation, run_id
+        )
+        if repeated_admission != admission:
+            raise ContainmentServiceError("preparation immutable input admission changed")
         predecessor_run_ids = _prepare_predecessor_run_ids(
             store,
             command_fingerprint,
@@ -2069,20 +2551,22 @@ def prepare_run(
                 lambda: None, lambda _prepared: None, require_absent=True)
             for scenario in ContainmentScenario:
                 fixture_parent = fixture_root / scenario.value
+                expected_fixture_admission = admission.fixture(scenario)
                 fixtures.append(
                     _delegated_mutations_with_created_root(
                         fixture_parent,
                         (),
                         partial(
-                            preflight_containment_fixture,
+                            _repeat_fixture_admission,
+                            expected_fixture_admission,
                             source,
                             mo2_artifact_id,
+                            steam,
                             validation,
                             scenario,
                             fixture_parent=fixture_parent,
-                            command_runner=_PreparationCommandRunner(),
                         ),
-                        lambda _prepared, scenario=scenario, fixture_parent=fixture_parent: (
+                        lambda prepared, scenario=scenario, fixture_parent=fixture_parent: (
                             prepare_containment_fixture(
                                 source,
                                 mo2_artifact_id,
@@ -2093,6 +2577,7 @@ def prepare_run(
                                 command_runner=_PreparationCommandRunner(),
                                 retain_projection_owners=True,
                                 on_projection_created=partial(retain_projection, scenario),
+                                expected_admission=prepared,
                             )
                         ),
                         require_absent=True,
@@ -2466,8 +2951,13 @@ def restart_preparation(validation_root: Path, run_id: str) -> str:
     store = ContainmentStore.open_readonly(validation_root)
     intent = store.load_intent(run_id)
     future_run_id = "containment-run:" + uuid.uuid4().hex
-    _preflight_preparation(Path(intent["sourceWorkspace"]), str(intent["mo2ArtifactId"]),
-                           Path(validation_root), future_run_id)
+    admission = _preflight_preparation(
+        Path(intent["sourceWorkspace"]),
+        str(intent["mo2ArtifactId"]),
+        Path(intent["steamRoot"]),
+        Path(validation_root),
+        future_run_id,
+    )
     receipt = recover_preparation(validation_root, run_id)
     _record_preparation_effects(receipt.effects)
     recovery = receipt.value
@@ -2477,7 +2967,7 @@ def restart_preparation(validation_root: Path, run_id: str) -> str:
     intent = store.load_intent(run_id)
     fresh = prepare_run(Path(intent["sourceWorkspace"]), str(intent["mo2ArtifactId"]),
         Path(intent["steamRoot"]), validation_root, preparation_recovery=recovery,
-        _admitted_run_id=future_run_id)
+        _admitted_run_id=future_run_id, _admitted_preparation=admission)
     _record_preparation_effects(fresh.effects)
     return fresh.value
 
@@ -2774,22 +3264,31 @@ def capture_scenario(
 
     post_mo2 = _capture_protected(record)
     projection_quarantine = store.quarantine_path(run_id) / scenario.value
-    projection = _delegated_mutations_with_created_root(
-        projection_quarantine,
-        (
-            record.source_mods,
-            record.stage_mods,
-        ),
-        lambda: None,
-        lambda _prepared: _finalize_projection(
-            store,
-            run_id,
-            record,
-            journal.protected_before,
-            post_mo2,
-            quarantine_root=projection_quarantine,
-        ),
-    )
+    with _retained_relocation_projections(store, run_id, record) as projections:
+        projection = _delegated_mutations_with_created_root(
+            projection_quarantine,
+            (
+                record.source_mods,
+                record.stage_mods,
+            ),
+            partial(
+                _preflight_projection_relocation,
+                record,
+                projection_quarantine,
+                expected_projections=projections,
+            ),
+            lambda prepared: _finalize_projection(
+                store,
+                run_id,
+                record,
+                journal.protected_before,
+                post_mo2,
+                quarantine_root=projection_quarantine,
+                relocation=prepared,
+                expected_projections=projections,
+            ),
+            expected_projections=projections,
+        )
     store.write_protected_state(
         run_id,
         scenario,
@@ -3543,22 +4042,6 @@ def _projection_state(
     return len(record.before_names), True, True
 
 
-def _changed_projection_names(record: FixtureRecord) -> tuple[str, ...]:
-    stage_names = set(_direct_names(record.stage_mods))
-    changed: list[str] = []
-    for name in record.before_names:
-        if name not in stage_names:
-            continue
-        try:
-            evidence = inspect_junction(record.stage_mods / name)
-        except (OSError, ContainmentSafetyError):
-            changed.append(name)
-            continue
-        if not _same_path(evidence.target_path, record.source_mods / name):
-            changed.append(name)
-    return tuple(changed)
-
-
 def _finalize_projection(
     store: ContainmentStore,
     run_id: str,
@@ -3567,22 +4050,32 @@ def _finalize_projection(
     post_mo2: ProtectedState,
     *,
     quarantine_root: Path | None = None,
+    relocation: _RelocationAdmission | None = None,
+    expected_projections: tuple = (),
 ) -> _ProjectionEvidence:
     incomplete: list[str] = []
-    try:
-        stage_names = _direct_names(record.stage_mods)
-        staging_complete = True
-    except OSError as error:
-        stage_names = ()
-        staging_complete = False
-        incomplete.append(f"staging-observation-unavailable:{type(error).__name__}")
-    try:
-        source_names = _direct_names(record.source_mods)
-        production_complete = True
-    except OSError as error:
-        source_names = record.before_names
-        production_complete = False
-        incomplete.append(f"production-observation-unavailable:{type(error).__name__}")
+    prospective_quarantine = (
+        store.quarantine_path(run_id) / record.scenario.value
+        if quarantine_root is None
+        else Path(quarantine_root)
+    )
+    if relocation is None:
+        relocation = _preflight_projection_relocation(
+            record,
+            prospective_quarantine,
+            expected_projections=expected_projections,
+        )
+    relocation = _require_relocation_admission(
+        record,
+        prospective_quarantine,
+        relocation,
+        expected_projections=expected_projections,
+    )
+    stage_names = relocation.stage_names
+    source_names = relocation.source_names
+    changed_snapshot = relocation.changed_names
+    staging_complete = True
+    production_complete = True
     production_backups = tuple(name for name in source_names if name not in record.before_names)
     new_names = tuple(name for name in stage_names if name not in record.before_names)
     projection_count, targets_verified, projection_complete = _projection_state(
@@ -3620,19 +4113,7 @@ def _finalize_projection(
         adoption = None
         if post_mo2 != before:
             safety.append("protected-state-changed-before-adoption")
-            try:
-                changed_names = _changed_projection_names(record)
-            except OSError as error:
-                changed_names = ()
-                staging_complete = False
-                incomplete.append(
-                    f"staging-reobservation-unavailable:{type(error).__name__}"
-                )
-            quarantine_names = (
-                tuple(dict.fromkeys((*changed_names, *new_names)))
-                if staging_complete
-                else ()
-            )
+            quarantine_names = relocation.mutation_names if staging_complete else ()
             for name in quarantine_names:
                 try:
                     _quarantine_exact(record.stage_mods / name, quarantine)
@@ -3669,14 +4150,7 @@ def _finalize_projection(
         restored = final == before
     else:
         unexpected = tuple(name for name in stage_names if name not in record.before_names)
-        try:
-            changed = _changed_projection_names(record)
-        except OSError as error:
-            changed = ()
-            staging_complete = False
-            incomplete.append(
-                f"staging-reobservation-unavailable:{type(error).__name__}"
-            )
+        changed = changed_snapshot
         replacement_candidate = (
             record.scenario is ContainmentScenario.REPLACE_EXISTING
             and not unexpected
@@ -3710,11 +4184,7 @@ def _finalize_projection(
         else:
             if unexpected or changed:
                 safety.append("unexpected-staging-backup")
-            quarantine_names = (
-                tuple(dict.fromkeys((*changed, *unexpected)))
-                if staging_complete
-                else ()
-            )
+            quarantine_names = relocation.mutation_names if staging_complete else ()
             for name in quarantine_names:
                 try:
                     _quarantine_exact(record.stage_mods / name, quarantine)
@@ -3806,28 +4276,51 @@ def _perform_recovery_cleanup(
     recovery_quarantine = store.quarantine_path(journal.run_id) / (
         "Recovery-" + journal.scenario.value
     )
-    try:
-        _delegated_mutations_with_created_root(
+
+    def quarantine_recovery(
+        prepared: _RelocationAdmission,
+        projections: tuple,
+    ) -> None:
+        admitted = _require_relocation_admission(
+            record,
             recovery_quarantine,
-            (),
-            lambda: None,
-            lambda _prepared: None,
+            prepared,
+            expected_projections=projections,
         )
-        stage_names = _direct_names(record.stage_mods)
-        changed = _changed_projection_names(record)
-        unexpected = tuple(name for name in stage_names if name not in record.before_names)
-        for name in dict.fromkeys((*changed, *unexpected)):
-            source = record.stage_mods / name
-            _delegated_mutations(
-                (record.stage_mods, recovery_quarantine),
+        for name in admitted.mutation_names:
+            _quarantine_exact(record.stage_mods / name, recovery_quarantine)
+
+    try:
+        with _retained_relocation_projections(
+            store,
+            journal.run_id,
+            record,
+        ) as projections:
+            _delegated_mutations_with_created_root(
+                recovery_quarantine,
+                (record.source_mods, record.stage_mods),
                 partial(
-                    _quarantine_exact,
-                    source,
+                    _preflight_projection_relocation,
+                    record,
                     recovery_quarantine,
+                    expected_projections=projections,
                 ),
+                partial(quarantine_recovery, projections=projections),
+                expected_projections=projections,
             )
-    except (OSError, ContainmentSafetyError):
+    except (OSError, ValueError, ContainmentSafetyError, ContainmentServiceError):
         blockers.append("staging-quarantine-failed")
+        return RecoveryCleanupEvidence(
+            watch,
+            proof.protected_after,
+            IntegrityObservation.UNKNOWN,
+            IntegrityObservation.UNKNOWN,
+            0,
+            False,
+            False,
+            0,
+            tuple(sorted(set(blockers))),
+        )
 
     try:
         before_normalization = _capture_protected(record)

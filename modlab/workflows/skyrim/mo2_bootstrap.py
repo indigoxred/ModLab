@@ -242,9 +242,21 @@ class _RecordingCommandRunner:
         self._runner = runner or SubprocessCommandRunner()
         self._calls: list[tuple[str, ...]] = []
 
-    def run(self, args: tuple[str, ...]):
-        self._calls.append(args)
-        return self._runner.run(args)
+    def run(self, args: tuple[str, ...], *, on_created=None):
+        created = False
+
+        def record_created() -> None:
+            nonlocal created
+            if created:
+                raise Mo2BootstrapError(
+                    "bootstrap command runner reported process creation more than once"
+                )
+            created = True
+            self._calls.append(args)
+            if on_created is not None:
+                on_created()
+
+        return self._runner.run(args, on_created=record_created)
 
     def programs_launched(self) -> tuple[str, ...]:
         labels = {

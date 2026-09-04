@@ -316,7 +316,7 @@ class Mo2BootstrapPlanningTests(unittest.TestCase):
         from modlab.workflows.skyrim.mo2_bootstrap import Mo2BootstrapRefusal
 
         class BrokenRunner:
-            def run(self, _):
+            def run(self, _, *, on_created=None):
                 raise OSError("fixture launch failure")
 
         before = self.fixture.workspace_state()

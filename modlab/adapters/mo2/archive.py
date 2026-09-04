@@ -24,18 +24,37 @@ class Mo2ArchiveError(RuntimeError):
 
 
 class CommandRunner(Protocol):
-    def run(self, args: tuple[str, ...]) -> CompletedProcess[bytes]: ...
+    def run(
+        self,
+        args: tuple[str, ...],
+        *,
+        on_created: Callable[[], None] | None = None,
+    ) -> CompletedProcess[bytes]: ...
 
 
 class SubprocessCommandRunner:
-    def run(self, args: tuple[str, ...]) -> CompletedProcess[bytes]:
-        return subprocess.run(
+    def run(
+        self,
+        args: tuple[str, ...],
+        *,
+        on_created: Callable[[], None] | None = None,
+    ) -> CompletedProcess[bytes]:
+        with subprocess.Popen(
             list(args),
-            check=False,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             shell=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        ) as process:
+            try:
+                if on_created is not None:
+                    on_created()
+                stdout, stderr = process.communicate()
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
+            return CompletedProcess(args, process.returncode, stdout, stderr)
 
 
 @dataclass(frozen=True)

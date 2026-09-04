@@ -1,0 +1,39 @@
+test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary (tests.test_mo2_path_budget.NativePathBudgetTests.test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary) ... ERROR
+
+======================================================================
+ERROR: test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary (tests.test_mo2_path_budget.NativePathBudgetTests.test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\windows_watch.py", line 1277, in start_watch
+    ready_bytes = _read_exact_regular_file(
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\windows_watch.py", line 638, in _read_exact_regular_file
+    raise _winerror(f"could not open exact {label} {path}")
+FileNotFoundError: [Errno 2] could not open exact ready record C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\modlab-containment-watch-dx_h1tfc\protocol\pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\qqqqqqqqqqqqqqq\ready.json: The system cannot find the file specified.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\windows_watch.py", line 1292, in start_watch
+    raise WatchProtocolError(
+modlab.validation.windows_watch_protocol.WatchProtocolError: watch worker exited before ready
+root-identity-changed; watch-startup-failed; worker-evidence-invalid; worker-exit-nonzero; worker-ready-invalid
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 1174, in test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary
+    request, _ = harness._start()
+                 ^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_watch.py", line 1207, in _start
+    worker_pid = start_watch(request)
+                 ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\windows_watch.py", line 1315, in start_watch
+    raise WatchProtocolError(
+modlab.validation.windows_watch_protocol.WatchProtocolError: watch worker exited before ready; watch startup cleanup was incomplete
+
+----------------------------------------------------------------------
+Ran 1 test in 0.219s
+
+FAILED (errors=1)
+Exit: 1

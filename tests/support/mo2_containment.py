@@ -97,8 +97,32 @@ def prepare_fixture_with_fake_bootstrap(root: Path, *, fixture_parent: Path | No
         archive_path, source_note="fixture source archive"
     )
     steam_root = base / "Steam"
-    steam_root.mkdir()
+    steamapps = steam_root / "steamapps"
+    game_root = steamapps / "common" / "Skyrim Special Edition"
+    steamapps.mkdir(parents=True)
+    (steamapps / "appmanifest_489830.acf").write_text(
+        '"AppState"\n'
+        "{\n"
+        '    "appid" "489830"\n'
+        '    "name" "The Elder Scrolls V: Skyrim Special Edition"\n'
+        '    "StateFlags" "4"\n'
+        '    "installdir" "Skyrim Special Edition"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    from tests.support.mo2_bootstrap import make_primary_policy_fixture
+
+    make_primary_policy_fixture(game_root)
+    (game_root / "SkyrimSE.exe").write_bytes(b"fixture Skyrim executable")
     counter = 0
+
+    def fake_version_reader(path: Path) -> str | None:
+        name = Path(path).name.casefold()
+        if name == "skyrimse.exe":
+            return "1.6.1170.0"
+        if name == "modorganizer.exe":
+            return "2.5.2.0"
+        return None
 
     def fake_prepare(*, workspace_root: Path, **_kwargs):
         nonlocal counter
@@ -136,10 +160,18 @@ def prepare_fixture_with_fake_bootstrap(root: Path, *, fixture_parent: Path | No
 
     report = SimpleNamespace(executable=SimpleNamespace(file_version="2.5.2.0"))
     from modlab.adapters.mo2.archive import ArchiveEntry, ArchiveListing
-    descriptor = replace(load_mo2_release(bundled_mo2_252_path()).descriptor,
+    loaded_release = load_mo2_release(bundled_mo2_252_path())
+    descriptor = replace(loaded_release.descriptor,
                          archive_sha256=artifact.sha256, archive_size=artifact.size)
     with (
-        patch.object(fixtures, "load_mo2_release", return_value=SimpleNamespace(descriptor=descriptor)),
+        patch.object(
+            fixtures,
+            "load_mo2_release",
+            return_value=SimpleNamespace(
+                descriptor=descriptor,
+                path=loaded_release.path,
+            ),
+        ),
         patch.object(fixtures, "observe_bsdtar", return_value=SimpleNamespace(executable=SimpleNamespace(path=r"C:\Windows\System32\tar.exe"))),
         patch.object(
             fixtures,
@@ -163,6 +195,7 @@ def prepare_fixture_with_fake_bootstrap(root: Path, *, fixture_parent: Path | No
             initialize_workspace(source_workspace).mo2_containment_validation,
             ContainmentScenario.NEW_FOLDER,
             fixture_parent=fixture_parent,
+            version_reader=fake_version_reader,
             **({"retain_projection_owners": True} if retain_projection_owners else {}),
         )
 

@@ -1,0 +1,26 @@
+desktop-947h2kl\red
+test_fixture_enables_non_plugin_fomod_dependencies_only_in_stage (tests.test_mo2_containment_fixtures.ContainmentFixtureTests.test_fixture_enables_non_plugin_fomod_dependencies_only_in_stage) ... ERROR
+
+======================================================================
+ERROR: test_fixture_enables_non_plugin_fomod_dependencies_only_in_stage (tests.test_mo2_containment_fixtures.ContainmentFixtureTests.test_fixture_enables_non_plugin_fomod_dependencies_only_in_stage)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_fixtures.py", line 653, in test_fixture_enables_non_plugin_fomod_dependencies_only_in_stage
+    fixture = prepare_fixture_with_fake_bootstrap(self.root)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\support\mo2_containment.py", line 183, in prepare_fixture_with_fake_bootstrap
+    return fixtures.prepare_containment_fixture(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_fixtures.py", line 267, in prepare_containment_fixture
+    admission = _admit_fixture(
+                ^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_fixtures.py", line 554, in _admit_fixture
+    (Path(loaded_release.path), "file", False),
+          ^^^^^^^^^^^^^^^^^^^
+AttributeError: 'types.SimpleNamespace' object has no attribute 'path'
+
+----------------------------------------------------------------------
+Ran 1 test in 0.108s
+
+FAILED (errors=1)
+Exit: 1

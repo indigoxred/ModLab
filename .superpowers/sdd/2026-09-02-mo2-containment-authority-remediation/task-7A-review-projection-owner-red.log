@@ -1,0 +1,25 @@
+test_relocation_admission_observes_the_bound_projection_without_reenumerating (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_relocation_admission_observes_the_bound_projection_without_reenumerating) ... ERROR
+test_created_root_guard_threads_bound_projection_into_observation (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_created_root_guard_threads_bound_projection_into_observation) ... ERROR
+
+======================================================================
+ERROR: test_relocation_admission_observes_the_bound_projection_without_reenumerating (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_relocation_admission_observes_the_bound_projection_without_reenumerating)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 275, in test_relocation_admission_observes_the_bound_projection_without_reenumerating
+    admission = service._preflight_projection_relocation(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: _preflight_projection_relocation() got an unexpected keyword argument 'expected_projections'
+
+======================================================================
+ERROR: test_created_root_guard_threads_bound_projection_into_observation (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_created_root_guard_threads_bound_projection_into_observation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 299, in test_created_root_guard_threads_bound_projection_into_observation
+    result = service._delegated_mutations_with_created_root(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: _delegated_mutations_with_created_root() got an unexpected keyword argument 'expected_projections'
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.086s
+
+FAILED (errors=2)

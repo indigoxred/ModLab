@@ -1,0 +1,89 @@
+EEEEEE
+======================================================================
+ERROR: test_relocation_admission_binds_actual_tree_and_every_destination_member (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_relocation_admission_binds_actual_tree_and_every_destination_member)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 210, in test_relocation_admission_binds_actual_tree_and_every_destination_member
+    patch.object(service, "_relocation_destination_volume", return_value=7),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1467, in __enter__
+    original, local = self.get_original()
+                      ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1437, in get_original
+    raise AttributeError(
+AttributeError: <module 'modlab.validation.mo2_containment_service' from 'C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\modlab\\validation\\mo2_containment_service.py'> does not have the attribute '_relocation_destination_volume'
+
+======================================================================
+ERROR: test_relocation_admission_rejects_long_collision_reparse_and_cross_volume (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_relocation_admission_rejects_long_collision_reparse_and_cross_volume) (message='path budget')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 249, in test_relocation_admission_rejects_long_collision_reparse_and_cross_volume
+    patch.object(service, "_relocation_destination_volume", return_value=destination_volume),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1467, in __enter__
+    original, local = self.get_original()
+                      ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1437, in get_original
+    raise AttributeError(
+AttributeError: <module 'modlab.validation.mo2_containment_service' from 'C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\modlab\\validation\\mo2_containment_service.py'> does not have the attribute '_relocation_destination_volume'
+
+======================================================================
+ERROR: test_relocation_admission_rejects_long_collision_reparse_and_cross_volume (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_relocation_admission_rejects_long_collision_reparse_and_cross_volume) (message='collision')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 249, in test_relocation_admission_rejects_long_collision_reparse_and_cross_volume
+    patch.object(service, "_relocation_destination_volume", return_value=destination_volume),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1467, in __enter__
+    original, local = self.get_original()
+                      ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1437, in get_original
+    raise AttributeError(
+AttributeError: <module 'modlab.validation.mo2_containment_service' from 'C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\modlab\\validation\\mo2_containment_service.py'> does not have the attribute '_relocation_destination_volume'
+
+======================================================================
+ERROR: test_relocation_admission_rejects_long_collision_reparse_and_cross_volume (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_relocation_admission_rejects_long_collision_reparse_and_cross_volume) (message='reparse')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 249, in test_relocation_admission_rejects_long_collision_reparse_and_cross_volume
+    patch.object(service, "_relocation_destination_volume", return_value=destination_volume),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1467, in __enter__
+    original, local = self.get_original()
+                      ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1437, in get_original
+    raise AttributeError(
+AttributeError: <module 'modlab.validation.mo2_containment_service' from 'C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\modlab\\validation\\mo2_containment_service.py'> does not have the attribute '_relocation_destination_volume'
+
+======================================================================
+ERROR: test_relocation_admission_rejects_long_collision_reparse_and_cross_volume (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_relocation_admission_rejects_long_collision_reparse_and_cross_volume) (message='volume')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 249, in test_relocation_admission_rejects_long_collision_reparse_and_cross_volume
+    patch.object(service, "_relocation_destination_volume", return_value=destination_volume),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1467, in __enter__
+    original, local = self.get_original()
+                      ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1437, in get_original
+    raise AttributeError(
+AttributeError: <module 'modlab.validation.mo2_containment_service' from 'C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\modlab\\validation\\mo2_containment_service.py'> does not have the attribute '_relocation_destination_volume'
+
+======================================================================
+ERROR: test_relocation_snapshot_revalidation_refuses_substitution (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_relocation_snapshot_revalidation_refuses_substitution)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 269, in test_relocation_snapshot_revalidation_refuses_substitution
+    patch.object(service, "_relocation_destination_volume", return_value=7),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1467, in __enter__
+    original, local = self.get_original()
+                      ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\unittest\mock.py", line 1437, in get_original
+    raise AttributeError(
+AttributeError: <module 'modlab.validation.mo2_containment_service' from 'C:\\Users\\red\\Desktop\\Modlab\\.worktrees\\mo2-guard-bridge-handshake\\modlab\\validation\\mo2_containment_service.py'> does not have the attribute '_relocation_destination_volume'
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.057s
+
+FAILED (errors=6)

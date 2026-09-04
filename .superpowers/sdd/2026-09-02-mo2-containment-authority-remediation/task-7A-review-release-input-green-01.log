@@ -1,0 +1,7 @@
+test_bundled_descriptor_has_observed_exact_identities (tests.test_mo2_release.Mo2ReleaseTests.test_bundled_descriptor_has_observed_exact_identities) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.001s
+
+OK
+Exit: 0

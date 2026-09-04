@@ -214,8 +214,8 @@ class Mo2BootstrapCreateTests(unittest.TestCase):
         )
         run = self.fixture.runner.run
 
-        def mutate_after_extract(arguments):
-            result = run(arguments)
+        def mutate_after_extract(arguments, *, on_created=None):
+            result = run(arguments, on_created=on_created)
             if arguments[1] == "-xf":
                 payload.write_bytes(b"changed during extraction")
             return result

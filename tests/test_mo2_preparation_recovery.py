@@ -314,12 +314,17 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
             from tests.support.mo2_containment import import_curated_mo2_archive
             artifact_id = import_curated_mo2_archive(Path(os.environ["MODLAB_PREPARATION_ARCHIVE"]),
                 layout.root, self.root / "curated-input").artifact_id
+        steam_root = (
+            Path(os.environ["MODLAB_PREPARATION_STEAM"])
+            if real_archive
+            else self.root / "Steam"
+        )
         store = ContainmentStore(layout.mo2_containment_validation)
         run_id = "containment-run:" + "a" * 32
-        fingerprint = service._command_fingerprint(layout.root, artifact_id, self.root / "Steam")
+        fingerprint = service._command_fingerprint(layout.root, artifact_id, steam_root)
         intent = dict(schemaVersion=1, runId=run_id, mechanism="isolated-low-integrity-junction-projection-v1",
             sourceWorkspace=str(layout.root), mo2ArtifactId=artifact_id,
-            steamRoot=str(self.root / "Steam"), commandFingerprint=fingerprint, predecessorRunIds=[], retryOf=None)
+            steamRoot=str(steam_root), commandFingerprint=fingerprint, predecessorRunIds=[], retryOf=None)
         intent_id = store.write_intent(run_id, intent).content_id
         fixture = store.run_path(run_id) / "fixtures/NewFolder"
         target = fixture / "source-workspace/tools/mo2/skyrim-se-ae/mods/Protected Existing"
@@ -366,7 +371,11 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
         self.assertFalse(store.preparation_path(run_id, "replacement").exists())
         self.assertEqual((run_id,), store.list_run_ids())
 
-    @unittest.skipUnless(os.environ.get("MODLAB_PREPARATION_ARCHIVE"), "exact archive path-budget regression is opt-in")
+    @unittest.skipUnless(
+        os.environ.get("MODLAB_PREPARATION_ARCHIVE")
+        and os.environ.get("MODLAB_PREPARATION_STEAM"),
+        "exact archive and Steam path-budget regression is opt-in",
+    )
     def test_real_archive_unsupported_future_path_preserves_native_failed_attempt(self):
         self.preflight_patch.stop()
         store, run_id, fixture, link, target = self.failed_fixture(real_archive=True)

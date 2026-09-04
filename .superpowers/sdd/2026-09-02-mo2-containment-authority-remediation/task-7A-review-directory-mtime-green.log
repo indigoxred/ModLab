@@ -1,0 +1,8 @@
+test_fixture_admission_ignores_unconsumed_steam_root_child_churn (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_fixture_admission_ignores_unconsumed_steam_root_child_churn)
+An unrelated Steam client child cannot invalidate Skyrim inputs. ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.149s
+
+OK
+Exit=0

@@ -1,0 +1,17 @@
+test_fixture_admission_ignores_unconsumed_steam_root_child_churn (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_fixture_admission_ignores_unconsumed_steam_root_child_churn)
+An unrelated Steam client child cannot invalidate Skyrim inputs. ... FAIL
+
+======================================================================
+FAIL: test_fixture_admission_ignores_unconsumed_steam_root_child_churn (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_fixture_admission_ignores_unconsumed_steam_root_child_churn)
+An unrelated Steam client child cannot invalidate Skyrim inputs.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 820, in test_fixture_admission_ignores_unconsumed_steam_root_child_churn
+    self.assertEqual(first, after_create)
+AssertionError: Fixtu[158855 chars]8484171908843400, changed_ns=17884841719088434[3669 chars]')))) != Fixtu[158855 chars]8484181947848000, changed_ns=17884841719088434[3669 chars]'))))
+
+----------------------------------------------------------------------
+Ran 1 test in 0.163s
+
+FAILED (failures=1)
+Exit=1

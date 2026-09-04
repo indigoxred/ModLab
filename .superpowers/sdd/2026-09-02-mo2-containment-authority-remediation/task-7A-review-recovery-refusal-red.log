@@ -1,0 +1,20 @@
+test_recovery_relocation_refusal_stops_before_later_tree_mutation (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_recovery_relocation_refusal_stops_before_later_tree_mutation) ... ERROR
+
+======================================================================
+ERROR: test_recovery_relocation_refusal_stops_before_later_tree_mutation (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_recovery_relocation_refusal_stops_before_later_tree_mutation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 397, in test_recovery_relocation_refusal_stops_before_later_tree_mutation
+    result = service._perform_recovery_cleanup(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 4288, in _perform_recovery_cleanup
+    _current_effects().child_mutation_root(path)
+    ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 356, in _current_effects
+    raise RuntimeError("containment effect ledger is unavailable")
+RuntimeError: containment effect ledger is unavailable
+
+----------------------------------------------------------------------
+Ran 1 test in 0.104s
+
+FAILED (errors=1)

@@ -1,0 +1,10 @@
+test_recording_runner_keeps_successful_repeated_launches (tests.test_mo2_archive.Mo2ArchiveTests.test_recording_runner_keeps_successful_repeated_launches) ... ok
+test_recording_runner_records_only_created_processes_and_preserves_order (tests.test_mo2_archive.Mo2ArchiveTests.test_recording_runner_records_only_created_processes_and_preserves_order) ... ok
+test_spawn_boundary_programs_render_truthfully_on_success_and_failure (tests.test_mo2_archive.Mo2ArchiveTests.test_spawn_boundary_programs_render_truthfully_on_success_and_failure) ... ok
+test_subprocess_runner_observes_creation_and_cleans_post_spawn_failures (tests.test_mo2_archive.Mo2ArchiveTests.test_subprocess_runner_observes_creation_and_cleans_post_spawn_failures) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.021s
+
+OK
+Exit: 0

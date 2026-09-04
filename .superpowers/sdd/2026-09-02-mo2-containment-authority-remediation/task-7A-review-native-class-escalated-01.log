@@ -1,0 +1,15 @@
+desktop-947h2kl\red
+test_fixture_external_game_boundary_and_one_over_are_admitted_before_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_fixture_external_game_boundary_and_one_over_are_admitted_before_creation) ... ok
+test_fixture_rejects_configured_steam_junction_before_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_fixture_rejects_configured_steam_junction_before_creation) ... ok
+test_guarded_relocation_rejects_deep_foreign_tree_before_quarantine_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_guarded_relocation_rejects_deep_foreign_tree_before_quarantine_creation) ... ok
+test_guarded_relocation_rejects_reparse_before_quarantine_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_guarded_relocation_rejects_reparse_before_quarantine_creation) ... ok
+test_native_relocation_admits_bound_projection_and_exact_members (tests.test_mo2_path_budget.NativePathBudgetTests.test_native_relocation_admits_bound_projection_and_exact_members) ... ok
+test_native_tar_exact_cwd_and_member_limits_then_one_over_no_stage (tests.test_mo2_path_budget.NativePathBudgetTests.test_native_tar_exact_cwd_and_member_limits_then_one_over_no_stage) ... ok
+test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary (tests.test_mo2_path_budget.NativePathBudgetTests.test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary) ... ok
+test_substituted_expected_junction_refuses_before_quarantine_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_substituted_expected_junction_refuses_before_quarantine_creation) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.820s
+
+OK
+Exit: 0

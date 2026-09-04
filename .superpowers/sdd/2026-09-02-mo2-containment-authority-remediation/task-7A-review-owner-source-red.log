@@ -1,0 +1,20 @@
+test_relocation_admission_observes_the_bound_projection_without_reenumerating (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_relocation_admission_observes_the_bound_projection_without_reenumerating) ... FAIL
+
+======================================================================
+FAIL: test_relocation_admission_observes_the_bound_projection_without_reenumerating (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_relocation_admission_observes_the_bound_projection_without_reenumerating)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 305, in test_relocation_admission_observes_the_bound_projection_without_reenumerating
+    self.assertEqual(
+AssertionError: Lists differ: [((Wi[26 chars],), {'expected_projections': (namespace(verify[1336 chars],)})] != [((Wi[26 chars],), {}), ((WindowsPath('C:/run/t/mods'),), {'e[666 chars],)})]
+
+First differing element 0:
+((Win[25 chars],), {'expected_projections': (namespace(verify[626 chars]),)})
+((Win[25 chars],), {})
+
+Diff is 2599 characters long. Set self.maxDiff to None to see it.
+
+----------------------------------------------------------------------
+Ran 1 test in 0.094s
+
+FAILED (failures=1)

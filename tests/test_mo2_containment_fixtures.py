@@ -76,7 +76,8 @@ class ContainmentFixtureTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "curated MO2 release"):
             fixtures.preflight_containment_fixture(
-                source, artifact.artifact_id, layout.mo2_containment_validation,
+                source, artifact.artifact_id, self.root / "Steam",
+                layout.mo2_containment_validation,
                 fixtures.ContainmentScenario.NEW_FOLDER, fixture_parent=fixture_parent,
             )
 

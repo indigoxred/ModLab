@@ -97,9 +97,16 @@ class FakeRunner:
         runner.extraction_files = dict(files)
         return runner
 
-    def run(self, args: tuple[str, ...]) -> CompletedProcess[bytes]:
+    def run(
+        self,
+        args: tuple[str, ...],
+        *,
+        on_created=None,
+    ) -> CompletedProcess[bytes]:
         self.calls.append(list(args))
         operation = args[1]
+        if on_created is not None:
+            on_created()
         if operation == "-xf":
             destination = Path(args[args.index("-C") + 1])
             for relative_path, data in self.extraction_files.items():

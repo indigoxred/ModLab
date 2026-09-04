@@ -1,0 +1,73 @@
+test_fixture_external_game_boundary_and_one_over_are_admitted_before_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_fixture_external_game_boundary_and_one_over_are_admitted_before_creation) ... ok
+test_fixture_rejects_configured_steam_junction_before_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_fixture_rejects_configured_steam_junction_before_creation) ... ok
+test_guarded_relocation_rejects_deep_foreign_tree_before_quarantine_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_guarded_relocation_rejects_deep_foreign_tree_before_quarantine_creation) ... FAIL
+test_guarded_relocation_rejects_reparse_before_quarantine_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_guarded_relocation_rejects_reparse_before_quarantine_creation) ... ok
+test_native_relocation_admits_bound_projection_and_exact_members (tests.test_mo2_path_budget.NativePathBudgetTests.test_native_relocation_admits_bound_projection_and_exact_members) ... ERROR
+test_native_tar_exact_cwd_and_member_limits_then_one_over_no_stage (tests.test_mo2_path_budget.NativePathBudgetTests.test_native_tar_exact_cwd_and_member_limits_then_one_over_no_stage) ... ok
+test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary (tests.test_mo2_path_budget.NativePathBudgetTests.test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary) ... ERROR
+test_substituted_expected_junction_refuses_before_quarantine_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_substituted_expected_junction_refuses_before_quarantine_creation) ... ok
+
+======================================================================
+ERROR: test_native_relocation_admits_bound_projection_and_exact_members (tests.test_mo2_path_budget.NativePathBudgetTests.test_native_relocation_admits_bound_projection_and_exact_members)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 815, in test_native_relocation_admits_bound_projection_and_exact_members
+    admission = service._preflight_projection_relocation(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 564, in _preflight_projection_relocation
+    source_rows = _canonical_relocation_rows(
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 428, in _canonical_relocation_rows
+    raise ContainmentServiceError(
+modlab.validation.mo2_containment_service.ContainmentServiceError: relocation tree observation is unavailable: C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab-relocation-owner-qic00da4\source
+
+======================================================================
+ERROR: test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary (tests.test_mo2_path_budget.NativePathBudgetTests.test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\windows_watch.py", line 1277, in start_watch
+    ready_bytes = _read_exact_regular_file(
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\windows_watch.py", line 638, in _read_exact_regular_file
+    raise _winerror(f"could not open exact {label} {path}")
+FileNotFoundError: [Errno 2] could not open exact ready record C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\modlab-containment-watch-7__5jiwi\protocol\pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\qqqqqqqqqqqqqqq\ready.json: The system cannot find the file specified.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\windows_watch.py", line 1292, in start_watch
+    raise WatchProtocolError(
+modlab.validation.windows_watch_protocol.WatchProtocolError: watch worker exited before ready
+root-identity-changed; watch-startup-failed; worker-evidence-invalid; worker-exit-nonzero; worker-ready-invalid
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 1063, in test_python_shared_handle_rename_and_recursive_watcher_at_wide_boundary
+    request, _ = harness._start()
+                 ^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_containment_watch.py", line 1207, in _start
+    worker_pid = start_watch(request)
+                 ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\windows_watch.py", line 1315, in start_watch
+    raise WatchProtocolError(
+modlab.validation.windows_watch_protocol.WatchProtocolError: watch worker exited before ready; watch startup cleanup was incomplete
+
+======================================================================
+FAIL: test_guarded_relocation_rejects_deep_foreign_tree_before_quarantine_creation (tests.test_mo2_path_budget.NativePathBudgetTests.test_guarded_relocation_rejects_deep_foreign_tree_before_quarantine_creation)
+----------------------------------------------------------------------
+modlab.validation.mo2_containment_service.ContainmentServiceError: relocation tree observation is unavailable: C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab-relocation-boundary-ujw_tx70\source
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 955, in test_guarded_relocation_rejects_deep_foreign_tree_before_quarantine_creation
+    with self.assertRaisesRegex(Exception, "path budget"):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "path budget" does not match "relocation tree observation is unavailable: C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab-relocation-boundary-ujw_tx70\source"
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.574s
+
+FAILED (failures=1, errors=2)
+Exit: 1

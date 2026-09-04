@@ -1,0 +1,13 @@
+test_fixture_admission_ignores_unconsumed_steam_root_child_churn (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_fixture_admission_ignores_unconsumed_steam_root_child_churn)
+An unrelated Steam client child cannot invalidate Skyrim inputs. ... ok
+test_fixture_admission_rejects_same_path_directory_substitution (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_fixture_admission_rejects_same_path_directory_substitution)
+Stable spelling cannot hide replacement of an admitted directory. ... ok
+test_fixture_admission_rejects_consumed_file_timestamp_and_content_drift (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_fixture_admission_rejects_consumed_file_timestamp_and_content_drift)
+Files actually consumed by discovery retain strict metadata/content evidence. ... ok
+test_fixture_admission_rejects_archive_observation_drift_before_creation (tests.test_mo2_path_budget.PathBudgetPolicyTests.test_fixture_admission_rejects_archive_observation_drift_before_creation) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.481s
+
+OK
+Exit=0

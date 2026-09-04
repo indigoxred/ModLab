@@ -1,0 +1,18 @@
+test_native_relocation_admits_bound_projection_and_exact_members (tests.test_mo2_path_budget.NativePathBudgetTests.test_native_relocation_admits_bound_projection_and_exact_members) ... ERROR
+
+======================================================================
+ERROR: test_native_relocation_admits_bound_projection_and_exact_members (tests.test_mo2_path_budget.NativePathBudgetTests.test_native_relocation_admits_bound_projection_and_exact_members)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_path_budget.py", line 888, in test_native_relocation_admits_bound_projection_and_exact_members
+    admission = service._preflight_projection_relocation(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\validation\mo2_containment_service.py", line 589, in _preflight_projection_relocation
+    raise ContainmentServiceError(
+modlab.validation.mo2_containment_service.ContainmentServiceError: relocation source and destination must remain on one volume
+
+----------------------------------------------------------------------
+Ran 1 test in 0.122s
+
+FAILED (errors=1)
+Exit: 1

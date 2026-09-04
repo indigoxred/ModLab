@@ -1,0 +1,12 @@
+test_skyrim_production_snapshot_ignores_unrelated_steam_cache_mutation (tests.test_mo2_containment_fixtures.ContainmentFixtureTests.test_skyrim_production_snapshot_ignores_unrelated_steam_cache_mutation) ... ok
+test_skyrim_production_snapshot_reports_manifest_mutation (tests.test_mo2_containment_fixtures.ContainmentFixtureTests.test_skyrim_production_snapshot_reports_manifest_mutation) ... ok
+test_skyrim_production_snapshot_reports_game_root_mutation (tests.test_mo2_containment_fixtures.ContainmentFixtureTests.test_skyrim_production_snapshot_reports_game_root_mutation) ... ok
+test_skyrim_production_snapshot_refuses_missing_or_blocked_discovery (tests.test_mo2_containment_fixtures.ContainmentFixtureTests.test_skyrim_production_snapshot_refuses_missing_or_blocked_discovery) ... ok
+test_skyrim_production_snapshot_refuses_discovery_path_change_during_capture (tests.test_mo2_containment_fixtures.ContainmentFixtureTests.test_skyrim_production_snapshot_refuses_discovery_path_change_during_capture) ... ok
+test_skyrim_production_snapshot_refuses_discovery_report_change_during_capture (tests.test_mo2_containment_fixtures.ContainmentFixtureTests.test_skyrim_production_snapshot_refuses_discovery_report_change_during_capture) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.090s
+
+OK
+Exit: 0

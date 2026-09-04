@@ -621,15 +621,43 @@ class ContainmentServiceTests(unittest.TestCase):
                 root, root, root, root, root, root, {}, (),
                 ("Protected Existing",),
             )
-            with patch.object(
-                service,
-                "inspect_junction",
-                side_effect=service.ContainmentSafetyError("replaced"),
+            source_rows = (
+                (".", "directory", 7, 1, 0, 0, 0, 0, 0, None),
+                ("Protected Existing", "directory", 7, 2, 0, 0, 0, 0, 0, None),
+            )
+            stage_rows = (
+                (".", "directory", 7, 3, 0, 0, 0, 0, 0, None),
+                ("Protected Existing", "directory", 7, 4, 0, 0, 0, 0, 0, None),
+            )
+            quarantine = root / "quarantine"
+            with (
+                patch.object(
+                    service,
+                    "_mutation_root_observation",
+                    side_effect=(source_rows, stage_rows),
+                ),
+                patch.object(service, "_relocation_destination_volume", return_value=7),
+                patch.object(
+                    service,
+                    "_direct_names",
+                    side_effect=AssertionError("must consume canonical relocation rows"),
+                ),
             ):
-                self.assertEqual(
-                    ("Protected Existing",),
-                    service._changed_projection_names(record),
+                admission = service._preflight_projection_relocation(
+                    record,
+                    quarantine,
                 )
+            self.assertEqual(("Protected Existing",), admission.changed_names)
+            self.assertEqual(("Protected Existing",), admission.mutation_names)
+            self.assertEqual(
+                (
+                    (
+                        "Protected Existing",
+                        (str(quarantine / "Protected Existing"),),
+                    ),
+                ),
+                admission.destination_map,
+            )
 
     def test_adopted_folder_is_quarantined_even_if_output_inspection_fails(self):
         with tempfile.TemporaryDirectory(prefix="modlab-adoption-quarantine-") as directory:
@@ -782,7 +810,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     projection.projection_observation_complete,
                 )
 
-    def test_projection_reobservation_access_failure_is_incomplete(self):
+    def test_projection_relocation_reobservation_access_failure_refuses_before_quarantine(self):
         with tempfile.TemporaryDirectory(
             prefix="modlab-projection-reobserve-"
         ) as directory:
@@ -802,40 +830,40 @@ class ContainmentServiceTests(unittest.TestCase):
             )
             store = ContainmentStore(root / "validation")
             store.prepare_run_root(RUN_ID)
+            source_rows = (
+                (".", "directory", 7, 1, 0, 0, 0, 0, 0, None),
+                ("Protected Existing", "directory", 7, 2, 0, 0, 0, 0, 0, None),
+            )
+            stage_rows = (
+                (".", "directory", 7, 3, 0, 0, 0, 0, 0, None),
+                ("Protected Existing", "directory", 7, 4, 0, 0, 0, 0, 0, None),
+            )
+            source_before = tuple(path.name for path in source.iterdir())
+            stage_before = tuple(path.name for path in stage.iterdir())
+            quarantine = store.quarantine_path(RUN_ID) / record.scenario.value
             with (
                 patch.object(
                     service,
-                    "_direct_names",
+                    "_mutation_root_observation",
                     side_effect=(
-                        ("Protected Existing",),
-                        ("Protected Existing",),
-                        ("Protected Existing",),
-                        OSError("access denied"),
+                        source_rows,
+                        stage_rows,
+                        source_rows,
+                        None,
                     ),
                 ),
-                patch.object(
-                    service,
-                    "inspect_junction",
-                    return_value=SimpleNamespace(
-                        target_path=source / "Protected Existing"
-                    ),
+                patch.object(service, "_relocation_destination_volume", return_value=7),
+                self.assertRaisesRegex(
+                    service.ContainmentServiceError,
+                    "relocation tree observation is unavailable",
                 ),
-                patch.object(service, "_capture_protected", return_value=protected()),
             ):
-                projection = service._finalize_projection(
+                service._finalize_projection(
                     store, RUN_ID, record, protected(), protected()
                 )
-            evaluated = evaluate_scenario(
-                evidence(
-                    record.scenario,
-                    staging_observation_complete=(
-                        projection.staging_observation_complete
-                    ),
-                    incomplete_reasons=projection.incomplete_reasons,
-                )
-            )
-            self.assertFalse(projection.staging_observation_complete)
-            self.assertEqual(ScenarioOutcome.INCOMPLETE, evaluated.outcome)
+            self.assertFalse(quarantine.exists())
+            self.assertEqual(source_before, tuple(path.name for path in source.iterdir()))
+            self.assertEqual(stage_before, tuple(path.name for path in stage.iterdir()))
 
     def test_replace_quarantines_disposable_replacement_and_restores_projection(self):
         with tempfile.TemporaryDirectory(prefix="modlab-replace-projection-") as directory:
@@ -3720,7 +3748,11 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
             retained = PinnedObject(
                 root,
                 7201,
-                PinnedIdentity(1, 1, 0x10),
+                PinnedIdentity(
+                    int(expected[0][2]),
+                    int(expected[0][3]),
+                    int(expected[0][8]),
+                ),
             )
 
             with (
