@@ -1,0 +1,6 @@
+test_initial_journal_ownership_resolution_unwinds_exact_job_then_retries (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_initial_journal_ownership_resolution_unwinds_exact_job_then_retries) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.081s
+
+OK

@@ -1,0 +1,379 @@
+test_private_candidate_ownership_reports_no_final_publication_effect (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_private_candidate_ownership_reports_no_final_publication_effect) ... ok
+test_initial_journal_ownership_resolution_unwinds_exact_job_then_retries (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_initial_journal_ownership_resolution_unwinds_exact_job_then_retries) ... ERROR
+test_immutable_owner_failure_keeps_record_identity_and_live_union (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_immutable_owner_failure_keeps_record_identity_and_live_union) ... ok
+test_renamed_then_rolled_back_publication_reports_visible_incomplete_effect (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_renamed_then_rolled_back_publication_reports_visible_incomplete_effect) ... ok
+test_recovery_source_substitution_moves_only_the_pinned_stage (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_source_substitution_moves_only_the_pinned_stage) ... ERROR
+test_recovery_destination_parent_substitution_preserves_journal_for_retry (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_destination_parent_substitution_preserves_journal_for_retry) ... ERROR
+test_recovery_wrong_source_type_preserves_unknown_and_recorded_stage (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_wrong_source_type_preserves_unknown_and_recorded_stage) ... ERROR
+test_recovery_unknown_reparse_identity_refuses_then_cleanly_retries (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_unknown_reparse_identity_refuses_then_cleanly_retries) ... ERROR
+test_recovery_cross_volume_refusal_leaves_stage_retryable (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_cross_volume_refusal_leaves_stage_retryable) ... ERROR
+test_recovery_move_close_failure_retains_owners_and_retries_after_resolution (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_move_close_failure_retains_owners_and_retries_after_resolution) ... ERROR
+
+======================================================================
+ERROR: test_initial_journal_ownership_resolution_unwinds_exact_job_then_retries (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_initial_journal_ownership_resolution_unwinds_exact_job_then_retries)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 874, in _atomic_create
+    windows_exact_fs.publish_new_pinned(target, data, validate)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 1184, in publish_new_pinned
+    parent = pin_direct_object(destination.parent, kind="directory")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 625, in pin_direct_object
+    handle = _open_no_follow(target, desired_access)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 562, in _open_no_follow
+    raise _winerror(f"CreateFileW failed for {path}")
+BrokenPipeError: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpn6szpf7q\workspace\runtime\jobs\mo2-bootstrap\0123456789abcdef0123456789abcdef: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_store.py", line 751, in test_initial_journal_ownership_resolution_unwinds_exact_job_then_retries
+    self.store.create_job(self.plan)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 508, in create_job
+    changed = self._atomic_create(
+              ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 889, in _atomic_create
+    raise Mo2BootstrapStoreError(
+modlab.workflows.skyrim.mo2_bootstrap_store.Mo2BootstrapStoreError: could not create immutable bootstrap journal-0123456789abcdef0123456789abcdef through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpn6szpf7q\workspace\runtime\jobs\mo2-bootstrap\0123456789abcdef0123456789abcdef\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpn6szpf7q\workspace\runtime\jobs\mo2-bootstrap\0123456789abcdef0123456789abcdef: The process cannot access the file because it is being used by another process.
+
+======================================================================
+ERROR: test_recovery_source_substitution_moves_only_the_pinned_stage (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_source_substitution_moves_only_the_pinned_stage)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 874, in _atomic_create
+    windows_exact_fs.publish_new_pinned(target, data, validate)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 1184, in publish_new_pinned
+    parent = pin_direct_object(destination.parent, kind="directory")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 625, in pin_direct_object
+    handle = _open_no_follow(target, desired_access)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 562, in _open_no_follow
+    raise _winerror(f"CreateFileW failed for {path}")
+BrokenPipeError: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzjberxx_\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2378, in _apply_create_plan
+    job = store.create_job(plan, listing=collected.listing)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 508, in create_job
+    changed = self._atomic_create(
+              ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 889, in _atomic_create
+    raise Mo2BootstrapStoreError(
+modlab.workflows.skyrim.mo2_bootstrap_store.Mo2BootstrapStoreError: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzjberxx_\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzjberxx_\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2402, in _apply_create_plan
+    raise Mo2BootstrapRefusal(
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap creation job could not be created: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzjberxx_\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzjberxx_\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 410, in test_recovery_source_substitution_moves_only_the_pinned_stage
+    self._interrupt_staged()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 140, in _interrupt_staged
+    self._apply()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 69, in _apply
+    return apply_mo2_setup(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 714, in apply_mo2_setup
+    raise _refusal_with_failure(error, failure) from error
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap creation job could not be created: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzjberxx_\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzjberxx_\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+======================================================================
+ERROR: test_recovery_destination_parent_substitution_preserves_journal_for_retry (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_destination_parent_substitution_preserves_journal_for_retry)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 874, in _atomic_create
+    windows_exact_fs.publish_new_pinned(target, data, validate)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 1184, in publish_new_pinned
+    parent = pin_direct_object(destination.parent, kind="directory")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 625, in pin_direct_object
+    handle = _open_no_follow(target, desired_access)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 562, in _open_no_follow
+    raise _winerror(f"CreateFileW failed for {path}")
+BrokenPipeError: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmptwu3iym0\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2378, in _apply_create_plan
+    job = store.create_job(plan, listing=collected.listing)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 508, in create_job
+    changed = self._atomic_create(
+              ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 889, in _atomic_create
+    raise Mo2BootstrapStoreError(
+modlab.workflows.skyrim.mo2_bootstrap_store.Mo2BootstrapStoreError: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmptwu3iym0\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmptwu3iym0\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2402, in _apply_create_plan
+    raise Mo2BootstrapRefusal(
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap creation job could not be created: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmptwu3iym0\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmptwu3iym0\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 448, in test_recovery_destination_parent_substitution_preserves_journal_for_retry
+    self._interrupt_staged()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 140, in _interrupt_staged
+    self._apply()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 69, in _apply
+    return apply_mo2_setup(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 714, in apply_mo2_setup
+    raise _refusal_with_failure(error, failure) from error
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap creation job could not be created: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmptwu3iym0\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmptwu3iym0\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+======================================================================
+ERROR: test_recovery_wrong_source_type_preserves_unknown_and_recorded_stage (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_wrong_source_type_preserves_unknown_and_recorded_stage)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 874, in _atomic_create
+    windows_exact_fs.publish_new_pinned(target, data, validate)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 1184, in publish_new_pinned
+    parent = pin_direct_object(destination.parent, kind="directory")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 625, in pin_direct_object
+    handle = _open_no_follow(target, desired_access)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 562, in _open_no_follow
+    raise _winerror(f"CreateFileW failed for {path}")
+BrokenPipeError: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmp30w40c2w\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2378, in _apply_create_plan
+    job = store.create_job(plan, listing=collected.listing)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 508, in create_job
+    changed = self._atomic_create(
+              ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 889, in _atomic_create
+    raise Mo2BootstrapStoreError(
+modlab.workflows.skyrim.mo2_bootstrap_store.Mo2BootstrapStoreError: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmp30w40c2w\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmp30w40c2w\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2402, in _apply_create_plan
+    raise Mo2BootstrapRefusal(
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap creation job could not be created: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmp30w40c2w\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmp30w40c2w\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 495, in test_recovery_wrong_source_type_preserves_unknown_and_recorded_stage
+    self._interrupt_staged()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 140, in _interrupt_staged
+    self._apply()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 69, in _apply
+    return apply_mo2_setup(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 714, in apply_mo2_setup
+    raise _refusal_with_failure(error, failure) from error
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap creation job could not be created: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmp30w40c2w\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmp30w40c2w\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+======================================================================
+ERROR: test_recovery_unknown_reparse_identity_refuses_then_cleanly_retries (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_unknown_reparse_identity_refuses_then_cleanly_retries)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 874, in _atomic_create
+    windows_exact_fs.publish_new_pinned(target, data, validate)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 1184, in publish_new_pinned
+    parent = pin_direct_object(destination.parent, kind="directory")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 625, in pin_direct_object
+    handle = _open_no_follow(target, desired_access)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 562, in _open_no_follow
+    raise _winerror(f"CreateFileW failed for {path}")
+BrokenPipeError: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzqfsu3ll\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2378, in _apply_create_plan
+    job = store.create_job(plan, listing=collected.listing)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 508, in create_job
+    changed = self._atomic_create(
+              ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 889, in _atomic_create
+    raise Mo2BootstrapStoreError(
+modlab.workflows.skyrim.mo2_bootstrap_store.Mo2BootstrapStoreError: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzqfsu3ll\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzqfsu3ll\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2402, in _apply_create_plan
+    raise Mo2BootstrapRefusal(
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap creation job could not be created: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzqfsu3ll\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzqfsu3ll\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 530, in test_recovery_unknown_reparse_identity_refuses_then_cleanly_retries
+    self._interrupt_staged()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 140, in _interrupt_staged
+    self._apply()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 69, in _apply
+    return apply_mo2_setup(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 714, in apply_mo2_setup
+    raise _refusal_with_failure(error, failure) from error
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap creation job could not be created: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzqfsu3ll\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpzqfsu3ll\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+======================================================================
+ERROR: test_recovery_cross_volume_refusal_leaves_stage_retryable (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_cross_volume_refusal_leaves_stage_retryable)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 874, in _atomic_create
+    windows_exact_fs.publish_new_pinned(target, data, validate)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 1184, in publish_new_pinned
+    parent = pin_direct_object(destination.parent, kind="directory")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 625, in pin_direct_object
+    handle = _open_no_follow(target, desired_access)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 562, in _open_no_follow
+    raise _winerror(f"CreateFileW failed for {path}")
+BrokenPipeError: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpnepp9z4r\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2378, in _apply_create_plan
+    job = store.create_job(plan, listing=collected.listing)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 508, in create_job
+    changed = self._atomic_create(
+              ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 889, in _atomic_create
+    raise Mo2BootstrapStoreError(
+modlab.workflows.skyrim.mo2_bootstrap_store.Mo2BootstrapStoreError: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpnepp9z4r\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpnepp9z4r\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2402, in _apply_create_plan
+    raise Mo2BootstrapRefusal(
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap creation job could not be created: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpnepp9z4r\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpnepp9z4r\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 572, in test_recovery_cross_volume_refusal_leaves_stage_retryable
+    self._interrupt_staged()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 140, in _interrupt_staged
+    self._apply()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 69, in _apply
+    return apply_mo2_setup(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 714, in apply_mo2_setup
+    raise _refusal_with_failure(error, failure) from error
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap creation job could not be created: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpnepp9z4r\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpnepp9z4r\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+======================================================================
+ERROR: test_recovery_move_close_failure_retains_owners_and_retries_after_resolution (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_move_close_failure_retains_owners_and_retries_after_resolution)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 874, in _atomic_create
+    windows_exact_fs.publish_new_pinned(target, data, validate)
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 1184, in publish_new_pinned
+    parent = pin_direct_object(destination.parent, kind="directory")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 625, in pin_direct_object
+    handle = _open_no_follow(target, desired_access)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\platform\windows_exact_fs.py", line 562, in _open_no_follow
+    raise _winerror(f"CreateFileW failed for {path}")
+BrokenPipeError: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpsd1yn0k7\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2378, in _apply_create_plan
+    job = store.create_job(plan, listing=collected.listing)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 508, in create_job
+    changed = self._atomic_create(
+              ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap_store.py", line 889, in _atomic_create
+    raise Mo2BootstrapStoreError(
+modlab.workflows.skyrim.mo2_bootstrap_store.Mo2BootstrapStoreError: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpsd1yn0k7\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpsd1yn0k7\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 696, in apply_mo2_setup
+    return _apply_collected_mo2_setup(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 741, in _apply_collected_mo2_setup
+    return _apply_create_plan(
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 2402, in _apply_create_plan
+    raise Mo2BootstrapRefusal(
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap creation job could not be created: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpsd1yn0k7\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpsd1yn0k7\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 627, in test_recovery_move_close_failure_retains_owners_and_retries_after_resolution
+    self._interrupt_staged()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 140, in _interrupt_staged
+    self._apply()
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\tests\test_mo2_bootstrap_recovery.py", line 69, in _apply
+    return apply_mo2_setup(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\modlab\workflows\skyrim\mo2_bootstrap.py", line 714, in apply_mo2_setup
+    raise _refusal_with_failure(error, failure) from error
+modlab.workflows.skyrim.mo2_bootstrap.Mo2BootstrapRefusal: bootstrap creation job could not be created: could not create immutable bootstrap journal-fedcba9876543210fedcba9876543210 through retained ownership at C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpsd1yn0k7\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210\journal.json: [Errno 32] CreateFileW failed for C:\Users\red\Desktop\Modlab\.worktrees\mo2-guard-bridge-handshake\nt\tmpsd1yn0k7\ModLab\workspace\runtime\jobs\mo2-bootstrap\fedcba9876543210fedcba9876543210: The process cannot access the file because it is being used by another process.
+
+----------------------------------------------------------------------
+Ran 10 tests in 2.301s
+
+FAILED (errors=7)

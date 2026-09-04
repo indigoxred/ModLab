@@ -1,0 +1,15 @@
+test_private_candidate_ownership_reports_no_final_publication_effect (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_private_candidate_ownership_reports_no_final_publication_effect) ... ok
+test_initial_journal_ownership_resolution_unwinds_exact_job_then_retries (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_initial_journal_ownership_resolution_unwinds_exact_job_then_retries) ... ok
+test_immutable_owner_failure_keeps_record_identity_and_live_union (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_immutable_owner_failure_keeps_record_identity_and_live_union) ... ok
+test_renamed_then_rolled_back_publication_reports_visible_incomplete_effect (tests.test_mo2_bootstrap_store.Mo2BootstrapStoreTests.test_renamed_then_rolled_back_publication_reports_visible_incomplete_effect) ... ok
+test_recovery_source_substitution_moves_only_the_pinned_stage (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_source_substitution_moves_only_the_pinned_stage) ... ok
+test_recovery_destination_parent_substitution_preserves_journal_for_retry (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_destination_parent_substitution_preserves_journal_for_retry) ... ok
+test_recovery_wrong_source_type_preserves_unknown_and_recorded_stage (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_wrong_source_type_preserves_unknown_and_recorded_stage) ... ok
+test_recovery_unknown_reparse_identity_refuses_then_cleanly_retries (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_unknown_reparse_identity_refuses_then_cleanly_retries) ... ok
+test_recovery_cross_volume_refusal_leaves_stage_retryable (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_cross_volume_refusal_leaves_stage_retryable) ... ok
+test_recovery_move_close_failure_retains_owners_and_retries_after_resolution (tests.test_mo2_bootstrap_recovery.Mo2BootstrapRecoveryTests.test_recovery_move_close_failure_retains_owners_and_retries_after_resolution) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 7.157s
+
+OK

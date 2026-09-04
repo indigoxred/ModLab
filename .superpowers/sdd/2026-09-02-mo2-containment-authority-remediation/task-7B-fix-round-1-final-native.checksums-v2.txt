@@ -1,0 +1,24 @@
+execution_mode=sandbox_permissions=require_escalated
+source_commit=f2be28360472c358146eb617971c15e71f2782d5
+source_tree=a7a9469c25cf5f8ca70b72f8ad0594430bb0e36c
+suite_command=C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest discover -s tests -v
+exit_code=0
+run_count=1179
+pass_count=1169
+skip_count=10
+failure_pattern_count=0
+unittest_duration_seconds=1140.282
+outer_duration_seconds=1141.731
+postflight_relevant_process_count=0
+source_hashes_unchanged=true
+source_hashes:
+81884f4231d9f11dd7e1ae55d5510e40f0db9582f22cfa4201ea8242a7d88d70  modlab/platform/windows_exact_fs.py
+3da0d59ab1770ddeccc36dc26661c1dadfda3bf2c5126ab9e423896ca84aa257  modlab/workflows/skyrim/mo2_bootstrap_store.py
+0c4ad1985a8d7f30920c08030ad5b35984bcba2e834b0b0f1b7dcee9b0c24233  tests/test_mo2_bootstrap_store.py
+eb2ce17d83ca4456c6dccb4fbec14edf4b3af6b84b7cf41a036f0495e7113a3c  tests/test_mo2_bootstrap_recovery.py
+evidence_hashes:
+56e7f1945590410b6e179f3f414b49c073d9ff571e51a28cd69462d9485200a9  task-7B-fix-round-1-final-native.log
+d146b6c4bbe81f47b0baefcec9c152ff1072e138a12ea3b223b4d6e36ef2f909  task-7B-fix-round-1-final-native.stderr.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  task-7B-fix-round-1-final-native.stdout.log
+a9725caae9995709adfb98b320970778f1cd091a8fd03919635192ba54b5618f  task-7B-fix-round-1-final-native.manifest.txt
+note=The original manifest is preserved unchanged; its post-suite PowerShell artifact-list expression emitted a non-terminating syntax error after the passing test result, unchanged source hashes, and zero-process postflight were already recorded. This v2 manifest supplies the independently computed artifact hashes.

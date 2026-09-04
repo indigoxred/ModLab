@@ -1,0 +1,16 @@
+test_validated_candidate_handle_publishes_original_after_old_path_is_replaced (tests.test_windows_exact_fs.WindowsExactFsTests.test_validated_candidate_handle_publishes_original_after_old_path_is_replaced) ... ok
+test_cross_volume_and_destination_parent_identity_mismatch_refuse_before_rename (tests.test_windows_exact_fs.WindowsExactFsTests.test_cross_volume_and_destination_parent_identity_mismatch_refuse_before_rename) ... ok
+test_close_failure_keeps_explicit_handle_ownership (tests.test_windows_exact_fs.WindowsExactFsTests.test_close_failure_keeps_explicit_handle_ownership) ... ok
+test_create_validation_close_failure_retains_candidate_across_retries (tests.test_windows_exact_fs.WindowsExactFsTests.test_create_validation_close_failure_retains_candidate_across_retries) ... ok
+test_publish_unions_candidate_parent_and_verification_ownership (tests.test_windows_exact_fs.WindowsExactFsTests.test_publish_unions_candidate_parent_and_verification_ownership) ... ok
+test_ownership_union_preserves_same_role_owners_through_partial_retries (tests.test_windows_exact_fs.WindowsExactFsTests.test_ownership_union_preserves_same_role_owners_through_partial_retries) ... ok
+test_shared_rename_implementation_has_no_pathname_fallback (tests.test_windows_exact_fs.WindowsExactFsTests.test_shared_rename_implementation_has_no_pathname_fallback) ... ok
+test_post_rename_validator_failure_deletes_the_moved_exact_candidate (tests.test_windows_exact_fs.WindowsExactFsTests.test_post_rename_validator_failure_deletes_the_moved_exact_candidate) ... ok
+test_failed_post_publish_cleanup_returns_the_live_retained_candidate (tests.test_windows_exact_fs.WindowsExactFsTests.test_failed_post_publish_cleanup_returns_the_live_retained_candidate) ... ok
+test_repeated_retry_deletes_only_exact_moved_candidate_and_closes_all_roles (tests.test_windows_exact_fs.WindowsExactFsTests.test_repeated_retry_deletes_only_exact_moved_candidate_and_closes_all_roles) ... ok
+test_all_containment_immutable_publishers_use_the_shared_primitive (tests.test_windows_exact_fs.WindowsExactFsTests.test_all_containment_immutable_publishers_use_the_shared_primitive) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 0.127s
+
+OK

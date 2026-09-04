@@ -332,3 +332,158 @@ cleanup, commit, UI/MO2/game launch, live/original action, push, or merge occurr
   above, and `git diff --cached --check` exited 0 before the commit.
 - This commit used the passing final-native-v2 evidence above; no test was rerun,
   no scratch was cleaned, and no push or merge occurred.
+
+## Task 7B review fix round 1/5
+
+### Accepted findings and correction
+
+- Verified the review's critical finding: all three immutable-store ownership
+  wrappers derived `changed` from `bool(error.candidates)`, although candidate
+  ownership says nothing about whether the no-replace rename became visible.
+- Added immutable internal `ExactPublicationFailure` evidence with separately
+  typed phase (`private-candidate` or `rename-visible`) and residual effect
+  (`no-destination-change`, `rolled-back`, or `rollback-incomplete`). A
+  rename-visible failure remains incomplete even after exact rollback, and
+  rollback never upgrades it to completed publication.
+- `publish_new_pinned` is still the sole immutable publisher. It derives phase
+  from its own rename result / exact retained object's destination update and
+  effect from exact candidate cleanup, and `union_retained_ownership` preserves
+  that evidence across owner additions and partial cleanup retries. Store
+  wrappers now consume this evidence; they never infer phase from owner roles.
+- The existing shared publisher can optionally borrow an already-retained exact
+  destination-parent owner. This is used only for a newly rooted-created job
+  directory, because that creation handle intentionally prevents a pathname
+  reopen with delete access. Borrowed authority is never closed by the publisher.
+- Initial job creation on Windows now uses `create_pinned_directory_child` under
+  a retained jobs-root parent. The exact new empty job directory stays live
+  through initial journal publication. An incomplete journal publication unions
+  the exact journal owners with that exact job-directory candidate; resolution
+  deletes only those exact objects in dependency order and supports partial
+  cleanup retry. No pathname cleanup fallback is used on this Windows path.
+- Non-publication ownership remains backward-compatible: it carries no
+  publication evidence and callers must supply their operation-known `changed`
+  state explicitly.
+
+### TDD chronology and focused evidence
+
+1. Baseline production was restored exactly to committed HEAD `2f5c79d` before
+   the combined behavioral RED. The earlier four-test RED is retained as
+   `task-7B-fix-round-1-red.log`, SHA-256
+   `301cce1b22d739614604a3cee02a97a41456af608e15755778fb881201ab8b15`:
+   four intended assertion failures plus one downstream temporary-directory
+   cleanup error caused by the deliberately retained handle after an early
+   assertion.
+2. The first combined attempt found only a missing test-file `os` import before
+   discovery and is preserved as `task-7B-fix-round-1-combined-red.log`, SHA-256
+   `167923c56ccd8a65085f15c01c17b1d3f0d7fde31d12b95e3c4b1b84491806ff`.
+3. The corrected baseline combined RED ran all ten new cases. The four
+   publication/job-owner tests failed for the intended false/missing authority
+   evidence (plus the same downstream retained-handle teardown error); all six
+   real recovery-relocation safety cases passed on unchanged production. Ten
+   tests in 7.165s, exit 1. Evidence:
+   `task-7B-fix-round-1-combined-red-v2.log`, SHA-256
+   `00b8fd6b4388293703dfd064b144957f859a67c6f1d5b351bf72a689026ced78`.
+4. The first implementation run proved that the rooted-created directory owner
+   cannot be reopened as a publisher parent because its authority handle denies
+   delete sharing. Three publication tests passed and seven job-dependent tests
+   errored at that exact reopen; preserved as
+   `task-7B-fix-round-1-focused-green-01.log`, SHA-256
+   `29baf0e5340a2fd09ed1daf3a7366bbe7e01e90071d62e765d30d0246aebbeb8`.
+   The minimal correction was the shared publisher's borrowed-parent interface.
+5. The same ten cases then passed: 10/10 in 7.157s, exit 0.
+   `task-7B-fix-round-1-focused-green-02.log`, SHA-256
+   `f16b80e9c03ca8ec0027969841a7a83091f6ef0ac66a93f00e18763df76be392`.
+6. The complete focused bootstrap store and recovery modules passed: 68/68 in
+   46.631s, exit 0. `task-7B-fix-round-1-bootstrap-focused-green.log`, SHA-256
+   `78a0327b19184203f1836ddacc01911bb5c3e3caaeb2876dbbbb9a4eb1d1a0ac`.
+7. Eleven selected shared exact-FS publisher, owner-union, same-volume,
+   no-pathname-fallback, rollback, and retained-close tests passed in 0.127s,
+   exit 0. `task-7B-fix-round-1-exact-fs-focused-green.log`, SHA-256
+   `074f7ad2f09023cecf5c5ea4cf54f8ee59f5f83da2f43cee60b91a316f2803cf`.
+8. The strengthened initial-journal test separately proved publication evidence
+   survives a failed first cleanup and the store wrapper's narrowed ownership:
+   1/1 in 0.081s, exit 0. `task-7B-fix-round-1-union-green.log`, SHA-256
+   `039c2d352a4b605025af8b58d440db76fc43a06f341082253627f20bd0f0122d`.
+
+### Recovery relocation boundary coverage
+
+- Six new native tests call the real shared relocation primitive through the
+  recovery caller and cover source substitution, destination-parent
+  substitution, wrong source type, unknown reparse identity, cross-volume
+  refusal, and retained source/parent close failure. They prove journal state and
+  recovery evidence remain retryable or `RecoveryRequired` as appropriate while
+  unknown/prior bytes remain unchanged.
+- Existing unchanged tests mapped alongside them are
+  `test_restore_rename_failure_is_retryable_from_filesystem_evidence`,
+  `test_stage_quarantine_survives_journal_failure_and_retries`,
+  `test_staged_job_quarantines_only_the_exact_recorded_stage`, and
+  `test_adopt_recovery_quarantines_stage_without_changing_manager`. These cover
+  caller retry/state semantics but do not replace the six new tests at the real
+  shared recovery-move injection boundary.
+
+### Self-review and rendezvous state
+
+- Tracked changes are exactly four files:
+  `modlab/platform/windows_exact_fs.py`,
+  `modlab/workflows/skyrim/mo2_bootstrap_store.py`,
+  `tests/test_mo2_bootstrap_store.py`, and
+  `tests/test_mo2_bootstrap_recovery.py`. Current SHA-256 values respectively are
+  `81884f4231d9f11dd7e1ae55d5510e40f0db9582f22cfa4201ea8242a7d88d70`,
+  `3da0d59ab1770ddeccc36dc26661c1dadfda3bf2c5126ab9e423896ca84aa257`,
+  `0c4ad1985a8d7f30920c08030ad5b35984bcba2e834b0b0f1b7dcee9b0c24233`,
+  and `eb2ce17d83ca4456c6dccb4fbec14edf4b3af6b84b7cf41a036f0495e7113a3c`.
+- `git diff --check` is clean apart from line-ending warnings. Review found no
+  second rename/publisher, pathname mutation fallback on the Windows job cleanup
+  path, copy/delete or overwrite publication, mutable-journal `os.replace`
+  rewrite, adoption relocation, watch change, or live-owner loss.
+- HEAD remains `2f5c79de1e41febe3ad535af14a6d7fddb65ac1d`. No complete
+  native/all-real/absence-sensitive suite, scratch cleanup, commit, UI/MO2/game
+  action, live/original operation, push, or merge occurred in this fix round.
+  Focused source is ready for controller rendezvous.
+
+### Fix round 1 complete native gate and source commit
+
+- After controller acceptance and independent focused verification, the exact
+  four source/test hashes above were frozen and the single complete native
+  Windows discovery ran with `sandbox_permissions=require_escalated`, a
+  1,800-second ceiling, worktree-owned `TEMP`/`TMP`, and only
+  `MODLAB_PREPARATION_ARCHIVE=C:\Users\red\Desktop\Modlab\workspace\inbox\Mod.Organizer-2.5.2.7z`
+  plus `MODLAB_PREPARATION_STEAM=C:\Users\red\Desktop\Steam`. The separate
+  `MODLAB_MO2_ARCHIVE`, `MODLAB_STEAM_ROOT`, and runtime/live variables were
+  unset.
+- Exact command:
+  `C:\Users\red\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest discover -s tests -v`.
+- Result: exit 0, 1,179 tests in 1,140.282s; 1,169 passed, 0 failures,
+  0 errors, and 10 skips. Outer evidence duration was 1,141.731s. All ten
+  skip lines are retained verbatim: eight unavailable symlink-privilege cases
+  and the two expected real-integration tests requiring the deliberately unset
+  `MODLAB_MO2_ARCHIVE` / `MODLAB_STEAM_ROOT` opt-ins.
+- Preflight HEAD was `2f5c79de1e41febe3ad535af14a6d7fddb65ac1d` with zero
+  relevant processes. Periodic evidence captured the suite, expected watch and
+  all-real child, and `tar.exe` extraction. Postflight recorded zero relevant
+  processes, unchanged HEAD, and exact pre/post equality for all four frozen
+  source/test hashes.
+- Complete combined evidence is `task-7B-fix-round-1-final-native.log`, SHA-256
+  `56e7f1945590410b6e179f3f414b49c073d9ff571e51a28cd69462d9485200a9`.
+  Raw stderr SHA-256 is
+  `d146b6c4bbe81f47b0baefcec9c152ff1072e138a12ea3b223b4d6e36ef2f909`;
+  raw stdout is empty with SHA-256
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+- The original manifest is preserved with SHA-256
+  `a9725caae9995709adfb98b320970778f1cd091a8fd03919635192ba54b5618f`.
+  Its post-suite artifact-list expression emitted a non-terminating PowerShell
+  syntax error only after the pass, unchanged hashes, and zero-process
+  postflight had been recorded. No test was rerun; the separately retained
+  `task-7B-fix-round-1-final-native.checksums-v2.txt` records the independently
+  computed raw/combined hashes and the complete result; its SHA-256 is
+  `86b6dd4a139686e3aed26cc9a9729e32c0ab40e88ef7c196f8b94d1155c9aaf5`.
+- The staged source name list contained exactly
+  `modlab/platform/windows_exact_fs.py`,
+  `modlab/workflows/skyrim/mo2_bootstrap_store.py`,
+  `tests/test_mo2_bootstrap_recovery.py`, and
+  `tests/test_mo2_bootstrap_store.py`; `git diff --cached --check` exited 0.
+  Source/test commit: `f2be28360472c358146eb617971c15e71f2782d5`, tree
+  `a7a9469c25cf5f8ca70b72f8ad0594430bb0e36c`, message
+  `fix: retain truthful bootstrap publication authority`.
+- No scratch cleanup, UI/MO2/game action, live/original operation, push, or merge
+  occurred. The source/test bytes were not edited after the native gate.
