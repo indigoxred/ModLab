@@ -77,9 +77,21 @@ class Mo2BootstrapStoreOwnershipError(Mo2BootstrapStorePromotionError):
         record_kind: str,
         record_id: str,
         path: Path,
-        changed: bool,
+        changed: bool | None = None,
     ):
         self.ownership = ownership
+        publication = ownership.publication
+        if publication is not None:
+            publication_changed = publication.changed
+            if changed is not None and changed is not publication_changed:
+                raise ValueError(
+                    "store publication state conflicts with exact publication evidence"
+                )
+            changed = publication_changed
+        if changed is None:
+            raise ValueError(
+                "non-publication exact ownership requires explicit store change state"
+            )
         super().__init__(
             message,
             record_kind=record_kind,
@@ -115,6 +127,10 @@ class Mo2BootstrapStoreOwnershipError(Mo2BootstrapStorePromotionError):
     @property
     def retained_objects(self):
         return self.ownership.retained_objects
+
+    @property
+    def publication(self):
+        return self.ownership.publication
 
     def resolve(self) -> None:
         try:
@@ -349,7 +365,6 @@ class Mo2BootstrapStore:
                 record_kind="plan",
                 record_id=plan.plan_id,
                 path=target,
-                changed=bool(error.candidates),
             ) from error
         except _AtomicCreatePromotionError as error:
             raise Mo2BootstrapStorePromotionError(
@@ -479,16 +494,38 @@ class Mo2BootstrapStore:
 
         self._prepare_directory(job_directory.parent)
         created_job_directory = False
+        job_owner = None
         try:
-            job_directory.mkdir()
+            if os.name == "nt":
+                job_owner = self._create_exact_job_directory(job_directory)
+            else:
+                job_directory.mkdir()
+                self._validate_existing_directory(
+                    job_directory, "bootstrap job directory"
+                )
             created_job_directory = True
-            self._validate_existing_directory(job_directory, "bootstrap job directory")
             try:
                 changed = self._atomic_create(
                     self.journal_path(job_id),
                     journal_data,
                     f"journal-{job_id.removeprefix('bootstrap-job:')}",
+                    destination_parent=job_owner,
                 )
+            except windows_exact_fs.ExactObjectOwnershipError as error:
+                if job_owner is not None and job_owner.handle:
+                    error = windows_exact_fs.union_retained_ownership(
+                        "initial journal publication retains its exact owners and "
+                        "the newly created job directory",
+                        prior=error,
+                        owners=(
+                            windows_exact_fs.RetainedObjectOwner(
+                                windows_exact_fs.RetainedObjectRole.CANDIDATE,
+                                job_owner,
+                            ),
+                        ),
+                    )
+                    job_owner = None
+                raise error
             except _AtomicCreatePromotionError as error:
                 raise Mo2BootstrapStorePromotionError(
                     "bootstrap journal was promoted but could not be verified: "
@@ -502,6 +539,33 @@ class Mo2BootstrapStore:
                 raise Mo2BootstrapStoreError(
                     "bootstrap journal appeared during job creation"
                 )
+            created_job_directory = False
+            if job_owner is not None:
+                try:
+                    job_owner.close()
+                except BaseException as error:
+                    ownership = windows_exact_fs.union_retained_ownership(
+                        "completed journal publication retains the exact job "
+                        "directory verification owner",
+                        prior=error,
+                        owners=(
+                            windows_exact_fs.RetainedObjectOwner(
+                                windows_exact_fs.RetainedObjectRole.VERIFICATION,
+                                job_owner,
+                            ),
+                        ),
+                    )
+                    job_owner = None
+                    raise Mo2BootstrapStoreOwnershipError(
+                        "bootstrap journal publication completed but retains live "
+                        f"exact ownership: {error}",
+                        ownership,
+                        record_kind="journal",
+                        record_id=job_id,
+                        path=self.journal_path(job_id),
+                        changed=True,
+                    ) from error
+                job_owner = None
             try:
                 return self.load_job(job_id, changed=True)
             except (Mo2BootstrapStoreError, Mo2BootstrapNotFoundError) as error:
@@ -519,15 +583,71 @@ class Mo2BootstrapStore:
                 record_kind="journal",
                 record_id=job_id,
                 path=self.journal_path(job_id),
-                changed=bool(error.candidates),
+                **({} if error.publication is not None else {"changed": False}),
             ) from error
-        except Mo2BootstrapStoreError:
+        except Mo2BootstrapStoreError as error:
             if created_job_directory:
-                self._remove_empty_directory(job_directory)
+                if job_owner is not None:
+                    try:
+                        windows_exact_fs.delete_pinned_object(job_owner)
+                    except BaseException as cleanup_error:
+                        if job_owner.handle:
+                            ownership = windows_exact_fs.union_retained_ownership(
+                                "bootstrap job failure retains exact cleanup ownership "
+                                "of the newly created directory",
+                                prior=cleanup_error,
+                                owners=(
+                                    windows_exact_fs.RetainedObjectOwner(
+                                        windows_exact_fs.RetainedObjectRole.CANDIDATE,
+                                        job_owner,
+                                    ),
+                                ),
+                            )
+                            ownership.add_note(f"original job failure: {error!r}")
+                            job_owner = None
+                            raise Mo2BootstrapStoreOwnershipError(
+                                "bootstrap job failure retains live exact directory "
+                                f"ownership: {cleanup_error}",
+                                ownership,
+                                record_kind="journal",
+                                record_id=job_id,
+                                path=self.journal_path(job_id),
+                                changed=False,
+                            ) from error
+                else:
+                    self._remove_empty_directory(job_directory)
             raise
         except Exception as error:
             if created_job_directory:
-                self._remove_empty_directory(job_directory)
+                if job_owner is not None:
+                    try:
+                        windows_exact_fs.delete_pinned_object(job_owner)
+                    except BaseException as cleanup_error:
+                        if job_owner.handle:
+                            ownership = windows_exact_fs.union_retained_ownership(
+                                "bootstrap job failure retains exact cleanup ownership "
+                                "of the newly created directory",
+                                prior=cleanup_error,
+                                owners=(
+                                    windows_exact_fs.RetainedObjectOwner(
+                                        windows_exact_fs.RetainedObjectRole.CANDIDATE,
+                                        job_owner,
+                                    ),
+                                ),
+                            )
+                            ownership.add_note(f"original job failure: {error!r}")
+                            job_owner = None
+                            raise Mo2BootstrapStoreOwnershipError(
+                                "bootstrap job failure retains live exact directory "
+                                f"ownership: {cleanup_error}",
+                                ownership,
+                                record_kind="journal",
+                                record_id=job_id,
+                                path=self.journal_path(job_id),
+                                changed=False,
+                            ) from error
+                else:
+                    self._remove_empty_directory(job_directory)
             raise Mo2BootstrapStoreError(
                 f"could not create bootstrap job {job_id}: {error}"
             ) from error
@@ -628,7 +748,6 @@ class Mo2BootstrapStore:
                 record_kind="receipt",
                 record_id=receipt.receipt_id,
                 path=target,
-                changed=bool(error.candidates),
             ) from error
         except _AtomicCreatePromotionError as error:
             raise Mo2BootstrapStorePromotionError(
@@ -741,7 +860,14 @@ class Mo2BootstrapStore:
             return False
         return self._atomic_create(target, data, label)
 
-    def _atomic_create(self, target: Path, data: bytes, label: str) -> bool:
+    def _atomic_create(
+        self,
+        target: Path,
+        data: bytes,
+        label: str,
+        *,
+        destination_parent=None,
+    ) -> bool:
         if os.name == "nt":
             self._validate_target(target)
 
@@ -753,7 +879,15 @@ class Mo2BootstrapStore:
                 return candidate
 
             try:
-                windows_exact_fs.publish_new_pinned(target, data, validate)
+                if destination_parent is None:
+                    windows_exact_fs.publish_new_pinned(target, data, validate)
+                else:
+                    windows_exact_fs.publish_new_pinned(
+                        target,
+                        data,
+                        validate,
+                        destination_parent=destination_parent,
+                    )
                 return True
             except FileExistsError:
                 self._validate_existing_file(target, f"stored {label}")
@@ -1161,6 +1295,56 @@ class Mo2BootstrapStore:
             raise Mo2BootstrapStoreError(
                 f"cannot read {label} {path}: {error}"
             ) from error
+
+    @staticmethod
+    def _create_exact_job_directory(path: Path):
+        parent = windows_exact_fs.pin_direct_object(path.parent, kind="directory")
+        try:
+            child = windows_exact_fs.create_pinned_directory_child(path, parent)
+        except BaseException as error:
+            try:
+                parent.close()
+            except BaseException as close_error:
+                if parent.handle:
+                    raise windows_exact_fs.union_retained_ownership(
+                        "job-directory creation retained its exact parent owner",
+                        prior=error,
+                        owners=(
+                            windows_exact_fs.RetainedObjectOwner(
+                                windows_exact_fs.RetainedObjectRole.DESTINATION_PARENT,
+                                parent,
+                            ),
+                        ),
+                    ) from error
+                error.add_note(
+                    f"job-directory parent cleanup completed with error: {close_error}"
+                )
+            raise
+        try:
+            parent.close()
+        except BaseException as error:
+            owners = (
+                windows_exact_fs.RetainedObjectOwner(
+                    windows_exact_fs.RetainedObjectRole.CANDIDATE,
+                    child,
+                ),
+                *(
+                    (
+                        windows_exact_fs.RetainedObjectOwner(
+                            windows_exact_fs.RetainedObjectRole.DESTINATION_PARENT,
+                            parent,
+                        ),
+                    )
+                    if parent.handle
+                    else ()
+                ),
+            )
+            raise windows_exact_fs.union_retained_ownership(
+                "job-directory creation retains exact child/parent ownership",
+                prior=error,
+                owners=owners,
+            ) from error
+        return child
 
     def _prepare_directory(self, directory: Path) -> None:
         self._validate_workspace_identity()

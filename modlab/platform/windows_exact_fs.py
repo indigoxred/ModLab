@@ -72,6 +72,53 @@ class RetainedObjectRole(Enum):
     VERIFICATION = "verification"
 
 
+class ExactPublicationPhase(Enum):
+    """Furthest authority-bearing phase reached by immutable publication."""
+
+    PRIVATE_CANDIDATE = "private-candidate"
+    RENAME_VISIBLE = "rename-visible"
+
+
+class ExactPublicationEffect(Enum):
+    """Destination effect remaining after an incomplete publication unwinds."""
+
+    NO_DESTINATION_CHANGE = "no-destination-change"
+    ROLLED_BACK = "rolled-back"
+    ROLLBACK_INCOMPLETE = "rollback-incomplete"
+
+
+@dataclass(frozen=True)
+class ExactPublicationFailure:
+    """Truthful phase/effect evidence for an incomplete immutable publication."""
+
+    phase: ExactPublicationPhase
+    effect: ExactPublicationEffect
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.phase, ExactPublicationPhase):
+            raise TypeError("publication phase must be ExactPublicationPhase")
+        if not isinstance(self.effect, ExactPublicationEffect):
+            raise TypeError("publication effect must be ExactPublicationEffect")
+        if (
+            self.phase is ExactPublicationPhase.PRIVATE_CANDIDATE
+            and self.effect is not ExactPublicationEffect.NO_DESTINATION_CHANGE
+        ):
+            raise ValueError("private candidate cannot report a destination effect")
+        if (
+            self.phase is ExactPublicationPhase.RENAME_VISIBLE
+            and self.effect is ExactPublicationEffect.NO_DESTINATION_CHANGE
+        ):
+            raise ValueError("rename-visible publication must report rollback state")
+
+    @property
+    def completed(self) -> bool:
+        return False
+
+    @property
+    def changed(self) -> bool:
+        return self.phase is ExactPublicationPhase.RENAME_VISIBLE
+
+
 @dataclass(frozen=True)
 class RetainedObjectOwner:
     """One typed cleanup role paired with its exact retained object."""
@@ -131,6 +178,7 @@ class ExactObjectOwnershipError(ExactObjectError):
         candidate: "PinnedObject | None" = None,
         destination_parent: "PinnedObject | None" = None,
         verification: tuple["PinnedObject", ...] = (),
+        publication: ExactPublicationFailure | None = None,
     ) -> None:
         super().__init__(message)
         if not isinstance(owners, tuple):
@@ -145,6 +193,11 @@ class ExactObjectOwnershipError(ExactObjectError):
         self.owners = _normalize_retained_owners((*owners, *compatibility_owners))
         if not self.owners:
             raise ValueError("exact ownership error requires an explicit live-owner role")
+        if publication is not None and not isinstance(
+            publication, ExactPublicationFailure
+        ):
+            raise TypeError("publication evidence must be ExactPublicationFailure")
+        self.publication = publication
 
     @property
     def candidates(self) -> tuple["PinnedObject", ...]:
@@ -203,6 +256,7 @@ class ExactDirectoryCreationOwnershipError(ExactObjectOwnershipError):
         candidate: "PinnedObject | None" = None,
         destination_parent: "PinnedObject | None" = None,
         verification: tuple["PinnedObject", ...] = (),
+        publication: ExactPublicationFailure | None = None,
     ) -> None:
         super().__init__(
             message,
@@ -210,6 +264,7 @@ class ExactDirectoryCreationOwnershipError(ExactObjectOwnershipError):
             candidate=candidate,
             destination_parent=destination_parent,
             verification=verification,
+            publication=publication,
         )
         self.outcome = outcome
         self.created_candidate = candidate
@@ -269,18 +324,34 @@ def union_retained_ownership(
     *,
     prior: BaseException | None = None,
     owners: tuple[RetainedObjectOwner, ...] = (),
+    publication: ExactPublicationFailure | None = None,
 ) -> ExactObjectOwnershipError:
     """Extend ownership without discarding native evidence or failure context."""
     prior_owners = prior.owners if isinstance(prior, ExactObjectOwnershipError) else ()
+    prior_publication = (
+        prior.publication if isinstance(prior, ExactObjectOwnershipError) else None
+    )
+    if (
+        publication is not None
+        and prior_publication is not None
+        and publication != prior_publication
+    ):
+        raise ValueError("cannot replace retained publication evidence during union")
+    publication = publication or prior_publication
     if isinstance(prior, ExactDirectoryCreationOwnershipError):
         result = ExactDirectoryCreationOwnershipError(
             message,
             prior.outcome,
             owners=(*prior_owners, *owners),
             candidate=prior.created_candidate,
+            publication=publication,
         )
     else:
-        result = ExactObjectOwnershipError(message, owners=(*prior_owners, *owners))
+        result = ExactObjectOwnershipError(
+            message,
+            owners=(*prior_owners, *owners),
+            publication=publication,
+        )
     if prior is not None:
         result.__cause__ = prior
         for note in getattr(prior, "__notes__", ()):
@@ -296,6 +367,7 @@ def _union_ownership(
     candidate: PinnedObject | None = None,
     destination_parent: PinnedObject | None = None,
     verification: tuple[PinnedObject, ...] = (),
+    publication: ExactPublicationFailure | None = None,
 ) -> ExactObjectOwnershipError:
     """Build one role-preserving union of every still-live exact owner."""
     additional = (
@@ -308,6 +380,7 @@ def _union_ownership(
         message,
         prior=prior,
         owners=additional,
+        publication=publication,
     )
 
 
@@ -1090,6 +1163,8 @@ def publish_new_pinned(
     path: Path,
     data: bytes,
     validator: Callable[[bytes], object],
+    *,
+    destination_parent: PinnedObject | None = None,
 ) -> object:
     """Create, validate, and publish immutable bytes through one retained owner.
 
@@ -1107,7 +1182,22 @@ def publish_new_pinned(
     candidate: PinnedObject | None = None
     primary_error: BaseException | None = None
     completed = False
-    parent = pin_direct_object(destination.parent, kind="directory")
+    renamed = False
+    borrowed_parent = destination_parent is not None
+    parent = (
+        destination_parent
+        if borrowed_parent
+        else pin_direct_object(destination.parent, kind="directory")
+    )
+    if (
+        not isinstance(parent, PinnedObject)
+        or not parent.handle
+        or parent.identity is None
+        or parent.path != destination.parent
+    ):
+        raise ExactObjectError(
+            "immutable publication requires its exact destination-parent owner"
+        )
     try:
         candidate = create_pinned_new(temporary, parent)
         write_pinned_file(candidate, data)
@@ -1116,12 +1206,14 @@ def publish_new_pinned(
             raise ExactObjectError("private candidate retained-handle readback mismatch")
         validator(candidate_bytes)
         rename_pinned_no_replace(candidate, destination, parent)
+        renamed = True
         published_bytes = read_pinned_file(candidate)
         if published_bytes != data:
             raise ExactObjectError("published candidate retained-handle readback mismatch")
         result = validator(published_bytes)
-        parent.close()
-        parent = None
+        if not borrowed_parent:
+            parent.close()
+            parent = None
         candidate.close()
         candidate = None
         completed = True
@@ -1132,15 +1224,20 @@ def publish_new_pinned(
     finally:
         cleanup_errors: list[BaseException] = []
         retained_objects: list[PinnedObject] = []
+        rename_visible = renamed or (
+            candidate is not None and candidate.path == destination
+        )
+        rolled_back = False
         if candidate is not None:
             try:
                 delete_pinned_object(candidate)
                 candidate = None
+                rolled_back = rename_visible
             except BaseException as cleanup_error:
                 cleanup_errors.append(cleanup_error)
                 if candidate.handle:
                     retained_objects.append(candidate)
-        if parent is not None:
+        if parent is not None and not borrowed_parent:
             try:
                 parent.close()
             except BaseException as close_error:
@@ -1160,7 +1257,27 @@ def publish_new_pinned(
                 + "; ".join(str(error) for error in cleanup_errors),
                 prior=prior_ownership,
                 candidate=candidate if candidate is not None and candidate.handle else None,
-                destination_parent=parent if parent is not None and parent.handle else None,
+                destination_parent=(
+                    parent
+                    if not borrowed_parent and parent is not None and parent.handle
+                    else None
+                ),
+                publication=ExactPublicationFailure(
+                    phase=(
+                        ExactPublicationPhase.RENAME_VISIBLE
+                        if rename_visible
+                        else ExactPublicationPhase.PRIVATE_CANDIDATE
+                    ),
+                    effect=(
+                        ExactPublicationEffect.ROLLED_BACK
+                        if rolled_back
+                        else (
+                            ExactPublicationEffect.ROLLBACK_INCOMPLETE
+                            if rename_visible
+                            else ExactPublicationEffect.NO_DESTINATION_CHANGE
+                        )
+                    ),
+                ),
             )
             if primary_error is not None:
                 raise ownership_error from primary_error

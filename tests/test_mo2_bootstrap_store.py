@@ -27,6 +27,7 @@ from modlab.workflows.skyrim.mo2_bootstrap_store import (
     Mo2BootstrapNotFoundError,
     Mo2BootstrapStore,
     Mo2BootstrapStoreError,
+    Mo2BootstrapStoreOwnershipError,
     Mo2BootstrapStorePromotionError,
 )
 from modlab.workspace import initialize_workspace
@@ -492,6 +493,46 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
         self.assertEqual([], list(self.layout.mo2_bootstrap_jobs.glob("*.part")))
         self.assertEqual([], list(target.parent.glob(f".{target.name}.*.tmp")))
 
+    @unittest.skipUnless(os.name == "nt", "exact publication requires Windows")
+    def test_private_candidate_ownership_reports_no_final_publication_effect(self):
+        target = self.store.plan_path(self.plan.plan_id)
+        real_delete = windows_exact_fs.delete_pinned_object
+
+        def retain_private_candidate(candidate):
+            if candidate.path.parent == target.parent and candidate.path.name.startswith(
+                f".{target.name}."
+            ):
+                raise OSError("fixture retains private publication candidate")
+            return real_delete(candidate)
+
+        with patch.object(
+            windows_exact_fs,
+            "write_pinned_file",
+            side_effect=OSError("fixture pre-rename write failure"),
+        ), patch.object(
+            windows_exact_fs,
+            "delete_pinned_object",
+            side_effect=retain_private_candidate,
+        ):
+            with self.assertRaises(Mo2BootstrapStoreOwnershipError) as raised:
+                self.store.write_plan(self.plan)
+
+        error = raised.exception
+        self.assertFalse(error.changed)
+        publication = getattr(error, "publication", None)
+        self.assertIsNotNone(publication)
+        self.assertEqual("private-candidate", publication.phase.value)
+        self.assertEqual("no-destination-change", publication.effect.value)
+        self.assertFalse(publication.completed)
+        self.assertFalse(target.exists())
+        self.assertEqual(1, len(error.candidates))
+        self.assertNotEqual(0, error.candidate.handle)
+
+        error.resolve()
+
+        self.assertFalse(target.exists())
+        self.assertEqual([], list(target.parent.glob(f".{target.name}.*.tmp")))
+
     def test_initial_journal_validation_failure_preserves_promotion_evidence(self):
         self.store.write_plan(self.plan)
         target = self.store.journal_path(JOB_ID)
@@ -675,6 +716,94 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
         self.assertFalse(self.store.stage_root(JOB_ID).exists())
         self.assertEqual([], list(self.layout.mo2_bootstrap_jobs.glob("*.part")))
 
+    @unittest.skipUnless(os.name == "nt", "exact publication requires Windows")
+    def test_initial_journal_ownership_resolution_unwinds_exact_job_then_retries(self):
+        self.store.write_plan(self.plan)
+        job_directory = self.store.job_directory(JOB_ID)
+        journal = self.store.journal_path(JOB_ID)
+        unrelated = self.layout.mo2_bootstrap_jobs / "unrelated.keep"
+        unrelated.write_bytes(b"unrelated bytes")
+        real_write = windows_exact_fs.write_pinned_file
+        real_delete = windows_exact_fs.delete_pinned_object
+
+        def fail_journal_write(candidate, data):
+            if candidate.path.parent == job_directory:
+                raise OSError("fixture initial journal write failure")
+            return real_write(candidate, data)
+
+        def retain_journal_candidate(candidate):
+            if candidate.path.parent == job_directory and candidate.path.name.startswith(
+                ".journal.json."
+            ):
+                raise OSError("fixture retains exact journal candidate")
+            return real_delete(candidate)
+
+        with patch.object(
+            windows_exact_fs,
+            "write_pinned_file",
+            side_effect=fail_journal_write,
+        ), patch.object(
+            windows_exact_fs,
+            "delete_pinned_object",
+            side_effect=retain_journal_candidate,
+        ):
+            with self.assertRaises(Mo2BootstrapStoreOwnershipError) as raised:
+                self.store.create_job(self.plan)
+
+        error = raised.exception
+        self.assertFalse(error.changed)
+        self.assertEqual("private-candidate", error.publication.phase.value)
+        self.assertEqual(
+            "no-destination-change", error.publication.effect.value
+        )
+        self.assertFalse(journal.exists())
+        self.assertTrue(job_directory.exists())
+        self.assertEqual(
+            {job_directory, error.candidate.path},
+            {candidate.path for candidate in error.candidates},
+        )
+        self.assertEqual(b"unrelated bytes", unrelated.read_bytes())
+
+        failed_job_cleanup = False
+
+        def fail_exact_job_cleanup_once(candidate):
+            nonlocal failed_job_cleanup
+            if candidate.path == job_directory and not failed_job_cleanup:
+                failed_job_cleanup = True
+                raise OSError("fixture retains exact job directory once")
+            return real_delete(candidate)
+
+        with patch.object(
+            windows_exact_fs,
+            "delete_pinned_object",
+            side_effect=fail_exact_job_cleanup_once,
+        ):
+            with self.assertRaises(Mo2BootstrapStoreOwnershipError) as unresolved:
+                error.resolve()
+
+        self.assertIs(error, unresolved.exception)
+        self.assertEqual("private-candidate", error.publication.phase.value)
+        self.assertEqual(
+            "no-destination-change", error.publication.effect.value
+        )
+        self.assertTrue(failed_job_cleanup)
+        self.assertFalse(journal.exists())
+        self.assertTrue(job_directory.exists())
+        self.assertEqual(
+            (job_directory,),
+            tuple(candidate.path for candidate in error.candidates),
+        )
+        self.assertEqual([], list(job_directory.iterdir()))
+        self.assertEqual(b"unrelated bytes", unrelated.read_bytes())
+
+        error.resolve()
+
+        self.assertFalse(job_directory.exists())
+        self.assertEqual(b"unrelated bytes", unrelated.read_bytes())
+        retried = self.store.create_job(self.plan)
+        self.assertEqual(BootstrapJobState.PLANNED, retried.journal.state)
+        self.assertEqual(journal_to_bytes(retried.journal), journal.read_bytes())
+
     def test_completed_publication_later_reload_failure_keeps_document(self):
         target = self.store.plan_path(self.plan.plan_id)
         with patch.object(
@@ -727,12 +856,64 @@ class Mo2BootstrapStoreTests(unittest.TestCase):
         self.assertEqual(self.plan.plan_id, error.record_id)
         self.assertEqual(target, error.path)
         self.assertTrue(error.changed)
+        publication = getattr(error, "publication", None)
+        self.assertIsNotNone(publication)
+        self.assertEqual("rename-visible", publication.phase.value)
+        self.assertEqual("rollback-incomplete", publication.effect.value)
+        self.assertFalse(publication.completed)
         self.assertEqual(
             {RetainedObjectRole.CANDIDATE, RetainedObjectRole.DESTINATION_PARENT},
             {owner.role for owner in error.owners},
         )
         error.resolve()
         self.assertFalse(target.exists())
+
+    @unittest.skipUnless(os.name == "nt", "exact publication requires Windows")
+    def test_renamed_then_rolled_back_publication_reports_visible_incomplete_effect(self):
+        target = self.store.plan_path(self.plan.plan_id)
+        rename = windows_exact_fs.rename_pinned_no_replace
+        close = windows_exact_fs.PinnedObject.close
+        parent_owner = None
+
+        def arm_parent_after_rename(source, destination, parent, **kwargs):
+            nonlocal parent_owner
+            result = rename(source, destination, parent, **kwargs)
+            if Path(destination) == target:
+                parent_owner = parent
+            return result
+
+        def retain_only_parent(owner):
+            if owner is parent_owner and owner.handle:
+                raise OSError("fixture retains publication parent")
+            return close(owner)
+
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=arm_parent_after_rename,
+        ), patch.object(
+            windows_exact_fs.PinnedObject,
+            "close",
+            autospec=True,
+            side_effect=retain_only_parent,
+        ):
+            with self.assertRaises(Mo2BootstrapStoreOwnershipError) as raised:
+                self.store.write_plan(self.plan)
+
+        error = raised.exception
+        self.assertTrue(error.changed)
+        publication = getattr(error, "publication", None)
+        self.assertIsNotNone(publication)
+        self.assertEqual("rename-visible", publication.phase.value)
+        self.assertEqual("rolled-back", publication.effect.value)
+        self.assertFalse(publication.completed)
+        self.assertFalse(target.exists())
+        self.assertEqual(
+            (RetainedObjectRole.DESTINATION_PARENT,),
+            tuple(owner.role for owner in error.owners),
+        )
+
+        error.resolve()
 
     def test_redirected_plan_job_and_receipt_ancestors_are_rejected(self):
         cases = (

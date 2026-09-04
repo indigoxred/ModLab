@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from dataclasses import replace
@@ -403,6 +404,281 @@ class Mo2BootstrapRecoveryTests(unittest.TestCase):
 
         self.assertEqual(BootstrapJobState.RECOVERED, result.journal.state)
         self.assertEqual(self.before_target, tree_state(self.fixture.layout.skyrim_mo2))
+
+    @unittest.skipUnless(os.name == "nt", "retained recovery moves require Windows")
+    def test_recovery_source_substitution_moves_only_the_pinned_stage(self):
+        self._interrupt_staged()
+        job = self._job()
+        stage = Path(job.stage_root)
+        quarantine = Mo2BootstrapStore(self.fixture.workspace).job_directory(JOB_ID) / "recovered-stage"
+        displaced = stage.with_name("fixture-displaced-recovery-stage")
+        stage_state = tree_state(stage)
+        unknown = b"substituted recovery source"
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+        injected = False
+
+        def substitute_source(source, target, parent, **kwargs):
+            nonlocal injected
+            if Path(source.path) == stage:
+                injected = True
+                stage.rename(displaced)
+                stage.mkdir()
+                (stage / "unknown.txt").write_bytes(unknown)
+            return rename_pinned(source, target, parent, **kwargs)
+
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=substitute_source,
+        ):
+            with self.assertRaises(Mo2BootstrapRefusal) as raised:
+                self._recover()
+
+        self.assertTrue(injected)
+        self.assertEqual("recovery-required", raised.exception.code)
+        self.assertEqual(unknown, (stage / "unknown.txt").read_bytes())
+        self.assertFalse(displaced.exists())
+        self.assertEqual(stage_state, tree_state(quarantine))
+        self.assertEqual(BootstrapJobState.RECOVERY_REQUIRED, self._job().state)
+        self.assertEqual(self.before_target, tree_state(self.fixture.layout.skyrim_mo2))
+        self.assertEqual(self.before_external, self.fixture.external_state())
+
+    @unittest.skipUnless(os.name == "nt", "retained recovery moves require Windows")
+    def test_recovery_destination_parent_substitution_preserves_journal_for_retry(self):
+        self._interrupt_staged()
+        store = Mo2BootstrapStore(self.fixture.workspace)
+        job = self._job()
+        stage = Path(job.stage_root)
+        stage_state = tree_state(stage)
+        job_directory = store.job_directory(JOB_ID)
+        displaced_parent = job_directory.with_name("fixture-displaced-recovery-job")
+        unknown_parent = job_directory.with_name("fixture-unknown-recovery-job")
+        journal_bytes = store.journal_path(JOB_ID).read_bytes()
+        unknown = b"substituted recovery parent"
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+        injected = False
+
+        def substitute_parent(source, target, parent, **kwargs):
+            nonlocal injected
+            if Path(source.path) == stage:
+                injected = True
+                Path(parent.path).rename(displaced_parent)
+                Path(parent.path).mkdir()
+                (Path(parent.path) / "unknown.txt").write_bytes(unknown)
+            return rename_pinned(source, target, parent, **kwargs)
+
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=substitute_parent,
+        ):
+            with self.assertRaises(Mo2BootstrapRefusal):
+                self._recover()
+
+        self.assertTrue(injected)
+        self.assertEqual(stage_state, tree_state(stage))
+        self.assertEqual(unknown, (job_directory / "unknown.txt").read_bytes())
+        self.assertEqual(journal_bytes, (displaced_parent / "journal.json").read_bytes())
+        job_directory.rename(unknown_parent)
+        displaced_parent.rename(job_directory)
+        self.assertEqual(BootstrapJobState.STAGED, self._job().state)
+
+        result = self._recover()
+
+        self.assertEqual(BootstrapJobState.RECOVERED, result.journal.state)
+        self.assertEqual(unknown, (unknown_parent / "unknown.txt").read_bytes())
+        self.assertEqual(self.before_target, tree_state(self.fixture.layout.skyrim_mo2))
+        self.assertEqual(self.before_external, self.fixture.external_state())
+
+    @unittest.skipUnless(os.name == "nt", "retained recovery moves require Windows")
+    def test_recovery_wrong_source_type_preserves_unknown_and_recorded_stage(self):
+        self._interrupt_staged()
+        job = self._job()
+        stage = Path(job.stage_root)
+        displaced = stage.with_name("fixture-recorded-directory-stage")
+        stage_state = tree_state(stage)
+        unknown = b"wrong-type recovery source"
+        pin_direct = windows_exact_fs.pin_direct_object
+        injected = False
+
+        def replace_source_with_file(path, kind):
+            nonlocal injected
+            if Path(path) == stage:
+                injected = True
+                stage.rename(displaced)
+                stage.write_bytes(unknown)
+            return pin_direct(path, kind)
+
+        with patch.object(
+            windows_exact_fs,
+            "pin_direct_object",
+            side_effect=replace_source_with_file,
+        ):
+            with self.assertRaises(Mo2BootstrapRefusal) as raised:
+                self._recover()
+
+        self.assertTrue(injected)
+        self.assertEqual("recovery-required", raised.exception.code)
+        self.assertEqual(unknown, stage.read_bytes())
+        self.assertEqual(stage_state, tree_state(displaced))
+        self.assertEqual(BootstrapJobState.RECOVERY_REQUIRED, self._job().state)
+        self.assertEqual(self.before_target, tree_state(self.fixture.layout.skyrim_mo2))
+        self.assertEqual(self.before_external, self.fixture.external_state())
+
+    @unittest.skipUnless(os.name == "nt", "retained recovery moves require Windows")
+    def test_recovery_unknown_reparse_identity_refuses_then_cleanly_retries(self):
+        self._interrupt_staged()
+        job = self._job()
+        stage = Path(job.stage_root)
+        stage_state = tree_state(stage)
+        handle_identity = windows_exact_fs._handle_identity
+        injected = False
+
+        def report_unknown_reparse(handle, path):
+            nonlocal injected
+            identity = handle_identity(handle, path)
+            if Path(path) == stage:
+                injected = True
+                return replace(
+                    identity,
+                    attributes=(
+                        identity.attributes
+                        | windows_exact_fs._FILE_ATTRIBUTE_REPARSE_POINT
+                    ),
+                )
+            return identity
+
+        with patch.object(
+            windows_exact_fs,
+            "_handle_identity",
+            side_effect=report_unknown_reparse,
+        ):
+            with self.assertRaises(Mo2BootstrapRefusal) as raised:
+                self._recover()
+
+        self.assertTrue(injected)
+        self.assertEqual("recovery-required", raised.exception.code)
+        self.assertEqual(stage_state, tree_state(stage))
+        self.assertEqual(BootstrapJobState.RECOVERY_REQUIRED, self._job().state)
+
+        result = self._recover()
+
+        self.assertEqual(BootstrapJobState.RECOVERED, result.journal.state)
+        self.assertEqual(self.before_target, tree_state(self.fixture.layout.skyrim_mo2))
+        self.assertEqual(self.before_external, self.fixture.external_state())
+
+    @unittest.skipUnless(os.name == "nt", "retained recovery moves require Windows")
+    def test_recovery_cross_volume_refusal_leaves_stage_retryable(self):
+        self._interrupt_staged()
+        job = self._job()
+        stage = Path(job.stage_root)
+        stage_state = tree_state(stage)
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+        handle_identity = windows_exact_fs._handle_identity
+        injected = False
+
+        def report_cross_volume(source, target, parent, **kwargs):
+            nonlocal injected
+            if Path(source.path) != stage:
+                return rename_pinned(source, target, parent, **kwargs)
+            injected = True
+            foreign_identity = replace(
+                source.identity,
+                volume_serial=parent.identity.volume_serial + 1,
+            )
+            foreign_source = replace(source, identity=foreign_identity)
+
+            def foreign_handle_identity(handle, path):
+                if handle == foreign_source.handle:
+                    return foreign_identity
+                if handle == parent.handle:
+                    return parent.identity
+                return handle_identity(handle, path)
+
+            with patch.object(
+                windows_exact_fs,
+                "_handle_identity",
+                side_effect=foreign_handle_identity,
+            ):
+                return rename_pinned(foreign_source, target, parent, **kwargs)
+
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=report_cross_volume,
+        ):
+            with self.assertRaises(Mo2BootstrapRefusal) as raised:
+                self._recover()
+
+        self.assertTrue(injected)
+        self.assertEqual("recovery-required", raised.exception.code)
+        self.assertIn("same volume", str(raised.exception))
+        self.assertEqual(stage_state, tree_state(stage))
+        self.assertEqual(BootstrapJobState.RECOVERY_REQUIRED, self._job().state)
+
+        result = self._recover()
+
+        self.assertEqual(BootstrapJobState.RECOVERED, result.journal.state)
+        self.assertEqual(self.before_target, tree_state(self.fixture.layout.skyrim_mo2))
+        self.assertEqual(self.before_external, self.fixture.external_state())
+
+    @unittest.skipUnless(os.name == "nt", "retained recovery moves require Windows")
+    def test_recovery_move_close_failure_retains_owners_and_retries_after_resolution(self):
+        self._interrupt_staged()
+        store = Mo2BootstrapStore(self.fixture.workspace)
+        job = self._job()
+        stage = Path(job.stage_root)
+        quarantine = store.job_directory(JOB_ID) / "recovered-stage"
+        stage_state = tree_state(stage)
+        rename_pinned = windows_exact_fs.rename_pinned_no_replace
+        close = windows_exact_fs.PinnedObject.close
+        fail_ids: set[int] = set()
+
+        def arm_after_recovery_move(source, target, parent, **kwargs):
+            is_stage = Path(source.path) == stage
+            result = rename_pinned(source, target, parent, **kwargs)
+            if is_stage:
+                fail_ids.update((id(source), id(parent)))
+            return result
+
+        def fail_move_owner_close(owner):
+            if id(owner) in fail_ids and owner.handle:
+                raise OSError("fixture recovery owner close failure")
+            return close(owner)
+
+        with patch.object(
+            windows_exact_fs,
+            "rename_pinned_no_replace",
+            side_effect=arm_after_recovery_move,
+        ), patch.object(
+            windows_exact_fs.PinnedObject,
+            "close",
+            autospec=True,
+            side_effect=fail_move_owner_close,
+        ):
+            with self.assertRaises(
+                windows_exact_fs.ExactObjectOwnershipError
+            ) as raised:
+                self._recover()
+
+        self.assertEqual(
+            {
+                windows_exact_fs.RetainedObjectRole.VERIFICATION,
+                windows_exact_fs.RetainedObjectRole.DESTINATION_PARENT,
+            },
+            {owner.role for owner in raised.exception.owners},
+        )
+        self.assertFalse(stage.exists())
+        self.assertEqual(stage_state, tree_state(quarantine))
+        self.assertEqual(BootstrapJobState.STAGED, self._job().state)
+        self.assertEqual(self.before_target, tree_state(self.fixture.layout.skyrim_mo2))
+        self.assertEqual(self.before_external, self.fixture.external_state())
+
+        raised.exception.resolve()
+        result = self._recover()
+
+        self.assertEqual(BootstrapJobState.RECOVERED, result.journal.state)
+        self.assertEqual(stage_state, tree_state(quarantine))
 
     def test_orphan_receipt_is_reused_after_verified_journal_failure(self):
         self._interrupt_activated()
