@@ -4973,6 +4973,38 @@ class _FakeInstallBackend:
 
 
 class MaintainedGateBoundaryTests(unittest.TestCase):
+    def test_complete_preparation_record_larger_than_a_log_round_trips(self):
+        # Real two-layout preparation measured 30,034,466 canonical bytes.
+        # Exercise the same native publication/read boundary without real MO2.
+        directory = Path(tempfile.mkdtemp(prefix="large-prep-", dir=SCRATCH))
+        root = directory / "disposable" / ("a" * 32)
+        authority = h.authority_run_root(root)
+        root.parent.mkdir(parents=True)
+        authority.parent.mkdir(parents=True)
+        value = {"preparationFixture": "x" * (30 * 1024 * 1024)}
+        with h.create_vault(authority):
+            published = h._publish_gate_json(root, authority / "preparation.json", value)
+            self.assertEqual(published["preparationFixture"], value["preparationFixture"])
+            self.assertEqual(h._load_gate_json(root, authority / "preparation.json"), value)
+
+    def test_larger_preparation_allowance_does_not_apply_to_other_records(self):
+        directory = Path(tempfile.mkdtemp(prefix="record-limit-", dir=SCRATCH))
+        root = directory / "disposable" / ("a" * 32)
+        authority = h.authority_run_root(root)
+        root.parent.mkdir(parents=True)
+        authority.parent.mkdir(parents=True)
+        with h.create_vault(authority):
+            (authority / "SingleFile").mkdir()
+            cases = ((authority / "phase-final.json", 16 * 1024 * 1024 + 1),
+                     (authority / "SingleFile" / "preparation.json", 16 * 1024 * 1024 + 1),
+                     (authority / "preparation.json", 64 * 1024 * 1024 + 1))
+            for path, size in cases:
+                with self.subTest(path=path):
+                    with path.open("xb") as stream:
+                        stream.truncate(size)
+                    with self.assertRaises(h.windows_exact_fs.ExactObjectError):
+                        h._load_gate_json(root, path)
+
     def test_config_requires_disjoint_same_identity_authority_before_mutation(self):
         base = Path(tempfile.mkdtemp(prefix="root-", dir=SCRATCH))
         disposable = base / "disposable" / ("a" * 32)

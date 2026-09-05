@@ -165,6 +165,8 @@ COMPLETE_PATH_LIMIT = LIMITS["preparation-wide"]
 INVENTORY_LIMIT = MAX_PATHS
 MAX_PREPARATION_INPUT_BYTES = 2 * 1024 * 1024
 MAX_GATE_RECORD_BYTES = 16 * 1024 * 1024
+# The complete two-layout bootstrap/path evidence exceeds an ordinary record.
+MAX_PREPARATION_RECORD_BYTES = 64 * 1024 * 1024
 MAX_RETAINED_LOGS = 128
 MAX_GATE_INVENTORY_ENTRIES = 16384
 MAX_SCREENSHOT_BYTES = 16 * 1024 * 1024
@@ -241,7 +243,10 @@ def _read_gate_evidence(run_root: Path, target: Path, *, maximum_bytes: int = MA
 
 
 def _load_gate_json(run_root: Path, target: Path) -> object:
-    data = _read_gate_evidence(run_root, target)
+    maximum_bytes = (MAX_PREPARATION_RECORD_BYTES
+                     if Path(target).absolute() == authority_run_root(run_root) / "preparation.json"
+                     else MAX_GATE_RECORD_BYTES)
+    data = _read_gate_evidence(run_root, target, maximum_bytes=maximum_bytes)
     value = parse_json(data)
     if _canonical(value) != data:
         raise GateError("protected gate record is not canonical")
