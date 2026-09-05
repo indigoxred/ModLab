@@ -3,73 +3,85 @@
     "input": "watch/request.json",
     "sourcePath": "trusted-controller-or-watcher",
     "capturePath": "authority/<run>/scenarios/<scenario>/watch/request.json",
-    "consumer": "Task4 shared watcher reconstruction; Task5"
+    "consumer": "Task4 shared watcher reconstruction; Task5",
+    "gateCapturePath": "authority/<gate-run>/<layout>/jobs/<phase>/watch/request.json"
   },
   {
     "input": "watch/controller-claim.json",
     "sourcePath": "trusted-controller-or-watcher",
     "capturePath": "authority/<run>/scenarios/<scenario>/watch/controller-claim.json",
-    "consumer": "Task4 shared watcher reconstruction; Task5"
+    "consumer": "Task4 shared watcher reconstruction; Task5",
+    "gateCapturePath": "authority/<gate-run>/<layout>/jobs/<phase>/watch/controller-claim.json"
   },
   {
     "input": "watch/worker-launch.json",
     "sourcePath": "trusted-controller-or-watcher",
     "capturePath": "authority/<run>/scenarios/<scenario>/watch/worker-launch.json",
-    "consumer": "Task4 shared watcher reconstruction; Task5"
+    "consumer": "Task4 shared watcher reconstruction; Task5",
+    "gateCapturePath": "authority/<gate-run>/<layout>/jobs/<phase>/watch/worker-launch.json"
   },
   {
     "input": "watch/ready.json",
     "sourcePath": "trusted-controller-or-watcher",
     "capturePath": "authority/<run>/scenarios/<scenario>/watch/ready.json",
-    "consumer": "Task4 shared watcher reconstruction; Task5"
+    "consumer": "Task4 shared watcher reconstruction; Task5",
+    "gateCapturePath": "authority/<gate-run>/<layout>/jobs/<phase>/watch/ready.json"
   },
   {
     "input": "watch/events.ndjson",
     "sourcePath": "trusted-controller-or-watcher",
     "capturePath": "authority/<run>/scenarios/<scenario>/watch/events.ndjson",
-    "consumer": "Task4 shared watcher reconstruction; Task5"
+    "consumer": "Task4 shared watcher reconstruction; Task5",
+    "gateCapturePath": "authority/<gate-run>/<layout>/jobs/<phase>/watch/events.ndjson"
   },
   {
     "input": "watch/terminal.json",
     "sourcePath": "trusted-controller-or-watcher",
     "capturePath": "authority/<run>/scenarios/<scenario>/watch/terminal.json",
-    "consumer": "Task4 shared watcher reconstruction; Task5"
+    "consumer": "Task4 shared watcher reconstruction; Task5",
+    "gateCapturePath": "authority/<gate-run>/<layout>/jobs/<phase>/watch/terminal.json"
   },
   {
     "input": "watch/controller-loss.json",
     "sourcePath": "trusted-controller-or-watcher",
     "capturePath": "authority/<run>/scenarios/<scenario>/watch/controller-loss.json",
-    "consumer": "Task4 shared watcher reconstruction; Task5"
+    "consumer": "Task4 shared watcher reconstruction; Task5",
+    "gateCapturePath": "authority/<gate-run>/<layout>/jobs/<phase>/watch/controller-loss.json"
   },
   {
     "input": "watch/stop.token",
     "sourcePath": "trusted-controller-or-watcher",
     "capturePath": "authority/<run>/scenarios/<scenario>/watch/stop.token",
-    "consumer": "Task4 shared watcher reconstruction; Task5"
+    "consumer": "Task4 shared watcher reconstruction; Task5",
+    "gateCapturePath": "authority/<gate-run>/<layout>/jobs/<phase>/watch/stop.token"
   },
   {
     "input": "watch/launch-admission.json",
     "sourcePath": "trusted-controller-or-watcher",
     "capturePath": "authority/<run>/scenarios/<scenario>/watch/launch-admission.json",
-    "consumer": "Task4 shared watcher reconstruction; Task5"
+    "consumer": "Task4 shared watcher reconstruction; Task5",
+    "gateCapturePath": "authority/<gate-run>/<layout>/jobs/<phase>/watch/launch-admission.json"
   },
   {
     "input": "watch/process-quiescence.json",
     "sourcePath": "trusted-controller-or-watcher",
     "capturePath": "authority/<run>/scenarios/<scenario>/watch/process-quiescence.json",
-    "consumer": "Task4 shared watcher reconstruction; Task5"
+    "consumer": "Task4 shared watcher reconstruction; Task5",
+    "gateCapturePath": "authority/<gate-run>/<layout>/jobs/<phase>/watch/process-quiescence.json"
   },
   {
     "input": "watch/worker-exit.json",
     "sourcePath": "trusted-controller-or-watcher",
     "capturePath": "authority/<run>/scenarios/<scenario>/watch/worker-exit.json",
-    "consumer": "Task4 shared watcher reconstruction; Task5"
+    "consumer": "Task4 shared watcher reconstruction; Task5",
+    "gateCapturePath": "authority/<gate-run>/<layout>/jobs/<phase>/watch/worker-exit.json"
   },
   {
     "input": "watch/outcome.json",
     "sourcePath": "trusted-controller-or-watcher",
     "capturePath": "authority/<run>/scenarios/<scenario>/watch/outcome.json",
-    "consumer": "Task4 shared watcher reconstruction; Task5"
+    "consumer": "Task4 shared watcher reconstruction; Task5",
+    "gateCapturePath": "authority/<gate-run>/<layout>/jobs/<phase>/watch/outcome.json"
   },
   {
     "input": "scenario/journal.json",
@@ -225,96 +237,180 @@
     "input": "gate/selection",
     "sourcePath": "trusted-gate-controller",
     "capturePath": "authority/<gate-run>/selection.json",
-    "consumer": "Task5 integration required; not a Task4 consumer; 5B protected record boundary implemented in tools/mo2_round8_gate.py; 5C phase/causal integration remains required"
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "gate/installation",
     "sourcePath": "trusted-gate-controller",
-    "capturePath": "authority/<gate-run>/installation.json",
-    "consumer": "Task5 integration required; not a Task4 consumer; 5B protected record boundary implemented in tools/mo2_round8_gate.py; 5C phase/causal integration remains required"
+    "capturePath": "authority/<gate-run>/<layout>/installation.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "gate/envelope",
     "sourcePath": "trusted-gate-controller",
-    "capturePath": "authority/<gate-run>/envelope.json",
-    "consumer": "Task5 integration required; not a Task4 consumer; 5B protected record boundary implemented in tools/mo2_round8_gate.py; 5C phase/causal integration remains required"
+    "capturePath": "authority/<gate-run>/full-stack-envelope.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "gate/phase-begin",
     "sourcePath": "trusted-gate-controller",
-    "capturePath": "authority/<gate-run>/phase-begin.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/begin.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "gate/process",
     "sourcePath": "trusted-gate-controller",
-    "capturePath": "authority/<gate-run>/process.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/process.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "gate/operator",
     "sourcePath": "trusted-gate-controller",
-    "capturePath": "authority/<gate-run>/operator.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/operator-evidence.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "gate/runtime",
     "sourcePath": "trusted-gate-controller",
-    "capturePath": "authority/<gate-run>/runtime.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/runtime-delta.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "gate/observation",
     "sourcePath": "trusted-gate-controller",
-    "capturePath": "authority/<gate-run>/observation.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/observation.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "gate/effect",
     "sourcePath": "trusted-gate-controller",
-    "capturePath": "authority/<gate-run>/effect.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/effect.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "gate/guarded-phase",
     "sourcePath": "trusted-gate-controller",
-    "capturePath": "authority/<gate-run>/guarded-phase.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/guarded.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "gate/final",
     "sourcePath": "trusted-gate-controller",
-    "capturePath": "authority/<gate-run>/final.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/phase-final.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "gate/failure",
     "sourcePath": "trusted-gate-controller",
-    "capturePath": "authority/<gate-run>/failure.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/failure.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "gate/cleanup",
     "sourcePath": "trusted-gate-controller",
-    "capturePath": "authority/<gate-run>/cleanup.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/cleanup.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "gate/restart",
     "sourcePath": "trusted-gate-controller",
     "capturePath": "authority/<gate-run>/restart.json",
-    "consumer": "Task5 integration required; not a Task4 consumer; 5B protected record boundary implemented in tools/mo2_round8_gate.py; 5C phase/causal integration remains required"
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; shared causal reconstruction; not a Task4 gate consumer"
   },
   {
     "input": "capture/screenshot.png",
-    "sourcePath": "disposable/<job>/screenshot.png",
-    "capturePath": "authority/<run>/captures/screenshot.png",
-    "consumer": "Task4 bounded capture primitive; Task5 verdict consumer"
+    "sourcePath": "Computer Use operator exchange: validated PNG data URL bytes",
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/window.png",
+    "consumer": "Task5 validate_operator_evidence; direct protected original publication, 16 MiB maximum"
   },
   {
     "input": "capture/log.txt",
-    "sourcePath": "disposable/<job>/log.txt",
-    "capturePath": "authority/<run>/captures/log.txt",
-    "consumer": "Task4 bounded capture primitive; Task5 verdict consumer"
+    "sourcePath": "disposable/<gate-run>/<layout>/{app,bootstrap/tools/mo2/skyrim-se-ae}/logs/*.log",
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/observed-<000..127>.log",
+    "consumer": "Task5 exact ContainmentStore capture, 16 MiB maximum per log; capability raw log parser"
+  },
+  {
+    "input": "gate/preparation",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/preparation.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; canonical independent original/provenance"
+  },
+  {
+    "input": "gate/preparation-originals",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/preparation-originals.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; canonical independent original/provenance"
+  },
+  {
+    "input": "gate/preparation-effect",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/preparation-effect.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; canonical independent original/provenance"
+  },
+  {
+    "input": "gate/preparation-failure",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/failure.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; canonical independent original/provenance"
+  },
+  {
+    "input": "gate/installation-failure",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/<layout>/installation-failure.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; canonical independent original/provenance"
+  },
+  {
+    "input": "gate/screenshot-provenance",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/window.png.capture.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; canonical independent original/provenance"
+  },
+  {
+    "input": "gate/log-provenance",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/observed-<000..127>.log.capture.json",
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; canonical independent original/provenance"
+  },
+  {
+    "input": "gate/original-harness",
+    "sourcePath": "tools/mo2_round8_gate.py",
+    "capturePath": "authority/<gate-run>/originals/harness.py",
+    "provenancePath": "authority/<gate-run>/originals/harness.py.capture.json",
+    "consumer": "Task5 protected preparation reconstruction; shared capture 2 MiB maximum"
+  },
+  {
+    "input": "gate/original-helper",
+    "sourcePath": "modlab/platform/windows_exact_fs.py",
+    "capturePath": "authority/<gate-run>/originals/windows_exact_fs.py",
+    "provenancePath": "authority/<gate-run>/originals/windows_exact_fs.py.capture.json",
+    "consumer": "Task5 protected preparation reconstruction; shared capture 2 MiB maximum"
+  },
+  {
+    "input": "gate/original-release",
+    "sourcePath": "curated-release-descriptor",
+    "capturePath": "authority/<gate-run>/originals/release.json",
+    "provenancePath": "authority/<gate-run>/originals/release.json.capture.json",
+    "consumer": "Task5 protected preparation reconstruction; shared capture 2 MiB maximum"
+  },
+  {
+    "input": "gate/original-artifact",
+    "sourcePath": "disposable/<gate-run>/<layout>/bootstrap/library/metadata/artifacts/<sha256>.json",
+    "capturePath": "authority/<gate-run>/<layout>/originals/artifact.json",
+    "provenancePath": "authority/<gate-run>/<layout>/originals/artifact.json.capture.json",
+    "consumer": "Task5 protected preparation reconstruction; shared capture 2 MiB maximum"
+  },
+  {
+    "input": "gate/original-mo2-ini",
+    "sourcePath": "disposable/<gate-run>/<layout>/bootstrap/tools/mo2/skyrim-se-ae/ModOrganizer.ini",
+    "capturePath": "authority/<gate-run>/<layout>/originals/ModOrganizer.ini",
+    "provenancePath": "authority/<gate-run>/<layout>/originals/ModOrganizer.ini.capture.json",
+    "consumer": "Task5 protected preparation reconstruction; shared capture 2 MiB maximum"
+  },
+  {
+    "input": "gate/original-nxm-ini",
+    "sourcePath": "disposable/<gate-run>/<layout>/app/nxmhandler.ini",
+    "capturePath": "authority/<gate-run>/<layout>/originals/nxmhandler.ini",
+    "provenancePath": "authority/<gate-run>/<layout>/originals/nxmhandler.ini.capture.json",
+    "consumer": "Task5 protected preparation reconstruction; shared capture 2 MiB maximum"
   }
 ]

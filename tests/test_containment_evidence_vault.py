@@ -313,7 +313,7 @@ class EvidenceStoreTests(unittest.TestCase):
         self.assertTrue(hasattr(self.store, "write_evaluation"), "protected independent evaluation input required")
 
 class EvidenceInventoryTests(unittest.TestCase):
-    def test_inventory_covers_all_bound_inputs_and_separates_later_gate_consumers(self):
+    def test_inventory_covers_all_bound_inputs_and_protected_gate_consumers(self):
         import json
         rows=json.loads((Path(__file__).resolve().parents[1]/"docs/validation/mo2-containment-evidence-inventory.json").read_text())
         expected={
@@ -323,13 +323,14 @@ class EvidenceInventoryTests(unittest.TestCase):
             *("catalog/"+name for name in ("retirements","supersessions","reviews","eligibilities")),
             *("gate/"+name for name in ("selection","installation","envelope","phase-begin","process","operator","runtime","observation","effect","guarded-phase","final","failure","cleanup","restart")),
             "preparation-projection","preparation-projection-cleanup","capture/screenshot.png","capture/log.txt",
+            *("gate/"+name for name in ("preparation","preparation-originals","preparation-effect","preparation-failure","installation-failure","screenshot-provenance","log-provenance","original-harness","original-helper","original-release","original-artifact","original-mo2-ini","original-nxm-ini")),
         }
         self.assertEqual(expected,{row["input"] for row in rows})
         self.assertEqual(len(expected),len(rows))
         for row in rows:
             self.assertTrue(row["capturePath"].startswith("authority/"),row)
             self.assertNotEqual(row["sourcePath"],row["capturePath"])
-            if row["input"].startswith("gate/"): self.assertIn("Task5 integration required",row["consumer"])
+            if row["input"].startswith("gate/"): self.assertIn("Task5 protected",row["consumer"])
 
 
 class ExactCaptureReaderTests(unittest.TestCase):

@@ -163,7 +163,7 @@ def _cleanup_outcome(
     reasons: tuple[str, ...] = (),
 ) -> WatchOutcome:
     return WatchOutcome(
-        schema_version=1,
+        schema_version=2,
         request_id=request.request_id,
         request_sha256=h.watch_request_sha256(request),
         session_id=request.session_id,
@@ -191,6 +191,105 @@ def _cleanup_outcome(
 
 
 @unittest.skipIf(h is None, "harness not implemented yet")
+def _protected_matrix(matrix):
+    matrix["schemaVersion"] = 3
+    authority = h.authority_run_root(Path(matrix["root"]))
+    matrix["authorityRoot"] = str(authority)
+    for candidate in matrix["candidates"]:
+        for observation in [candidate["control"], *candidate["observations"]]:
+            job = authority / candidate["layout"] / "jobs" / observation["phase"]
+            observation["job"] = str(job)
+            for reference in observation["logs"]:
+                reference["path"] = str(job / Path(reference["path"]).name)
+    return matrix
+
+
+def _phase_job(root, layout, phase):
+    """Native protected fixture storage; app/child fixture paths stay disposable."""
+    authority = h.authority_run_root(root)
+    authority.parent.mkdir(parents=True, exist_ok=True)
+    if not authority.exists():
+        h.create_vault(authority).close()
+    Path(root).parent.mkdir(parents=True, exist_ok=True)
+    return authority / layout / "jobs" / phase
+
+
+def _offline_request(*args):
+    """Explicit synthetic request for orchestration tests with native seams patched."""
+    authority = next(path for path in (args[4], *args[4].parents) if path.name == args[2].split(":")[1])
+    with h.open_vault(authority) as vault:
+        return WatchRequest(*args, authority, vault.identity.volume_serial, vault.identity.file_id, vault.creator_sid)
+
+
+class _OfflineOwner:
+    def __init__(self, pid=41, creation=101, active=0):
+        self.process_handle = 777
+        self.resumed = True
+        self.active = active
+        self.pid = pid
+        self.creation = creation
+    def observe(self):
+        return SimpleNamespace(pid=self.pid, creation_time=self.creation,
+            root_exit_code=None if self.active else 0, active_processes=self.active, total_processes=1)
+    def close(self):
+        self.process_handle = 0
+
+
+def _vault_creator(authority):
+    with h.open_vault(authority) as vault:
+        return vault.creator_sid
+
+
+def _synthetic_causal_records(request, claim, launch, pid, creation):
+    """Offline parser fixture only: no native launch or controller-exit proof claimed."""
+    from modlab.validation.windows_watch_protocol import causal_record, causal_record_to_bytes
+    watch = request.evidence_root
+    def publish(kind, filename, **facts):
+        data = causal_record_to_bytes(causal_record(kind, request, claim, launch, **facts), request, claim, launch)
+        (watch / filename).write_bytes(data)
+        return h._sha256(data)
+    admission = publish("LaunchAdmission", "launch-admission.json",
+        readySha256=h._sha256((watch / "ready.json").read_bytes()), processPid=pid, processCreationTime=creation)
+    quiescence = publish("ProcessTreeQuiescence", "process-quiescence.json",
+        admissionSha256=admission, processPid=pid, processCreationTime=creation,
+        rootExitCode=0, activeProcesses=0, totalProcesses=1, resumeVerified=True)
+    stop = publish("NormalControllerStop", "stop.token", admissionSha256=admission, quiescenceSha256=quiescence)
+    terminal = json.loads((watch / "terminal.json").read_bytes())
+    identity = h.windows_exact_fs.identity_at_path(watch / "stop.token")
+    terminal["schemaVersion"] = 2
+    terminal["stopBinding"] = {"sha256": stop, "volumeSerial": identity.volume_serial, "fileId": identity.file_id}
+    (watch / "terminal.json").write_bytes(h._canonical(terminal))
+    publish("WorkerExitObservation", "worker-exit.json", stopSha256=stop,
+        terminalSha256=h._sha256((watch / "terminal.json").read_bytes()),
+        eventSha256=h._sha256((watch / "events.ndjson").read_bytes()),
+        workerExitCode=0, observationHandlesClosed=True, reasonCodes=[])
+
+
+def _synthetic_worker_records(request, claim, launch, pid, creation):
+    watch = request.evidence_root
+    request_sha = h.watch_request_sha256(request)
+    (watch / "ready.json").write_bytes(h._canonical(h.windows_watch._ready_document(
+        request, launch.worker_pid, request_sha, launch.worker_creation_time)))
+    (watch / "events.ndjson").write_bytes(b"")
+    journal = h.windows_watch._read_exact_journal(watch / "events.ndjson")
+    (watch / "terminal.json").write_bytes(h._canonical({
+        "complete": True, "error": None, "eventByteCount": 0,
+        "eventBytesSha256": h._sha256(b""), "eventCount": 0, "finalSequence": 0,
+        "journalFileId": journal.file_id, "journalVolumeSerial": journal.volume_serial,
+        "openHandleCount": 0, "openedRootKinds": list(ROOT_KINDS), "ready": True,
+        "requestBytesSha256": request_sha, "requestId": request.request_id,
+        "rootIdentitiesUnchanged": True, "schemaVersion": 2,
+        "workerCreationTime": launch.worker_creation_time, "workerPid": launch.worker_pid}))
+    _synthetic_causal_records(request, claim, launch, pid, creation)
+    captured = h.windows_watch._capture_worker_evidence(request, launch)
+    outcome = h.windows_watch._watch_outcome(request, claim, launch,
+        completion=WatchEvidenceCompletion.COMPLETED, worker_exit_code=0, reasons=(), captured=captured)
+    (watch / "outcome.json").write_bytes(h.watch_outcome_to_bytes(outcome))
+
+
+OBSERVED_GATE_READS = []
+
+
 class OfflineGateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.scratch = SCRATCH / self._testMethodName
@@ -203,6 +302,22 @@ class OfflineGateTests(unittest.TestCase):
         self.game = self.steam / "steamapps" / "common" / "Skyrim Special Edition"
         self.game.mkdir(parents=True)
         (self.game / "SkyrimSE.exe").write_bytes(b"fixture-skyrim")
+        # Observe successful protected original reads across the real gate
+        # consumers; rejected paths and test-side fixture reads are not authority.
+        original_read = h.ContainmentStore.read_evidence_file
+        def read(store, run_id, target, **kwargs):
+            data = original_read(store, run_id, target, **kwargs)
+            authority = store.evidence_run_path(run_id)
+            self.assertTrue(h._inside(Path(target), authority))
+            OBSERVED_GATE_READS.append({"test": self._testMethodName, "path": str(Path(target).absolute()),
+                "authorityRoot": str(authority), "byteCount": len(data)})
+            return data
+        recorder = patch.object(h.ContainmentStore, "read_evidence_file", read)
+        recorder.start()
+        self.addCleanup(recorder.stop)
+
+    def tearDown(self):
+        (SCRATCH / "gate-all-protected-read-inventory.json").write_text(json.dumps(OBSERVED_GATE_READS, indent=2))
 
     def test_preparation_originals_are_protected_before_any_live_phase(self):
         authority = h.authority_run_root(self.run_root)
@@ -498,7 +613,7 @@ class OfflineGateTests(unittest.TestCase):
         # B's preparation/restart record flow, never a live UI or watcher result.
         failure = {"failureId": "phase-failure-sha256:" + "8" * 64, "layout": "SingleFile", "phase": "Control"}
         cleanup = {"cleanupId": "phase-cleanup-sha256:" + "9" * 64}
-        failed_path = self.run_root / "SingleFile" / "jobs" / "Control" / "failure.json"
+        failed_path = h.authority_run_root(self.run_root) / "SingleFile" / "jobs" / "Control" / "failure.json"
         failed_path.parent.mkdir(parents=True)
         failed_path.write_bytes(b"explicit phase fixture, no native UI evidence")
         old_bytes = (config.authority_root / "preparation.json").read_bytes()
@@ -566,14 +681,17 @@ class OfflineGateTests(unittest.TestCase):
         self.assertFalse((authority / "preparation.json").exists())
 
     def _complete_phase_evidence(self, case: str):
-        root = self.scratch / case / ("a" * 32)
+        root = self.scratch / case / "d" / ("a" * 32)
         layout = "SingleFile"
         phase = "Control"
         layout_root = root / layout
         app = layout_root / "app"
         workspace = layout_root / "bootstrap"
         manager = h.workspace_layout(workspace).skyrim_mo2
-        job = layout_root / "jobs" / phase
+        authority = h.authority_run_root(root)
+        authority.parent.mkdir(parents=True, exist_ok=True)
+        h.create_vault(authority).close()
+        job = authority / layout / "jobs" / phase
         watch = job / "watch"
         watch.mkdir(parents=True)
         app.mkdir(parents=True)
@@ -592,13 +710,16 @@ class OfflineGateTests(unittest.TestCase):
             ContainmentScenario.NEW_FOLDER,
             watch.absolute(),
             (watch / "stop.token").absolute(),
-            watch_roots,
+            watch_roots, authority,
+            h.windows_exact_fs.identity_at_path(authority).volume_serial,
+            h.windows_exact_fs.identity_at_path(authority).file_id,
+            _vault_creator(authority),
         )
         request_data = h.watch_request_to_bytes(request)
         (watch / "request.json").write_bytes(request_data)
         request_sha = h.watch_request_sha256(request)
         claim = h.windows_watch.ControllerClaim(
-            schema_version=1,
+            schema_version=2,
             request_sha256=request_sha,
             session_id=request.session_id,
             run_id=request.run_id,
@@ -612,7 +733,7 @@ class OfflineGateTests(unittest.TestCase):
             h.controller_claim_to_bytes(claim, request)
         )
         launch = h.windows_watch.WorkerLaunch(
-            schema_version=1,
+            schema_version=2,
             request_sha256=request_sha,
             session_id=request.session_id,
             run_id=request.run_id,
@@ -652,6 +773,7 @@ class OfflineGateTests(unittest.TestCase):
             "workerCreationTime": launch.worker_creation_time,
             "workerPid": launch.worker_pid,
         }))
+        _synthetic_causal_records(request, claim, launch, 7003, 8003)
         captured = h.windows_watch._capture_worker_evidence(request, launch)
         outcome = h.windows_watch._watch_outcome(
             request,
@@ -663,7 +785,7 @@ class OfflineGateTests(unittest.TestCase):
             captured=captured,
         )
         (watch / "outcome.json").write_bytes(h.watch_outcome_to_bytes(outcome))
-        (watch / "stop.token").write_bytes(b"stop\n")
+
 
         protected = h._json_value(_protected())
         writable = {
@@ -732,6 +854,7 @@ class OfflineGateTests(unittest.TestCase):
             "nativeBefore": native,
             "nativeAfter": native,
         }
+        h.publish_exact_json(job / "window.png.capture.json", h._screenshot_capture(window, image))
         close = {
             "action": "Alt+F4",
             "windowId": 51,
@@ -756,7 +879,15 @@ class OfflineGateTests(unittest.TestCase):
         }
         operator["operatorEvidenceId"] = "operator-evidence-sha256:" + h._sha256(h._canonical(operator))
         h.publish_exact_json(job / "operator-evidence.json", operator)
+        source_log = app / "logs" / "mo_interface.log"
+        source_log.parent.mkdir()
+        source_log.write_bytes(b"fixture retained MO2 log\n")
+        captured_log = job / "observed-000.log"
+        log_capture = h._evidence_store(root).capture_evidence_file(
+            "containment-run:" + root.name, source_log, captured_log,
+            maximum_bytes=h.MAX_GATE_RECORD_BYTES, stage=f"{layout}:{phase}:Log")
         observation = {
+            "logs": [{"path": str(captured_log), "sha256": log_capture["sha256"], "size": log_capture["byteCount"]}],
             "pid": mo2_pid,
             "before": [],
             "runtimeBefore": [],
@@ -776,6 +907,9 @@ class OfflineGateTests(unittest.TestCase):
             job / "begin.json",
             job / "process.json",
             job / "window.png",
+            job / "window.png.capture.json",
+            captured_log,
+            captured_log.with_name(captured_log.name + ".capture.json"),
             job / "operator-evidence.json",
             job / "runtime-delta.json",
             job / "observation.json",
@@ -784,7 +918,7 @@ class OfflineGateTests(unittest.TestCase):
             *(watch / name for name in (
                 "request.json", "controller-claim.json", "worker-launch.json",
                 "ready.json", "events.ndjson", "terminal.json", "outcome.json",
-                "stop.token",
+                "stop.token", "launch-admission.json", "process-quiescence.json", "worker-exit.json",
             )),
         )
         effect = h.build_effect_record(
@@ -808,6 +942,9 @@ class OfflineGateTests(unittest.TestCase):
             "terminalSha256": "terminal.json",
             "outcomeSha256": "outcome.json",
             "stopSha256": "stop.token",
+            "admissionSha256": "launch-admission.json",
+            "quiescenceSha256": "process-quiescence.json",
+            "workerExitSha256": "worker-exit.json",
         }
         final = {
             "schemaVersion": 1,
@@ -869,6 +1006,145 @@ class OfflineGateTests(unittest.TestCase):
                 "Control",
                 fixture.preparation["preparationId"],
             )
+
+    def test_phase_request_binds_known_protected_vault_and_disposable_child(self):
+        authority = h.authority_run_root(self.run_root)
+        authority.parent.mkdir(parents=True, exist_ok=True)
+        with h.create_vault(authority) as vault:
+            evidence = authority / "SingleFile" / "jobs" / "Control" / "watch"
+            evidence.mkdir(parents=True)
+            roots = {kind: self.scratch / kind for kind in ROOT_KINDS}
+            for path in roots.values():
+                path.mkdir()
+            request = h.build_watch_request(self.run_root, "SingleFile", "Control", roots,
+                evidence, request_token="2" * 64, session_token="3" * 64)
+            self.assertEqual(authority, request.authority_root)
+            self.assertEqual(vault.identity.file_id, request.authority_file_id)
+            self.assertEqual(vault.creator_sid, request.authority_creator_sid)
+            self.assertFalse(h._inside(evidence, self.run_root))
+            redirected = authority / "other-watch"
+            redirected.mkdir()
+            with self.assertRaises(h.GateError):
+                h.build_watch_request(self.run_root, "SingleFile", "Control", roots,
+                    redirected, request_token="4" * 64, session_token="5" * 64)
+
+    def test_gate_selection_refuses_legacy_or_redirected_authority_before_selector(self):
+        from tests.test_mo2_bridge_runtime_capability import fixture
+        matrix = fixture(self.run_root.parent)
+        with self.assertRaises(h.GateError):
+            h.derive_selection(matrix)
+        matrix["schemaVersion"] = 3
+        matrix["authorityRoot"] = str(self.run_root)
+        with self.assertRaises(h.GateError):
+            h.derive_selection(matrix, selector=lambda value: {"selection": "SingleFile", "capabilityId": "mo2-runtime-capability-sha256:" + "7" * 64})
+
+    def test_phase_original_reads_remain_protected_after_low_copies_change(self):
+        fixture = self._complete_phase_evidence("protected-reads")
+        low_job = fixture.root / "SingleFile" / "jobs" / "Control"
+        low_job.mkdir(parents=True)
+        for name in ("observation.json", "phase-final.json", "window.png", "stop.token", "worker-exit.json"):
+            (low_job / name).write_bytes(b"Low substituted verdict bytes")
+        observed = []
+        original_read = h.ContainmentStore.read_evidence_file
+        original_watch_read = h.windows_watch._read_exact_regular_file
+        def store_read(store, run_id, target, **kwargs):
+            observed.append(str(Path(target).absolute()))
+            return original_read(store, run_id, target, **kwargs)
+        def watch_read(target, *args, **kwargs):
+            observed.append(str(Path(target).absolute()))
+            return original_watch_read(target, *args, **kwargs)
+        with patch.object(h.ContainmentStore, "read_evidence_file", store_read), \
+                patch.object(h.windows_watch, "_read_exact_regular_file", watch_read):
+            self._reload_complete_phase(fixture)
+        self.assertTrue(observed)
+        self.assertTrue(all(h._inside(Path(path), h.authority_run_root(fixture.root)) for path in observed))
+        self.assertIn(str(fixture.job / "window.png"), observed)
+        self.assertIn(str(fixture.job / "observed-000.log.capture.json"), observed)
+        self.assertIn(str(fixture.watch / "worker-exit.json"), observed)
+        (SCRATCH / "phase-original-read-inventory.json").write_text(json.dumps(observed, indent=2))
+        provenance = fixture.job / "observed-000.log.capture.json"
+        original = provenance.read_bytes()
+        forged = json.loads(original)
+        forged["sourcePath"] = str(low_job / "unbound.log")
+        provenance.write_bytes(h._canonical(forged))
+        with self.assertRaisesRegex(h.GateError, "log capture provenance"):
+            self._reload_complete_phase(fixture)
+        provenance.write_bytes(original)
+
+    def test_missing_causal_original_never_completes_phase(self):
+        for name in ("launch-admission.json", "process-quiescence.json", "stop.token", "worker-exit.json"):
+            fixture = self._complete_phase_evidence("missing-" + name)
+            (fixture.watch / name).unlink()
+            with self.subTest(missing=name), self.assertRaises(h.GateError):
+                self._reload_complete_phase(fixture)
+
+    def test_watch_start_publication_before_error_remains_in_phase_effect_receipt(self):
+        root = self.run_root
+        job = _phase_job(root, "SingleFile", "Control")
+        app = root / "SingleFile" / "app"
+        manager = h.workspace_layout(root / "SingleFile" / "bootstrap").skyrim_mo2
+        app.mkdir(parents=True)
+        manager.mkdir(parents=True)
+        preparation = {"preparationId": "preparation-sha256:" + "1" * 64, "runRoot": str(root),
+            "layouts": [{"layout": "SingleFile", "workspace": str(root / "SingleFile" / "bootstrap"),
+                         "appRoot": str(app), "managerRoot": str(manager)}]}
+        request = _offline_request("watch-request:" + "2" * 64, "watch-session:" + "3" * 64,
+            "containment-run:" + root.name, ContainmentScenario.NEW_FOLDER, job / "watch", job / "watch" / "stop.token", ())
+        def start(value, *, on_created):
+            on_created(31)
+            h.publish_exact_json(value.evidence_root / "request.json", {"explicitOfflineFault": True})
+            raise OSError("watch startup failed after durable request")
+        backend = h.ProductionLiveBackend()
+        with patch.object(backend, "source_check"), \
+                patch.object(backend, "load_state", return_value=h.DurableLayoutState((), False)), \
+                patch.object(h, "_load_preparation", return_value=preparation), \
+                patch.object(h, "snapshot_tree", return_value=[]), \
+                patch.object(h, "_runtime_inventory", return_value=[]), \
+                patch.object(h, "_capture_protected", return_value=_protected()), \
+                patch.object(h, "_snapshot_runtime_writable", return_value={}), \
+                patch.object(h, "_derived_watch_roots", return_value={}), \
+                patch.object(h, "build_watch_request", return_value=request), \
+                patch.object(h, "_set_low_integrity_receipted"), \
+                patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW), \
+                patch.object(h, "start_watch", side_effect=start):
+            with self.assertRaises(ContainmentOperationError) as raised:
+                backend.begin_phase(root, "SingleFile", "Control")
+        self.assertIn("watch startup failed", str(raised.exception))
+        self.assertTrue((job / "watch" / "request.json").is_file())
+        self.assertIn(job / "watch" / "request.json", raised.exception.effects.written_paths)
+        self.assertEqual(31, raised.exception.effects.watcher_pid)
+        self.assertTrue(backend._pending_session.watcher_created)
+
+    def test_current_state_rechecks_protected_state_after_historical_phase_reload(self):
+        fixture = self._complete_phase_evidence("current-state")
+        fixture.preparation["layouts"][0]["writableBaseline"] = h.load_exact_json(fixture.job / "begin.json")["writableBefore"]
+        backend = h.ProductionLiveBackend()
+        with patch.object(h, "_fresh_preparation_preflight", return_value=fixture.preparation), \
+                patch.object(h, "_load_validated_phase_bundle", return_value=({}, {})), \
+                patch.object(h, "_capture_protected", return_value=fixture.protected) as capture, \
+                patch.object(h, "_derived_watch_roots", return_value=fixture.roots), \
+                patch.object(h, "_snapshot_runtime_writable", return_value={}), \
+                patch.object(h, "_validate_writable_chain"):
+            self.assertEqual(h.DurableLayoutState(("Control",), False), backend.load_state(fixture.root, "SingleFile"))
+            root_factory = h.windows_watch.watch_root
+            with patch.object(h.windows_watch, "watch_root", side_effect=lambda kind, path: replace(root_factory(kind, path), file_id=1)), self.assertRaisesRegex(h.GateError, "current watch root"):
+                backend.load_state(fixture.root, "SingleFile")
+            capture.return_value = replace(fixture.protected, play_profile_sha256="f" * 64)
+            with self.assertRaisesRegex(h.GateError, "current protected"):
+                backend.load_state(fixture.root, "SingleFile")
+            # Current state is checked through both direct and public action routes.
+            # Preparation admission has its own exhaustive route regression above.
+            with patch.object(backend, "source_check"), \
+                    patch.object(h, "_load_preparation", return_value=fixture.preparation), \
+                    patch.object(backend, "fail_phase"), \
+                    patch.object(h, "launch_low_integrity_process", side_effect=AssertionError("drift must refuse before launch")):
+                for route in (
+                    lambda: backend.begin_phase(fixture.root, "SingleFile", "Guarded"),
+                    lambda: backend.install_candidate(fixture.root, "SingleFile", "observation-sha256:" + "9" * 64),
+                    lambda: h.run_operator_phase(fixture.root, "SingleFile", "Guarded", backend=backend, exchange=None),
+                ):
+                    with self.assertRaisesRegex((h.GateError, ContainmentOperationError), "current protected"):
+                        route()
 
     def test_gate_path_admission_covers_both_bootstraps_and_runtime_without_mutation(self):
         listing = _listing("ModOrganizer.exe", "plugins/plugin_python/libs/mobase.cp312-win_amd64.pyd")
@@ -1266,7 +1542,7 @@ class OfflineGateTests(unittest.TestCase):
                 h.next_action(invalid)
 
     def test_durable_state_rejects_phase_filename_without_validated_bundle(self):
-        job = self.run_root / "SingleFile" / "jobs" / "Control"
+        job = _phase_job(self.run_root, "SingleFile", "Control")
         job.mkdir(parents=True)
         (job / "phase-final.json").write_bytes(b"{}\n")
         preparation = {
@@ -1434,8 +1710,8 @@ class OfflineGateTests(unittest.TestCase):
             path = self.scratch / "protected" / kind
             path.mkdir(parents=True)
             roots[kind] = path
-        evidence = self.scratch / "watch"
-        evidence.mkdir()
+        evidence = _phase_job(self.run_root, "SingleFile", "Control") / "watch"
+        evidence.mkdir(parents=True)
         request = h.build_watch_request(
             self.run_root,
             "SingleFile",
@@ -1462,14 +1738,17 @@ class OfflineGateTests(unittest.TestCase):
             path = self.scratch / "stable" / kind
             path.mkdir(parents=True)
             roots[kind] = path
-        evidence = self.scratch / "stable-watch"
-        evidence.mkdir()
+        evidence = _phase_job(self.run_root, "SingleFile", "Control") / "watch"
+        evidence.mkdir(parents=True)
         calls = []
 
         def identity(path):
+            if Path(path).absolute() not in roots.values():
+                return original_identity(path)
             calls.append(Path(path).absolute())
             return SimpleNamespace(volume_serial=7, file_id=len(calls), attributes=16)
 
+        original_identity = h.windows_exact_fs.identity_at_path
         with patch.object(h.windows_exact_fs, "identity_at_path", side_effect=identity):
             request = h.build_watch_request(
                 self.run_root, "SingleFile", "Control", roots, evidence,
@@ -1520,9 +1799,9 @@ class OfflineGateTests(unittest.TestCase):
         tool = {"loadedTool": "ModLab Capability Probe", "windowId": 51, "screenshotId": "shot-1", "image": window["image"]}
         close = {"action": "Alt+F4", "windowId": 51, "returned": True, "remainingMatches": [], "exitCode": 0}
         stable_image = {**window["image"], "identity": {"volumeSerial": 1, "fileId": 2, "attributes": 0}}
-        with patch.object(h, "_stable_file", return_value=stable_image) as stable:
+        with patch.object(h, "read_exact", wraps=h.read_exact) as stable:
             h.validate_operator_evidence("First", process, window, tool, close)
-        stable.assert_called_once_with(image.absolute())
+        stable.assert_called_once_with(image.absolute(), maximum_bytes=h.MAX_SCREENSHOT_BYTES)
         for changed in (
             {**window, "image": {**window["image"], "sha256": "0" * 64}},
             {**window, "nativeAfter": {**native, "pid": 99}},
@@ -1670,6 +1949,8 @@ class OfflineGateTests(unittest.TestCase):
                 },
             ]
         }
+        complete.update(schemaVersion=3, runId=self.run_root.name, root=str(self.run_root),
+                        authorityRoot=str(h.authority_run_root(self.run_root)), source={}, archive={})
         selected = {"selection": "SingleFile", "capabilityId": "mo2-runtime-capability-sha256:" + "7" * 64}
         calls = []
 
@@ -1785,6 +2066,71 @@ class OfflineGateTests(unittest.TestCase):
         """A service-wrapped primary owner and secondary publisher owner both survive."""
         self._assert_public_install_failure_retains_ownership(primary_owned=True)
 
+    def _assert_public_phase_failure_retains_ownership(self, *, primary_owned):
+        """Drive the real public failure publisher with retained native handles."""
+        authority = h.authority_run_root(self.run_root)
+        authority.parent.mkdir(parents=True, exist_ok=True)
+        from modlab.validation.windows_vault_security import create_vault
+        with create_vault(authority):
+            (authority / "SingleFile").mkdir()
+        layout_root = self.run_root / "SingleFile"
+        layout_root.mkdir(parents=True)
+        primary_effects = ContainmentEffects(written_paths=(layout_root / "installation-partial",))
+        exact = h.windows_exact_fs
+        primary_pin = None
+        secondary_pin = None
+        if primary_owned:
+            primary_pin = exact.pin_stable_direct_object(self.archive, kind="file", delete_access=False)
+            primary_cause = exact.ExactObjectOwnershipError("primary install close failed", verification=(primary_pin,))
+            phase_read_error = h.GateError("protected phase reconstruction read failed")
+            phase_read_error.__cause__ = primary_cause
+            primary = ContainmentOperationError("primary phase publication failed", effects=primary_effects, cause=phase_read_error)
+        else:
+            primary = h.GateError("ordinary primary install publication failed")
+            primary.effects = primary_effects
+        backend = _FakeLiveBackend(self.run_root)
+        backend.fail_phase = h.ProductionLiveBackend().fail_phase
+        original_publish = h._publish_gate_json
+        failure_target = authority / "SingleFile" / "jobs" / "Control" / "failure.json"
+        failure_target.parent.mkdir(parents=True)
+        secondary_effects = ContainmentEffects(written_paths=(failure_target,))
+        def publish_then_retain(root, target, value):
+            nonlocal secondary_pin
+            original_publish(root, target, value)
+            secondary_pin = exact.pin_stable_direct_object(target, kind="file", delete_access=False)
+            failure = exact.ExactObjectOwnershipError("secondary failure publication close failed", verification=(secondary_pin,))
+            raise failure
+        try:
+            with patch.object(backend, "begin_phase", side_effect=primary), \
+                    patch.object(h, "_publish_gate_json", side_effect=publish_then_retain), self.assertRaises(Exception) as raised:
+                h.run_operator_phase(self.run_root, "SingleFile", "Control", backend=backend, exchange=_FakeExchange())
+            failure = raised.exception
+            expected_pins = {id(secondary_pin)} | ({id(primary_pin)} if primary_pin is not None else set())
+            self.assertEqual(expected_pins, {id(owner.pinned) for owner in getattr(failure, "owners", ())})
+            self.assertIs(primary, failure.__cause__)
+            self.assertIn("secondary failure publication close failed", str(failure))
+            expected_effects = ContainmentEffects.merged(
+                primary_effects, secondary_effects,
+            )
+            self.assertEqual(expected_effects, failure.effects)
+            self.assertTrue(failure_target.is_file())
+            published = h._load_gate_json(self.run_root, failure_target)
+            self.assertEqual(h.build_effect_record("SingleFile:Control:failed", failure.effects), published["effects"])
+            self.assertTrue(all(owner.pinned.handle for owner in failure.owners))
+        finally:
+            if secondary_pin is not None:
+                secondary_pin.close()
+            if primary_pin is not None:
+                primary_pin.close()
+
+    def test_public_phase_preserves_failure_publication_owner_after_ordinary_primary_error(self):
+        """The public API must return secondary ownership, not merely a note."""
+        self._assert_public_phase_failure_retains_ownership(primary_owned=False)
+
+    def test_public_phase_unions_primary_and_failure_publication_owners(self):
+        """A service-wrapped primary owner and secondary publisher owner both survive."""
+        self._assert_public_phase_failure_retains_ownership(primary_owned=True)
+
     def test_production_install_publication_receipts_its_own_record(self):
         layout_root = self.run_root / "SingleFile"
         layout_root.mkdir(parents=True)
@@ -1842,13 +2188,13 @@ class OfflineGateTests(unittest.TestCase):
 
     def test_production_failure_publications_receipt_their_own_records(self):
         layout_root = self.run_root / "SingleFile"
-        job = layout_root / "jobs" / "Control"
+        job = _phase_job(layout_root.parent, layout_root.name, "Control")
         job.mkdir(parents=True)
         authority = h.authority_run_root(self.run_root)
         authority.parent.mkdir(parents=True, exist_ok=True)
         from modlab.validation.windows_vault_security import create_vault
-        with create_vault(authority):
-            (authority / "SingleFile").mkdir()
+        with h.open_vault(authority):
+            (authority / "SingleFile").mkdir(exist_ok=True)
         backend = h.ProductionLiveBackend()
         backend.fail_install(
             self.run_root,
@@ -2415,7 +2761,10 @@ class OfflineGateTests(unittest.TestCase):
                 "managerRoot": str(manager),
             }],
         }
-        job = layout_root / "jobs" / "Control"
+        authority = h.authority_run_root(self.run_root)
+        authority.parent.mkdir(parents=True, exist_ok=True)
+        h.create_vault(authority).close()
+        job = authority / "SingleFile" / "jobs" / "Control"
         request = WatchRequest(
             "watch-request:" + "2" * 64,
             "watch-session:" + "3" * 64,
@@ -2423,7 +2772,7 @@ class OfflineGateTests(unittest.TestCase):
             ContainmentScenario.NEW_FOLDER,
             job / "watch",
             job / "watch" / "stop.token",
-            (),
+            (), authority, 1, 1, "S-1-5-21-1-2-3-1001",
         )
         launch = SimpleNamespace(
             pid=41,
@@ -2433,6 +2782,8 @@ class OfflineGateTests(unittest.TestCase):
             arguments=("--profile", "ModLab - Lab"),
             working_directory=str(app),
         )
+        launch.owner = SimpleNamespace(process_handle=777, resumed=False)
+        admitted = []
         integrity_receipt = SimpleNamespace(
             executable=r"C:\Windows\System32\icacls.exe",
             arguments=("fixture",),
@@ -2445,12 +2796,17 @@ class OfflineGateTests(unittest.TestCase):
         def start(_request, *, on_created):
             on_created(31)
 
-        def launch_process(*_args, on_created, **_kwargs):
+        def launch_process(*_args, on_created, retain_owner=False, before_resume=None, **_kwargs):
+            self.assertTrue(retain_owner, "gate must request original owner")
             on_created(41)
+            self.assertIsNotNone(before_resume, "gate must admit before resume")
+            before_resume(launch)
+            launch.owner.resumed = True
             return launch
 
         backend = h.ProductionLiveBackend()
-        with patch.object(h, "_load_preparation", return_value=preparation), \
+        with patch.object(backend, "source_check"), \
+                patch.object(h, "_load_preparation", return_value=preparation), \
                 patch.object(backend, "load_state", return_value=h.DurableLayoutState((), False)), \
                 patch.object(h, "snapshot_tree", return_value=[]), \
                 patch.object(h, "_runtime_inventory", return_value=[]), \
@@ -2461,16 +2817,43 @@ class OfflineGateTests(unittest.TestCase):
                 patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW), \
                 patch.object(h, "start_watch", side_effect=start), \
                 patch.object(h, "launch_low_integrity_process", side_effect=launch_process), \
-                patch.object(h.windows_watch, "_verified_process_handle", return_value=777):
+                patch.object(h.windows_watch, "admit_watch_launch", side_effect=lambda path, value: admitted.append((path, value.owner, value.owner.resumed))), \
+                patch.object(h.windows_watch, "_verified_process_handle", side_effect=AssertionError("must not reopen PID")):
             received = backend.begin_phase(self.run_root, "SingleFile", "Control")
         self.assertEqual((31, 41), (received.effects.watcher_pid, received.effects.mo2_pid))
-        self.assertEqual(2, len(received.effects.preparation_processes))
+        self.assertEqual(1, len(received.effects.preparation_processes))
+        self.assertEqual([(job / "watch" / "request.json", launch.owner, False)], admitted)
+        self.assertIs(launch.owner, received.value.launch.owner)
         self.assertTrue(all(item.startswith("icacls-low:") for item in received.effects.preparation_processes))
         self.assertEqual(777, received.value.process_handle)
         self.assertTrue((job / "process.json").is_file())
 
+    def test_cleanup_quiescence_publication_before_error_remains_in_effect_receipt(self):
+        job = _phase_job(self.run_root, "SingleFile", "Control")
+        watch = job / "watch"
+        watch.mkdir(parents=True)
+        request = SimpleNamespace(evidence_root=watch)
+        identity = SimpleNamespace(request=request, launch=SimpleNamespace(worker_pid=31))
+        target = watch / h.CAUSAL_NAMES["ProcessTreeQuiescence"]
+
+        def publish_then_fail(path):
+            h._publish_gate_json(self.run_root, target, {"fixture": "published before error"})
+            raise OSError("fixture quiescence readback failed")
+
+        with patch.object(h, "_require_process_absence"), \
+                patch.object(h, "_load_phase_failure", return_value={"cleanup": {
+                    "watcherCreated": True, "watchIdentityAvailable": True}}), \
+                patch.object(h, "_load_bound_watch_identity", return_value=identity), \
+                patch.object(h.windows_watch, "watch_receipt_from_files", return_value=SimpleNamespace(complete=False)), \
+                patch.object(h.windows_watch, "complete_watch_launch", side_effect=publish_then_fail), \
+                self.assertRaises(ContainmentOperationError) as raised:
+            h.ProductionLiveBackend().cleanup_failed_phase(self.run_root, "SingleFile", "Control")
+        self.assertTrue(target.is_file(), str(raised.exception))
+        self.assertIn(target, raised.exception.effects.written_paths)
+        self.assertFalse((job / "cleanup.json").exists())
+
     def test_production_failure_uses_pending_session_and_stops_dead_process_watch(self):
-        job = self.run_root / "SingleFile" / "jobs" / "Control"
+        job = _phase_job(self.run_root, "SingleFile", "Control")
         watch = job / "watch"
         watch.mkdir(parents=True)
         request = SimpleNamespace(
@@ -2487,11 +2870,13 @@ class OfflineGateTests(unittest.TestCase):
             job_root=job,
             request=request,
             process_handle=777,
-            launch=SimpleNamespace(pid=41, creation_time=101),
+            launch=SimpleNamespace(pid=41, creation_time=101, owner=_OfflineOwner()),
         )
+        session.launch.owner = _OfflineOwner()
         backend = h.ProductionLiveBackend()
         backend._pending_session = session
-        with patch.object(h.windows_watch._kernel32, "WaitForSingleObject", return_value=h.windows_watch._WAIT_OBJECT_0), \
+        with patch.object(h.windows_watch, "complete_watch_launch"), \
+                patch.object(h.windows_watch._kernel32, "WaitForSingleObject", return_value=h.windows_watch._WAIT_OBJECT_0), \
                 patch.object(h.windows_watch, "_close_controller_handle", return_value=None), \
                 patch.object(
                     h,
@@ -2524,8 +2909,8 @@ class OfflineGateTests(unittest.TestCase):
     def test_failed_phase_retains_live_handle_and_incomplete_watcher_owner(self):
         for case in ("live-process", "incomplete-watch", "mismatched-watch", "close-failure"):
             with self.subTest(case=case):
-                root = self.scratch / case / ("a" * 32)
-                job = root / "SingleFile" / "jobs" / "Control"
+                root = self.scratch / case / "d" / ("a" * 32)
+                job = _phase_job(root, "SingleFile", "Control")
                 watch = job / "watch"
                 watch.mkdir(parents=True)
                 request = SimpleNamespace(
@@ -2542,7 +2927,7 @@ class OfflineGateTests(unittest.TestCase):
                     job_root=job,
                     request=request,
                     process_handle=777,
-                    launch=SimpleNamespace(pid=41, creation_time=101),
+                    launch=SimpleNamespace(pid=41, creation_time=101, owner=_OfflineOwner(active=1 if case == "live-process" else 0)),
                     watcher_pid=31,
                     watcher_created=True,
                 )
@@ -2563,9 +2948,10 @@ class OfflineGateTests(unittest.TestCase):
                     )
                 wait = h.windows_watch._WAIT_TIMEOUT if case == "live-process" else h.windows_watch._WAIT_OBJECT_0
                 close_error = "fixture handle close failure" if case == "close-failure" else None
-                with patch.object(h.windows_watch._kernel32, "WaitForSingleObject", return_value=wait), \
+                with patch.object(h.windows_watch, "complete_watch_launch"), \
+                patch.object(h.windows_watch._kernel32, "WaitForSingleObject", return_value=wait), \
                         patch.object(h.windows_watch, "_close_controller_handle", return_value=close_error) as close, \
-                        patch.object(h, "stop_watch", return_value=receipt) as stop:
+                        patch.object(h, "stop_watch", side_effect=OSError(close_error) if close_error else None, return_value=receipt) as stop:
                     backend.fail_phase(
                         root,
                         "SingleFile",
@@ -2581,10 +2967,10 @@ class OfflineGateTests(unittest.TestCase):
                     close.assert_not_called()
                     stop.assert_not_called()
                 else:
-                    close.assert_called_once()
+                    close.assert_not_called()
                     stop.assert_called_once()
                 if case in {"incomplete-watch", "mismatched-watch"}:
-                    self.assertEqual(0, session.process_handle)
+                    self.assertEqual(777, session.process_handle)
                     self.assertTrue(failure["watchCleanupPending"])
                 elif case == "close-failure":
                     self.assertEqual(777, session.process_handle)
@@ -2616,7 +3002,7 @@ class OfflineGateTests(unittest.TestCase):
             ),
             backend=_FakeBackend(self.scratch, _listing("ModOrganizer.exe")),
         )
-        job = old_root / "SingleFile" / "jobs" / "Control"
+        job = _phase_job(old_root, "SingleFile", "Control")
         watch = job / "watch"
         watch.mkdir(parents=True)
         watched_fixture = old_root / "fixture-roots" / "shared"
@@ -2625,7 +3011,7 @@ class OfflineGateTests(unittest.TestCase):
         watch_roots = tuple(
             replace(physical_root, root_kind=kind) for kind in ROOT_KINDS
         )
-        request = WatchRequest(
+        request = _offline_request(
             "watch-request:" + "3" * 64,
             "watch-session:" + "4" * 64,
             "containment-run:" + old_root.name,
@@ -2637,7 +3023,7 @@ class OfflineGateTests(unittest.TestCase):
         (watch / "request.json").write_bytes(h.watch_request_to_bytes(request))
         request_sha256 = h.watch_request_sha256(request)
         claim = ControllerClaim(
-            schema_version=1,
+            schema_version=2,
             request_sha256=request_sha256,
             session_id=request.session_id,
             run_id=request.run_id,
@@ -2648,7 +3034,7 @@ class OfflineGateTests(unittest.TestCase):
             controller_creation_time=99,
         )
         launch = WorkerLaunch(
-            schema_version=1,
+            schema_version=2,
             request_sha256=request_sha256,
             session_id=request.session_id,
             run_id=request.run_id,
@@ -2706,127 +3092,38 @@ class OfflineGateTests(unittest.TestCase):
         forged_failure["cleanup"]["watcherCreated"] = False
         body = {key: value for key, value in forged_failure.items() if key != "failureId"}
         forged_failure["failureId"] = "phase-failure-sha256:" + h._sha256(h._canonical(body))
-        original_load = h.load_exact_json
+        original_load = h._load_gate_json
 
-        def forged_failure_load(path):
-            return forged_failure if Path(path).absolute() == failure_path.absolute() else original_load(path)
+        def forged_failure_load(root, path):
+            return forged_failure if Path(path).absolute() == failure_path.absolute() else original_load(root, path)
 
-        with patch.object(h, "load_exact_json", side_effect=forged_failure_load), \
+        with patch.object(h, "_load_gate_json", side_effect=forged_failure_load), \
                 self.assertRaises(h.GateError):
             h._load_phase_failure(old_root, "SingleFile", "Control")
 
-        safe_outcome = _cleanup_outcome(
-            request,
-            31,
-            completion=WatchEvidenceCompletion.INCOMPLETE,
-            reasons=("controller-session-lost",),
-        )
-        event = WatcherEvent(1, "SourceMods", "Added", "breach.txt")
-        event_bytes = h._canonical({
-            "action": event.action,
-            "relativePath": event.relative_path,
-            "rootKind": event.root_kind,
-            "sequence": event.sequence,
-        })
-        unsafe_outcomes = (
-            replace(
-                safe_outcome,
-                root_identities_unchanged=False,
-                reason_codes=("controller-session-lost", "root-identity-changed"),
-            ),
-            replace(
-                safe_outcome,
-                events=(event,),
-                event_bytes_sha256=hashlib.sha256(event_bytes).hexdigest(),
-                journal_byte_count=len(event_bytes),
-                journal_event_count=1,
-                journal_final_sequence=1,
-            ),
-            replace(safe_outcome, reason_codes=("worker-cleanup-refused",)),
-            replace(
-                safe_outcome,
-                reason_codes=("controller-session-lost", "worker-cleanup-refused"),
-            ),
-            replace(
-                safe_outcome,
-                ready=False,
-                opened_root_kinds=(),
-                root_identities_unchanged=False,
-                reason_codes=("controller-session-lost", "worker-ready-invalid"),
-            ),
-        )
-        original_read = h.read_exact
-        for unsafe_outcome in unsafe_outcomes:
-            unsafe_bytes = h.watch_outcome_to_bytes(unsafe_outcome)
-            unsafe_id = h.watch_outcome_id_for(unsafe_outcome)
-
-            def read_unsafe(path, *, data=unsafe_bytes):
-                return data if Path(path).absolute() == (watch / "outcome.json").absolute() else original_read(path)
-
-            with self.subTest(reasons=unsafe_outcome.reason_codes), \
-                    patch.object(h, "read_exact", side_effect=read_unsafe), \
-                    self.assertRaises(h.GateError):
-                h._load_cleanup_watch_evidence(
-                    job,
-                    old_root,
-                    failure["cleanup"],
-                    unsafe_id,
-                )
-
-        safe_bytes = h.watch_outcome_to_bytes(safe_outcome)
-        safe_id = h.watch_outcome_id_for(safe_outcome)
-        unsafe_captures = (
-            replace(
-                captured,
-                events=(event,),
-                journal=h.windows_watch._JournalEvidence(1, 2, event_bytes, 1, 1),
-            ),
-            replace(captured, terminal_bytes_sha256="7" * 64),
-            replace(
-                captured,
-                ready=False,
-                opened_root_kinds=(),
-                completion_reasons=("controller-session-lost", "worker-ready-invalid"),
-            ),
-            replace(
-                captured,
-                root_identities_unchanged=False,
-                completion_reasons=("controller-session-lost", "root-identity-changed"),
-            ),
-        )
-
-        def read_safe(path):
-            return safe_bytes if Path(path).absolute() == (watch / "outcome.json").absolute() else original_read(path)
-
-        for unsafe_capture in unsafe_captures:
-            with self.subTest(raw_reasons=unsafe_capture.completion_reasons), \
-                    patch.object(h, "read_exact", side_effect=read_safe), \
-                    patch.object(h.windows_watch, "_capture_worker_evidence", return_value=unsafe_capture), \
-                    self.assertRaises(h.GateError):
-                h._load_cleanup_watch_evidence(
-                    job,
-                    old_root,
-                    failure["cleanup"],
-                    safe_id,
-                )
-
         restarted_backend = h.ProductionLiveBackend()
-        with patch.object(h.windows_watch, "_exact_process_status", return_value=("live", 888, None)), \
-                patch.object(h.windows_watch, "_close_controller_handle", return_value=None), \
-                self.assertRaisesRegex(ContainmentOperationError, "close it normally"):
+        with patch.object(h, "_require_process_absence"), \
+                patch.object(h, "capability_run_root", side_effect=lambda run_id: old_root if run_id == old_root.name else new_root), \
+                patch.object(h.windows_watch, "_exact_process_status", return_value=("dead", 0, None)), \
+                self.assertRaisesRegex(ContainmentOperationError, "original|local|session"):
             restarted_backend.cleanup_failed_phase(old_root, "SingleFile", "Control")
         self.assertFalse((job / "cleanup.json").exists())
-        with patch.object(h.windows_watch, "_exact_process_status", return_value=("dead", 0, None)) as exact_status, \
-                patch.object(h.windows_watch, "_capture_worker_evidence", return_value=captured) as capture, \
-                patch.object(h, "_require_process_absence"):
+        self.assertEqual(failure_before, failure_path.read_bytes())
+
+        # Explicit synthetic *already completed* protocol fixture. Native launch,
+        # stop and exit behavior is independently covered by CausalWatchTests.
+        _synthetic_worker_records(request, claim, launch, 41, 101)
+        for name in ("worker-exit.json", "stop.token", "events.ndjson", "terminal.json", "outcome.json"):
+            target = watch / name
+            original = target.read_bytes()
+            target.write_bytes(original + b" ")
+            with self.subTest(raw=name), self.assertRaises(h.GateError):
+                h._load_cleanup_watch_evidence(job, old_root, failure["cleanup"],
+                    h.watch_outcome_id_for(h.watch_outcome_from_bytes((watch / "outcome.json").read_bytes())) if name != "outcome.json" else "watch-outcome-sha256:" + "f" * 64)
+            target.write_bytes(original)
+        with patch.object(h, "_require_process_absence"), \
+                patch.object(h.windows_watch, "_exact_process_status", side_effect=AssertionError("closed chain cannot reopen PIDs")):
             cleaned = restarted_backend.cleanup_failed_phase(old_root, "SingleFile", "Control")
-        self.assertGreaterEqual(exact_status.call_count, 4)
-        self.assertEqual(3, capture.call_count)
-        capture.assert_has_calls([
-            call(request, launch),
-            call(request, launch),
-            call(request, launch),
-        ])
         outcome = h.watch_outcome_from_bytes((watch / "outcome.json").read_bytes())
         self.assertEqual(failure_before, failure_path.read_bytes())
         self.assertFalse(cleaned.value["authority"])
@@ -2834,8 +3131,8 @@ class OfflineGateTests(unittest.TestCase):
         self.assertTrue(cleaned.value["freshAttemptRequired"])
         self.assertTrue(cleaned.value["mo2Absent"])
         self.assertTrue(cleaned.value["watcherQuiescent"])
-        self.assertEqual("Incomplete", cleaned.value["watchEvidenceCompletion"])
-        self.assertEqual(["controller-session-lost"], cleaned.value["watchReasonCodes"])
+        self.assertEqual("Completed", cleaned.value["watchEvidenceCompletion"])
+        self.assertEqual([], cleaned.value["watchReasonCodes"])
         self.assertEqual(29, cleaned.value["controllerPid"])
         self.assertEqual(99, cleaned.value["controllerCreationTime"])
         self.assertEqual(100, cleaned.value["watcherCreationTime"])
@@ -2863,15 +3160,15 @@ class OfflineGateTests(unittest.TestCase):
         forged_no_watch_cleanup["cleanupId"] = "phase-cleanup-sha256:" + h._sha256(h._canonical(body))
         cleanup_path = job / "cleanup.json"
 
-        def forged_no_watch_load(path):
+        def forged_no_watch_load(root, path):
             absolute = Path(path).absolute()
             if absolute == failure_path.absolute():
                 return forged_no_watch_failure
             if absolute == cleanup_path.absolute():
                 return forged_no_watch_cleanup
-            return original_load(path)
+            return original_load(root, path)
 
-        with patch.object(h, "load_exact_json", side_effect=forged_no_watch_load), \
+        with patch.object(h, "_load_gate_json", side_effect=forged_no_watch_load), \
                 self.assertRaises(h.GateError):
             h._load_phase_cleanup(old_root, "SingleFile", "Control")
         (watch / "outcome.json").write_bytes(b"{}\n")
@@ -2887,13 +3184,13 @@ class OfflineGateTests(unittest.TestCase):
             "Package": "bootstrap-job:" + "6" * 32,
         }
         with patch.object(h, "_require_process_absence"), \
+                patch.object(h, "capability_run_root", side_effect=lambda run_id: old_root if run_id == old_root.name else new_root), \
                 patch.object(h.windows_watch, "_exact_process_status", return_value=("dead", 0, None)), \
-                patch.object(h.windows_watch, "_capture_worker_evidence", return_value=captured), \
                 patch.object(
                     h,
-                    "_load_preparation",
-                    side_effect=lambda root: h.load_exact_json(Path(root) / "preparation.json"),
-                ):
+                    "_fresh_preparation_preflight",
+                    side_effect=lambda root: h._load_gate_json(root, h.authority_run_root(root) / "preparation.json"),
+                ), patch.object(h, "_load_preparation", side_effect=lambda root: h._load_gate_json(root, h.authority_run_root(root) / "preparation.json")):
             restarted = h.restart_failed_attempt(
                 old_root,
                 h.GateConfig(
@@ -2913,14 +3210,14 @@ class OfflineGateTests(unittest.TestCase):
         self.assertEqual(str(old_root.absolute()), restarted.value["failedRunRoot"])
         self.assertEqual(set(), set(old_jobs.values()) & set(new_jobs.values()))
         self.assertEqual(
-            h.load_exact_json(new_root / "preparation.json")["preparationId"],
+            h.load_exact_json(h.authority_run_root(new_root) / "preparation.json")["preparationId"],
             restarted.value["preparationId"],
         )
-        self.assertEqual(restarted.value, h.load_exact_json(new_root / "restart.json"))
+        self.assertEqual(restarted.value, h.load_exact_json(h.authority_run_root(new_root) / "restart.json"))
 
-        restart_path = new_root / "restart.json"
+        restart_path = h.authority_run_root(new_root) / "restart.json"
         restart_record = h.load_exact_json(restart_path)
-        original_load = h.load_exact_json
+        original_load = h._load_gate_json
 
         def reidentify(item):
             body = {key: value for key, value in item.items() if key != "restartId"}
@@ -2942,15 +3239,15 @@ class OfflineGateTests(unittest.TestCase):
             mutate(forged)
             reidentify(forged)
 
-            def forged_restart_load(path, *, value=forged):
-                return value if Path(path).absolute() == restart_path.absolute() else original_load(path)
+            def forged_restart_load(root, path, *, value=forged):
+                return value if Path(path).absolute() == restart_path.absolute() else original_load(root, path)
 
             with self.subTest(label=label), \
-                    patch.object(h, "load_exact_json", side_effect=forged_restart_load), \
+                    patch.object(h, "_load_gate_json", side_effect=forged_restart_load), \
                     patch.object(
                         h,
                         "_load_preparation",
-                        side_effect=lambda root: original_load(Path(root) / "preparation.json"),
+                        side_effect=lambda root: original_load(root, h.authority_run_root(root) / "preparation.json"),
                     ), \
                     self.assertRaises(h.GateError):
                 h._load_restart_record(new_root)
@@ -2958,7 +3255,7 @@ class OfflineGateTests(unittest.TestCase):
     def test_partial_begin_failures_retain_cleanup_ownership_and_truthful_evidence(self):
         for case in ("launch-identity", "handle-acquisition", "launch-callback-error", "watch-stop-error"):
             with self.subTest(case=case):
-                root = self.scratch / case / ("b" * 32)
+                root = self.scratch / case / "d" / ("b" * 32)
                 layout_root = root / "SingleFile"
                 app = layout_root / "app"
                 manager = layout_root / "bootstrap" / "tools" / "mo2" / "skyrim-se-ae"
@@ -2966,8 +3263,8 @@ class OfflineGateTests(unittest.TestCase):
                 manager.mkdir(parents=True)
                 (layout_root / "environment").mkdir(parents=True)
                 (app / "ModOrganizer.exe").write_bytes(b"fixture")
-                job = layout_root / "jobs" / "Control"
-                request = WatchRequest(
+                job = _phase_job(layout_root.parent, layout_root.name, "Control")
+                request = _offline_request(
                     "watch-request:" + "2" * 64,
                     "watch-session:" + "3" * 64,
                     "containment-run:" + "b" * 32,
@@ -2995,6 +3292,7 @@ class OfflineGateTests(unittest.TestCase):
                     arguments=("--profile", "ModLab - Lab"),
                     working_directory=str(app),
                 )
+                launch.owner = _OfflineOwner()
                 integrity_receipt = SimpleNamespace(
                     executable=r"C:\Windows\System32\icacls.exe",
                     arguments=("fixture",),
@@ -3007,15 +3305,23 @@ class OfflineGateTests(unittest.TestCase):
                 def start(_request, *, on_created):
                     on_created(31)
 
-                def launch_process(*_args, on_created, **_kwargs):
+                def launch_process(*_args, on_created, before_resume, **_kwargs):
                     on_created(41)
                     if case == "launch-callback-error":
                         raise OSError("fixture failure after CreateProcess callback")
+                    before_resume(launch)
+                    if case == "watch-stop-error":
+                        error = OSError("fixture failure after admission")
+                        error.owner = launch.owner
+                        raise error
                     return launch
 
                 stop_error = h.GateError("fixture watcher stop failure") if case == "watch-stop-error" else None
                 backend = h.ProductionLiveBackend()
-                with patch.object(h, "_load_preparation", return_value=preparation), \
+                with patch.object(backend, "source_check"), \
+                        patch.object(h.windows_watch, "admit_watch_launch", side_effect=OSError("fixture admission failure") if case == "handle-acquisition" else None), \
+                        patch.object(h.windows_watch, "complete_watch_launch"), \
+                        patch.object(h, "_load_preparation", return_value=preparation), \
                         patch.object(backend, "load_state", return_value=h.DurableLayoutState((), False)), \
                         patch.object(h, "snapshot_tree", return_value=[]), \
                         patch.object(h, "_runtime_inventory", return_value=[]), \
@@ -3074,8 +3380,8 @@ class OfflineGateTests(unittest.TestCase):
         (app / "ModOrganizer.exe").write_bytes(b"fixture executable")
         source_log = manager_logs / "mo_interface.log"
         source_log.write_bytes(b"ordinary MO2 control log\n")
-        job = layout_root / "jobs" / "Control"
-        request = WatchRequest(
+        job = _phase_job(layout_root.parent, layout_root.name, "Control")
+        request = _offline_request(
             "watch-request:" + "2" * 64,
             "watch-session:" + "3" * 64,
             "containment-run:" + "a" * 32,
@@ -3117,6 +3423,7 @@ class OfflineGateTests(unittest.TestCase):
             arguments=("--profile", "ModLab - Lab"),
             working_directory=str(app),
         )
+        launch.owner = _OfflineOwner()
         integrity_receipt = SimpleNamespace(
             executable=r"C:\Windows\System32\icacls.exe",
             arguments=("fixture",),
@@ -3146,15 +3453,20 @@ class OfflineGateTests(unittest.TestCase):
             h.publish_exact_json(_request.evidence_root / "worker-launch.json", {"workerPid": 31})
             on_created(31)
 
-        def launch_process(*_args, on_created, **_kwargs):
+        def launch_process(*_args, on_created, retain_owner, before_resume, **_kwargs):
             events.append(("launch", launch))
+            self.assertTrue(retain_owner)
             on_created(41)
+            before_resume(launch)
             return launch
 
         def stop(request_path):
             events.append(("stop", request_path))
             (request_path.parent / "outcome.json").write_bytes(b"fixture outcome\n")
-            (request_path.parent / "stop.token").write_bytes(b"stop\n")
+            (request_path.parent / "stop.token").write_bytes(b"synthetic normal stop")
+            for name in ("launch-admission.json", "process-quiescence.json", "worker-exit.json"):
+                (request_path.parent / name).write_bytes(b"explicit offline causal seam")
+            launch.owner.close()
             return receipt
 
         class Exchange:
@@ -3177,8 +3489,15 @@ class OfflineGateTests(unittest.TestCase):
                     "observedAt": "2026-09-04T00:00:01+00:00",
                 }
 
+        captured = []
+        original_capture = h.ContainmentStore.capture_evidence_file
+        def capture(store, run_id, source, target, **kwargs):
+            value = original_capture(store, run_id, source, target, **kwargs)
+            captured.append(value)
+            return value
         backend = h.ProductionLiveBackend()
         with ExitStack() as stack:
+            stack.enter_context(patch.object(h.ContainmentStore, "capture_evidence_file", capture))
             stack.enter_context(patch.object(backend, "source_check"))
             durable = stack.enter_context(patch.object(
                 backend,
@@ -3215,7 +3534,9 @@ class OfflineGateTests(unittest.TestCase):
                 "className": "Qt5152QWindowIcon",
                 "visible": True,
             }]))
-            stack.enter_context(patch.object(h.windows_watch, "_verified_process_handle", return_value=777))
+            stack.enter_context(patch.object(h.windows_watch, "admit_watch_launch"))
+            completed = stack.enter_context(patch.object(h.windows_watch, "complete_watch_launch"))
+            stack.enter_context(patch.object(h.windows_watch, "_verified_process_handle", side_effect=AssertionError("no PID reopen")))
             stack.enter_context(patch.object(h.windows_watch, "_verify_retained_process_handle"))
             stack.enter_context(patch.object(h.windows_watch._kernel32, "WaitForSingleObject", side_effect=(h.windows_watch._WAIT_TIMEOUT, h.windows_watch._WAIT_TIMEOUT, h.windows_watch._WAIT_OBJECT_0)))
             stack.enter_context(patch.object(h.windows_watch, "_get_process_exit_code", return_value=0))
@@ -3229,12 +3550,17 @@ class OfflineGateTests(unittest.TestCase):
                 backend=backend,
                 exchange=Exchange(),
             )
+        self.assertEqual(1, len(captured))
+        self.assertEqual(str(source_log), captured[0]["sourcePath"])
+        self.assertEqual(source_log.read_bytes(), Path(captured[0]["capturePath"]).read_bytes())
+        (SCRATCH / "phase-log-capture-inventory.json").write_text(json.dumps(captured, indent=2))
         strict_bundle.assert_called_once_with(
             self.run_root.absolute(),
             "SingleFile",
             "Control",
             preparation["preparationId"],
         )
+        completed.assert_called_once_with(request.evidence_root / "request.json", launch.owner)
         self.assertEqual(3, durable.call_count)
         self.assertEqual(["start", "launch", "stop"], [item[0] for item in events])
         outputs.assert_called_once_with(
@@ -3285,12 +3611,21 @@ class OfflineGateTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         assert spec is not None and spec.loader is not None
         spec.loader.exec_module(module)
-        selected = h.derive_selection(module.fixture(self.scratch))
+        matrix = module.fixture(self.run_root.parent)
+        matrix.update(schemaVersion=3, authorityRoot=str(h.authority_run_root(self.run_root)))
+        for candidate in matrix["candidates"]:
+            for observation in [candidate["control"], *candidate["observations"]]:
+                prior = Path(observation["job"])
+                job = h.authority_run_root(self.run_root) / candidate["layout"] / "jobs" / observation["phase"]
+                observation["job"] = str(job)
+                for reference in observation["logs"]:
+                    reference["path"] = str(job / Path(reference["path"]).name)
+        selected = h.derive_selection(matrix)
         self.assertEqual("SingleFile", selected["selection"])
         self.assertRegex(selected["capabilityId"], r"^mo2-runtime-capability-sha256:[0-9a-f]{64}$")
 
     def test_guarded_marker_is_controller_published_through_shared_no_replace_boundary(self):
-        job = self.run_root / "SingleFile" / "jobs" / "Guarded"
+        job = _phase_job(self.run_root, "SingleFile", "Guarded")
         job.mkdir(parents=True)
         session = SimpleNamespace(
             run_root=self.run_root,
@@ -3329,7 +3664,7 @@ class OfflineGateTests(unittest.TestCase):
             h.containment_service._receipted(h._publish_guarded_marker)(session, loaded)
 
     def test_guarded_marker_is_not_published_before_full_observation_validation(self):
-        job = self.run_root / "SingleFile" / "jobs" / "Guarded"
+        job = _phase_job(self.run_root, "SingleFile", "Guarded")
         job.mkdir(parents=True)
         session = SimpleNamespace(
             run_root=self.run_root,
@@ -3471,7 +3806,7 @@ class OfflineGateTests(unittest.TestCase):
 
     def test_phase_reload_rejects_missing_complete_raw_evidence_chain(self):
         """A final/outcome summary alone is not a restart-safe phase proof."""
-        job = self.run_root / "SingleFile" / "jobs" / "Control"
+        job = _phase_job(self.run_root, "SingleFile", "Control")
         watch = job / "watch"
         watch.mkdir(parents=True)
         observation = {"pid": 41}
@@ -3638,7 +3973,7 @@ class OfflineGateTests(unittest.TestCase):
             final["watchEvidence"][field] = hashlib.sha256((fixture.watch / name).read_bytes()).hexdigest()
         final["phaseFinalId"] = "phase-final-sha256:" + h._sha256(h._canonical(final))
         final_path.write_bytes(h._canonical(final))
-        with self.assertRaisesRegex(h.GateError, "root path or identity"):
+        with self.assertRaisesRegex(h.GateError, "root path|reconstruction"):
             self._reload_complete_phase(fixture)
 
         fixture = self._complete_phase_evidence("protected-after")
@@ -3648,7 +3983,7 @@ class OfflineGateTests(unittest.TestCase):
         final["protectedAfter"]["source_mods"]["sha256"] = "9" * 64
         final["phaseFinalId"] = "phase-final-sha256:" + h._sha256(h._canonical(final))
         final_path.write_bytes(h._canonical(final))
-        with self.assertRaisesRegex(h.GateError, "current protected state"):
+        with self.assertRaisesRegex(h.GateError, "protected-state evidence"):
             self._reload_complete_phase(fixture)
 
         fixture = self._complete_phase_evidence("protected-before")
@@ -3749,7 +4084,7 @@ class OfflineGateTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         assert spec is not None and spec.loader is not None
         spec.loader.exec_module(module)
-        matrix = module.fixture(self.scratch)
+        matrix = module.fixture(self.run_root.parent)
         preparation_id = "preparation-sha256:" + "1" * 64
         preparation = {
             "preparationId": preparation_id,
@@ -3775,7 +4110,8 @@ class OfflineGateTests(unittest.TestCase):
                     observation["loaded"]["pid"] = pid
                 if phase == "Guarded":
                     observation["guarded"] = copy.deepcopy(observation["loaded"])
-                job = layout_root / "jobs" / phase
+                job = _phase_job(layout_root.parent, layout_root.name, phase)
+                observation["job"] = str(job)
                 watch = job / "watch"
                 watch.mkdir(parents=True)
                 if observation["loaded"] is None:
@@ -3853,7 +4189,7 @@ class OfflineGateTests(unittest.TestCase):
             install_effect = h.build_effect_record(
                 f"{layout}:Install",
                 ContainmentEffects(
-                    written_paths=(layout_root, layout_root / "installation.json"),
+                    written_paths=(layout_root, h.authority_run_root(self.run_root) / layout / "installation.json"),
                     child_mutation_roots=(layout_root,),
                 ),
             )
@@ -3889,10 +4225,10 @@ class OfflineGateTests(unittest.TestCase):
                 "authority": False,
             }
             installation["installationId"] = "installation-sha256:" + h._sha256(h._canonical(installation))
-            h.publish_exact_json(layout_root / "installation.json", installation)
+            h.publish_exact_json(h.authority_run_root(self.run_root) / layout / "installation.json", installation)
 
         def load_validated(root, layout, phase, expected_preparation_id):
-            job = Path(root) / layout / "jobs" / phase
+            job = _phase_job(Path(root), layout, phase)
             observation = h.load_exact_json(job / "observation.json")
             return observation, h._validate_phase_bundle(
                 Path(root),
@@ -3905,8 +4241,16 @@ class OfflineGateTests(unittest.TestCase):
                 h.read_exact(job / "watch" / "outcome.json"),
             )
 
+        reads = []
+        actual_read = h.runtime_capability.read_exact
+        def read(target, **kwargs):
+            reads.append(str(Path(target).absolute()))
+            return actual_read(target, **kwargs)
         backend = h.ProductionLiveBackend()
-        with patch.object(h, "_load_preparation", return_value=preparation), \
+        with patch.object(h.runtime_capability, "read_exact", side_effect=read), \
+                patch.object(h, "_fresh_preparation_preflight", return_value=preparation), \
+                patch.object(h, "capability_run_root", return_value=self.run_root), \
+                patch.object(h, "_load_preparation", return_value=preparation), \
                 patch.object(backend, "load_state", return_value=h.DurableLayoutState(h.PHASES, True)), \
                 patch.object(h, "_require_process_absence"), \
                 patch.object(h, "watch_outcome_from_bytes", side_effect=lambda data: outcomes[data]), \
@@ -3914,8 +4258,8 @@ class OfflineGateTests(unittest.TestCase):
                 patch.object(h, "watch_outcome_id_for", side_effect=lambda outcome: outcome.watch_id), \
                 patch.object(h, "_load_validated_phase_bundle", side_effect=load_validated) as loader:
             received = backend.finalize_gate(self.run_root)
-            envelope_path = self.run_root / "full-stack-envelope.json"
-            selection_path = self.run_root / "selection.json"
+            envelope_path = h.authority_run_root(self.run_root) / "full-stack-envelope.json"
+            selection_path = h.authority_run_root(self.run_root) / "selection.json"
             self.assertEqual(received.value["envelope"], h.load_envelope(envelope_path))
             # Finalization, selection reload, and envelope reload each consume all
             # ten phase bundles; durable-state validation is isolated above.
@@ -3924,7 +4268,7 @@ class OfflineGateTests(unittest.TestCase):
             original_selection = h.read_exact(selection_path)
             alternate_matrix = {
                 key: copy.deepcopy(received.value["selection"][key])
-                for key in h.runtime_capability.MATRIX_FIELDS
+                for key in h.runtime_capability.PROTECTED_MATRIX_FIELDS
             }
             alternate_matrix["candidates"][0]["observations"][0]["after"].append(module.entry("surprise.py"))
             alternate_selection = h.derive_selection(alternate_matrix)
@@ -3957,11 +4301,14 @@ class OfflineGateTests(unittest.TestCase):
                         h.load_envelope(envelope_path)
             envelope_path.write_bytes(h._canonical(original_envelope))
 
+        self.assertTrue(reads)
+        self.assertTrue(all(h._inside(Path(path), h.authority_run_root(self.run_root)) for path in reads))
+        (SCRATCH / "phase-selection-original-read-inventory.json").write_text(json.dumps(reads, indent=2))
         self.assertEqual("SingleFile", received.value["selection"]["selection"])
         self.assertFalse(received.value["envelope"]["authority"])
         self.assertFalse(received.value["envelope"]["bridgeConsumptionPermitted"])
-        self.assertEqual(received.value["selection"], h.load_capability(self.run_root / "selection.json"))
-        self.assertEqual(received.value["envelope"], h.load_exact_json(self.run_root / "full-stack-envelope.json"))
+        self.assertEqual(received.value["selection"], h.load_capability(h.authority_run_root(self.run_root) / "selection.json"))
+        self.assertEqual(received.value["envelope"], h.load_exact_json(h.authority_run_root(self.run_root) / "full-stack-envelope.json"))
 
     def test_controller_terminalizes_failure_and_never_reuses_incomplete_phase(self):
         backend = _FakeLiveBackend(self.run_root)
@@ -4039,7 +4386,7 @@ class OfflineGateTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         assert spec is not None and spec.loader is not None
         spec.loader.exec_module(module)
-        selection = h.derive_selection(module.fixture(self.scratch / "envelope"))
+        selection = h.derive_selection(_protected_matrix(module.fixture(self.scratch / "envelope")))
         source = {
             **selection["source"],
             "artifactId": "containment-source-artifact-sha256:" + "3" * 64,

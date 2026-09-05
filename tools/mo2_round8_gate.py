@@ -123,6 +123,7 @@ from modlab.validation.windows_junction import stable_tree_identity
 from modlab.validation import windows_watch
 from modlab.validation.windows_watch import start_watch, stop_watch, watch_proves_unchanged
 from modlab.validation.windows_watch_protocol import (
+    CAUSAL_NAMES,
     CLAIM_NAME,
     CONTROLLER_LOSS_NAME,
     EVENTS_NAME,
@@ -523,7 +524,8 @@ def _runtime_paths(run_root: Path, layout: str, sources: Mapping[str, bytes]) ->
         rows.append(target)
         publication_targets.append(target)
     for phase in PHASES:
-        job = layout_root / "jobs" / phase
+        rows.append(layout_root / "jobs" / phase)
+        job = authority_run_root(run_root) / layout / "jobs" / phase
         watch = job / "watch"
         phase_targets = (
             job / "begin.json",
@@ -547,10 +549,13 @@ def _runtime_paths(run_root: Path, layout: str, sources: Mapping[str, bytes]) ->
             watch / TERMINAL_NAME,
             watch / CONTROLLER_LOSS_NAME,
             watch / OUTCOME_NAME,
+            *(watch / name for name in sorted(set(CAUSAL_NAMES.values()))),
+            job / "window.png.capture.json",
         )
         rows.extend((job, watch, *phase_targets))
         publication_targets.extend(phase_targets)
         retained_logs = tuple(job / f"observed-{index:03}.log" for index in range(MAX_RETAINED_LOGS))
+        retained_logs += tuple(path.with_name(path.name + ".capture.json") for path in retained_logs)
         rows.extend(retained_logs)
         publication_targets.extend(retained_logs)
     planned = [
@@ -1366,6 +1371,7 @@ class PendingPhaseCleanup:
     mo2_creation_time: int | None = None
     launch: object | None = None
     process_handle: int = 0
+    process_owner: object | None = None
 
 
 @dataclass
@@ -2370,6 +2376,13 @@ def _retained_log_targets(job_root: Path, count: int) -> tuple[Path, ...]:
     return tuple(root / f"observed-{index:03}.log" for index in range(count))
 
 
+def _screenshot_capture(window, image):
+    return {"schemaVersion": 1, "kind": "task-7B-screenshot-capture",
+            "stage": "NativeWindow", "sourceKind": "ComputerUseDataUrl",
+            "screenshotId": window["screenshotId"], "capturePath": image["path"],
+            "byteCount": image["size"], "sha256": image["sha256"]}
+
+
 def _validate_phase_bundle(
     run_root: Path,
     layout: str,
@@ -2525,7 +2538,7 @@ def _validate_phase_evidence_chain(
     raw: Mapping[str, bytes],
 ) -> None:
     """Reconstruct every immutable watcher/phase record after restart."""
-    job = root / layout / "jobs" / phase
+    job = authority_run_root(root) / layout / "jobs" / phase
     watch = job / "watch"
     expected_raw = {
         "requestSha256": REQUEST_NAME,
@@ -2536,14 +2549,15 @@ def _validate_phase_evidence_chain(
         "terminalSha256": TERMINAL_NAME,
         "outcomeSha256": OUTCOME_NAME,
         "stopSha256": STOP_NAME,
+        "admissionSha256": CAUSAL_NAMES["LaunchAdmission"],
+        "quiescenceSha256": CAUSAL_NAMES["ProcessTreeQuiescence"],
+        "workerExitSha256": CAUSAL_NAMES["WorkerExitObservation"],
     }
     hashes = {field: _sha256(raw[filename]) for field, filename in expected_raw.items()}
     if final.get("watchEvidence") != hashes:
         raise GateError("phase final does not bind every exact watcher evidence file")
     if os.path.lexists(watch / CONTROLLER_LOSS_NAME):
         raise GateError("completed phase contains a controller-loss record")
-    if raw[STOP_NAME] != b"stop\n":
-        raise GateError("completed phase stop token bytes differ")
 
     try:
         request = watch_request_from_bytes(raw[REQUEST_NAME])
@@ -2561,11 +2575,10 @@ def _validate_phase_evidence_chain(
         derived = _derived_watch_roots(preparation, layout)
         if tuple(derived) != ROOT_KINDS:
             raise GateError("derived watch root order differs")
-        current_roots = tuple(
-            windows_watch.watch_root(kind, derived[kind]) for kind in ROOT_KINDS
-        )
-        if request.roots != current_roots:
-            raise GateError("watch request root path or identity differs from the current roots")
+        if tuple((item.root_kind, item.path) for item in request.roots) != tuple((kind, derived[kind].absolute()) for kind in ROOT_KINDS):
+            raise GateError("watch request root path differs from protected preparation")
+        if request.authority_root != authority_run_root(root):
+            raise GateError("watch request authority binding differs")
 
         claim = controller_claim_from_bytes(raw[CLAIM_NAME], request)
         if raw[CLAIM_NAME] != controller_claim_to_bytes(claim, request):
@@ -2573,23 +2586,12 @@ def _validate_phase_evidence_chain(
         launch = worker_launch_from_bytes(raw[LAUNCH_NAME], request)
         if raw[LAUNCH_NAME] != worker_launch_to_bytes(launch, request):
             raise GateError("worker launch bytes are not canonical")
-        captured = windows_watch._capture_worker_evidence(request, launch)
         outcome = watch_outcome_from_bytes(raw[OUTCOME_NAME])
-        if raw[OUTCOME_NAME] != watch_outcome_to_bytes(outcome):
-            raise GateError("watch outcome bytes are not canonical")
-        windows_watch._validate_outcome_binding(outcome, request, claim, launch)
-        expected_outcome = windows_watch._watch_outcome(
-            request,
-            claim,
-            launch,
-            completion=WatchEvidenceCompletion.COMPLETED,
-            worker_exit_code=0,
-            reasons=(),
-            captured=captured,
-        )
-        if captured.completion_reasons or outcome != expected_outcome:
-            raise GateError("watch outcome does not exactly reconstruct from raw worker evidence")
-        receipt = windows_watch._receipt_from_outcome(outcome)
+        receipt = windows_watch.watch_receipt_from_files(request, launch.worker_pid,
+            watch / READY_NAME, watch / EVENTS_NAME, watch / TERMINAL_NAME)
+        _require_cleanup_receipt(receipt, request, launch.worker_pid)
+        if receipt.watch_outcome_id != watch_outcome_id_for(outcome):
+            raise GateError("watch outcome differs from shared causal reconstruction")
     except GateError:
         raise
     except Exception as error:
@@ -2654,6 +2656,10 @@ def _validate_phase_evidence_chain(
     ):
         raise GateError("phase process/observation binding differs")
 
+    admission = windows_watch.causal_record_from_bytes(raw[CAUSAL_NAMES["LaunchAdmission"]], request, claim, launch)
+    if (admission["processPid"], admission["processCreationTime"]) != (process_record["pid"], process_record["creationTime"]):
+        raise GateError("phase process differs from original watch admission")
+
     operator_record = _record_id(
         operator,
         "operatorEvidenceId",
@@ -2715,14 +2721,27 @@ def _validate_phase_evidence_chain(
         operator_record["window"],
         operator_record["tool"],
         operator_record["close"],
+        run_root=root,
     )
+
+    if _load_gate_json(root, job / "window.png.capture.json") != _screenshot_capture(window, image):
+        raise GateError("screenshot original capture provenance differs")
+    for reference in observation.get("logs", ()):
+        target = Path(reference["path"])
+        capture = _load_gate_json(root, target.with_name(target.name + ".capture.json"))
+        if (set(capture) != {"schemaVersion", "sourcePath", "capturePath", "volumeSerial", "fileId", "byteCount", "sha256", "stage"}
+                or capture["schemaVersion"] != 1 or capture["capturePath"] != str(target)
+                or capture["byteCount"] != reference["size"] or capture["sha256"] != reference["sha256"]
+                or capture["stage"] != f"{layout}:{phase}:Log"
+                or type(capture["volumeSerial"]) is not int or type(capture["fileId"]) is not int
+                or not any(_inside(Path(capture["sourcePath"]), Path(str(layout_record[name])) / "logs")
+                           for name in ("appRoot", "managerRoot"))):
+            raise GateError("retained log capture provenance differs")
 
     before = _protected_state(final.get("protectedBefore"), "protectedBefore")
     after = _protected_state(final.get("protectedAfter"), "protectedAfter")
     if begin_record.get("protectedBefore") != final.get("protectedBefore"):
         raise GateError("phase begin/final protected-before binding differs")
-    if _capture_protected(preparation, layout) != after:
-        raise GateError("current protected state differs from the completed phase")
     if not watch_proves_unchanged(receipt, before, after):
         raise GateError("durable watcher/protected-state evidence does not prove unchanged")
     required_writes = {
@@ -2730,6 +2749,7 @@ def _validate_phase_evidence_chain(
         job / "begin.json",
         job / "process.json",
         job / "window.png",
+        job / "window.png.capture.json",
         job / "operator-evidence.json",
         job / "runtime-delta.json",
         job / "observation.json",
@@ -2744,19 +2764,23 @@ def _validate_phase_evidence_chain(
             TERMINAL_NAME,
             OUTCOME_NAME,
             STOP_NAME,
+            CAUSAL_NAMES["LaunchAdmission"],
+            CAUSAL_NAMES["ProcessTreeQuiescence"],
+            CAUSAL_NAMES["WorkerExitObservation"],
         )),
     }
     for reference in observation.get("logs", ()):
         if not isinstance(reference, Mapping) or type(reference.get("path")) is not str:
             raise GateError("phase log evidence reference is malformed")
         required_writes.add(Path(reference["path"]).absolute())
+        required_writes.add(Path(reference["path"] + ".capture.json").absolute())
     if observation.get("guarded") is not None:
         required_writes.add(job / "guarded.json")
     written = {Path(path).absolute() for path in effect.get("writtenPaths", ())}
     layout_root = root / layout
     if (
         not required_writes.issubset(written)
-        or any(not _inside(path, layout_root) for path in written)
+        or any(not (_inside(path, layout_root) or _inside(path, authority_run_root(root) / layout)) for path in written)
         or effect.get("childMutationRoots") != [str(layout_root)]
         or effect.get("sourceChanges") != []
         or effect.get("gameChanges") != []
@@ -2779,18 +2803,18 @@ def _load_validated_phase_bundle(
     preparation_id: str,
 ) -> tuple[Mapping[str, object], Mapping[str, object]]:
     root = Path(run_root).absolute()
-    job = root / layout / "jobs" / phase
+    job = authority_run_root(root) / layout / "jobs" / phase
     try:
-        observation = load_exact_json(job / "observation.json")
-        final = load_exact_json(job / "phase-final.json")
-        effect = load_exact_json(job / "effect.json")
-        begin = load_exact_json(job / "begin.json")
-        process = load_exact_json(job / "process.json")
-        operator = load_exact_json(job / "operator-evidence.json")
-        runtime_delta = load_exact_json(job / "runtime-delta.json")
+        observation = _load_gate_json(root, job / "observation.json")
+        final = _load_gate_json(root, job / "phase-final.json")
+        effect = _load_gate_json(root, job / "effect.json")
+        begin = _load_gate_json(root, job / "begin.json")
+        process = _load_gate_json(root, job / "process.json")
+        operator = _load_gate_json(root, job / "operator-evidence.json")
+        runtime_delta = _load_gate_json(root, job / "runtime-delta.json")
         watch = job / "watch"
         raw = {
-            name: read_exact(watch / name)
+            name: _read_gate_evidence(root, watch / name)
             for name in (
                 REQUEST_NAME,
                 CLAIM_NAME,
@@ -2800,6 +2824,9 @@ def _load_validated_phase_bundle(
                 TERMINAL_NAME,
                 OUTCOME_NAME,
                 STOP_NAME,
+                CAUSAL_NAMES["LaunchAdmission"],
+                CAUSAL_NAMES["ProcessTreeQuiescence"],
+                CAUSAL_NAMES["WorkerExitObservation"],
             )
         }
     except (OSError, RuntimeError, TypeError, ValueError) as error:
@@ -2841,11 +2868,11 @@ def _load_validated_phase_bundle(
         runtime_capability._observation(
             observation,
             {"layout": layout, "appRoot": str(root / layout / "app")},
-            {"root": str(root), "runId": root.name},
+            {"schemaVersion": 3, "root": str(root), "authorityRoot": str(authority_run_root(root)), "runId": root.name},
             PHASES.index(phase),
         )
         runtime_capability._verify_raw_evidence(
-            {"candidates": [{"control": observation, "observations": []}]}
+            {"schemaVersion": 3, "authorityRoot": str(authority_run_root(root)), "candidates": [{"control": observation, "observations": []}]}
         )
     except (OSError, RuntimeError, TypeError, ValueError) as error:
         raise GateError(f"durable phase observation/raw evidence differs: {error}") from error
@@ -2885,7 +2912,7 @@ def _load_bound_watch_identity(job: Path, run_root: Path) -> SimpleNamespace:
     watch = Path(job).absolute() / "watch"
     root = Path(run_root).absolute()
     try:
-        request_bytes = read_exact(watch / REQUEST_NAME)
+        request_bytes = _read_gate_evidence(root, watch / REQUEST_NAME)
         request = watch_request_from_bytes(request_bytes)
         if request_bytes != watch_request_to_bytes(request):
             raise GateError("failed phase watch request bytes are not canonical")
@@ -2897,11 +2924,11 @@ def _load_bound_watch_identity(job: Path, run_root: Path) -> SimpleNamespace:
             or tuple(item.root_kind for item in request.roots) != ROOT_KINDS
         ):
             raise GateError("failed phase watch request binding differs")
-        claim_bytes = read_exact(watch / CLAIM_NAME)
+        claim_bytes = _read_gate_evidence(root, watch / CLAIM_NAME)
         claim = controller_claim_from_bytes(claim_bytes, request)
         if claim_bytes != controller_claim_to_bytes(claim, request):
             raise GateError("failed phase controller claim bytes are not canonical")
-        launch_bytes = read_exact(watch / LAUNCH_NAME)
+        launch_bytes = _read_gate_evidence(root, watch / LAUNCH_NAME)
         launch = worker_launch_from_bytes(launch_bytes, request)
         if launch_bytes != worker_launch_to_bytes(launch, request):
             raise GateError("failed phase worker launch bytes are not canonical")
@@ -2936,9 +2963,9 @@ def _require_exact_process_dead(pid: object, creation_time: object, label: str, 
 
 def _load_phase_failure(run_root: Path, layout: str, phase: str) -> Mapping[str, object]:
     root = Path(run_root).absolute()
-    job = root / layout / "jobs" / phase
+    job = authority_run_root(root) / layout / "jobs" / phase
     value = _record_id(
-        load_exact_json(job / "failure.json"),
+        _load_gate_json(root, job / "failure.json"),
         "failureId",
         "phase-failure-sha256:",
         "failed phase record",
@@ -3036,6 +3063,7 @@ def _load_cleanup_watch_evidence(
     prior: Mapping[str, object],
     outcome_id: str,
 ) -> SimpleNamespace:
+    root = Path(run_root).absolute()
     watch = Path(job).absolute() / "watch"
     try:
         identity = _load_bound_watch_identity(job, run_root)
@@ -3053,33 +3081,18 @@ def _load_cleanup_watch_evidence(
             or identity.launch_sha256 != prior["workerLaunchSha256"]
         ):
             raise GateError("failed phase cleanup exact watcher identity differs")
-        outcome_bytes = read_exact(watch / OUTCOME_NAME)
+        outcome_bytes = _read_gate_evidence(root, watch / OUTCOME_NAME)
         outcome = watch_outcome_from_bytes(outcome_bytes)
         if outcome_bytes != watch_outcome_to_bytes(outcome):
             raise GateError("failed phase cleanup watch outcome bytes are not canonical")
-        windows_watch._validate_outcome_binding(
-            outcome,
-            request,
-            identity.claim,
-            identity.launch,
-        )
-        captured = windows_watch._capture_worker_evidence(
-            request,
-            identity.launch,
-        )
-        windows_watch._validate_outcome_raw_evidence(
-            outcome,
-            request,
-            identity.claim,
-            identity.launch,
-            captured,
-        )
+        receipt = windows_watch.watch_receipt_from_files(request, identity.launch.worker_pid,
+            watch / READY_NAME, watch / EVENTS_NAME, watch / TERMINAL_NAME)
+        _require_cleanup_receipt(receipt, request, identity.launch.worker_pid)
         if (
             watch_outcome_id_for(outcome) != outcome_id
             or outcome.request_sha256 != watch_request_sha256(request)
         ):
             raise GateError("failed phase cleanup watch outcome binding differs")
-        receipt = windows_watch._receipt_from_outcome(outcome)
         if (
             receipt.watch_outcome_id != outcome_id
             or receipt.request_id != request.request_id
@@ -3117,10 +3130,10 @@ def _load_cleanup_watch_evidence(
 
 def _load_phase_cleanup(run_root: Path, layout: str, phase: str) -> Mapping[str, object]:
     root = Path(run_root).absolute()
-    job = root / layout / "jobs" / phase
+    job = authority_run_root(root) / layout / "jobs" / phase
     failure = _load_phase_failure(root, layout, phase)
     value = _record_id(
-        load_exact_json(job / "cleanup.json"),
+        _load_gate_json(root, job / "cleanup.json"),
         "cleanupId",
         "phase-cleanup-sha256:",
         "failed phase cleanup record",
@@ -3152,6 +3165,8 @@ def _load_phase_cleanup(run_root: Path, layout: str, phase: str) -> Mapping[str,
     ):
         raise GateError("failed phase cleanup record binding differs")
     prior = failure["cleanup"]
+    if prior["mo2Created"] and not prior["watcherCreated"]:
+        raise GateError("cleanup lacks original process admission and closed-tree evidence")
     for current, expected in (
         ("requestId", prior["requestId"]),
         ("sessionId", prior["sessionId"]),
@@ -3212,7 +3227,7 @@ class ProductionLiveBackend:
 
     def load_state(self, run_root: Path, layout: str) -> DurableLayoutState:
         preparation = _fresh_preparation_preflight(run_root)
-        layout_root = Path(run_root) / layout
+        layout_root = authority_run_root(run_root) / layout
         terminal = list(layout_root.glob("jobs/*/failure.json"))
         installation_failure = authority_run_root(run_root) / layout / "installation-failure.json"
         incomplete = [
@@ -3232,7 +3247,7 @@ class ProductionLiveBackend:
                 phase,
                 str(preparation["preparationId"]),
             )
-            deltas[phase] = load_exact_json(layout_root / "jobs" / phase / "runtime-delta.json")
+            deltas[phase] = _load_gate_json(run_root, layout_root / "jobs" / phase / "runtime-delta.json")
         installed = (authority_run_root(run_root) / layout / "installation.json").is_file()
         installation = None
         if installed:
@@ -3241,6 +3256,15 @@ class ProductionLiveBackend:
             raise GateError("candidate installation is not bound to completed Control")
         if len(completed) > 1 and not installed:
             raise GateError("candidate phases exist without the installation transition")
+        if completed:
+            latest = layout_root / "jobs" / completed[-1]
+            final = _load_gate_json(run_root, latest / "phase-final.json")
+            if _capture_protected(preparation, layout) != _protected_state(final["protectedAfter"], "protectedAfter"):
+                raise GateError("current protected state differs from the completed phase")
+            request = _load_bound_watch_identity(latest, run_root).request
+            roots = _derived_watch_roots(preparation, layout)
+            if request.roots != tuple(windows_watch.watch_root(kind, roots[kind]) for kind in ROOT_KINDS):
+                raise GateError("current watch root path or identity differs from the completed phase")
         preparation_layout = _layout_record(preparation, layout)
         _validate_writable_chain(
             Path(run_root).absolute(),
@@ -3421,6 +3445,10 @@ class ProductionLiveBackend:
         return containment_service._receipted(self._begin_phase)(run_root, layout, phase)
 
     def _begin_phase(self, run_root: Path, layout: str, phase: str) -> LivePhaseSession:
+        with open_vault(authority_run_root(run_root)):
+            return self._begin_phase_in_vault(run_root, layout, phase)
+
+    def _begin_phase_in_vault(self, run_root: Path, layout: str, phase: str) -> LivePhaseSession:
         self.source_check(run_root)
         preparation = _load_preparation(run_root)
         durable = self.load_state(run_root, layout)
@@ -3431,13 +3459,15 @@ class ProductionLiveBackend:
         layout_root = root / layout
         app = Path(str(record["appRoot"]))
         manager = Path(str(record["managerRoot"]))
-        job = layout_root / "jobs" / phase
+        job = authority_run_root(root) / layout / "jobs" / phase
+        child_job = layout_root / "jobs" / phase
         if job.exists():
             raise GateError("phase job path already exists")
         containment_service._current_effects().child_mutation_root(layout_root)
         job.mkdir(parents=True, exist_ok=False)
-        _set_low_integrity_receipted(job)
-        if inspect_path_integrity(job) is not IntegrityLevel.LOW:
+        child_job.mkdir(parents=True, exist_ok=False)
+        _set_low_integrity_receipted(child_job)
+        if inspect_path_integrity(child_job) is not IntegrityLevel.LOW:
             raise GateError("phase job root is not Low integrity")
         plugins_before = snapshot_tree(app / "plugins")
         app_before = snapshot_tree(app)
@@ -3458,7 +3488,6 @@ class ProductionLiveBackend:
         nonce = secrets.token_hex(16)
         watch_root = job / "watch"
         watch_root.mkdir()
-        _set_low_integrity_receipted(watch_root)
         request = build_watch_request(
             root,
             layout,
@@ -3488,7 +3517,7 @@ class ProductionLiveBackend:
         }
         begin["beginId"] = "phase-begin-sha256:" + _sha256(_canonical(begin))
         containment_service._current_effects().write(job / "begin.json")
-        publish_exact_json(job / "begin.json", begin)
+        _publish_gate_json(root, job / "begin.json", begin)
         executable = app / "ModOrganizer.exe"
         pending_cleanup = PendingPhaseCleanup(
             root,
@@ -3510,11 +3539,13 @@ class ProductionLiveBackend:
             pending_cleanup.mo2_pid = pid
             containment_service._current_effects().mo2(pid)
 
+        # Admit attempted immutable publications before delegation: a shared
+        # writer may publish and then raise. Never snapshot its live journal.
+        for name in (REQUEST_NAME, CLAIM_NAME, LAUNCH_NAME, READY_NAME, EVENTS_NAME):
+            containment_service._current_effects().write(watch_root / name)
         start_watch(request, on_created=watcher_created)
         if not pending_cleanup.watcher_created:
             raise GateError("watch startup returned without a worker creation receipt")
-        for name in (REQUEST_NAME, CLAIM_NAME, LAUNCH_NAME, READY_NAME, EVENTS_NAME):
-            containment_service._current_effects().write(watch_root / name)
         environment = child_environment(
             root,
             layout,
@@ -3523,13 +3554,26 @@ class ProductionLiveBackend:
             system_root=os.environ.get("SystemRoot", r"C:\Windows"),
             username=os.environ.get("USERNAME", ""),
         )
-        launch = launch_low_integrity_process(
-            executable,
-            ("--profile", "ModLab - Lab"),
-            app,
-            environment,
-            on_created=mo2_created,
-        )
+        def before_resume(value):
+            pending_cleanup.launch = value
+            pending_cleanup.mo2_creation_time = value.creation_time
+            pending_cleanup.process_handle = value.owner.process_handle
+            containment_service._current_effects().write(watch_root / CAUSAL_NAMES["LaunchAdmission"])
+            windows_watch.admit_watch_launch(watch_root / REQUEST_NAME, value)
+
+        try:
+            launch = launch_low_integrity_process(
+                executable,
+                ("--profile", "ModLab - Lab"),
+                app,
+                environment,
+                on_created=mo2_created,
+                retain_owner=True,
+                before_resume=before_resume,
+            )
+        except BaseException as error:
+            pending_cleanup.process_owner = containment_service._process_owner_from_error(error)
+            raise
         pending_cleanup.launch = launch
         pending_cleanup.mo2_created = True
         pending_cleanup.mo2_pid = getattr(launch, "pid", pending_cleanup.mo2_pid)
@@ -3557,7 +3601,7 @@ class ProductionLiveBackend:
             writable_before,
         )
         self._pending_session = pending
-        process_handle = windows_watch._verified_process_handle(launch.pid, launch.creation_time)
+        process_handle = launch.owner.process_handle
         pending.process_handle = process_handle
         process = {
             "pid": launch.pid,
@@ -3569,7 +3613,7 @@ class ProductionLiveBackend:
         }
         process["processId"] = "phase-process-sha256:" + _sha256(_canonical(process))
         containment_service._current_effects().write(job / "process.json")
-        publish_exact_json(job / "process.json", process)
+        _publish_gate_json(root, job / "process.json", process)
         return pending
 
     def native(self, session: LivePhaseSession, kind: str) -> Mapping[str, object]:
@@ -3665,34 +3709,15 @@ class ProductionLiveBackend:
         wait = windows_watch._kernel32.WaitForSingleObject(session.process_handle, 30_000)
         if wait != windows_watch._WAIT_OBJECT_0:
             raise GateError("MO2 did not exit normally within the bounded close interval")
-        exit_code = windows_watch._get_process_exit_code(session.process_handle)
-        close_error = windows_watch._close_controller_handle(
-            session.process_handle,
-            "completed MO2 phase process",
-            session.job_root,
-        )
-        session.process_handle = 0
-        if close_error is not None:
-            raise GateError(close_error)
-        if exit_code != 0:
-            raise GateError(f"MO2 exited with nonzero code {exit_code}")
-        status, handle, detail = windows_watch._exact_process_status(
-            session.launch.pid,
-            session.launch.creation_time,
-        )
-        if handle:
-            close_error = windows_watch._close_controller_handle(
-                handle,
-                "post-exit MO2 verification",
-                session.job_root,
-            )
-            if close_error is not None:
-                raise GateError(close_error)
-        if status != "dead" or detail is not None or any(
-            item.executable_path.casefold() == session.executable.casefold()
-            for item in _candidate_processes()
-        ):
-            raise GateError("exact MO2 process absence was not proved after close")
+        owner = session.launch.owner
+        observation = owner.observe()
+        exit_code = observation.root_exit_code
+        if exit_code != 0 or observation.active_processes != 0:
+            raise GateError("MO2 original process tree did not exit normally and completely")
+        containment_service._current_effects().write(session.request.evidence_root / CAUSAL_NAMES["ProcessTreeQuiescence"])
+        windows_watch.complete_watch_launch(session.request.evidence_root / REQUEST_NAME, owner)
+        if any(item.executable_path.casefold() == session.executable.casefold() for item in _candidate_processes()):
+            raise GateError("MO2 candidate process remains after original tree completion")
         before_windows = getattr(session, "native_windows_before", None)
         after_windows = getattr(session, "native_windows_after", None)
         if type(before_windows) is not list or type(after_windows) is not list:
@@ -3718,6 +3743,7 @@ class ProductionLiveBackend:
         operator_path = session.job_root / "operator-evidence.json"
         ledger = containment_service._current_effects()
         ledger.write(image_path)
+        ledger.write(image_path.with_name("window.png.capture.json"))
         ledger.write(operator_path)
 
         def validate_image(data: bytes) -> bytes:
@@ -3727,12 +3753,15 @@ class ProductionLiveBackend:
             return data
 
         windows_exact_fs.publish_new_pinned(image_path, screenshot, validate_image)
-        observed_image = _stable_file(image_path)
+        image_data = _read_gate_evidence(session.run_root, image_path, maximum_bytes=MAX_SCREENSHOT_BYTES)
+        observed_image = {"sha256": _sha256(image_data), "size": len(image_data)}
         image = {
             "path": str(image_path),
             "sha256": observed_image["sha256"],
             "size": observed_image["size"],
         }
+        _publish_gate_json(session.run_root, image_path.with_name("window.png.capture.json"),
+                           _screenshot_capture(window, image))
         process = {
             "pid": session.launch.pid,
             "creationTime": session.launch.creation_time,
@@ -3760,7 +3789,7 @@ class ProductionLiveBackend:
             "remainingMatches": [],
             "exitCode": exit_code,
         }
-        validate_operator_evidence(session.phase, process, strict_window, tool, strict_close)
+        validate_operator_evidence(session.phase, process, strict_window, tool, strict_close, run_root=session.run_root)
         operator = {
             "schemaVersion": SCHEMA_VERSION,
             "kind": "task-7B-operator-evidence",
@@ -3777,10 +3806,9 @@ class ProductionLiveBackend:
             "authority": False,
         }
         operator["operatorEvidenceId"] = "operator-evidence-sha256:" + _sha256(_canonical(operator))
-        publish_exact_json(operator_path, operator)
-        if load_exact_json(operator_path) != operator:
+        _publish_gate_json(session.run_root, operator_path, operator)
+        if _load_gate_json(session.run_root, operator_path) != operator:
             raise GateError("operator evidence exact reload differs")
-        receipt = stop_watch(session.request.evidence_root / REQUEST_NAME)
         for name in (
             REQUEST_NAME,
             CLAIM_NAME,
@@ -3790,8 +3818,11 @@ class ProductionLiveBackend:
             TERMINAL_NAME,
             OUTCOME_NAME,
             STOP_NAME,
+            *sorted(set(CAUSAL_NAMES.values())),
         ):
             containment_service._current_effects().write(session.request.evidence_root / name)
+        receipt = stop_watch(session.request.evidence_root / REQUEST_NAME)
+        session.process_handle = 0
         if (
             receipt.request_id != session.request.request_id
             or receipt.session_id != session.request.session_id
@@ -3837,13 +3868,12 @@ class ProductionLiveBackend:
             targets,
             strict=True,
         ):
-            data = read_exact(source)
-            windows_exact_fs.publish_new_pinned(
-                target,
-                data,
-                lambda actual, expected=data: actual if actual == expected else (_ for _ in ()).throw(GateError("retained log bytes differ")),
-            )
-            containment_service._current_effects().write(target)
+            ledger.write(target)
+            ledger.write(target.with_name(target.name + ".capture.json"))
+            capture = _evidence_store(session.run_root).capture_evidence_file(
+                "containment-run:" + session.run_root.name, source, target,
+                maximum_bytes=MAX_GATE_RECORD_BYTES, stage=f"{session.layout}:{session.phase}:Log")
+            data = _read_gate_evidence(session.run_root, target, maximum_bytes=capture["byteCount"])
             logs.append({"path": str(target), "sha256": _sha256(data), "size": len(data)})
             raw_logs.append(data)
         if not logs:
@@ -3901,11 +3931,11 @@ class ProductionLiveBackend:
             runtime_capability._observation(
                 observation,
                 {"layout": session.layout, "appRoot": str(session.app_root)},
-                {"root": str(session.run_root), "runId": session.run_root.name},
+                {"schemaVersion": 3, "root": str(session.run_root), "authorityRoot": str(authority_run_root(session.run_root)), "runId": session.run_root.name},
                 PHASES.index(session.phase),
             )
             runtime_capability._verify_raw_evidence(
-                {"candidates": [{"control": observation, "observations": []}]}
+                {"schemaVersion": 3, "authorityRoot": str(authority_run_root(session.run_root)), "candidates": [{"control": observation, "observations": []}]}
             )
         return {
             "observation": observation,
@@ -3921,7 +3951,7 @@ class ProductionLiveBackend:
     @staticmethod
     def _watcher_pid(session: LivePhaseSession) -> int:
         path = session.request.evidence_root / LAUNCH_NAME
-        value = parse_json(read_exact(path))
+        value = parse_json(_read_gate_evidence(session.run_root, path))
         pid = value.get("workerPid") if isinstance(value, Mapping) else None
         if type(pid) is not int or pid <= 0:
             raise GateError("watch worker launch PID is unavailable")
@@ -3955,7 +3985,7 @@ class ProductionLiveBackend:
             session.run_root,
             session.layout,
             session.phase,
-            load_exact_json(session.job_root / "begin.json"),
+            _load_gate_json(session.run_root, session.job_root / "begin.json"),
             runtime_delta,
         )
         ledger = containment_service._current_effects()
@@ -3963,6 +3993,7 @@ class ProductionLiveBackend:
             session.job_root / "begin.json",
             session.job_root / "process.json",
             session.job_root / "window.png",
+            session.job_root / "window.png.capture.json",
             session.job_root / "operator-evidence.json",
             session.job_root / "runtime-delta.json",
             session.job_root / "observation.json",
@@ -3977,22 +4008,24 @@ class ProductionLiveBackend:
                 TERMINAL_NAME,
                 OUTCOME_NAME,
                 STOP_NAME,
+                *sorted(set(CAUSAL_NAMES.values())),
             )),
         ]
         observation = draft["observation"]
         for reference in observation.get("logs", ()) if isinstance(observation, Mapping) else ():
             if isinstance(reference, Mapping) and type(reference.get("path")) is str:
                 publication_paths.append(Path(reference["path"]).absolute())
+                publication_paths.append(Path(reference["path"] + ".capture.json").absolute())
         if isinstance(observation, Mapping) and observation.get("guarded") is not None:
             publication_paths.append(session.job_root / "guarded.json")
         for path in publication_paths:
             ledger.write(path)
         combined = ContainmentEffects.merged(effects, ledger.freeze())
         effect = build_effect_record(f"{session.layout}:{session.phase}", combined)
-        publish_exact_json(session.job_root / "runtime-delta.json", runtime_delta)
-        publish_exact_json(session.job_root / "effect.json", effect)
+        _publish_gate_json(session.run_root, session.job_root / "runtime-delta.json", runtime_delta)
+        _publish_gate_json(session.run_root, session.job_root / "effect.json", effect)
         observation_id = "observation-sha256:" + _sha256(_canonical(observation))
-        publish_exact_json(session.job_root / "observation.json", observation)
+        _publish_gate_json(session.run_root, session.job_root / "observation.json", observation)
         final = {
             "schemaVersion": SCHEMA_VERSION,
             "kind": "task-7B-phase-final",
@@ -4005,11 +4038,11 @@ class ProductionLiveBackend:
             "watchOutcomeId": receipt.watch_outcome_id,
             "effectId": effect["effectId"],
             "operatorEvidenceId": draft["operatorEvidenceId"],
-            "beginId": load_exact_json(session.job_root / "begin.json")["beginId"],
-            "processId": load_exact_json(session.job_root / "process.json")["processId"],
+            "beginId": _load_gate_json(session.run_root, session.job_root / "begin.json")["beginId"],
+            "processId": _load_gate_json(session.run_root, session.job_root / "process.json")["processId"],
             "runtimeDeltaId": runtime_delta["runtimeDeltaId"],
             "watchEvidence": {
-                name: _sha256(read_exact(session.request.evidence_root / filename))
+                name: _sha256(_read_gate_evidence(session.run_root, session.request.evidence_root / filename))
                 for name, filename in (
                     ("requestSha256", REQUEST_NAME),
                     ("claimSha256", CLAIM_NAME),
@@ -4019,6 +4052,9 @@ class ProductionLiveBackend:
                     ("terminalSha256", TERMINAL_NAME),
                     ("outcomeSha256", OUTCOME_NAME),
                     ("stopSha256", STOP_NAME),
+                    ("admissionSha256", CAUSAL_NAMES["LaunchAdmission"]),
+                    ("quiescenceSha256", CAUSAL_NAMES["ProcessTreeQuiescence"]),
+                    ("workerExitSha256", CAUSAL_NAMES["WorkerExitObservation"]),
                 )
             },
             "protectedBefore": _json_value(session.protected_before),
@@ -4029,7 +4065,7 @@ class ProductionLiveBackend:
             "authority": False,
         }
         final["phaseFinalId"] = "phase-final-sha256:" + _sha256(_canonical(final))
-        publish_exact_json(session.job_root / "phase-final.json", final)
+        _publish_gate_json(session.run_root, session.job_root / "phase-final.json", final)
         _load_validated_phase_bundle(
             session.run_root,
             session.layout,
@@ -4097,9 +4133,10 @@ class ProductionLiveBackend:
         if len(receipts) != 10 or any(len({item[index] for item in receipts}) != 10 for index in range(4)):
             raise GateError("all ten watcher/MO2/request/session identities must be distinct")
         matrix = {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "runId": root.name,
             "root": str(root),
+            "authorityRoot": str(authority_run_root(root)),
             "source": dict(preparation["source"]),
             "archive": {
                 "sha256": preparation["archive"]["sha256"],
@@ -4111,7 +4148,7 @@ class ProductionLiveBackend:
         containment_service._current_effects().write(authority_run_root(root) / "selection.json")
         publish_capability(authority_run_root(root) / "selection.json", selection)
         exact_selection = load_capability(authority_run_root(root) / "selection.json", authority_root=authority_run_root(root))
-        if exact_selection != selection or capability_to_bytes(exact_selection) != read_exact(authority_run_root(root) / "selection.json"):
+        if exact_selection != selection or capability_to_bytes(exact_selection) != _read_gate_evidence(root, authority_run_root(root) / "selection.json"):
             raise GateError("selection exact publication/reload differs")
         source = {
             **dict(preparation["source"]),
@@ -4142,7 +4179,7 @@ class ProductionLiveBackend:
         effects: ContainmentEffects,
         session: LivePhaseSession | None = None,
     ) -> None:
-        job = Path(run_root).absolute() / layout / "jobs" / phase
+        job = authority_run_root(run_root) / layout / "jobs" / phase
         pending = self._pending_session
         if session is None and pending is not None and (
             pending.run_root == Path(run_root).absolute()
@@ -4173,62 +4210,28 @@ class ProductionLiveBackend:
         if executable is None and launch is not None:
             executable = getattr(launch, "executable", None)
         cleanup_errors: list[str] = []
+        cleanup_writes = []
         process_live = False
         process_handle_cleanup_pending = False
-        if process_handle:
-            try:
-                wait = windows_watch._kernel32.WaitForSingleObject(process_handle, 0)
-                if wait == windows_watch._WAIT_OBJECT_0:
-                    process_live = False
-                elif wait == windows_watch._WAIT_TIMEOUT:
-                    process_live = True
-                else:
-                    process_live = True
-                    cleanup_errors.append(f"failed MO2 phase liveness wait returned {wait}")
-            except BaseException as wait_error:
-                process_live = True
-                cleanup_errors.append(str(wait_error) or type(wait_error).__name__)
-            if not process_live:
-                close_error = windows_watch._close_controller_handle(
-                    process_handle,
-                    "failed MO2 phase process",
-                    job,
-                )
-                if close_error is not None:
-                    cleanup_errors.append(close_error)
-                    process_handle_cleanup_pending = True
-                else:
-                    owner.process_handle = 0
-        elif type(mo2_pid) is int and mo2_pid > 0 and type(mo2_creation_time) is int and mo2_creation_time > 0:
-            try:
-                status, handle, detail = windows_watch._exact_process_status(
-                    mo2_pid,
-                    mo2_creation_time,
-                )
-                process_live = status != "dead" or detail is not None
-                if detail is not None:
-                    cleanup_errors.append(str(detail))
-                if handle and process_live and owner is not None:
-                    owner.process_handle = handle
-                elif handle:
-                    close_error = windows_watch._close_controller_handle(
-                        handle,
-                        "failed MO2 phase verification",
-                        job,
-                    )
-                    if close_error is not None:
-                        cleanup_errors.append(close_error)
-                        process_handle_cleanup_pending = True
-                        if owner is not None:
-                            owner.process_handle = handle
-            except BaseException as status_error:
-                process_live = True
-                cleanup_errors.append(str(status_error) or type(status_error).__name__)
-        elif type(mo2_pid) is int and mo2_pid > 0:
+        process_owner = (getattr(launch, "owner", None) or getattr(owner, "process_owner", None)
+                         or containment_service._process_owner_from_error(error))
+        if owner is not None and process_owner is not None:
+            owner.process_owner = process_owner
+        if type(mo2_pid) is int and mo2_pid > 0:
             process_live = True
-            cleanup_errors.append(
-                f"created MO2 PID {mo2_pid} lacks an exact creation-time receipt"
-            )
+            process_handle_cleanup_pending = True
+            if process_owner is None:
+                cleanup_errors.append("original process tree owner unavailable")
+            else:
+                try:
+                    observed = process_owner.observe()
+                    process_live = observed.root_exit_code is None or observed.active_processes != 0
+                    if not process_live and request is not None:
+                        cleanup_writes.append(request.evidence_root / CAUSAL_NAMES["ProcessTreeQuiescence"])
+                        windows_watch.complete_watch_launch(request.evidence_root / REQUEST_NAME, process_owner)
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(str(cleanup_error) or type(cleanup_error).__name__)
+                    process_live = True
 
         evidence_root = getattr(request, "evidence_root", None) if request is not None else None
         request_id = getattr(request, "request_id", None) if request is not None else None
@@ -4254,9 +4257,13 @@ class ProductionLiveBackend:
             try:
                 if evidence_root is None:
                     raise GateError("watch evidence root is unavailable for failure cleanup")
+                cleanup_writes.extend(Path(evidence_root) / name for name in (STOP_NAME, EVENTS_NAME, TERMINAL_NAME, OUTCOME_NAME, CAUSAL_NAMES["WorkerExitObservation"]))
                 receipt = stop_watch(Path(evidence_root) / REQUEST_NAME)
                 _require_cleanup_receipt(receipt, request, watcher_pid)
                 watch_cleanup_pending = watch_identity is None
+                process_handle_cleanup_pending = False
+                if owner is not None:
+                    owner.process_handle = 0
             except BaseException as watch_error:
                 watch_cleanup_pending = True
                 cleanup_errors.append(str(watch_error) or type(watch_error).__name__)
@@ -4281,6 +4288,7 @@ class ProductionLiveBackend:
             "processHandleAcquired": process_handle_acquired,
             "processHandleCleanupPending": process_handle_cleanup_pending,
         }
+        effects = ContainmentEffects.merged(effects, ContainmentEffects(written_paths=tuple(cleanup_writes)))
         failure = {
             "schemaVersion": SCHEMA_VERSION,
             "kind": "task-7B-phase-failed-attempt",
@@ -4305,7 +4313,14 @@ class ProductionLiveBackend:
             "authority": False,
         }
         failure["failureId"] = "phase-failure-sha256:" + _sha256(_canonical(failure))
-        publish_exact_json(job / "failure.json", failure)
+        failure_effects = ContainmentEffects.merged(effects, ContainmentEffects(written_paths=(job / "failure.json",)))
+        try:
+            _publish_gate_json(run_root, job / "failure.json", failure)
+        except BaseException as publication_error:
+            publication_error.effects = ContainmentEffects.merged(failure_effects, getattr(publication_error, "effects", None) or ContainmentEffects())
+            if process_owner is not None:
+                publication_error.owner = process_owner
+            raise
         pending_cleanup = process_live or process_handle_cleanup_pending or watch_cleanup_pending
         self._pending_session = owner if pending_cleanup and owner is not None else None
 
@@ -4326,106 +4341,41 @@ class ProductionLiveBackend:
         root = Path(run_root).absolute()
         if layout not in LAYOUTS or phase not in PHASES or _RUN.fullmatch(root.name) is None:
             raise GateError("failed phase cleanup binding is invalid")
-        job = root / layout / "jobs" / phase
+        job = authority_run_root(root) / layout / "jobs" / phase
         existing = job / "cleanup.json"
         if existing.is_file():
-            record = _load_phase_cleanup(root, layout, phase)
-            prior = _load_phase_failure(root, layout, phase)["cleanup"]
-            if prior["mo2Created"]:
-                if not prior["mo2CreationTimeAvailable"]:
-                    raise GateError("failed-attempt MO2 exact process identity is unavailable")
-                _require_exact_process_dead(
-                    prior["mo2Pid"], prior["mo2CreationTime"],
-                    "failed-attempt MO2", job,
-                )
-            if prior["watcherCreated"]:
-                if prior["watchIdentityAvailable"] is not True:
-                    raise GateError("failed-attempt watcher exact process identity is unavailable")
-                _require_exact_process_dead(
-                    prior["controllerPid"], prior["controllerCreationTime"],
-                    "failed-attempt controller", job,
-                )
-                _require_exact_process_dead(
-                    prior["watcherPid"], prior["watcherCreationTime"],
-                    "failed-attempt watcher", job,
-                )
-            _require_process_absence()
-            return record
+            return _load_phase_cleanup(root, layout, phase)
         failure = _load_phase_failure(root, layout, phase)
         cleanup = failure["cleanup"]
-        mo2_created = cleanup["mo2Created"]
-        creation_available = cleanup["mo2CreationTimeAvailable"]
-        if mo2_created and not creation_available:
-            raise GateError("failed-attempt MO2 exact process identity is unavailable")
-        if mo2_created and creation_available:
-            status, handle, detail = windows_watch._exact_process_status(
-                cleanup["mo2Pid"],
-                cleanup["mo2CreationTime"],
-            )
-            close_error = None
-            if handle:
-                close_error = windows_watch._close_controller_handle(
-                    handle,
-                    "cleanup-only failed MO2 verification",
-                    job,
-                )
-            if close_error is not None:
-                raise GateError(close_error)
-            if status == "live":
-                raise GateError("failed-attempt MO2 is still running; close it normally, then retry cleanup")
-            if status != "dead" or detail is not None:
-                raise GateError(f"failed-attempt MO2 absence is uncertain: {detail or status}")
         _require_process_absence()
-
+        ledger = containment_service._current_effects()
+        ledger.child_mutation_root(root)
         outcome_id = None
         watch_evidence = None
         if cleanup["watcherCreated"]:
             if cleanup["watchIdentityAvailable"] is not True:
-                raise GateError("failed-attempt watcher exact process identity is unavailable")
-            request_path = job / "watch" / REQUEST_NAME
-            try:
-                request = watch_request_from_bytes(read_exact(request_path))
-            except (OSError, RuntimeError, TypeError, ValueError) as error:
-                raise GateError(f"failed-attempt watch request cannot be reconstructed: {error}") from error
-            if (
-                request.evidence_root != job / "watch"
-                or request.request_id != cleanup["requestId"]
-                or request.session_id != cleanup["sessionId"]
-                or request.run_id != "containment-run:" + root.name
-                or request.scenario is not ContainmentScenario.NEW_FOLDER
-            ):
-                raise GateError("failed-attempt watch request binding differs")
-            _require_exact_process_dead(
-                cleanup["controllerPid"],
-                cleanup["controllerCreationTime"],
-                "failed-attempt controller",
-                job,
-            )
-            receipt = stop_watch(request_path)
-            if (
-                not isinstance(receipt, WatchReceipt)
-                or type(receipt.watch_outcome_id) is not str
-                or not receipt.watch_outcome_id.startswith("watch-outcome-sha256:")
-            ):
-                raise GateError("watch cleanup did not retain one exact outcome")
-            _require_exact_process_dead(
-                cleanup["watcherPid"],
-                cleanup["watcherCreationTime"],
-                "failed-attempt watcher",
-                job,
-            )
+                raise GateError("failed-attempt watcher exact identity is unavailable")
+            identity = _load_bound_watch_identity(job, root)
+            request = identity.request
+            watch = request.evidence_root
+            receipt = windows_watch.watch_receipt_from_files(request, identity.launch.worker_pid,
+                watch / READY_NAME, watch / EVENTS_NAME, watch / TERMINAL_NAME)
+            if not receipt.complete:
+                # Only the original shared session can prove this tree closed.
+                # No numeric PID inventory or saved outcome substitutes for it.
+                ledger.write(watch / CAUSAL_NAMES["ProcessTreeQuiescence"])
+                windows_watch.complete_watch_launch(watch / REQUEST_NAME)
+                for name in (STOP_NAME, EVENTS_NAME, TERMINAL_NAME, OUTCOME_NAME, CAUSAL_NAMES["WorkerExitObservation"]):
+                    ledger.write(watch / name)
+                receipt = stop_watch(watch / REQUEST_NAME)
+            _require_cleanup_receipt(receipt, request, identity.launch.worker_pid)
             outcome_id = receipt.watch_outcome_id
-            watch_evidence = _load_cleanup_watch_evidence(
-                job,
-                root,
-                cleanup,
-                outcome_id,
-            )
+            watch_evidence = _load_cleanup_watch_evidence(job, root, cleanup, outcome_id)
             if watch_evidence.receipt != receipt:
-                raise GateError("watch cleanup receipt differs from exact retained outcome")
+                raise GateError("cleanup receipt differs from shared raw reconstruction")
+        elif cleanup["mo2Created"]:
+            raise GateError("original process tree ownership is unavailable for incomplete attempt")
 
-        ledger = containment_service._current_effects()
-        ledger.child_mutation_root(root)
         ledger.write(existing)
         effect = build_effect_record(f"{layout}:{phase}:cleanup", ledger.freeze())
         record = {
@@ -4466,7 +4416,7 @@ class ProductionLiveBackend:
             "authority": False,
         }
         record["cleanupId"] = "phase-cleanup-sha256:" + _sha256(_canonical(record))
-        publish_exact_json(existing, record)
+        _publish_gate_json(root, existing, record)
         exact = _load_phase_cleanup(root, layout, phase)
         if exact != record:
             raise GateError("failed phase cleanup exact reload differs")
@@ -4984,6 +4934,8 @@ def build_watch_request(
         raise GateError("watch request run/layout/phase binding is invalid")
     if _HEX64.fullmatch(request_token) is None or _HEX64.fullmatch(session_token) is None:
         raise GateError("watch request and session tokens must be fresh SHA-256 values")
+    if evidence_root != authority_run_root(run_root) / layout / "jobs" / phase / "watch":
+        raise GateError("watch evidence path differs from the exact protected phase")
     if set(roots) != set(ROOT_KINDS):
         raise GateError("watch roots must contain all eight canonical kinds")
     if not evidence_root.is_dir() or any(evidence_root.iterdir()):
@@ -4994,6 +4946,10 @@ def build_watch_request(
 
     factory = root_factory or stable_root
     watch_roots = tuple(factory(kind, Path(roots[kind]).absolute()) for kind in ROOT_KINDS)
+    with open_vault(authority_run_root(run_root)) as vault:
+        vault.verify_descendant(evidence_root)
+        authority_identity = vault.identity
+        creator_sid = vault.creator_sid
     return WatchRequest(
         request_id="watch-request:" + request_token,
         session_id="watch-session:" + session_token,
@@ -5002,6 +4958,10 @@ def build_watch_request(
         evidence_root=evidence_root,
         stop_token_path=evidence_root / STOP_NAME,
         roots=watch_roots,
+        authority_root=authority_run_root(run_root),
+        authority_volume_serial=authority_identity.volume_serial,
+        authority_file_id=authority_identity.file_id,
+        authority_creator_sid=creator_sid,
     )
 
 
@@ -5050,6 +5010,8 @@ def validate_operator_evidence(
     window: Mapping[str, object],
     tool: Mapping[str, object] | None,
     close: Mapping[str, object],
+    *,
+    run_root: Path | None = None,
 ) -> None:
     if phase not in PHASES or phase == "Control" and tool is not None:
         raise GateError("operator phase/tool evidence is inconsistent")
@@ -5092,13 +5054,11 @@ def validate_operator_evidence(
     image_path = Path(str(image["path"])).absolute()
     if not image_path.is_file():
         raise GateError("reviewable image is missing")
-    observed_image = _stable_file(image_path)
-    if (
-        image.get("size") != observed_image["size"]
-        or image.get("sha256") != observed_image["sha256"]
-    ):
+    image_data = (read_exact(image_path, maximum_bytes=MAX_SCREENSHOT_BYTES) if run_root is None
+                  else _read_gate_evidence(run_root, image_path, maximum_bytes=MAX_SCREENSHOT_BYTES))
+    if image.get("size") != len(image_data) or image.get("sha256") != _sha256(image_data):
         raise GateError("reviewable image bytes differ from the observation")
-    _validate_png_bytes(read_exact(image_path))
+    _validate_png_bytes(image_data)
     if phase != "Control":
         if (
             type(tool) is not dict
@@ -5149,8 +5109,8 @@ def _publish_guarded_marker(session: object, loaded: object) -> Mapping[str, obj
     ):
         raise GateError("Guarded marker is not bound to the exact loaded observation")
     containment_service._current_effects().write(target)
-    publish_exact_json(target, loaded)
-    exact = load_exact_json(target)
+    _publish_gate_json(session.run_root, target, loaded)
+    exact = _load_gate_json(session.run_root, target)
     if exact != loaded:
         raise GateError("Guarded marker exact reload differs")
     return exact
@@ -5169,6 +5129,8 @@ def _validate_observation_and_publish_guarded(
         "appRoot": str(Path(getattr(session, "app_root", ""))),
     }
     matrix = {
+        "schemaVersion": 3,
+        "authorityRoot": str(authority_run_root(session.run_root)),
         "root": str(Path(getattr(session, "run_root", ""))),
         "runId": Path(getattr(session, "run_root", "")).name,
     }
@@ -5181,7 +5143,7 @@ def _validate_observation_and_publish_guarded(
             PHASES.index("Guarded"),
         )
         runtime_capability._verify_raw_evidence(
-            {"candidates": [{"control": observation, "observations": []}]}
+            {"schemaVersion": 3, "authorityRoot": str(authority_run_root(session.run_root)), "candidates": [{"control": observation, "observations": []}]}
         )
 
     # First prove the complete launch/process/runtime observation and the exact
@@ -5274,6 +5236,11 @@ def derive_selection(
 ) -> Mapping[str, object]:
     """Delegate verdict derivation to the strict product V2 selector."""
     complete = require_complete_matrix(matrix)
+    if (set(complete) != runtime_capability.PROTECTED_MATRIX_FIELDS or complete.get("schemaVersion") != 3
+            or type(complete.get("root")) is not str or type(complete.get("authorityRoot")) is not str
+            or complete.get("authorityRoot") != str(authority_run_root(Path(complete["root"])))
+            or complete.get("runId") != Path(complete["root"]).name):
+        raise GateError("new gate selection requires exact schema-3 paired root bindings")
     for candidate in complete["candidates"]:
         control = candidate["control"]
         if isinstance(control, Mapping) and control.get("loaded") is not None:
@@ -5296,6 +5263,18 @@ def derive_selection(
     ):
         raise GateError("strict selector returned malformed or authority-bearing output")
     return selected
+
+
+def _phase_native_ownership(error):
+    """Recover retained native ownership through the gate/service cause wrappers."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        ownership = getattr(error, "ownership", error)
+        if isinstance(ownership, windows_exact_fs.ExactObjectOwnershipError):
+            return ownership
+        error = getattr(error, "cause", None) or error.__cause__
+    return None
 
 
 def run_operator_phase(
@@ -5358,11 +5337,29 @@ def run_operator_phase(
         try:
             backend.fail_phase(root, layout, phase, error, effects, session)
         except BaseException as failure_error:
-            if hasattr(error, "add_note"):
-                error.add_note(f"terminal phase failure publication also failed: {failure_error}")
+            partial = getattr(failure_error, "effects", None)
+            if isinstance(partial, ContainmentEffects):
+                effects = ContainmentEffects.merged(effects, partial)
+            primary = error.cause if isinstance(error, containment_service.ContainmentOperationError) and error.cause is not None else error
+            secondary_ownership = getattr(failure_error, "ownership", failure_error)
+            if isinstance(secondary_ownership, windows_exact_fs.ExactObjectOwnershipError):
+                combined = windows_exact_fs.union_retained_ownership(
+                    f"phase and failure publication retain original handles: {failure_error}",
+                    prior=_phase_native_ownership(error) or primary, owners=secondary_ownership.owners)
+                combined.owner = containment_service._process_owner_from_error(error) or containment_service._process_owner_from_error(failure_error)
+                combined.effects = effects
+                raise combined from error
+            error.add_note(f"terminal phase failure publication also failed: {failure_error}")
         if isinstance(error, GateError):
+            error.effects = effects
+            error.owner = containment_service._process_owner_from_error(error)
+            error.ownership = _phase_native_ownership(error)
             raise
-        raise GateError(str(error) or type(error).__name__) from error
+        wrapped = GateError(str(error) or type(error).__name__)
+        wrapped.effects = effects
+        wrapped.ownership = _phase_native_ownership(error)
+        wrapped.owner = containment_service._process_owner_from_error(error)
+        raise wrapped from error
 
 
 def install_operator_candidate(
@@ -5475,7 +5472,7 @@ def _load_restart_record(run_root: Path) -> Mapping[str, object]:
         _load_phase_failure(failed_root, layout, phase)
         for layout in LAYOUTS
         for phase in PHASES
-        if (failed_root / layout / "jobs" / phase / "failure.json").is_file()
+        if (authority_run_root(failed_root) / layout / "jobs" / phase / "failure.json").is_file()
     ]
     if not failures or value["failureIds"] != [item["failureId"] for item in failures]:
         raise GateError("failed attempt restart failure sequence differs")
@@ -5573,7 +5570,7 @@ def restart_failed_attempt(
         _load_phase_failure(failed_root, layout, phase)
         for layout in LAYOUTS
         for phase in PHASES
-        if (failed_root / layout / "jobs" / phase / "failure.json").is_file()
+        if (authority_run_root(failed_root) / layout / "jobs" / phase / "failure.json").is_file()
     ]
     if not failures:
         raise GateError("restart requires at least one immutable failed phase")
@@ -5654,6 +5651,7 @@ def build_envelope(
         raise GateError(f"product-valid derived selection is required: {error}") from error
     if (
         contains_authority(selection)
+        or selection.get("schemaVersion") != 3
         or selection.get("runId") != run_id
         or selection.get("source") != {key: source[key] for key in ("commit", "tree")}
     ):
@@ -5801,9 +5799,10 @@ def load_envelope(path: Path) -> Mapping[str, object]:
     ):
         raise GateError("durable watcher/MO2/request/session identities are not all fresh")
     expected_selection = derive_selection({
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "runId": root.name,
         "root": str(root),
+        "authorityRoot": str(authority_run_root(root)),
         "source": dict(preparation["source"]),
         "archive": {
             "sha256": preparation["archive"]["sha256"],
