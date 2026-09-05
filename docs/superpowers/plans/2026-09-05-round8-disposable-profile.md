@@ -34,3 +34,17 @@
 - [ ] Use a fresh preparation for ten real MO2 phases, retain actual UI evidence, and report the observed outcome. Unattended MO2 UI tests and retries are explicitly authorized by the user; no further readiness question is needed for that scope.
 
 MO2 source for the profile override: https://github.com/ModOrganizer2/modorganizer/blob/v2.5.2/src/settings.cpp#L1575-L1578
+
+
+## Task 2: Record ordinary startup output without changing support criteria
+
+The first real Control inventory exposed stock plugin caches, App log creation/rotation, and Windows cache fallback paths. The 2026-09-02 plan's Task 0 explicitly requires retaining created cache entries. This correction restores that measurement contract and leaves `_candidate_passes` unchanged.
+
+**Files:** `tools/mo2_round8_gate.py`, `modlab/adapters/mo2/bridge_runtime_capability.py`, `tests/test_mo2_round8_gate.py`, and the validation evidence document.
+
+- [x] Reproduce refusal of stock caches, new App logs, and missing Windows shared-data variables.
+- [x] Add bounded source-corresponding App/plugins cache observation rules to snapshots, deltas and output validation; retain every observed entry. Keep installation source-only and the original frozen Control baseline.
+- [x] Add a complete matrix regression proving stock caches are valid evidence while candidate cache drift produces NotSupported.
+- [x] Unify allowed App log creation/rotation, record the exact nxmhandler log, seed the empty crashDumps directory, and bind PROGRAMDATA/ALLUSERSPROFILE/SystemDrive explicitly.
+- [x] Verify focused runtime tests and the existing capability suite (48 tests).
+- [ ] Independently review this correction, commit it, then run the one complete gate covering both correction batches before fresh live preparation.

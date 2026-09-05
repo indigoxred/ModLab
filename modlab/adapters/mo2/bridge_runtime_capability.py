@@ -601,6 +601,10 @@ def launch_environment(root, layout, phase, nonce, inherited=None):
     environment = {"SystemRoot": system, "WINDIR": system, "PATH": str(Path(system) / "System32"), "USERNAME": username}
     base = root / layout / "environment"
     environment.update({name: str(base / name) for name in ("TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME")})
+    drive = Path(system).drive
+    _require(bool(drive) and len(drive) == 2 and drive[1] == ":", "Windows system drive is unavailable")
+    environment.update(SystemDrive=drive, PROGRAMDATA=str(base / "PROGRAMDATA"),
+        ALLUSERSPROFILE=str(base / "PROGRAMDATA"))
     environment.update(MODLAB_CAPABILITY_PHASE=phase, MODLAB_CAPABILITY_NONCE=nonce)
     if phase == "Guarded":
         environment["MODLAB_CAPABILITY_GUARD"] = nonce

@@ -162,7 +162,7 @@ HARNESS_POLICY_VERSION = 2
 EFFECT_POLICY_VERSION = 1
 PROTOCOL_VERSION = 2
 PUBLICATION_POLICY_VERSION = "handle-pinned-no-replace-v2"
-RUNTIME_POLICY_VERSION = 2
+RUNTIME_POLICY_VERSION = 3
 FIXTURE_VERSION = 3
 TAR_CWD_LIMIT = LIMITS["tar-cwd"]
 COMPLETE_PATH_LIMIT = LIMITS["preparation-wide"]
@@ -181,11 +181,6 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _JOB = re.compile(r"^bootstrap-job:[0-9a-f]{32}$")
 _ID64 = re.compile(r"^[a-z][a-z0-9-]*:[0-9a-f]{64}$")
 _NOREGISTER = b"[General]\r\nnoregister=true\r\n"
-_ALLOWED_RUNTIME_PREFIXES = (
-    "logs/",
-    "webcache/",
-    "cache/",
-)
 REPO_ROOT = _SCRIPT_REPO_ROOT
 MO2_FILE_VERSION = "2.5.2.0"
 
@@ -517,6 +512,8 @@ def _runtime_paths(run_root: Path, layout: str, sources: Mapping[str, bytes]) ->
         layout_root / "environment" / "LOCALAPPDATA",
         layout_root / "environment" / "USERPROFILE",
         layout_root / "environment" / "HOME",
+        layout_root / "environment" / "PROGRAMDATA",
+        layout_root / "app" / "crashDumps",
     ]
     publication_targets = [
         layout_root / "app" / "nxmhandler.ini",
@@ -1452,6 +1449,7 @@ class ProductionBackend:
     def configure(self, layout: str, layout_root: Path, manager_root: Path) -> dict[str, object]:
         environment_root = layout_root / "environment"
         directories = [
+            layout_root / "app" / "crashDumps",
             manager_root / "downloads",
             manager_root / "mods",
             manager_root / "profiles",
@@ -1460,7 +1458,7 @@ class ProductionBackend:
             manager_root / "logs",
             manager_root / "cache",
             manager_root / "test-profiles",
-            *(environment_root / name for name in ("TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME")),
+            *(environment_root / name for name in ("TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME", "PROGRAMDATA")),
         ]
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
@@ -1823,8 +1821,9 @@ def _validate_prepared_layout(
     )
     environment = root / layout / "environment"
     configured_roots = [
+        app / "crashDumps",
         manager / "downloads", manager / "mods", manager / "profiles", manager / "overwrite", manager / "webcache", manager / "logs", manager / "cache", manager / "test-profiles",
-        *(environment / name for name in ("TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME")),
+        *(environment / name for name in ("TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME", "PROGRAMDATA")),
     ]
     if (
         configuration["managerRoot"] != str(manager)
@@ -4911,7 +4910,7 @@ def _validated_writable_snapshots(
     for name, path in roots.items():
         snapshot, inventory = _runtime_snapshot(record[name], f"{label} {name}")
         for item in inventory.values():
-            if _runtime_entry_forbidden(str(item["path"])):
+            if _runtime_snapshot_entry_forbidden(name, str(item["path"]), inventory):
                 raise GateError(f"{label} contains a forbidden entry: {item['path']}")
         if require_current_roots:
             try:
@@ -5026,6 +5025,39 @@ def _validate_writable_chain(
         raise GateError("current writable state differs from the latest durable transition")
 
 
+def _source_bound_plugin_cache(relative: str, inventory: Mapping[str, Mapping[str, object]]) -> bool:
+    """Admit recorded cache paths, never assert their bytes are safe to execute.
+
+    The unchanged capability selector still compares the entire plugin tree to
+    frozen Control.after; any candidate-phase cache drift is NotSupported.
+    """
+    parts = relative.casefold().split("/")
+    if len(parts) < 2 or parts[0] != "plugins" or parts.count("__pycache__") != 1:
+        return False
+    index = parts.index("__pycache__")
+    if index < 1:
+        return False
+    prefix = "/".join(parts[:index]) + "/"
+    row = inventory.get(relative.casefold())
+    if row is None:
+        return False
+    if index == len(parts) - 1 and row["kind"] == "directory":
+        return any(key.startswith(prefix) and "/" not in key[len(prefix):]
+            and key.endswith(".py") and source["kind"] == "file"
+            for key, source in inventory.items())
+    if index != len(parts) - 2 or row["kind"] != "file":
+        return False
+    match = re.fullmatch(r"(.+)\.cpython-312(?:\.opt-[12])?\.pyc", parts[-1])
+    source = inventory.get(prefix + match.group(1) + ".py") if match else None
+    return source is not None and source["kind"] == "file"
+
+
+def _runtime_snapshot_entry_forbidden(name: str, relative: str,
+        inventory: Mapping[str, Mapping[str, object]]) -> bool:
+    return _runtime_entry_forbidden(relative) and not (
+        name == "App" and _source_bound_plugin_cache(relative, inventory))
+
+
 def _runtime_entry_forbidden(relative: str) -> bool:
     lowered = relative.casefold()
     return "__pycache__" in lowered.split("/") or lowered.endswith((".pyc", ".pyo"))
@@ -5036,14 +5068,14 @@ def _runtime_change_allowed(phase: str, root_name: str, relative: str) -> bool:
         return False
     prefixes = {
         current: {
-            "App": (),
+            "App": ("logs", "webcache", "cache"),
             "Manager": ("logs", "webcache", "cache", "test-profiles/modlab - lab"),
-            "Environment": ("temp", "tmp", "appdata", "localappdata", "userprofile", "home"),
+            "Environment": ("temp", "tmp", "appdata", "localappdata", "userprofile", "home", "programdata"),
         }
         for current in PHASES
     }
     lowered = relative.casefold()
-    if root_name == "App" and lowered == "modorganizer.ini":
+    if root_name == "App" and lowered in ("modorganizer.ini", "nxmhandler.log"):
         return True
     # The active profile directory is fixed; only entries below it may change.
     if root_name == "Manager" and lowered == "test-profiles/modlab - lab":
@@ -5070,9 +5102,10 @@ def build_runtime_delta(
         after_snapshot, current = _runtime_snapshot(after[name], f"{name} after")
         if before_snapshot["rootIdentity"] != after_snapshot["rootIdentity"]:
             raise GateError(f"runtime writable root identity changed: {name}")
-        for item in (*previous.values(), *current.values()):
-            if _runtime_entry_forbidden(str(item["path"])):
-                raise GateError(f"runtime snapshot contains a forbidden entry: {item['path']}")
+        for inventory in (previous, current):
+            for item in inventory.values():
+                if _runtime_snapshot_entry_forbidden(name, str(item["path"]), inventory):
+                    raise GateError(f"runtime snapshot contains a forbidden entry: {item['path']}")
         try:
             admitted = [
                 PlannedPath(
@@ -5100,7 +5133,9 @@ def build_runtime_delta(
             if old == new:
                 continue
             relative = str((old or new)["path"])
-            if not _runtime_change_allowed(phase, name, relative):
+            measured_cache = name == "App" and (
+                _source_bound_plugin_cache(relative, previous) or _source_bound_plugin_cache(relative, current))
+            if not _runtime_change_allowed(phase, name, relative) and not measured_cache:
                 raise GateError(f"runtime write escaped the declared {name} roots: {relative}")
             changes.append({
                 "path": relative,
@@ -5209,16 +5244,20 @@ def validate_runtime_outputs(
         raise GateError(f"runtime output path budget refused: {error}") from error
     if _inventory_map(runtime_before, "runtime before") != _inventory_map(runtime_after, "runtime after"):
         raise GateError("MO2/Python/mobase runtime identity drifted")
-    for key, item in previous.items():
-        if current.get(key) != item and str(item["path"]).casefold() != "modorganizer.ini":
-            raise GateError(f"pre-existing runtime entry changed: {item['path']}")
-    additions = [item["path"] for key, item in current.items() if key not in previous]
-    for relative in additions:
-        lowered = relative.casefold()
-        if "__pycache__" in lowered.split("/") or lowered.endswith((".pyc", ".pyo")):
-            raise GateError("Python bytecode/cache output is forbidden")
-        if not any(lowered.startswith(prefix.casefold()) for prefix in _ALLOWED_RUNTIME_PREFIXES):
-            raise GateError(f"runtime output escaped declared disposable roots: {relative}")
+    for inventory in (previous, current):
+        for item in inventory.values():
+            if _runtime_snapshot_entry_forbidden("App", str(item["path"]), inventory):
+                raise GateError("unbound Python bytecode/cache output is forbidden")
+    for key in set(previous) | set(current):
+        old, new = previous.get(key), current.get(key)
+        if old == new:
+            continue
+        relative = str((old or new)["path"])
+        if (_runtime_change_allowed(phase, "App", relative)
+                or _source_bound_plugin_cache(relative, previous)
+                or _source_bound_plugin_cache(relative, current)):
+            continue
+        raise GateError(f"runtime output escaped declared disposable roots: {relative}")
     return []
 
 

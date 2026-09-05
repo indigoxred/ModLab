@@ -1698,7 +1698,7 @@ class OfflineGateTests(unittest.TestCase):
         expected = {
             "SystemRoot", "WINDIR", "PATH", "USERNAME", "TEMP", "TMP", "APPDATA",
             "LOCALAPPDATA", "USERPROFILE", "HOME", "MODLAB_CAPABILITY_PHASE",
-            "MODLAB_CAPABILITY_NONCE", "MODLAB_CAPABILITY_GUARD",
+            "MODLAB_CAPABILITY_NONCE", "MODLAB_CAPABILITY_GUARD", "SystemDrive", "PROGRAMDATA", "ALLUSERSPROFILE",
         }
         self.assertEqual(expected, set(environment))
         self.assertFalse(any(name.upper().startswith("PYTHON") for name in environment))
@@ -1834,6 +1834,82 @@ class OfflineGateTests(unittest.TestCase):
         with self.assertRaises(h.GateError):
             h._validate_phase_ini_capture(fixture.root, "SingleFile", "Control", inventory)
 
+    def test_runtime_records_source_bound_plugin_caches_without_hiding_drift(self):
+        source = {"path": "plugins/bundled.py", "kind": "file", "sha256": "a" * 64,
+            "size": 4, "volume": 1, "fileId": 10}
+        cache_dir = {"path": "plugins/__pycache__", "kind": "directory", "sha256": None,
+            "size": 0, "volume": 1, "fileId": 11}
+        cache = {**source, "path": "plugins/__pycache__/bundled.cpython-312.opt-2.pyc",
+            "sha256": "b" * 64, "fileId": 12}
+        before = {name: {"rootIdentity": {"volumeSerial": 1, "fileId": i, "attributes": 16},
+            "inventory": []} for i, name in enumerate(("App", "Manager", "Environment"), 1)}
+        before["App"]["inventory"] = [source]
+        after = copy.deepcopy(before)
+        after["App"]["inventory"] += [cache_dir, cache]
+        for phase in ("Control", "First", "Second", "Passive", "Guarded"):
+            with self.subTest(phase=phase):
+                delta = h.build_runtime_delta(self.run_root, "SingleFile", phase, before, after)
+                self.assertEqual([cache_dir, cache], [row["after"] for row in delta["roots"][0]["changes"]])
+                h._validated_writable_snapshots(self.run_root, "SingleFile", after, "recorded cache")
+                h.validate_runtime_outputs(self.run_root, "SingleFile", phase,
+                    before["App"]["inventory"], after["App"]["inventory"], [], [])
+        for path in ("plugins/__pycache__/unknown.cpython-312.pyc", "plugins/__pycache__/bundled.pyc",
+                "plugins/__pycache__/bundled.cpython-999.pyc", "plugins/bundled.pyo"):
+            changed = copy.deepcopy(after)
+            changed["App"]["inventory"][-1]["path"] = path
+            with self.subTest(path=path), self.assertRaises(h.GateError):
+                h.build_runtime_delta(self.run_root, "SingleFile", "Control", before, changed)
+
+    def test_app_logs_can_be_created_modified_and_rotated(self):
+        directory = {"path": "logs", "kind": "directory", "sha256": None,
+            "size": 0, "volume": 1, "fileId": 11}
+        log = {"path": "logs/mo_interface.log", "kind": "file", "sha256": "a" * 64,
+            "size": 4, "volume": 1, "fileId": 10}
+        before = {name: {"rootIdentity": {"volumeSerial": 1, "fileId": i, "attributes": 16},
+            "inventory": []} for i, name in enumerate(("App", "Manager", "Environment"), 1)}
+        after = copy.deepcopy(before)
+        after["App"]["inventory"] = [directory, log]
+        h.build_runtime_delta(self.run_root, "SingleFile", "Control", before, after)
+        h.validate_runtime_outputs(self.run_root, "SingleFile", "Control", [], [directory, log], [], [])
+        for saved in ([directory, {**log, "sha256": "b" * 64}], [directory]):
+            second = copy.deepcopy(after)
+            second["App"]["inventory"] = saved
+            h.build_runtime_delta(self.run_root, "SingleFile", "Second", after, second)
+            h.validate_runtime_outputs(self.run_root, "SingleFile", "Second", [directory, log], saved, [], [])
+
+    def test_windows_cache_environment_is_explicit_and_disposable(self):
+        environment = h.child_environment(self.run_root, "SingleFile", "Control", "b" * 32,
+            system_root=r"C:\Windows", username="fixture-user")
+        expected = str(self.run_root / "SingleFile" / "environment" / "PROGRAMDATA")
+        self.assertEqual(expected, environment["PROGRAMDATA"])
+        self.assertEqual(expected, environment["ALLUSERSPROFILE"])
+        self.assertEqual("C:", environment["SystemDrive"])
+
+    def test_complete_matrix_records_stock_cache_but_candidate_cache_is_unsupported(self):
+        from tests.test_mo2_bridge_runtime_capability import fixture, entry
+        value = fixture(self.scratch)
+        stock = [entry("__pycache__", "directory", file_id=901),
+            entry("__pycache__/bundled.cpython-312.opt-2.pyc", file_id=902)]
+        for candidate in value["candidates"]:
+            candidate["control"]["after"] += copy.deepcopy(stock)
+            for observation in candidate["observations"]:
+                for side in ("before", "after"):
+                    observation[side] += copy.deepcopy(stock)
+        supported = h.runtime_capability.select_capability(value)
+        self.assertEqual("SingleFile", supported["selection"])
+        for candidate in value["candidates"]:
+            prefix = "__pycache__/modlab_capability_probe" if candidate["layout"] == "SingleFile" else "modlab_capability_probe/__pycache__/plugin"
+            cache = entry(prefix + ".cpython-312.pyc", file_id=903)
+            for index, observation in enumerate(candidate["observations"]):
+                observation["after"].append(copy.deepcopy(cache))
+                if index:
+                    observation["before"].append(copy.deepcopy(cache))
+                observation["ownBefore"] = h.own_inventory(observation["before"])
+                observation["ownAfter"] = h.own_inventory(observation["after"])
+        result = h.runtime_capability.select_capability(value)
+        self.assertEqual("NotSupported", result["selection"])
+        self.assertEqual(result, h.runtime_capability.capability_from_bytes(h.runtime_capability.capability_to_bytes(result)))
+
     def test_runtime_delta_confines_app_manager_and_environment_writes(self):
         roots = h._runtime_writable_roots(self.run_root, "SingleFile")
         before = {
@@ -1849,7 +1925,7 @@ class OfflineGateTests(unittest.TestCase):
         delta = h.build_runtime_delta(self.run_root, "SingleFile", "First", before, allowed)
         self.assertRegex(delta["runtimeDeltaId"], r"^runtime-delta-sha256:[0-9a-f]{64}$")
         for root_name, relative in (
-            ("App", "logs/mo_interface.log"),
+            ("App", "unrelated/mo_interface.log"),
             ("App", "plugins/foreign.py"),
             ("Manager", "profiles/ModLab - Lab/plugins.txt"),
             ("Environment", "TEMP/__pycache__/probe.pyc"),
@@ -5201,9 +5277,10 @@ class _FakeBackend:
         self.mutations.append("configure:" + layout)
         environment_root = layout_root / "environment"
         roots = [
+            layout_root / "app" / "crashDumps",
             manager_root / "downloads", manager_root / "mods", manager_root / "profiles",
             manager_root / "overwrite", manager_root / "webcache", manager_root / "logs", manager_root / "cache", manager_root / "test-profiles",
-            *(environment_root / name for name in ("TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME")),
+            *(environment_root / name for name in ("TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME", "PROGRAMDATA")),
         ]
         for root in roots:
             root.mkdir(parents=True, exist_ok=True)

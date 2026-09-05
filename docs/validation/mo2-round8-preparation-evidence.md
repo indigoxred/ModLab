@@ -52,7 +52,7 @@ JPEG acceptance uses Pillow 12.3.0 from `tools/requirements-round8.txt` only whe
 
 ## Approved disposable active profile boundary
 
-Fresh preparations under harness/runtime policy 2 and fixture version 3 implement the user-approved profile separation. MO2 selects `manager/test-profiles/ModLab - Lab` through its native `[Settings] profiles_directory=%BASE_DIR%/test-profiles` override. Preparation copies the Lab seed to distinct file/directory objects and binds equality of relative names, kinds, lengths and hashes to the protected Manager baseline. Originals remain in `manager/profiles` and retain the existing eight-root watch and zero-event proof.
+Fresh preparations under harness policy 2, runtime policy 3 and fixture version 3 implement the user-approved profile separation. MO2 selects `manager/test-profiles/ModLab - Lab` through its native `[Settings] profiles_directory=%BASE_DIR%/test-profiles` override. Preparation copies the Lab seed to distinct file/directory objects and binds equality of relative names, kinds, lengths and hashes to the protected Manager baseline. Originals remain in `manager/profiles` and retain the existing eight-root watch and zero-event proof.
 
 The layout, bootstrap and manager ancestors remain Medium integrity, as do the original profiles, source mods, downloads and overwrite. Low labels are applied only to the app, environment, manager logs/webcache/cache and test-profiles trees. Exact receipts bind all six targets per layout, and current admission checks the Low roots and Medium original entries/ancestors.
 
@@ -61,3 +61,14 @@ Runtime deltas permit saved files only below the exact disposable Lab directory,
 Every completed phase retains the original saved ModOrganizer.ini, bounded to 2 MiB, with Configuration-stage native capture provenance. Reconstruction matches its bytes, size and original file identity to the App delta, then compares required settings against the protected prepared INI. Game/base/profile selection and local-save policy cannot change; optional directory overrides must resolve to the declared exact destinations. Window preferences may be saved. Historical verification reads only protected captures. Current action admission checks the live configuration semantics, then the existing durable chain requires equality with the latest recorded state.
 
 Earlier failed attempts remain untouched and ineligible. These policies supersede the active-profile zero-write requirement for new Round 8 attempts only; normal ModLab storage, scanner behavior and the shared watcher protocol are unchanged. The approved implementation plan is `docs/superpowers/plans/2026-09-05-round8-disposable-profile.md`.
+
+
+## Runtime observations and support verdict
+
+The original capability task requires recording cache creation. Runtime policy 3 admits bounded App/plugins cache observations only in a direct `__pycache__` directory with corresponding `.py` source files in the same inventory, using CPython 3.12 cache names (including optimization suffixes). Unknown caches and bytecode elsewhere remain a refusal. No entries, hashes or identities are filtered out. Declared candidate installation still cannot include bytecode. These records describe observed bytes and do not assert that a cache is safe executable content.
+
+The capability selector is unchanged: full Control.after is frozen, and every later phase's full plugin tree must equal that baseline plus the declared candidate. Candidate cache creation or any later plugin drift still produces `NotSupported`. The gate records that measurable outcome rather than confusing it with malformed evidence. No bytecode suppression, permission trick, deletion or new baseline is used to force a supported result.
+
+App logs/webcache/cache directories and their contents may be created, updated and rotated under the same bounded transition policy already used for Manager runtime output. The exact nxmhandler.log is also recorded. The fixed crashDumps directory is prepared empty; unexpected crash contents remain outside the accepted runtime policy. Ordinary package/runtime source files remain immutable.
+
+The child environment binds PROGRAMDATA and ALLUSERSPROFILE to the disposable Environment/PROGRAMDATA directory and SystemDrive to the validated Windows drive. This addresses the first real run's literal `%SystemDrive%` cache tree and missing shared-data path. Ambient environment variables remain excluded, and Python bytecode flags remain prohibited. A real rerun is required to verify the Windows/NVIDIA behavior under these corrected bindings.
