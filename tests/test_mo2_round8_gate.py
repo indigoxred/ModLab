@@ -1393,7 +1393,7 @@ class OfflineGateTests(unittest.TestCase):
             "tar-plan:SingleFile", "tar-apply:SingleFile",
             "tar-plan:Package", "tar-apply:Package",
         }.issubset(processes))
-        self.assertEqual(6, len(processes))
+        self.assertEqual(16, len(processes))
         self.assertEqual(12, sum(item.startswith("icacls-low:") for item in processes))
         record = received.value
         self.assertEqual(["SingleFile", "Package"], [row["layout"] for row in record["layouts"]])
