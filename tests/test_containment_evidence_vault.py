@@ -54,6 +54,39 @@ class EvidenceStoreTests(unittest.TestCase):
         self.assertEqual((), self.store.list_run_ids(), "legacy disposable-only runs must not block fresh preparation")
         self.assertEqual(b"historical", (self.store.run_path(RUN) / "intent.json").read_bytes())
 
+    def test_historical_run_cannot_be_prepared_or_created(self):
+        from dataclasses import replace
+        from tests.test_mo2_containment_store import valid_prepared_journal
+        for index, operation in enumerate(("prepare", "create")):
+            with self.subTest(operation=operation):
+                run_id = "containment-run:" + str(index + 1) * 32
+                historical = self.store.run_path(run_id)
+                historical.mkdir()
+                intent = historical / "intent.json"
+                intent.write_bytes(b"historical immutable intent")
+                original = exact.identity_at_path(historical)
+                with self.assertRaisesRegex(ContainmentStoreError, "historical"):
+                    if operation == "prepare":
+                        self.store.prepare_run_root(run_id)
+                    else:
+                        self.store.create(replace(valid_prepared_journal(self.base), run_id=run_id))
+                self.assertFalse(self.store.evidence_run_path(run_id).exists())
+                self.assertEqual(original, exact.identity_at_path(historical))
+                self.assertEqual((intent,), tuple(historical.iterdir()))
+                self.assertEqual(b"historical immutable intent", intent.read_bytes())
+
+    def test_verified_new_run_can_be_prepared_and_created_again(self):
+        from dataclasses import replace
+        from tests.test_mo2_containment_store import valid_prepared_journal
+        self.store.prepare_run_root(RUN)
+        original = exact.identity_at_path(self.store.evidence_run_path(RUN))
+        journal = replace(valid_prepared_journal(self.base), run_id=RUN)
+        reopened = ContainmentStore(self.store.root)
+        reopened.prepare_run_root(RUN)
+        self.assertEqual(journal, reopened.create(journal))
+        self.assertEqual(journal, reopened.create(journal))
+        self.assertEqual(original, exact.identity_at_path(reopened.evidence_run_path(RUN)))
+
     def test_unverified_existing_run_is_never_adopted(self):
         self.assertTrue(hasattr(self.store, "evidence_run_path"), "explicit authority required")
         path = self.store.evidence_run_path(RUN)
@@ -418,6 +451,47 @@ class CausalStoreTests(unittest.TestCase):
         (self.root/"worker-exit.json").unlink()
         with self.assertRaises(ContainmentStoreError):
             reopened.load_result(RUN,SCENARIO)
+
+    def assert_valid_launch_breach_survives_refused_recovery(self, cleanup_refusal=False):
+        from dataclasses import replace
+        from unittest import mock
+        from modlab.validation import mo2_containment_service as service
+        from modlab.validation.mo2_containment_model import ScenarioCleanupStatus, ScenarioOutcome
+        self.launch()
+        outcome = self.finish()
+        after = replace(self.journal.protected_before, play_profile_sha256="b" * 64)
+        blocker = "cleanup-proof-unavailable" if cleanup_refusal else "prior-mo2-process-still-live"
+        proof = service.RecoveryProofEvidence(outcome, after, () if cleanup_refusal else (blocker,))
+        cleanup_result = service.RecoveryProofEvidence(outcome, after, (blocker,))
+        quarantine = self.store.quarantine_path(RUN)
+        before = tuple(quarantine.iterdir())
+        with mock.patch.object(service, "_load_fixture_record", return_value=object()), \
+             mock.patch.object(service, "_prove_recovery", return_value=proof), \
+             mock.patch.object(service, "_perform_recovery_cleanup", return_value=cleanup_result) as cleanup:
+            receipt = service.recover_scenario(self.store.root, RUN, SCENARIO)
+        if cleanup_refusal:
+            cleanup.assert_called_once()
+        else:
+            cleanup.assert_not_called()
+        recovery = receipt.value
+        self.assertIs(ScenarioCleanupStatus.REFUSED, recovery.cleanup_status)
+        self.assertEqual((blocker,), recovery.blockers)
+        self.assertFalse(recovery.fresh_run_permitted)
+        self.assertIsNotNone(recovery.result_id)
+        reopened = ContainmentStore.open_readonly(self.store.root)
+        result = reopened.load_result(RUN, SCENARIO)
+        self.assertIs(ScenarioOutcome.FAILED, result.outcome)
+        self.assertEqual(self.process, result.mo2_process)
+        self.assertEqual(recovery, reopened.load_recovery(RUN, SCENARIO))
+        self.assertNotEqual(reopened.result_path(RUN, SCENARIO), reopened.scenario_path(RUN, SCENARIO) / "recovery.json")
+        self.assertEqual(before, tuple(quarantine.iterdir()))
+        self.assertEqual((), receipt.effects.child_mutation_roots)
+
+    def test_valid_launch_breach_persists_before_refused_cleanup(self):
+        self.assert_valid_launch_breach_survives_refused_recovery()
+
+    def test_valid_launch_breach_persists_after_cleanup_proof_refusal(self):
+        self.assert_valid_launch_breach_survives_refused_recovery(cleanup_refusal=True)
 
     def test_malformed_raw_request_has_typed_store_refusal(self):
         self.launch()

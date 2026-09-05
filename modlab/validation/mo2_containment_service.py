@@ -4815,13 +4815,21 @@ def _persist_proven_recovery_breach(
     if existing is not None:
         _record_result_effects(existing)
         return scenario_result_id_for(existing, outcome)
+    try:
+        process = _load_launch_process(store, journal.run_id, journal.scenario)
+    except ContainmentStoreOwnershipError:
+        raise
+    except ContainmentStoreError:
+        process = None
+    if process is not None and process.pid != journal.mo2_pid:
+        process = None
     evaluation = ScenarioEvidence(
             run_id=journal.run_id,
             scenario=journal.scenario,
             protected_before=journal.protected_before,
             protected_after=proof.protected_after,
             watch_outcome=outcome,
-            mo2_process=None,
+            mo2_process=process,
             source_integrity=IntegrityObservation.UNKNOWN,
             stage_integrity=IntegrityObservation.UNKNOWN,
             scenario_started=True,
@@ -5064,7 +5072,7 @@ def _load_launch_process(
     store: ContainmentStore,
     run_id: str,
     scenario: ContainmentScenario,
-    record: FixtureRecord,
+    record: FixtureRecord | None = None,
 ) -> ProcessEvidence:
     document = store.load_launch_evidence(run_id, scenario)
     process = ProcessEvidence(
@@ -5075,7 +5083,7 @@ def _load_launch_process(
         str(document["workingDirectory"]),
         IntegrityObservation(str(document["integrity"])),
     )
-    if (
+    if record is not None and (
         not _same_path(process.executable, record.executable)
         or not _same_path(process.working_directory, record.stage_app)
         or process.arguments != ("--profile", "ModLab - Lab")

@@ -1164,7 +1164,10 @@ class ContainmentStore:
         return "containment-recovery-sha256:" + hashlib.sha256(data).hexdigest()
 
     def _prepare_run(self, run_id: str) -> None:
-        self._prepare_vault(self.evidence_run_path(run_id))
+        authority = self.evidence_run_path(run_id)
+        if not os.path.lexists(authority) and os.path.lexists(self.run_path(run_id)):
+            raise ContainmentStoreError("historical disposable run cannot acquire new authority")
+        self._prepare_vault(authority)
         self._ensure_direct_directory(self.run_path(run_id))
         self._ensure_direct_directory(self.evidence_run_path(run_id) / "scenarios")
         self._ensure_direct_directory(self.quarantine_path(run_id))
