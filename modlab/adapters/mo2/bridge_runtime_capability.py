@@ -20,7 +20,7 @@ from modlab.validation.windows_vault_security import open_vault
 from modlab.platform.windows_exact_fs import (
     RetainedObjectOwner, RetainedObjectRole,
     identity_at_path, pin_stable_direct_object, publish_new_pinned, read_pinned_file,
-    union_retained_ownership,
+    union_retained_ownership, hash_pinned_file,
 )
 
 
@@ -355,14 +355,33 @@ def _entry(path, relative, kind):
                 "size": len(data), "volume": pinned.identity.volume_serial, "fileId": pinned.identity.file_id}
 
 
-def snapshot_tree(root):
-    """Retain all descendants and bracket every directory's exact membership."""
+def snapshot_tree(root, *, maximum_entries=None, maximum_log_files=None,
+                  maximum_log_bytes=None, stream_files=False):
+    """Retain descendants and bracket membership; optional limits precede reads."""
+    for bound in (maximum_entries, maximum_log_files, maximum_log_bytes):
+        _require(bound is None or type(bound) is int and bound >= 0, "invalid inventory bound")
     result = []
     root = Path(root).absolute()
     members = {}
+    files = []
+    discovered = 0
+    log_count = 0
+
+    def paths_at(directory, limit):
+        if limit is None:
+            return sorted(directory.iterdir(), key=lambda p: (p.name.casefold(), p.name))
+        paths = []
+        # Path.iterdir may materialize the entire native listing before yielding.
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                _require(len(paths) < limit, "inventory entry count exceeds bound")
+                paths.append(directory / entry.name)
+        return sorted(paths, key=lambda p: (p.name.casefold(), p.name))
 
     def walk(directory, stack):
-        paths = sorted(directory.iterdir(), key=lambda p: (p.name.casefold(), p.name))
+        nonlocal discovered, log_count
+        paths = paths_at(directory, None if maximum_entries is None else maximum_entries - discovered)
+        discovered += len(paths)
         _require(len({p.name.casefold() for p in paths}) == len(paths), "case-insensitive inventory collision")
         children = []
         members[directory] = []
@@ -371,25 +390,39 @@ def snapshot_tree(root):
             _require(not stat.S_ISLNK(metadata.st_mode) and not getattr(metadata, "st_file_attributes", 0) & 0x400, "redirected inventory entry")
             kind = "directory" if stat.S_ISDIR(metadata.st_mode) else "file"
             _require(kind == "directory" or stat.S_ISREG(metadata.st_mode), "unsupported inventory entry")
+            is_log = kind == "file" and path.name.casefold().endswith(".log")
+            if is_log:
+                log_count += 1
+                _require(maximum_log_files is None or log_count <= maximum_log_files,
+                         "inventory log count exceeds bound")
             relative = path.relative_to(root).as_posix()
             _relative(relative)
             expected = identity_at_path(path)
             pinned = stack.enter_context(_pinned(path, kind))
             _require(expected == pinned.identity, "inventory member changed during acquisition")
             members[directory].append((path, pinned.identity))
-            data = read_pinned_file(pinned) if kind == "file" else b""
-            result.append({"path": relative, "kind": kind,
-                "sha256": hashlib.sha256(data).hexdigest() if kind == "file" else None,
-                "size": len(data), "volume": pinned.identity.volume_serial, "fileId": pinned.identity.file_id})
-            if kind == "directory":
+            row = {"path": relative, "kind": kind, "sha256": None, "size": 0,
+                   "volume": pinned.identity.volume_serial, "fileId": pinned.identity.file_id}
+            result.append(row)
+            if kind == "file":
+                files.append((pinned, row, maximum_log_bytes if is_log else None))
+            else:
                 children.append(path)
         for child in children:
             walk(child, stack)
 
     with _parents(root), ExitStack() as stack:
         walk(root, stack)
+        # Complete bounded discovery before consuming any Low content.
+        for pinned, row, maximum_bytes in files:
+            if stream_files:
+                row["sha256"], row["size"] = hash_pinned_file(pinned, maximum_bytes=maximum_bytes)
+            else:
+                data = (read_pinned_file(pinned) if maximum_bytes is None else
+                        read_pinned_file(pinned, maximum_bytes=maximum_bytes))
+                row["sha256"], row["size"] = hashlib.sha256(data).hexdigest(), len(data)
         for directory, expected in members.items():
-            actual = sorted(directory.iterdir(), key=lambda p: (p.name.casefold(), p.name))
+            actual = paths_at(directory, len(expected) if maximum_entries is not None else None)
             _require(actual == [path for path, _identity in expected], "inventory directory membership changed")
             for path, identity in expected:
                 _require(identity_at_path(path) == identity, "inventory member identity changed")

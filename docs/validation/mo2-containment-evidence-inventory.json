@@ -327,7 +327,8 @@
     "input": "capture/log.txt",
     "sourcePath": "disposable/<gate-run>/<layout>/{app,bootstrap/tools/mo2/skyrim-se-ae}/logs/*.log",
     "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/observed-<000..127>.log",
-    "consumer": "Task5 exact ContainmentStore capture, 16 MiB maximum per log; capability raw log parser"
+    "consumer": "Task5 exact ContainmentStore capture, 16 MiB maximum per log; capability raw log parser",
+    "inputBounds": "Gate snapshots: 16384 descendants per tree, 128 .log files per tree, 16 MiB per log before native content read; bounded lazy discovery and 64 KiB streaming inventory; capture additionally limits 128 combined logs."
   },
   {
     "input": "gate/preparation",
@@ -369,7 +370,8 @@
     "input": "gate/log-provenance",
     "sourcePath": "trusted-gate-controller",
     "capturePath": "authority/<gate-run>/<layout>/jobs/<phase>/observed-<000..127>.log.capture.json",
-    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; canonical independent original/provenance"
+    "consumer": "Task5 protected consumer in tools/mo2_round8_gate.py; canonical independent original/provenance",
+    "inputBounds": "Gate snapshots: 16384 descendants per tree, 128 .log files per tree, 16 MiB per log before native content read; bounded lazy discovery and 64 KiB streaming inventory; capture additionally limits 128 combined logs."
   },
   {
     "input": "gate/original-harness",

@@ -71,7 +71,6 @@ from modlab.adapters.mo2.bridge_runtime_capability import (
     read_exact,
     run_root as capability_run_root,
     select_capability,
-    snapshot_tree,
 )
 from modlab.adapters.mo2.processes import enumerate_windows_processes
 from modlab.adapters.mo2 import bridge_runtime_capability as runtime_capability
@@ -167,6 +166,7 @@ INVENTORY_LIMIT = MAX_PATHS
 MAX_PREPARATION_INPUT_BYTES = 2 * 1024 * 1024
 MAX_GATE_RECORD_BYTES = 16 * 1024 * 1024
 MAX_RETAINED_LOGS = 128
+MAX_GATE_INVENTORY_ENTRIES = 16384
 MAX_SCREENSHOT_BYTES = 16 * 1024 * 1024
 MAX_PNG_DECOMPRESSED_BYTES = 256 * 1024 * 1024
 _RUN = re.compile(r"^[0-9a-f]{32}$")
@@ -2134,6 +2134,15 @@ def _load_installation(run_root: Path, layout: str) -> Mapping[str, object]:
     return value
 
 
+def snapshot_tree(root):
+    """Gate Low-input inventories refuse excessive discovery before reading bytes."""
+    return runtime_capability.snapshot_tree(
+        root, maximum_entries=MAX_GATE_INVENTORY_ENTRIES,
+        maximum_log_files=MAX_RETAINED_LOGS, maximum_log_bytes=MAX_GATE_RECORD_BYTES,
+        stream_files=True,
+    )
+
+
 def _runtime_inventory(preparation: Mapping[str, object], layout: str) -> list[dict[str, object]]:
     record = _layout_record(preparation, layout)
     app = Path(str(record["appRoot"]))
@@ -3407,11 +3416,11 @@ class ProductionLiveBackend:
         control_id: str,
         error: BaseException,
         effects: ContainmentEffects,
-    ) -> None:
+    ) -> ContainmentEffects:
         root = Path(run_root).absolute()
         target = authority_run_root(root) / layout / "installation-failure.json"
         if not target.parent.is_dir() or target.exists():
-            return
+            return effects
         failure_effects = ContainmentEffects.merged(
             effects,
             ContainmentEffects(written_paths=(target,)),
@@ -3440,6 +3449,7 @@ class ProductionLiveBackend:
                 if isinstance(partial, ContainmentEffects) else failure_effects
             )
             raise
+        return failure_effects
 
     def begin_phase(self, run_root: Path, layout: str, phase: str) -> ContainmentServiceResult:
         return containment_service._receipted(self._begin_phase)(run_root, layout, phase)
@@ -5437,8 +5447,13 @@ def install_operator_candidate(
         if isinstance(partial, ContainmentEffects):
             effects = ContainmentEffects.merged(effects, partial)
         try:
-            selected.fail_install(root, layout, control_id, error, effects)
+            failure_effects = selected.fail_install(root, layout, control_id, error, effects)
+            if isinstance(failure_effects, ContainmentEffects):
+                effects = ContainmentEffects.merged(effects, failure_effects)
         except BaseException as failure_error:
+            partial = getattr(failure_error, "effects", None)
+            if isinstance(partial, ContainmentEffects):
+                effects = ContainmentEffects.merged(effects, partial)
             failure_ownership = getattr(failure_error, "ownership", failure_error)
             if isinstance(failure_ownership, windows_exact_fs.ExactObjectOwnershipError):
                 primary = error.cause if isinstance(error, containment_service.ContainmentOperationError) and error.cause is not None else error
@@ -5446,13 +5461,11 @@ def install_operator_candidate(
                     f"installation and failure publication retain original handles: {failure_error}",
                     prior=getattr(primary, "ownership", primary), owners=failure_ownership.owners,
                 )
-                partial = getattr(failure_error, "effects", None)
-                if isinstance(partial, ContainmentEffects):
-                    effects = ContainmentEffects.merged(effects, partial)
                 ownership.effects = effects
                 raise ownership from error
             if hasattr(error, "add_note"):
                 error.add_note(f"terminal installation failure publication also failed: {failure_error}")
+        error.effects = effects
         raise
 
 

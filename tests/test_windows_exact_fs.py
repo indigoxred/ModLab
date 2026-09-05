@@ -29,6 +29,30 @@ from modlab.platform.windows_exact_fs import (
 
 @unittest.skipUnless(os.name == "nt", "Windows retained-handle APIs are required")
 class WindowsExactFsTests(unittest.TestCase):
+    def test_streaming_hash_bounds_native_chunks_and_checks_size_before_read(self):
+        import hashlib
+        target = self.root / "stream.bin"
+        data = b"abc" * 50000
+        target.write_bytes(data)
+        pinned = pin_stable_direct_object(target, "file", delete_access=False)
+        original = windows_exact_fs._kernel32.ReadFile
+        amounts = []
+        def read(handle, buffer, amount, transferred, overlapped):
+            amounts.append(amount)
+            return original(handle, buffer, amount, transferred, overlapped)
+        try:
+            with mock.patch.object(windows_exact_fs._kernel32, "ReadFile", side_effect=read):
+                digest, size = windows_exact_fs.hash_pinned_file(pinned)
+            self.assertEqual(hashlib.sha256(data).hexdigest(), digest)
+            self.assertEqual(len(data), size)
+            self.assertGreater(len(amounts), 1)
+            self.assertLessEqual(max(amounts), 64 * 1024)
+            with mock.patch.object(windows_exact_fs._kernel32, "ReadFile",
+                                   side_effect=AssertionError("read before bound")), \
+                    self.assertRaisesRegex(ExactObjectError, "maximum byte bound"):
+                windows_exact_fs.hash_pinned_file(pinned, maximum_bytes=len(data) - 1)
+        finally:
+            pinned.close()
     def test_rooted_directory_close_only_creation_guards_with_concurrent_reader(self):
         parent = pin_direct_object(self.root, 'directory')
         child = reader = None

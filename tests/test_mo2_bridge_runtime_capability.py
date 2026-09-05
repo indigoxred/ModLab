@@ -353,6 +353,75 @@ class CapabilityFilesystemTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
+    def test_bounded_snapshot_limits_enumeration_before_retaining_entries(self):
+        for index in range(10):
+            (self.root / f"{index:03}.bin").write_bytes(b"data")
+        original = os.scandir
+        yielded = []
+        @contextmanager
+        def counted(path):
+            with original(path) as entries:
+                def rows():
+                    for entry in entries:
+                        yielded.append(entry.name)
+                        yield entry
+                yield rows()
+        with patch.object(cap.os, "scandir", counted), \
+                self.assertRaisesRegex(cap.CapabilityError, "entry count"):
+            cap.snapshot_tree(self.root, maximum_entries=8, stream_files=True)
+        self.assertEqual(9, len(yielded))
+        rows = cap.snapshot_tree(self.root, maximum_entries=10, stream_files=True)
+        self.assertEqual(10, len(rows))
+
+    def test_bounded_snapshot_streams_large_binary_and_preserves_native_sharing(self):
+        earlier = self.root / "a.bin"
+        earlier.write_bytes(b"first")
+        last = self.root / "z.exe"
+        with last.open("wb") as stream:
+            stream.truncate(16 * 1024 * 1024 + 1)
+        original = cap.hash_pinned_file
+        def hashing(pinned, **kwargs):
+            if pinned.path == last:
+                with self.assertRaises(OSError):
+                    earlier.write_bytes(b"changed")
+            return original(pinned, **kwargs)
+        with patch.object(cap, "hash_pinned_file", side_effect=hashing), \
+                patch.object(cap, "read_pinned_file", side_effect=AssertionError("unbounded bytes inventory")):
+            rows = cap.snapshot_tree(self.root, maximum_entries=10,
+                                     maximum_log_files=128, maximum_log_bytes=16 * 1024 * 1024,
+                                     stream_files=True)
+        self.assertEqual(16 * 1024 * 1024 + 1, rows[-1]["size"])
+        self.assertEqual(hashlib.sha256(b"first").hexdigest(), rows[0]["sha256"])
+    def test_bounded_snapshot_preserves_all_partial_close_owners(self):
+        from modlab.platform import windows_exact_fs as exact
+        for name in ("a.bin", "b.bin", "z.log"):
+            (self.root / name).write_bytes(b"data")
+        original = exact.PinnedObject.close
+        retained = []
+        armed = False
+        hashing = cap.hash_pinned_file
+        def hash_file(pinned, **kwargs):
+            nonlocal armed
+            if pinned.path.name == "z.log":
+                armed = True
+            return hashing(pinned, **kwargs)
+        def close(pinned):
+            if armed and pinned.path.name in {"a.bin", "b.bin"}:
+                retained.append(pinned)
+                raise OSError("injected snapshot close failure")
+            return original(pinned)
+        try:
+            with patch.object(exact.PinnedObject, "close", close), \
+                    patch.object(cap, "hash_pinned_file", side_effect=hash_file), \
+                    self.assertRaises(exact.ExactObjectOwnershipError) as raised:
+                cap.snapshot_tree(self.root, maximum_entries=3, maximum_log_bytes=1, stream_files=True)
+            self.assertEqual({self.root / "a.bin", self.root / "b.bin"},
+                             {owner.pinned.path for owner in raised.exception.owners})
+            self.assertTrue(all(owner.pinned.handle for owner in raised.exception.owners))
+        finally:
+            for pinned in retained:
+                original(pinned)
+
     def test_inventory_detects_content_identity_empty_directory_and_cache_drift(self):
         (self.root / "probe.py").write_bytes(b"pass\n")
         before = cap.snapshot_tree(self.root)

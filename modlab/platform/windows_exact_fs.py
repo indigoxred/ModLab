@@ -12,6 +12,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from enum import Enum
 import os
+import hashlib
 from pathlib import Path
 from collections.abc import Callable
 import re
@@ -1092,8 +1093,8 @@ def rename_pinned_no_replace(
         raise ExactObjectError("renamed destination is not the pinned source object")
 
 
-def read_pinned_file(source: PinnedObject, *, maximum_bytes: int | None = None) -> bytes:
-    """Read a retained direct regular file without reopening its mutable pathname."""
+def _pinned_file_chunks(source: PinnedObject, *, maximum_bytes: int | None = None):
+    """Shared native read loop; consumers exhaust it before accepting content."""
     if maximum_bytes is not None and (type(maximum_bytes) is not int or maximum_bytes < 0):
         raise ExactObjectError("maximum byte bound must be a nonnegative integer")
     if not source.handle:
@@ -1112,7 +1113,6 @@ def read_pinned_file(source: PinnedObject, *, maximum_bytes: int | None = None) 
         raise ExactObjectError(f"pinned file exceeds maximum byte bound: {source.path}")
     if not _kernel32.SetFilePointerEx(source.handle, ctypes.c_longlong(0), None, _FILE_BEGIN):
         raise _winerror(f"SetFilePointerEx failed for {source.path}")
-    parts: list[bytes] = []
     remaining = size.value
     while remaining:
         amount = min(remaining, 64 * 1024)
@@ -1122,11 +1122,25 @@ def read_pinned_file(source: PinnedObject, *, maximum_bytes: int | None = None) 
             raise _winerror(f"ReadFile failed for {source.path}")
         if transferred.value == 0:
             raise ExactObjectError(f"pinned file read was short: {source.path}")
-        parts.append(bytes(buffer[: transferred.value]))
+        yield bytes(buffer[: transferred.value])
         remaining -= transferred.value
     if _identity_key(_handle_identity(source.handle, source.path)) != _identity_key(source.identity):
         raise ExactObjectError("pinned file identity changed during read")
-    return b"".join(parts)
+
+
+def read_pinned_file(source: PinnedObject, *, maximum_bytes: int | None = None) -> bytes:
+    """Read a retained direct regular file without reopening its mutable pathname."""
+    return b"".join(_pinned_file_chunks(source, maximum_bytes=maximum_bytes))
+
+
+def hash_pinned_file(source: PinnedObject, *, maximum_bytes: int | None = None) -> tuple[str, int]:
+    """Hash exact retained bytes using bounded 64 KiB native chunks."""
+    digest = hashlib.sha256()
+    size = 0
+    for chunk in _pinned_file_chunks(source, maximum_bytes=maximum_bytes):
+        digest.update(chunk)
+        size += len(chunk)
+    return digest.hexdigest(), size
 
 
 def delete_pinned_object(source: PinnedObject) -> None:

@@ -2003,6 +2003,96 @@ class OfflineGateTests(unittest.TestCase):
             received.effects.written_paths,
         )
 
+    def test_low_logs_are_bounded_before_earlier_inventory_native_reads(self):
+        """Earlier app/runtime/writable paths cannot consume oversized Low logs."""
+        roots = h._runtime_writable_roots(self.run_root, "SingleFile")
+        for root in roots.values():
+            root.mkdir(parents=True)
+        log = roots["App"] / "logs" / "oversized.log"
+        log.parent.mkdir()
+        with log.open("wb") as stream:
+            stream.truncate(16 * 1024 * 1024 + 1)
+        exact = h.windows_exact_fs
+        routes = (
+            lambda: h.snapshot_tree(roots["App"]),
+            lambda: h._runtime_inventory({}, "SingleFile"),
+            lambda: h._snapshot_runtime_writable(self.run_root, "SingleFile"),
+            lambda: h.snapshot_tree(log.parent),
+        )
+        for route in routes:
+            with self.subTest(route=route), \
+                    patch.object(h, "_layout_record", return_value={"appRoot": str(roots["App"])}), \
+                    patch.object(h, "read_windows_file_version", return_value=h.MO2_FILE_VERSION), \
+                    patch.object(exact._kernel32, "ReadFile", side_effect=AssertionError("content read before size refusal")), \
+                    self.assertRaisesRegex(exact.ExactObjectError, "maximum byte bound"):
+                route()
+
+    def test_gate_inventory_accepts_exact_descendant_budget_and_refuses_next(self):
+        root = self.run_root / "SingleFile" / "app"
+        root.mkdir(parents=True)
+        for index in range(16384):
+            (root / f"{index:05}.bin").touch()
+        rows = h.snapshot_tree(root)
+        self.assertEqual(16384, len(rows))
+        (root / "excess.bin").touch()
+        with patch.object(h.windows_exact_fs._kernel32, "ReadFile",
+                          side_effect=AssertionError("content read before entry refusal")), \
+                self.assertRaisesRegex(h.runtime_capability.CapabilityError, "entry count"):
+            h.snapshot_tree(root)
+
+    def test_low_log_flood_is_rejected_before_inventory_content_reads(self):
+        """The 129th log refuses discovery before pins/content can grow unbounded."""
+        root = self.run_root / "SingleFile" / "app" / "logs"
+        root.mkdir(parents=True)
+        for index in range(130):
+            (root / f"{index:03}.log").write_bytes(b"small")
+        with patch.object(h.windows_exact_fs._kernel32, "ReadFile",
+                          side_effect=AssertionError("content read before count refusal")), \
+                self.assertRaisesRegex(h.runtime_capability.CapabilityError, "log count"):
+            h.snapshot_tree(root)
+    def test_public_install_failure_publication_preserves_actual_receipts(self):
+        """Successful prior writes and ordinary publication errors keep receipts."""
+        for publisher_raises in (False, True):
+            with self.subTest(publisher_raises=publisher_raises):
+                root = self.run_root.parent / ("b" * 32 if publisher_raises else "c" * 32)
+                authority = h.authority_run_root(root)
+                authority.parent.mkdir(parents=True, exist_ok=True)
+                from modlab.validation.windows_vault_security import create_vault
+                with create_vault(authority):
+                    (authority / "SingleFile").mkdir()
+                backend = _FakeInstallBackend(root)
+                backend.fail_install = h.ProductionLiveBackend().fail_install
+                written = root / "SingleFile" / "app" / "plugins" / "probe.py"
+                def install(*_args):
+                    def mutation():
+                        h.containment_service._current_effects().write(written)
+                        written.parent.mkdir(parents=True)
+                        written.write_bytes(b"pass\n")
+                        return {}
+                    return h.containment_service._receipted(mutation)()
+                primary = h.GateError("installation publication failed")
+                original = h._publish_gate_json
+                def publish(*args):
+                    original(*args)
+                    if publisher_raises:
+                        raise RuntimeError("failure published then ordinary exception")
+                with patch.object(backend, "install_candidate", side_effect=install), \
+                        patch.object(backend, "publish_install", side_effect=primary), \
+                        patch.object(h, "_publish_gate_json", side_effect=publish), \
+                        self.assertRaises(h.GateError) as raised:
+                    h.install_operator_candidate(root, "SingleFile", "observation-sha256:" + "8" * 64, backend=backend)
+                self.assertIs(primary, raised.exception)
+                target = authority / "SingleFile" / "installation-failure.json"
+                self.assertTrue(written.is_file())
+                self.assertTrue(target.is_file())
+                effects = getattr(raised.exception, "effects", ContainmentEffects())
+                self.assertIn(written, effects.written_paths)
+                self.assertIn(target, effects.written_paths)
+                self.assertEqual(set(h._load_gate_json(root, target)["effects"]["writtenPaths"]),
+                                 {str(path) for path in effects.written_paths})
+                if publisher_raises:
+                    self.assertTrue(any("failure published then ordinary exception" in note
+                                        for note in raised.exception.__notes__))
     def _assert_public_install_failure_retains_ownership(self, *, primary_owned):
         """Drive the real public failure publisher with retained native handles."""
         authority = h.authority_run_root(self.run_root)
