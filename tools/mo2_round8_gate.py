@@ -3392,22 +3392,30 @@ class ProductionLiveBackend:
             effects,
             ContainmentEffects(written_paths=(target,)),
         )
-        _publish_gate_json(
-            root, target,
-            {
-                "schemaVersion": SCHEMA_VERSION,
-                "kind": "task-7B-candidate-installation-failed-attempt",
-                "runId": root.name,
-                "layout": layout,
-                "controlId": control_id,
-                "terminal": True,
-                "retryPermitted": False,
-                "errorType": type(error).__name__,
-                "error": str(error) or type(error).__name__,
-                "effects": build_effect_record(f"{layout}:Install:failed", failure_effects),
-                "authority": False,
-            },
-        )
+        try:
+            _publish_gate_json(
+                root, target,
+                {
+                    "schemaVersion": SCHEMA_VERSION,
+                    "kind": "task-7B-candidate-installation-failed-attempt",
+                    "runId": root.name,
+                    "layout": layout,
+                    "controlId": control_id,
+                    "terminal": True,
+                    "retryPermitted": False,
+                    "errorType": type(error).__name__,
+                    "error": str(error) or type(error).__name__,
+                    "effects": build_effect_record(f"{layout}:Install:failed", failure_effects),
+                    "authority": False,
+                },
+            )
+        except BaseException as publication_error:
+            partial = getattr(publication_error, "effects", None)
+            publication_error.effects = (
+                ContainmentEffects.merged(failure_effects, partial)
+                if isinstance(partial, ContainmentEffects) else failure_effects
+            )
+            raise
 
     def begin_phase(self, run_root: Path, layout: str, phase: str) -> ContainmentServiceResult:
         return containment_service._receipted(self._begin_phase)(run_root, layout, phase)

@@ -1752,7 +1752,6 @@ class OfflineGateTests(unittest.TestCase):
             original_publish(root, target, value)
             secondary_pin = exact.pin_stable_direct_object(target, kind="file", delete_access=False)
             failure = exact.ExactObjectOwnershipError("secondary failure publication close failed", verification=(secondary_pin,))
-            failure.effects = secondary_effects
             raise failure
         try:
             with patch.object(backend, "publish_install", side_effect=primary), \
@@ -1769,6 +1768,8 @@ class OfflineGateTests(unittest.TestCase):
             )
             self.assertEqual(expected_effects, failure.effects)
             self.assertTrue(failure_target.is_file())
+            published = h._load_gate_json(self.run_root, failure_target)
+            self.assertEqual(h.build_effect_record("SingleFile:Install:failed", failure.effects), published["effects"])
             self.assertTrue(all(owner.pinned.handle for owner in failure.owners))
         finally:
             if secondary_pin is not None:
