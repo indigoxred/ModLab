@@ -25,6 +25,7 @@ import secrets
 import subprocess
 import struct
 import sys
+import time
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 from ctypes import wintypes
@@ -3670,23 +3671,34 @@ class ProductionLiveBackend:
     def native(self, session: LivePhaseSession, kind: str) -> Mapping[str, object]:
         if kind not in {"native-before", "native-after"}:
             raise GateError("native observation kind is invalid")
-        windows_watch._verify_retained_process_handle(
-            session.process_handle,
-            session.launch.pid,
-            session.launch.creation_time,
-        )
-        wait = windows_watch._kernel32.WaitForSingleObject(session.process_handle, 0)
-        if wait != windows_watch._WAIT_TIMEOUT:
-            raise GateError("launched MO2 process is no longer live during UI correlation")
-        matches = [
-            item for item in _candidate_processes()
-            if item.executable_path.casefold() == session.executable.casefold()
-        ]
-        if len(matches) != 1 or matches[0].pid != session.launch.pid:
-            raise GateError("native inventory does not contain one exact launched process")
-        windows = _native_windows_for_pid(session.launch.pid)
-        if not windows:
-            raise GateError("launched MO2 process has no visible native HWND")
+        deadline = time.monotonic() + 30.0
+        while True:
+            windows_watch._verify_retained_process_handle(
+                session.process_handle,
+                session.launch.pid,
+                session.launch.creation_time,
+            )
+            wait = windows_watch._kernel32.WaitForSingleObject(session.process_handle, 0)
+            if wait != windows_watch._WAIT_TIMEOUT:
+                raise GateError("launched MO2 process is no longer live during UI correlation")
+            matches = [
+                item for item in _candidate_processes()
+                if item.executable_path.casefold() == session.executable.casefold()
+            ]
+            if len(matches) != 1 or matches[0].pid != session.launch.pid:
+                raise GateError("native inventory does not contain one exact launched process")
+            windows = _native_windows_for_pid(session.launch.pid)
+            if windows:
+                break
+            remaining = deadline - time.monotonic()
+            if kind != "native-before" or remaining <= 0:
+                raise GateError("launched MO2 process has no visible native HWND")
+            # Initial resume is not window readiness. Wait on the original
+            # process so termination interrupts the bounded startup retry.
+            wait = windows_watch._kernel32.WaitForSingleObject(
+                session.process_handle, max(1, min(250, int(remaining * 1000))))
+            if wait != windows_watch._WAIT_TIMEOUT:
+                raise GateError("launched MO2 process is no longer live during UI correlation")
         if kind == "native-before":
             session.native_windows_before = windows
         else:

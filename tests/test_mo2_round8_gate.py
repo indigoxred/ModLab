@@ -2590,6 +2590,58 @@ class OfflineGateTests(unittest.TestCase):
                 backend=backend,
             )
 
+    def test_initial_native_window_waits_for_live_process_readiness(self):
+        session = SimpleNamespace(process_handle=777,
+            launch=SimpleNamespace(pid=41, creation_time=101), executable="fixture.exe")
+        elapsed = [0.0]
+        def wait(handle, milliseconds):
+            self.assertEqual(handle, 777)
+            elapsed[0] += milliseconds / 1000
+            return h.windows_watch._WAIT_TIMEOUT
+        windows = [{"hwnd": 51, "pid": 41, "title": "Mod Organizer",
+                    "className": "fixture", "visible": True}]
+        with patch.object(h, "time", SimpleNamespace(monotonic=lambda: elapsed[0]), create=True), \
+                patch.object(h.windows_watch, "_verify_retained_process_handle") as verify, \
+                patch.object(h.windows_watch._kernel32, "WaitForSingleObject", side_effect=wait), \
+                patch.object(h, "_candidate_processes", return_value=(SimpleNamespace(
+                    pid=41, executable_path="fixture.exe"),)), \
+                patch.object(h, "_native_windows_for_pid", side_effect=[[], [], windows]):
+            result = h.ProductionLiveBackend().native(session, "native-before")
+        self.assertTrue(result["complete"])
+        self.assertEqual(session.native_windows_before, windows)
+        self.assertGreater(elapsed[0], 0)
+        self.assertGreaterEqual(verify.call_count, 3)
+
+    def test_initial_native_window_wait_refuses_timeout_exit_and_missing_after(self):
+        for scenario in ("timeout", "exit", "native-after"):
+            with self.subTest(scenario=scenario):
+                session = SimpleNamespace(process_handle=777,
+                    launch=SimpleNamespace(pid=41, creation_time=101), executable="fixture.exe")
+                elapsed = [0.0]
+                def wait(handle, milliseconds):
+                    elapsed[0] += milliseconds / 1000
+                    return (h.windows_watch._WAIT_OBJECT_0 if scenario == "exit" and elapsed[0] > 0
+                            else h.windows_watch._WAIT_TIMEOUT)
+                with patch.object(h, "time", SimpleNamespace(monotonic=lambda: elapsed[0]), create=True), \
+                        patch.object(h.windows_watch, "_verify_retained_process_handle"), \
+                        patch.object(h.windows_watch._kernel32, "WaitForSingleObject", side_effect=wait), \
+                        patch.object(h, "_candidate_processes", return_value=(SimpleNamespace(
+                            pid=41, executable_path="fixture.exe"),)), \
+                        patch.object(h, "_native_windows_for_pid", return_value=[]) as enumerate_windows:
+                    with self.assertRaisesRegex(h.GateError,
+                            "no longer live" if scenario == "exit" else "no visible native HWND"):
+                        h.ProductionLiveBackend().native(session,
+                            "native-after" if scenario == "native-after" else "native-before")
+                self.assertFalse(hasattr(session, "native_windows_before"))
+                if scenario == "timeout":
+                    self.assertGreaterEqual(elapsed[0], 30)
+                    self.assertLessEqual(elapsed[0], 30.25)
+                elif scenario == "native-after":
+                    self.assertEqual(elapsed[0], 0)
+                    enumerate_windows.assert_called_once()
+                else:
+                    self.assertLess(elapsed[0], 1)
+
     def test_json_line_exchange_supports_binary_controller_streams(self):
         supplied = {
             "windowId": 51,
