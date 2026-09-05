@@ -292,8 +292,8 @@ OBSERVED_GATE_READS = []
 
 class OfflineGateTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.scratch = SCRATCH / self._testMethodName
-        self.scratch.mkdir(parents=True)
+        # Real bootstrap budgets require short, fresh native fixture paths.
+        self.scratch = Path(tempfile.mkdtemp(prefix="gate-", dir=SCRATCH))
         self.run_root = self.scratch / "d" / ("a" * 32)
         self.run_root.parent.mkdir()
         self.archive = self.scratch / "Mod.Organizer-2.5.2.7z"
@@ -369,11 +369,101 @@ class OfflineGateTests(unittest.TestCase):
         record = h.prepare_gate(config, backend=backend).value
         release = SimpleNamespace(sha256="6" * 64, descriptor=SimpleNamespace(
             archive_sha256=record["archive"]["sha256"], archive_size=record["archive"]["size"],
-            archive_name=record["archive"]["originalName"], executable=SimpleNamespace(
+            archive_name=record["archive"]["originalName"],
+            archive_entry_count=plan_from_dict(record["layouts"][0]["bootstrap"]["plan"]).archive.entry_count,
+            archive_listing_sha256=plan_from_dict(record["layouts"][0]["bootstrap"]["plan"]).archive.listing_sha256,
+            executable=SimpleNamespace(
                 file_version="2.5.2.0", sha256=record["mo2"]["sha256"], size=record["mo2"]["size"],
             ),
         ))
         return config, backend, record, release
+
+    def test_preparation_binds_the_configured_manager_across_activation(self):
+        # Production journals inventory the full configured manager, while
+        # receipt.packageInventorySha256 inventories only the extracted package.
+        apply_fixture = _FakeBackend.apply_setup
+        def configured_manager(backend, *args, **kwargs):
+            applied = apply_fixture(backend, *args, **kwargs)
+            applied.journal = replace(applied.journal,
+                stage_inventory_sha256="c" * 64,
+                activated_inventory_sha256="c" * 64,
+                stage_entry_count=applied.receipt.package_file_count + 19,
+                activated_entry_count=applied.receipt.package_file_count + 19)
+            return applied
+        with patch.object(_FakeBackend, "apply_setup", configured_manager):
+            config, backend, record, release = self._protected_preparation_fixture()
+        with patch.object(h, "capability_run_root", return_value=self.run_root), \
+                patch.object(h, "load_mo2_release_bytes", return_value=release):
+            self.assertEqual(record, h._load_preparation(self.run_root))
+        originals, captures = h._load_preparation_originals(self.run_root, record)
+        row = record["layouts"][0]
+        for changes in (
+            {"activated_inventory_sha256": "d" * 64},
+            {"activated_entry_count": row["bootstrap"]["journal"]["stageEntryCount"] + 1},
+            {"stage_entry_count": 0, "activated_entry_count": 0},
+        ):
+            with self.subTest(changes=changes):
+                forged = copy.deepcopy(row)
+                journal = replace(journal_from_dict(forged["bootstrap"]["journal"]), **changes)
+                forged["bootstrap"]["journal"] = journal_to_dict(journal)
+                with self.assertRaisesRegex(h.GateError, "bootstrap journal cross-binding"):
+                    h._validate_prepared_layout(self.run_root, record, "SingleFile", forged,
+                        record["bootstrapJobIds"], originals, captures)
+
+    def test_preparation_reconstructs_distinct_preview_and_actual_job_budgets(self):
+        config, backend, record, release = self._protected_preparation_fixture()
+        originals, captures = h._load_preparation_originals(self.run_root, record)
+        listing = originals["archiveListing"]
+        self.assertEqual(listing["entries"], [
+            {"kind": "file", "relativePath": "ModOrganizer.exe"},
+            {"kind": "file", "relativePath": "plugins/base.py"}])
+        self.assertEqual(listing["canonicalSha256"],
+            hashlib.sha256(b"ModOrganizer.exe\nplugins/base.py\n").hexdigest())
+        with patch.object(h, "capability_run_root", return_value=self.run_root), \
+                patch.object(h, "load_mo2_release_bytes", return_value=release):
+            self.assertEqual(record, h._load_preparation(self.run_root))
+        for field, altered in (("archive_entry_count", 3), ("archive_listing_sha256", "0" * 64)):
+            with self.subTest(release_field=field), \
+                    patch.object(release.descriptor, field, altered), \
+                    patch.object(h, "capability_run_root", return_value=self.run_root), \
+                    patch.object(h, "load_mo2_release_bytes", return_value=release):
+                with self.assertRaisesRegex(h.GateError, "listing differs from captured release"):
+                    h._load_preparation(self.run_root)
+        row = record["layouts"][0]
+        plan = plan_from_dict(row["bootstrap"]["plan"])
+        journal = journal_from_dict(row["bootstrap"]["journal"])
+        self.assertNotEqual(plan.path_budget, journal.path_budget)
+        for scope in ("preview", "job"):
+            with self.subTest(scope=scope):
+                forged = copy.deepcopy(row)
+                if scope == "preview":
+                    changed = replace(plan, path_budget=journal.path_budget)
+                    changed = replace(changed, plan_id=plan_id_for(changed))
+                    receipt = replace(receipt_from_dict(forged["bootstrap"]["receipt"]), plan_id=changed.plan_id)
+                    receipt = replace(receipt, receipt_id=receipt_id_for(receipt))
+                    changed_journal = replace(journal, plan_id=changed.plan_id, receipt_id=receipt.receipt_id)
+                    forged["bootstrap"].update(plan=plan_to_dict(changed), receipt=receipt_to_dict(receipt),
+                                               journal=journal_to_dict(changed_journal))
+                else:
+                    forged["bootstrap"]["journal"] = journal_to_dict(replace(journal, path_budget=plan.path_budget))
+                with self.assertRaisesRegex(h.GateError, "bootstrap.*(budget|cross-binding)"):
+                    h._validate_prepared_layout(self.run_root, record, "SingleFile", forged,
+                        record["bootstrapJobIds"], originals, captures)
+        for mutate in (
+            lambda value: value["archiveListing"]["entries"].pop(),
+            lambda value: value["archiveListing"].__setitem__("canonicalSha256", "0" * 64),
+            lambda value: value["archiveListing"]["entries"][0].__setitem__("relativePath", "../escape"),
+            lambda value: value["archiveListing"]["entries"][0].__setitem__("kind", "link"),
+            lambda value: value.pop("archiveListing"),
+            lambda value: value["archiveListing"]["entries"].reverse(),
+            lambda value: value["archiveListing"]["entries"][0].__setitem__("extra", True),
+            lambda value: value["archiveListing"]["entries"][0].__setitem__("relativePath", 42),
+        ):
+            changed = copy.deepcopy(originals)
+            mutate(changed)
+            with self.assertRaises((h.GateError, h.PathBudgetError)):
+                h._validate_prepared_layout(self.run_root, record, "SingleFile", row,
+                    record["bootstrapJobIds"], changed, captures)
 
     def test_historical_preparation_uses_originals_after_low_inputs_change(self):
         """A historical read must neither consume Low bytes nor run current probes."""
@@ -2625,6 +2715,10 @@ class OfflineGateTests(unittest.TestCase):
         self.assertEqual("bootstrap-job:" + "d" * 32, applied.receipt.job_id)
         self.assertEqual(applied.receipt, receipt_from_dict(receipt_to_dict(applied.receipt)))
         self.assertEqual(applied.journal, journal_from_dict(journal_to_dict(applied.journal)))
+        self.assertNotEqual(applied.journal.activated_inventory_sha256, applied.receipt.package_inventory_sha256)
+        self.assertGreater(applied.journal.activated_entry_count, applied.receipt.package_file_count)
+        self.assertEqual(applied.journal.stage_inventory_sha256, applied.journal.activated_inventory_sha256)
+        self.assertEqual(applied.journal.stage_entry_count, applied.journal.activated_entry_count)
         self.assertTrue((workspace / "tools" / "mo2" / "skyrim-se-ae" / "app" / "ModOrganizer.exe").is_file())
 
         summarized = h.containment_service._receipted(h._bootstrap_summary)(
@@ -2729,6 +2823,8 @@ class OfflineGateTests(unittest.TestCase):
                 archive_sha256=record["archive"]["sha256"],
                 archive_size=record["archive"]["size"],
                 archive_name=record["archive"]["originalName"],
+                archive_entry_count=plan_from_dict(record["layouts"][0]["bootstrap"]["plan"]).archive.entry_count,
+                archive_listing_sha256=plan_from_dict(record["layouts"][0]["bootstrap"]["plan"]).archive.listing_sha256,
                 executable=SimpleNamespace(
                     file_version="2.5.2.0",
                     sha256=record["mo2"]["sha256"],
@@ -2812,6 +2908,8 @@ class OfflineGateTests(unittest.TestCase):
                 archive_sha256=record["archive"]["sha256"],
                 archive_size=record["archive"]["size"],
                 archive_name=record["archive"]["originalName"],
+                archive_entry_count=plan_from_dict(record["layouts"][0]["bootstrap"]["plan"]).archive.entry_count,
+                archive_listing_sha256=plan_from_dict(record["layouts"][0]["bootstrap"]["plan"]).archive.listing_sha256,
                 executable=SimpleNamespace(
                     file_version="2.5.2.0",
                     sha256=record["mo2"]["sha256"],
@@ -4667,9 +4765,12 @@ class _FakeBackend:
     def prepare_setup(self, layout: str, artifact_id: str, workspace: Path, steam_root: Path):
         self.mutations.append("prepare:" + layout)
         self.prepared.append(layout)
-        budget = admit_paths((PlannedPath("fixture", "preparation-wide", str(workspace.absolute())),))
         final = workspace / "tools/mo2/skyrim-se-ae"
         artifact = ArchiveVault(workspace).get(artifact_id)
+        budget = admit_paths((*h.bootstrap_paths(workspace, self.listing,
+            disposition="Create", archive_path=workspace / artifact.stored_relative_path),
+            *h.bootstrap_paths(workspace, self.listing,
+            disposition="Adopt", archive_path=workspace / artifact.stored_relative_path)))
         metadata_path = workspace / "library" / "metadata" / "artifacts" / f"{artifact.sha256}.json"
         extractor_path = self.extractor_path
         game_executable = h._stable_file(steam_root / "steamapps/common/Skyrim Special Edition/SkyrimSE.exe")
@@ -4776,7 +4877,9 @@ class _FakeBackend:
             stage_entry_count=receipt.package_file_count,
             activated_inventory_sha256=receipt.package_inventory_sha256,
             activated_entry_count=receipt.package_file_count,
-            path_budget=planned.path_budget,
+            path_budget=admit_paths(h.bootstrap_paths(workspace, self.listing,
+                job_id=job_id, disposition=planned.disposition.value,
+                archive_path=workspace / planned.archive.stored_path)),
         )
         fixture_receipt = workspace / "runtime" / "fixture-receipt.json"
         fixture_receipt.write_bytes(b"fixture receipt evidence")

@@ -35,6 +35,7 @@ if str(_SCRIPT_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
 
 from modlab.adapters.mo2.archive import (
+    ArchiveEntry,
     ArchiveListing,
     observe_bsdtar,
     preflight_archive,
@@ -273,7 +274,7 @@ def _preparation_capture_paths(authority: Path) -> dict[str, Path]:
     return captures
 
 
-def _capture_preparation_originals(config: GateConfig, record: Mapping[str, object], vault: object, release_path: Path) -> dict[str, object]:
+def _capture_preparation_originals(config: GateConfig, record: Mapping[str, object], vault: object, release_path: Path, listing: ArchiveListing) -> dict[str, object]:
     """Retain bounded source bytes and the original native observations, before use."""
     store = _evidence_store(config.run_root)
     destinations = _preparation_capture_paths(config.authority_root)
@@ -305,7 +306,9 @@ def _capture_preparation_originals(config: GateConfig, record: Mapping[str, obje
             sources[key], target, maximum_bytes=MAX_PREPARATION_INPUT_BYTES, stage="Preparation")
     original = {"schemaVersion": 1, "runId": config.run_root.name, "authorityRoot": str(config.authority_root),
         "source": record["source"], "archive": record["archive"], "extractor": record["extractor"],
-        "game": record["game"], "layouts": observations, "captures": captures}
+        "game": record["game"], "layouts": observations, "captures": captures,
+        "archiveListing": {"canonicalSha256": listing.canonical_sha256,
+            "entries": [{"relativePath": item.relative_path, "kind": item.kind} for item in listing.entries]}}
     target = config.authority_root / "preparation-originals.json"
     ledger.write(target)
     _publish_gate_json(config.run_root, target, original)
@@ -315,7 +318,7 @@ def _capture_preparation_originals(config: GateConfig, record: Mapping[str, obje
 def _load_preparation_originals(root: Path, preparation: Mapping[str, object]) -> tuple[dict, dict[str, bytes]]:
     authority = authority_run_root(root)
     original = _load_gate_json(root, authority / "preparation-originals.json")
-    _exact_object(original, {"schemaVersion", "runId", "authorityRoot", "source", "archive", "extractor", "game", "layouts", "captures"}, "preparation originals")
+    _exact_object(original, {"schemaVersion", "runId", "authorityRoot", "source", "archive", "extractor", "game", "layouts", "captures", "archiveListing"}, "preparation originals")
     if (original["schemaVersion"] != 1 or original["runId"] != root.name
             or original["authorityRoot"] != str(authority)
             or preparation["originalsSha256"] != _sha256(_canonical(original))
@@ -1203,7 +1206,7 @@ def _prepare_gate_in_vault(config, selected, inspected, admission, vault):
             "authority": False,
         }
         ledger = containment_service._current_effects()
-        original = _capture_preparation_originals(config, record, vault, Path(getattr(selected, "release_path", bundled_mo2_252_path())).absolute())
+        original = _capture_preparation_originals(config, record, vault, Path(getattr(selected, "release_path", bundled_mo2_252_path())).absolute(), inspected.listing)
         record["originalsSha256"] = _sha256(_canonical(original))
         preparation_path = config.authority_root / "preparation.json"
         effect_path = config.authority_root / "preparation-effect.json"
@@ -1451,6 +1454,21 @@ def _bootstrap_effect(value: object, label: str, root: Path) -> dict[str, object
     return record
 
 
+def _original_archive_listing(originals: Mapping[str, object]) -> ArchiveListing:
+    value = _exact_object(originals.get("archiveListing"), {"canonicalSha256", "entries"}, "archive listing")
+    if (type(value["canonicalSha256"]) is not str or _HEX64.fullmatch(value["canonicalSha256"]) is None
+            or type(value["entries"]) is not list or not 0 < len(value["entries"]) <= INVENTORY_LIMIT):
+        raise GateError("protected archive listing is malformed or unbounded")
+    entries = []
+    for item in value["entries"]:
+        row = _exact_object(item, {"relativePath", "kind"}, "archive listing entry")
+        if type(row["relativePath"]) is not str or type(row["kind"]) is not str:
+            raise GateError("protected archive listing entry fields must be strings")
+        entries.append(ArchiveEntry(row["relativePath"], row["kind"]))
+    # bootstrap_paths reuses archive_paths for path/kind/duplicate/order/hash checks.
+    return ArchiveListing(tuple(entries), value["canonicalSha256"])
+
+
 def _validate_prepared_layout(
     root: Path,
     preparation: Mapping[str, object],
@@ -1528,6 +1546,17 @@ def _validate_prepared_layout(
     planning = _bootstrap_effect(bootstrap["planningEffects"], f"{layout} bootstrap planning effect", root)
     application = _bootstrap_effect(bootstrap["applicationEffects"], f"{layout} bootstrap application effect", root)
     job_id = jobs[layout]
+    listing = _original_archive_listing(originals)
+    if listing.entry_count != plan.archive.entry_count or listing.canonical_sha256 != plan.archive.listing_sha256:
+        raise GateError("protected archive listing differs from bootstrap plan")
+    preview_budget = admit_paths((
+        *bootstrap_paths(workspace, listing, layout_version=2, disposition="Create", archive_path=payload_path),
+        *bootstrap_paths(workspace, listing, layout_version=2, disposition="Adopt", archive_path=payload_path),
+    ))
+    job_budget = admit_paths(bootstrap_paths(workspace, listing, job_id=job_id,
+        layout_version=2, disposition="Create", archive_path=payload_path))
+    if plan.path_budget != preview_budget or journal.path_budget != job_budget:
+        raise GateError("bootstrap preview or actual-job path budget differs")
     game_file = preparation["game"]["skyrimExecutable"]
     top_extractor = preparation["extractor"]
     extractor_identity = {
@@ -1617,9 +1646,11 @@ def _validate_prepared_layout(
         or journal.stage_root != str(expected_stage)
         or journal.prior_root != str(expected_prior)
         or journal.prior_target_kind != "Empty"
-        or journal.path_budget != plan.path_budget
-        or journal.activated_inventory_sha256 != receipt.package_inventory_sha256
-        or journal.activated_entry_count != receipt.package_file_count
+        # Journal inventories include configured profiles and manager files;
+        # the receipt's package inventory covers the extracted app only.
+        or journal.activated_inventory_sha256 != journal.stage_inventory_sha256
+        or journal.activated_entry_count != journal.stage_entry_count
+        or journal.activated_entry_count < receipt.package_file_count
     ):
         raise GateError("bootstrap journal cross-binding differs")
 
@@ -1798,6 +1829,9 @@ def _load_preparation(run_root: Path) -> Mapping[str, object]:
     archive = value.get("archive")
     release_record = load_mo2_release_bytes(captures["release"], authority_run_root(root) / "originals" / "release.json")
     release = release_record.descriptor
+    listing = _original_archive_listing(originals)
+    if listing.entry_count != release.archive_entry_count or listing.canonical_sha256 != release.archive_listing_sha256:
+        raise GateError("protected archive listing differs from captured release")
     if (
         type(archive) is not dict
         or set(archive) != {"path", "sha256", "size", "identity", "originalName"}
