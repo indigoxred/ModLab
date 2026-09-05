@@ -50,6 +50,46 @@ from modlab.validation.windows_watch import (
 )
 
 
+# Explicit native fixtures: every request names the fresh test authority root;
+# successful watch fixtures admit a real disposable Low child before completion.
+from modlab.validation.windows_vault_security import create_vault, open_vault
+from modlab.validation.windows_integrity import launch_low_integrity_process, set_low_integrity_tree
+_NativeWatchRequest = WatchRequest
+_native_start_watch = start_watch
+_fixture_popen = subprocess.Popen
+
+
+def WatchRequest(*args, **kwargs):
+    evidence = kwargs.get("evidence_root", args[4] if len(args) > 4 else None)
+    authority = next(path for path in (evidence, *evidence.parents) if path.name == "authority")
+    with open_vault(authority) as vault:
+        kwargs.update(authority_root=vault.path, authority_volume_serial=vault.identity.volume_serial,
+                      authority_file_id=vault.identity.file_id, authority_creator_sid=vault.creator_sid)
+    return _NativeWatchRequest(*args, **kwargs)
+
+
+def _admit_disposable_child(request):
+    low = Path(tempfile.mkdtemp(prefix="wc-low-"))
+    with mock.patch.object(subprocess, "Popen", new=_fixture_popen):
+        set_low_integrity_tree(low)
+    path = request.evidence_root / "request.json"
+    launch = launch_low_integrity_process(Path(sys.executable), ("-B", "-c", "pass"), low,
+        dict(os.environ, TEMP=str(low), TMP=str(low)), retain_owner=True,
+        before_resume=lambda value: windows_watch.admit_watch_launch(path, value))
+    deadline = time.monotonic() + 15
+    while launch.owner.observe().active_processes:
+        if time.monotonic() >= deadline:
+            raise AssertionError("disposable fixture tree did not exit")
+        time.sleep(.01)
+    windows_watch.complete_watch_launch(path, launch.owner)
+
+
+def start_watch(request, **kwargs):
+    pid = _native_start_watch(request, **kwargs)
+    _admit_disposable_child(request)
+    return pid
+
+
 @dataclass(frozen=True)
 class CancelDrainProof:
     every_completion_observed: bool
@@ -184,7 +224,8 @@ def _read_controller_pid_barrier(path: Path) -> int:
 class MutationWatchTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="modlab-containment-watch-")
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name) / "authority"
+        create_vault(self.root).close()
         self.watched = self.root / "watched"
         self.evidence = self.root / "evidence"
         self.watched.mkdir()
@@ -197,6 +238,7 @@ class MutationWatchTests(unittest.TestCase):
                 stop_watch(request_path)
             except (OSError, WatchProtocolError):
                 pass
+        self.doCleanups()
         self.temporary.cleanup()
 
     def test_new_write_ownership_error_preserves_role_and_retry_contract(self):
@@ -238,7 +280,7 @@ class MutationWatchTests(unittest.TestCase):
     def test_outcome_publication_keeps_the_validated_candidate_handle_through_rename(self):
         request = self._request()
         claim = windows_watch.ControllerClaim(
-            schema_version=1,
+            schema_version=2,
             request_sha256=windows_watch.watch_request_sha256(request),
             session_id=request.session_id,
             run_id=request.run_id,
@@ -249,7 +291,7 @@ class MutationWatchTests(unittest.TestCase):
             controller_creation_time=102,
         )
         launch = windows_watch.WorkerLaunch(
-            schema_version=1,
+            schema_version=2,
             request_sha256=windows_watch.watch_request_sha256(request),
             session_id=request.session_id,
             run_id=request.run_id,
@@ -349,7 +391,7 @@ class MutationWatchTests(unittest.TestCase):
             real_close(pinned)
 
         def synthetic_directory_identity(handle: int, path: Path):
-            if Path(path) == case_root / "events.ndjson":
+            if Path(path).suffix in {".json", ".ndjson"}:
                 return real_handle_identity(handle, path)
             return (
                 request.roots[0].volume_serial,
@@ -488,7 +530,9 @@ class MutationWatchTests(unittest.TestCase):
             process=mock.Mock(),
             lock=threading.Lock(),
             poison_reasons=[],
+            vault=windows_watch._open_request_vault(request),
         )
+        self.addCleanup(session.vault.close)
         owner_path = self.root / "stop-token-owner.txt"
         owner_path.write_bytes(b"owner")
         owner = windows_exact_fs.pin_direct_object(owner_path, kind="file")
@@ -578,7 +622,9 @@ class MutationWatchTests(unittest.TestCase):
             process=mock.Mock(),
             lock=threading.Lock(),
             poison_reasons=[],
+            vault=windows_watch._open_request_vault(request),
         )
+        self.addCleanup(session.vault.close)
         owners = []
         errors = []
         for name in ("primary", "fallback"):
@@ -780,8 +826,7 @@ class MutationWatchTests(unittest.TestCase):
             if route == "local":
                 self.assertEqual(completed, reloaded)
             else:
-                self.assertFalse(reloaded.complete)
-                self.assertIn("worker-exit-unproven", reloaded.error)
+                self.assertEqual(completed, reloaded)
             self.assertEqual(original_bytes, outcome_path.read_bytes())
         finally:
             with windows_watch._LOCAL_SESSIONS_LOCK:
@@ -977,16 +1022,12 @@ class MutationWatchTests(unittest.TestCase):
                             if persistent:
                                 self._assert_controller_ownership(report, state)
                             else:
-                                self.assertFalse(report().complete)
+                                self.assertEqual(complete, report().complete)
                                 self.assertEqual(set(), state["live"])
                     self.assertEqual(original, outcome_path.read_bytes())
                     self.assertEqual(identity, windows_exact_fs.identity_at_path(outcome_path))
                     reloaded = report()
-                    self.assertFalse(reloaded.complete)
-                    if complete:
-                        self.assertIn("worker-exit-unproven", reloaded.error)
-                    else:
-                        self.assertEqual(expected, reloaded)
+                    self.assertEqual(expected, reloaded)
 
     def test_non_owner_preserves_publication_owner_when_worker_close_is_interrupted(self):
         fixture = self._external_controller_fixture("pending-publication-query-owner")
@@ -1483,6 +1524,7 @@ class MutationWatchTests(unittest.TestCase):
         launch = windows_watch._load_worker_launch(request)
         outcome = watch_outcome_from_bytes((request.evidence_root / "outcome.json").read_bytes())
         captured = windows_watch._capture_worker_evidence(request, launch)
+        (request.evidence_root / "worker-exit.json").unlink()
         with self.assertRaises(WatchProtocolError):
             windows_watch._validate_outcome_raw_evidence(
                 outcome, request, claim, launch, captured,
@@ -1555,6 +1597,7 @@ class MutationWatchTests(unittest.TestCase):
                 "from tests.test_mo2_containment_watch import _publish_controller_pid_barrier",
                 "evidence, watched, barrier = map(Path, sys.argv[1:4])",
                 "root = watch_root('SourceMods', watched)",
+                "from tests.test_mo2_containment_watch import WatchRequest, start_watch",
                 "request = WatchRequest(",
                 "    request_id='watch-request:' + '8' * 64,",
                 "    session_id='watch-session:' + '9' * 64,",
@@ -1873,7 +1916,9 @@ class MutationWatchTests(unittest.TestCase):
                 start_watch(request, on_created=created.append)
         finally:
             with windows_watch._LOCAL_SESSIONS_LOCK:
-                windows_watch._LOCAL_SESSIONS.pop(request_path.absolute(), None)
+                session = windows_watch._LOCAL_SESSIONS.pop(request_path.absolute(), None)
+            if session is not None:
+                windows_watch._close_session_resources(session)
 
         self.assertEqual([9182], created)
 
@@ -2850,6 +2895,7 @@ class MutationWatchTests(unittest.TestCase):
                 "from tests.test_mo2_containment_watch import _publish_controller_pid_barrier",
                 "evidence, watched, ready, finish, terminal_ready = map(Path, sys.argv[1:6])",
                 "root = watch_root('SourceMods', watched)",
+                "from tests.test_mo2_containment_watch import WatchRequest, start_watch",
                 "request = WatchRequest(",
                 "    request_id='watch-request:' + '4' * 64,",
                 "    session_id='watch-session:' + '5' * 64,",
@@ -2862,7 +2908,11 @@ class MutationWatchTests(unittest.TestCase):
                 "worker_pid = start_watch(request)",
                 "_publish_controller_pid_barrier(ready, worker_pid)",
                 "while not finish.exists(): time.sleep(0.01)",
-                "request.stop_token_path.write_bytes(b'stop\\n')",
+                "from modlab.validation import windows_watch as protocol",
+                "session = protocol._local_launch_session(evidence/'request.json')",
+                "_, ah = protocol._read_causal(request,session.claim,session.launch,'LaunchAdmission')",
+                "_, qh = protocol._read_causal(request,session.claim,session.launch,'ProcessTreeQuiescence')",
+                "protocol._publish_causal(request,session.claim,session.launch,'NormalControllerStop',admissionSha256=ah,quiescenceSha256=qh)",
                 "while not (evidence / 'terminal.json').exists(): time.sleep(0.01)",
                 "terminal_ready.write_text('ready', encoding='ascii')",
                 "while True: time.sleep(1)",
@@ -2956,7 +3006,8 @@ class MutationWatchTests(unittest.TestCase):
                 "    return real_publish(path, data, parse)",
                 "watch.publish_new_verified = stall_launch",
                 "root = watch.watch_root('SourceMods', watched)",
-                "request = watch.WatchRequest(",
+                "from tests.test_mo2_containment_watch import WatchRequest",
+                "request = WatchRequest(",
                 "    request_id='watch-request:' + '2' * 64,",
                 "    session_id='watch-session:' + '3' * 64,",
                 "    run_id='containment-run:0123456789abcdef0123456789abcdef',",
@@ -3039,7 +3090,8 @@ class MutationWatchTests(unittest.TestCase):
                 "    while True: time.sleep(1)",
                 "watch._parse_ready = stall_ready",
                 "root = watch.watch_root('SourceMods', watched)",
-                "request = watch.WatchRequest(",
+                "from tests.test_mo2_containment_watch import WatchRequest",
+                "request = WatchRequest(",
                 "    request_id='watch-request:' + 'a' * 64,",
                 "    session_id='watch-session:' + 'b' * 64,",
                 "    run_id='containment-run:0123456789abcdef0123456789abcdef',",
@@ -3125,6 +3177,7 @@ class MutationWatchTests(unittest.TestCase):
                 "from tests.test_mo2_containment_watch import _publish_controller_pid_barrier",
                 "evidence, watched, ready, release, token_ready = map(Path, sys.argv[1:6])",
                 "root = watch_root('SourceMods', watched)",
+                "from tests.test_mo2_containment_watch import WatchRequest, start_watch",
                 "request = WatchRequest(",
                 "    request_id='watch-request:' + 'c' * 64,",
                 "    session_id='watch-session:' + 'd' * 64,",
@@ -3593,8 +3646,7 @@ class MutationWatchTests(unittest.TestCase):
         self.assertIn("[Errno 32]", receipts[0].error)
         self.assertEqual(outcome_bytes, outcome_path.read_bytes())
         reloaded = stop_watch(request_path)
-        self.assertFalse(reloaded.complete)
-        self.assertIn("worker-exit-unproven", reloaded.error)
+        self.assertEqual(original, reloaded)
         self.assertEqual(original.watch_outcome_id, watch_outcome_id_for(
             watch_outcome_from_bytes(outcome_path.read_bytes()),
         ))
@@ -3630,8 +3682,7 @@ class MutationWatchTests(unittest.TestCase):
                 self.assertIn(f"[Errno {error_code}]", receipt.error)
                 self.assertEqual(outcome_bytes, outcome_path.read_bytes())
         reloaded = stop_watch(request_path)
-        self.assertFalse(reloaded.complete)
-        self.assertIn("worker-exit-unproven", reloaded.error)
+        self.assertEqual(original, reloaded)
         self.assertEqual(original.watch_outcome_id, watch_outcome_id_for(
             watch_outcome_from_bytes(outcome_path.read_bytes()),
         ))
@@ -3827,6 +3878,7 @@ class MutationWatchTests(unittest.TestCase):
     def test_serialized_request_preserves_duplicate_physical_identities(self):
         root = watch_root("SourceMods", self.watched)
         document = {
+            **{key: value for key, value in windows_watch._request_document(self._request()).items() if key.startswith("authority")},
             "evidenceRoot": str(self.evidence),
             "requestId": "watch-request:" + "d" * 64,
             "runId": "containment-run:0123456789abcdef0123456789abcdef",
@@ -3841,7 +3893,7 @@ class MutationWatchTests(unittest.TestCase):
                 }
                 for kind in windows_watch.ROOT_KINDS
             ],
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "stopTokenPath": str(self.evidence / "stop.token"),
         }
 
@@ -3853,6 +3905,7 @@ class MutationWatchTests(unittest.TestCase):
     def test_request_schema_rejects_boolean_and_float_integer_values(self):
         request = self._request()
         base = {
+            **{key: value for key, value in windows_watch._request_document(request).items() if key.startswith("authority")},
             "evidenceRoot": str(request.evidence_root),
             "requestId": request.request_id,
             "runId": request.run_id,
@@ -3867,7 +3920,7 @@ class MutationWatchTests(unittest.TestCase):
                 }
                 for root in request.roots
             ],
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "stopTokenPath": str(request.stop_token_path),
         }
         mutations = (
@@ -4484,39 +4537,16 @@ class MutationWatchTests(unittest.TestCase):
     def test_stop_token_is_written_and_worker_reaped_when_ready_is_malformed(self):
         request_path, _ = self._start()
         ready_path = self.evidence / "ready.json"
-        ready_bytes = ready_path.read_bytes()
-        ready_path.write_bytes(b"not-json\n")
-        try:
+        with self.assertRaises(PermissionError):
+            ready_path.write_bytes(b"not-json\n")
+        real_read = windows_watch._read_exact_regular_file
+        def malformed(path, label, **kwargs):
+            return b"not-json\n" if path == ready_path else real_read(path, label, **kwargs)
+        with mock.patch.object(windows_watch, "_read_exact_regular_file", side_effect=malformed):
             receipt = stop_watch(request_path)
-        finally:
-            ready_path.write_bytes(ready_bytes)
-
         self.assertFalse(receipt.complete)
         self.assertTrue((self.evidence / "stop.token").is_file())
         self.assertIn("worker-ready-invalid", receipt.error)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
     def test_process_identity_error_retains_handle_when_unwind_close_fails(self):
@@ -4788,6 +4818,7 @@ class MutationWatchTests(unittest.TestCase):
                 "from tests.test_mo2_containment_watch import _publish_controller_pid_barrier",
                 "evidence, watched, barrier = map(Path, sys.argv[1:4])",
                 "root = watch_root('SourceMods', watched)",
+                "from tests.test_mo2_containment_watch import WatchRequest, start_watch",
                 "request = WatchRequest(",
                 "    request_id='watch-request:' + '6' * 64,",
                 "    session_id='watch-session:' + '7' * 64,",
@@ -4974,6 +5005,7 @@ class MutationWatchTests(unittest.TestCase):
         request_path.write_bytes(
             _canonical(
                 {
+                    **{key: value for key, value in windows_watch._request_document(request).items() if key.startswith("authority")},
                     "evidenceRoot": str(case_root),
                     "requestId": request.request_id,
                     "runId": request.run_id,
@@ -4988,7 +5020,7 @@ class MutationWatchTests(unittest.TestCase):
                         }
                         for kind in windows_watch.ROOT_KINDS
                     ],
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "stopTokenPath": str(case_root / "stop.token"),
                 }
             )
@@ -5000,7 +5032,7 @@ class MutationWatchTests(unittest.TestCase):
             windows_watch._current_controller_identity()
         )
         claim = windows_watch.ControllerClaim(
-            schema_version=1,
+            schema_version=2,
             request_sha256=request_sha256,
             session_id=request.session_id,
             run_id=request.run_id,
@@ -5014,7 +5046,7 @@ class MutationWatchTests(unittest.TestCase):
             windows_watch.controller_claim_to_bytes(claim, request)
         )
         launch = windows_watch.WorkerLaunch(
-            schema_version=1,
+            schema_version=2,
             request_sha256=request_sha256,
             session_id=request.session_id,
             run_id=request.run_id,
@@ -5376,7 +5408,7 @@ class MutationWatchTests(unittest.TestCase):
             windows_watch._current_controller_identity()
         )
         claim = windows_watch.ControllerClaim(
-            schema_version=1,
+            schema_version=2,
             request_sha256=request_sha256,
             session_id=request.session_id,
             run_id=request.run_id,
@@ -5395,7 +5427,7 @@ class MutationWatchTests(unittest.TestCase):
         process_handle, creation_time = windows_watch._open_process_identity(os.getpid())
         self.assertIsNone(windows_watch._close_handle(process_handle, "direct worker process"))
         launch = windows_watch.WorkerLaunch(
-            schema_version=1,
+            schema_version=2,
             request_sha256=request_sha256,
             session_id=request.session_id,
             run_id=request.run_id,
@@ -5432,7 +5464,7 @@ class MutationWatchTests(unittest.TestCase):
         request_bytes, request_sha256 = windows_watch._request_bytes_and_sha256(request)
         (case_root / "request.json").write_bytes(request_bytes)
         launch = windows_watch.WorkerLaunch(
-            schema_version=1,
+            schema_version=2,
             request_sha256=request_sha256,
             session_id=request.session_id,
             run_id=request.run_id,
@@ -5449,7 +5481,7 @@ class MutationWatchTests(unittest.TestCase):
                     "openedRootKinds": list(windows_watch.ROOT_KINDS),
                     "requestBytesSha256": request_sha256,
                     "requestId": request.request_id,
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "workerCreationTime": worker_creation_time,
                     "workerPid": worker_pid,
                 }
@@ -5461,6 +5493,7 @@ class MutationWatchTests(unittest.TestCase):
         terminal_path.write_bytes(
             _canonical(
                 {
+                    "stopBinding": None,
                     "complete": complete,
                     "error": terminal_error,
                     "eventByteCount": len(event_bytes),
@@ -5475,7 +5508,7 @@ class MutationWatchTests(unittest.TestCase):
                     "requestBytesSha256": request_sha256,
                     "requestId": request.request_id,
                     "rootIdentitiesUnchanged": True,
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "workerCreationTime": worker_creation_time,
                     "workerPid": worker_pid,
                 }

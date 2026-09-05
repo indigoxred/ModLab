@@ -409,3 +409,48 @@ def create_vault(path: Path) -> EvidenceVault:
 def open_vault(path: Path, *, expected_creator_sid: str | None = None) -> EvidenceVault:
     """Verify a vault for the actual effective creator token, without repair."""
     return _acquire(path, create=False, expected_creator_sid=expected_creator_sid)
+
+
+class TrustedPathGuard:
+    """Read-only pins for concrete trusted code/search paths and ancestors."""
+    def __init__(self, pins):
+        self._pins = pins
+
+    def verify(self):
+        for pinned in self._pins:
+            if not pinned.handle or exact._handle_identity(pinned.handle, pinned.path) != pinned.identity or exact.identity_at_path(pinned.path) != pinned.identity:
+                raise exact.ExactObjectError('trusted runtime identity changed')
+            _validate_policy(pinned)
+
+    def close(self):
+        _close_pins(self._pins)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, error, traceback):
+        _close_pins(self._pins, error)
+
+
+def pin_trusted_paths(paths: tuple[Path, ...]) -> TrustedPathGuard:
+    """Verify Medium-or-higher NW code/runtime objects without adopting them."""
+    pins = []
+    seen = set()
+    try:
+        for path in paths:
+            target = exact._absolute(path)
+            for component in (*reversed(target.parents), target):
+                if component in seen:
+                    continue
+                pinned = _pin(component)
+                pins.append(pinned)
+                seen.add(component)
+                if component != target and not pinned.identity.attributes & 0x10:
+                    raise exact.ExactObjectError('trusted runtime ancestor is not a directory')
+                _validate_policy(pinned)
+        guard = TrustedPathGuard(pins)
+        guard.verify()
+        return guard
+    except BaseException as error:
+        _close_pins(pins, error)
+        raise

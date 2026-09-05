@@ -23,7 +23,7 @@ from modlab.validation.mo2_containment_model import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REQUEST_NAME = "request.json"
 CLAIM_NAME = "controller-claim.json"
 LAUNCH_NAME = "worker-launch.json"
@@ -62,6 +62,7 @@ _REQUEST_FIELDS = {
     "evidenceRoot",
     "stopTokenPath",
     "roots",
+    "authorityRoot", "authorityVolumeSerial", "authorityFileId", "authorityCreatorSid",
 }
 _ROOT_FIELDS = {"rootKind", "path", "volumeSerial", "fileId"}
 _CLAIM_FIELDS = {
@@ -162,6 +163,10 @@ class WatchRequest:
     evidence_root: Path
     stop_token_path: Path
     roots: tuple[WatchRoot, ...]
+    authority_root: Path
+    authority_volume_serial: int
+    authority_file_id: int
+    authority_creator_sid: str
 
 
 @dataclass(frozen=True)
@@ -276,6 +281,10 @@ def watch_request_from_bytes(data: bytes) -> WatchRequest:
         evidence_root=_path(value["evidenceRoot"], "evidenceRoot"),
         stop_token_path=_path(value["stopTokenPath"], "stopTokenPath"),
         roots=tuple(roots),
+        authority_root=_path(value["authorityRoot"], "authorityRoot"),
+        authority_volume_serial=_integer(value["authorityVolumeSerial"], "authorityVolumeSerial"),
+        authority_file_id=_positive(value["authorityFileId"], "authorityFileId"),
+        authority_creator_sid=_text(value["authorityCreatorSid"], "authorityCreatorSid"),
     )
     return _validate_request(request)
 
@@ -287,14 +296,16 @@ def watch_request_sha256(value: WatchRequest) -> str:
 def watch_worker_command(request_path: Path) -> tuple[str, ...]:
     canonical_request_path = _path_value(request_path, "worker request path")
     executable = _path_value(Path(sys.executable), "worker executable")
-    return (
-        str(executable),
-        "-B",
-        "-m",
-        "modlab.validation.windows_watch",
-        "--worker",
-        str(canonical_request_path),
+    source = Path(__file__).absolute().parents[2]
+    runtime = Path(sys.base_prefix)
+    search = [str(source), str(runtime / f"python{sys.version_info.major}{sys.version_info.minor}.zip"),
+              str(runtime / "DLLs"), str(runtime / "Lib"), str(runtime)]
+    bootstrap = (
+        "import sys;sys.path[:]= " + repr(search) + ";"
+        "from modlab.validation.windows_watch import main;raise SystemExit(main())"
     )
+    return (str(executable), "-I", "-S", "-B", "-c", bootstrap, "--worker", str(canonical_request_path))
+
 
 
 def controller_claim_to_bytes(
@@ -472,6 +483,12 @@ def _validate_request(value: WatchRequest) -> WatchRequest:
         raise WatchProtocolError(
             "request must contain all eight logical root kinds in canonical order"
         )
+    authority_root = _path_value(value.authority_root, "authorityRoot")
+    if evidence_root != authority_root and authority_root not in evidence_root.parents:
+        raise WatchProtocolError("evidence root must descend from actual authority root")
+    _integer(value.authority_volume_serial, "authorityVolumeSerial", maximum=0xFFFFFFFF)
+    _positive(value.authority_file_id, "authorityFileId")
+    _pattern(value.authority_creator_sid, re.compile(r"S-1-(?:[0-9]+-)+[0-9]+"), "authorityCreatorSid")
     return WatchRequest(
         request_id,
         session_id,
@@ -480,6 +497,7 @@ def _validate_request(value: WatchRequest) -> WatchRequest:
         evidence_root,
         stop_token,
         roots,
+        authority_root, value.authority_volume_serial, value.authority_file_id, value.authority_creator_sid,
     )
 
 
@@ -630,6 +648,10 @@ def _request_dict(value: WatchRequest) -> dict[str, Any]:
         "runId": value.run_id,
         "scenario": value.scenario.value,
         "evidenceRoot": str(value.evidence_root),
+        "authorityRoot": str(value.authority_root),
+        "authorityVolumeSerial": value.authority_volume_serial,
+        "authorityFileId": value.authority_file_id,
+        "authorityCreatorSid": value.authority_creator_sid,
         "stopTokenPath": str(value.stop_token_path),
         "roots": [
             {
@@ -822,3 +844,71 @@ def _path_value(value: Any, label: str) -> Path:
             f"{label} must use one canonical absolute Windows path spelling"
         )
     return Path(text)
+
+
+# Each link is canonical and attempt-bound. Native facts are supplied by the
+# controller/worker, never inferred by these pure parsers.
+CAUSAL_NAMES = {
+    "LaunchAdmission": "launch-admission.json",
+    "ProcessTreeQuiescence": "process-quiescence.json",
+    "NormalControllerStop": STOP_NAME,
+    "RecoveryCleanupStop": STOP_NAME,
+    "WorkerExitObservation": "worker-exit.json",
+}
+_CAUSAL_FIELDS = {
+    "LaunchAdmission": {"readySha256", "processPid", "processCreationTime"},
+    "ProcessTreeQuiescence": {"admissionSha256", "processPid", "processCreationTime", "rootExitCode", "activeProcesses", "totalProcesses", "resumeVerified"},
+    "NormalControllerStop": {"admissionSha256", "quiescenceSha256"},
+    "RecoveryCleanupStop": {"cleanupPid", "cleanupCreationTime"},
+    "WorkerExitObservation": {"stopSha256", "terminalSha256", "eventSha256", "workerExitCode", "observationHandlesClosed", "reasonCodes"},
+}
+_CAUSAL_COMMON = {"schemaVersion", "kind", "requestSha256", "sessionId", "runId", "scenario", "controllerPid", "controllerCreationTime", "workerPid", "workerCreationTime"}
+
+
+def causal_record(kind: str, request: WatchRequest, claim: ControllerClaim,
+                  launch: WorkerLaunch, **facts: object) -> dict[str, object]:
+    value = {"schemaVersion": SCHEMA_VERSION, "kind": kind,
+             "requestSha256": watch_request_sha256(request), "sessionId": request.session_id,
+             "runId": request.run_id, "scenario": request.scenario.value,
+             "controllerPid": claim.controller_pid, "controllerCreationTime": claim.controller_creation_time,
+             "workerPid": launch.worker_pid, "workerCreationTime": launch.worker_creation_time, **facts}
+    return causal_record_from_bytes(_canonical_bytes(value), request, claim, launch)
+
+
+def causal_record_from_bytes(data: bytes, request: WatchRequest, claim: ControllerClaim,
+                             launch: WorkerLaunch) -> dict[str, object]:
+    _validate_claim(claim, _validate_request(request))
+    _validate_launch(launch, request)
+    value = _object_from_bytes(data, "causal record")
+    kind = value.get("kind")
+    if type(kind) is not str or kind not in _CAUSAL_FIELDS:
+        raise WatchProtocolError("unknown causal record kind")
+    _exact_fields(value, _CAUSAL_COMMON | _CAUSAL_FIELDS[kind], kind)
+    _schema(value["schemaVersion"], "causal schemaVersion")
+    _bind_request_record(value["requestSha256"], value["sessionId"], value["runId"], _scenario(value["scenario"]), request, kind)
+    for field, expected in (("controllerPid", claim.controller_pid), ("controllerCreationTime", claim.controller_creation_time),
+                            ("workerPid", launch.worker_pid), ("workerCreationTime", launch.worker_creation_time)):
+        if _positive(value[field], field) != expected:
+            raise WatchProtocolError("causal controller/worker identity mismatch")
+    for field in _CAUSAL_FIELDS[kind]:
+        item = value[field]
+        if field.endswith("Sha256"):
+            _pattern(item, _SHA256, field)
+        elif field in {"resumeVerified", "observationHandlesClosed"}:
+            if item is not True:
+                raise WatchProtocolError(field + " must be true")
+        elif field == "reasonCodes":
+            if type(item) is not list or any(type(reason) is not str or not reason for reason in item) or len(set(item)) != len(item):
+                raise WatchProtocolError("invalid worker exit reasons")
+        else:
+            _integer(item, field, minimum=1 if field.endswith(("Pid", "CreationTime")) or field == "totalProcesses" else 0)
+    if kind == "ProcessTreeQuiescence" and value["activeProcesses"] != 0:
+        raise WatchProtocolError("quiescence requires empty job")
+    return value
+
+
+def causal_record_to_bytes(value: dict[str, object], request: WatchRequest,
+                           claim: ControllerClaim, launch: WorkerLaunch) -> bytes:
+    data = _canonical_bytes(value)
+    causal_record_from_bytes(data, request, claim, launch)
+    return data

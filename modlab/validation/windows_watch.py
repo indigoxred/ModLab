@@ -6,6 +6,7 @@ import argparse
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass, replace
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -16,16 +17,20 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 
 from modlab.platform.windows_exact_fs import (
     ExactObjectError,
     ExactObjectOwnershipError,
     PinnedObject,
+    PinnedIdentity,
+    read_pinned_file,
     publish_new_pinned,
     resolve_retained_ownership,
     union_retained_ownership,
 )
+from modlab.validation.windows_vault_security import EvidenceVault, open_vault, pin_trusted_paths
+from modlab.validation.windows_process_job import ProcessJobOwner
 from modlab.validation.mo2_containment_model import (
     ContainmentScenario,
     ProtectedState,
@@ -41,6 +46,10 @@ from modlab.validation.mo2_containment_serialization import (
     watch_outcome_to_bytes,
 )
 from modlab.validation.windows_watch_protocol import (
+    CAUSAL_NAMES,
+    causal_record,
+    causal_record_from_bytes,
+    causal_record_to_bytes,
     CLAIM_NAME as _CLAIM_NAME,
     CONTROLLER_LOSS_NAME as _CONTROLLER_LOSS_NAME,
     EVENTS_NAME as _EVENTS_NAME,
@@ -73,7 +82,11 @@ from modlab.validation.windows_watch_protocol import (
 )
 
 
-_SCHEMA_VERSION = 1
+if TYPE_CHECKING:
+    from modlab.validation.windows_integrity import ProcessLaunch
+
+
+_SCHEMA_VERSION = 2
 _ROOT_KIND_SET = frozenset(ROOT_KINDS)
 _ACTIONS = {
     1: "Added",
@@ -241,6 +254,13 @@ class _LocalWatchSession:
     lock: threading.Lock
     poison_reasons: list[str]
     finalized_outcome: WatchOutcome | None = None
+    vault: EvidenceVault | None = None
+    runtime_guard: object | None = None
+    process_owner: ProcessJobOwner | None = None
+    admission: dict[str, object] | None = None
+    quiescence: dict[str, object] | None = None
+    record_pins: list[PinnedObject] | None = None
+    observed_worker_exit_code: int | None = None
 
 
 _LOCAL_SESSIONS: dict[Path, _LocalWatchSession] = {}
@@ -822,6 +842,7 @@ def _normalize_request(request: WatchRequest, *, inspect_roots: bool) -> WatchRe
         evidence_root,
         expected_stop,
         tuple(normalized),
+        request.authority_root, request.authority_volume_serial, request.authority_file_id, request.authority_creator_sid,
     )
 
 
@@ -881,7 +902,7 @@ def _required_int(value: object, label: str, *, minimum: int = 0) -> int:
 
 
 def _request_from_bytes(data: bytes) -> WatchRequest:
-    return _normalize_request(watch_request_from_bytes(data), inspect_roots=False)
+    return watch_request_from_bytes(data)
 
 
 def _write_new(path: Path, data: bytes) -> None:
@@ -975,7 +996,7 @@ def _open_process_identity(pid: int) -> tuple[int, int]:
 def _load_request_path(request_path: Path) -> WatchRequest:
     supplied = _reject_reparse_components(Path(request_path), "request path")
     resolved = supplied.resolve(strict=True)
-    request = _request_from_bytes(resolved.read_bytes())
+    request = _request_from_bytes(_read_exact_regular_file(resolved, "request record"))
     if resolved != request.evidence_root / _REQUEST_NAME:
         raise WatchProtocolError("request path is not confined to its evidence root")
     return request
@@ -1090,14 +1111,14 @@ def _close_popen_process_handle(process: subprocess.Popen[bytes]) -> str | None:
 
 def _load_controller_claim(request: WatchRequest) -> ControllerClaim:
     return controller_claim_from_bytes(
-        (request.evidence_root / _CLAIM_NAME).read_bytes(),
+        _read_exact_regular_file(request.evidence_root / _CLAIM_NAME, "controller claim"),
         request,
     )
 
 
 def _load_worker_launch(request: WatchRequest) -> WorkerLaunch:
     return worker_launch_from_bytes(
-        (request.evidence_root / _LAUNCH_NAME).read_bytes(),
+        _read_exact_regular_file(request.evidence_root / _LAUNCH_NAME, "worker launch"),
         request,
     )
 
@@ -1140,10 +1161,275 @@ def _cleanup_start_failure(
     return pending
 
 
-def start_watch(
+def _open_request_vault(request: WatchRequest) -> EvidenceVault:
+    # Parse binding before any native lookup; never infer a vault from a child.
+    watch_request_to_bytes(request)
+    vault = open_vault(request.authority_root, expected_creator_sid=request.authority_creator_sid)
+    try:
+        if (vault.identity.volume_serial, vault.identity.file_id) != (request.authority_volume_serial, request.authority_file_id):
+            raise WatchProtocolError("authority root identity mismatch")
+        vault.verify_descendant(request.evidence_root)
+        return vault
+    except BaseException as error:
+        try:
+            vault.close()
+        except BaseException as cleanup:
+            raise _merge_controller_errors(error, cleanup)
+        raise
+
+
+@contextmanager
+def _guard_request(request):
+    vault = _open_request_vault(request)
+    try:
+        yield vault
+    except BaseException as error:
+        try:
+            vault.close()
+        except BaseException as cleanup:
+            raise _merge_controller_errors(error, cleanup)
+        raise
+    else:
+        vault.close()
+
+
+def _verify_records(vault: EvidenceVault, request: WatchRequest, *, include_outcome=False) -> None:
+    vault.verify_descendant(request.evidence_root)
+    for name in {_REQUEST_NAME, _CLAIM_NAME, _LAUNCH_NAME, _READY_NAME, _EVENTS_NAME,
+                 _TERMINAL_NAME, _CONTROLLER_LOSS_NAME, _OUTCOME_NAME, *CAUSAL_NAMES.values()}:
+        path = request.evidence_root / name
+        if (name != _OUTCOME_NAME or include_outcome) and path.exists():
+            vault.verify_descendant(path)
+
+
+def _runtime_paths() -> tuple[Path, ...]:
+    source = Path(__file__).absolute().parents[2]
+    modules = ("modlab/__init__.py", "modlab/platform/__init__.py", "modlab/validation/__init__.py",
+               "modlab/platform/windows_exact_fs.py", "modlab/validation/windows_watch.py",
+               "modlab/validation/windows_watch_protocol.py", "modlab/validation/windows_vault_security.py",
+               "modlab/validation/windows_process_job.py", "modlab/validation/mo2_containment_model.py",
+               "modlab/validation/mo2_containment_serialization.py", "modlab/validation/mo2_containment_authority.py")
+    runtime = Path(sys.base_prefix)
+    paths = [Path(sys.executable), source, runtime, *(source / module for module in modules)]
+    # Isolated -S startup uses only the interpreter's standard library/DLL paths.
+    for name in ("Lib", "DLLs", f"python{sys.version_info.major}{sys.version_info.minor}.zip",
+                 f"python{sys.version_info.major}{sys.version_info.minor}.dll", "python3.dll"):
+        path = runtime / name
+        if path.exists():
+            paths.append(path)
+    return tuple(paths)
+
+
+def start_watch(request: WatchRequest, *, on_created: Callable[[int], None] | None = None) -> int:
+    vault = _open_request_vault(request)
+    runtime = None
+    try:
+        runtime = pin_trusted_paths(_runtime_paths())
+        return _start_watch(request, on_created=on_created, vault=vault, runtime_guard=runtime)
+    except BaseException as error:
+        with _LOCAL_SESSIONS_LOCK:
+            retained = _LOCAL_SESSIONS.get((request.evidence_root / _REQUEST_NAME).absolute())
+        if retained is None:
+            for guard in (runtime, vault):
+                if guard is not None:
+                    try:
+                        guard.close()
+                    except BaseException as cleanup:
+                        error = _merge_controller_errors(error, cleanup)
+        raise error
+
+
+def run_watch_worker(request_path: Path) -> int:
+    request = _load_request_path(request_path)
+    with _guard_request(request) as vault:
+        _verify_records(vault, request)
+        if _load_request_path(request_path) != request:
+            raise WatchProtocolError("request changed during vault acquisition")
+        result = _run_watch_worker(request_path)
+        _verify_records(vault, request)
+        return result
+
+
+def _pin_record(path: Path, *, wait_for_publication=False) -> tuple[PinnedObject, bytes]:
+    deadline = time.monotonic() + 1.0
+    while True:
+        handle = _kernel32.CreateFileW(str(path), _GENERIC_READ, _FILE_SHARE_READ, None,
+                                       _OPEN_EXISTING, _FILE_FLAG_OPEN_REPARSE_POINT, None)
+        if handle != _INVALID_HANDLE_VALUE:
+            break
+        error = _winerror(f"could not pin causal record {path}")
+        if not wait_for_publication or error.errno != _ERROR_SHARING_VIOLATION or time.monotonic() >= deadline:
+            raise error
+        time.sleep(.01)
+    pin = PinnedObject(path, handle, None)
+    try:
+        volume, file_id, attributes = _handle_identity(handle, path)
+        if attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT):
+            raise WatchProtocolError("causal record must be direct regular file")
+        pin.identity = PinnedIdentity(volume, file_id, attributes)
+        return pin, read_pinned_file(pin)
+    except BaseException as error:
+        try:
+            pin.close()
+        except BaseException as cleanup:
+            raise ExactObjectOwnershipError(str(cleanup), verification=(pin,)) from error
+        raise
+
+
+def _read_causal(request, claim, launch, kind):
+    path = request.evidence_root / CAUSAL_NAMES[kind]
+    try:
+        data = _read_exact_regular_file(path, kind)
+    except _HandleOwnershipError as error:
+        raise _controller_owner(error, path)
+    value = causal_record_from_bytes(data, request, claim, launch)
+    if value["kind"] != kind:
+        raise WatchProtocolError("causal record kind mismatch: " + kind)
+    return value, hashlib.sha256(data).hexdigest()
+
+
+def _publish_causal(request, claim, launch, kind, **facts):
+    value = causal_record(kind, request, claim, launch, **facts)
+    data = causal_record_to_bytes(value, request, claim, launch)
+    _write_new(request.evidence_root / CAUSAL_NAMES[kind], data)
+    return value
+
+
+def _local_launch_session(request_path):
+    with _LOCAL_SESSIONS_LOCK:
+        session = _LOCAL_SESSIONS.get(Path(request_path).absolute())
+    if session is None or _current_controller_identity() != (session.controller_pid, session.controller_creation_time):
+        raise WatchProtocolError("original local watcher ownership required")
+    return session
+
+
+def admit_watch_launch(request_path: Path, launch: ProcessLaunch) -> None:
+    """Bind the original private-job root, only from the launcher's before_resume."""
+    session = _local_launch_session(request_path)
+    with session.lock:
+        if session.process_owner is not None or session.poison_reasons:
+            raise WatchProtocolError("watch launch already admitted or poisoned")
+        owner = launch.owner
+        if not isinstance(owner, ProcessJobOwner):
+            raise WatchProtocolError("retained process job owner required")
+        # Retain before any fallible observation/publication; failed launch keeps
+        # its original owner reachable through this session and launch exception.
+        session.process_owner = owner
+        try:
+            _verify_records(session.vault, session.request)
+            if owner.resumed:
+                raise WatchProtocolError("launch admission must precede verified resume")
+            observation = owner.observe()
+            if (observation.pid, observation.creation_time) != (launch.pid, launch.creation_time) or observation.root_exit_code is not None or observation.active_processes != 1:
+                raise WatchProtocolError("launch admission original process identity mismatch")
+            handle = _popen_process_handle(session.process)
+            _verify_retained_process_handle(handle, session.worker_pid, session.worker_creation_time)
+            if _kernel32.WaitForSingleObject(handle, 0) != _WAIT_TIMEOUT or session.request.stop_token_path.exists():
+                raise WatchProtocolError("watcher no longer armed before process admission")
+            ready = _read_exact_regular_file(session.request.evidence_root / _READY_NAME, "ready record")
+            _parse_ready(ready, session.request, session.worker_pid, session.request_sha256, session.worker_creation_time)
+            session.admission = _publish_causal(session.request, session.claim, session.launch, "LaunchAdmission",
+                readySha256=hashlib.sha256(ready).hexdigest(), processPid=launch.pid, processCreationTime=launch.creation_time)
+        except BaseException as error:
+            session.poison_reasons.append("launch-admission-failed")
+            if isinstance(error, _HandleOwnershipError):
+                raise _controller_owner(error, session.request.evidence_root)
+            raise
+
+
+def complete_watch_launch(request_path: Path, owner: ProcessJobOwner | None = None) -> None:
+    """Persist original tree quiescence; close remains the stop operation's duty."""
+    session = _local_launch_session(request_path)
+    try:
+        _complete_watch_launch(request_path, owner)
+    except BaseException as error:
+        if session.process_owner is not None:
+            error.owner = session.process_owner
+        raise
+
+
+def _complete_watch_launch(request_path: Path, owner: ProcessJobOwner | None = None) -> None:
+    """Query original ownership and persist quiescence; retain owner until stop."""
+    session = _local_launch_session(request_path)
+    with session.lock:
+        retained = session.process_owner
+        if retained is None or (owner is not None and owner is not retained) or session.admission is None:
+            raise WatchProtocolError("original admitted process owner required")
+        if session.poison_reasons or not retained.resumed:
+            raise WatchProtocolError("normal completion requires unbroken verified resume")
+        _verify_records(session.vault, session.request)
+        observation = retained.observe()
+        if (observation.pid, observation.creation_time) != (session.admission["processPid"], session.admission["processCreationTime"]):
+            raise WatchProtocolError("quiescence root identity mismatch")
+        if observation.root_exit_code is None or observation.active_processes != 0:
+            raise WatchProtocolError("original process tree is still active")
+        admission, admission_hash = _read_causal(session.request, session.claim, session.launch, "LaunchAdmission")
+        if admission != session.admission:
+            raise WatchProtocolError("admission differs from retained process observation")
+        value = causal_record("ProcessTreeQuiescence", session.request, session.claim, session.launch,
+            admissionSha256=admission_hash, processPid=observation.pid, processCreationTime=observation.creation_time,
+            rootExitCode=observation.root_exit_code, activeProcesses=0, totalProcesses=observation.total_processes, resumeVerified=True)
+        data = causal_record_to_bytes(value, session.request, session.claim, session.launch)
+        try:
+            _write_new(session.request.evidence_root / CAUSAL_NAMES["ProcessTreeQuiescence"], data)
+        except FileExistsError:
+            existing, _ = _read_causal(session.request, session.claim, session.launch, "ProcessTreeQuiescence")
+            if existing != value:
+                raise WatchProtocolError("quiescence collision differs from retained observation")
+        session.quiescence = value
+
+
+def _validate_stop_chain(request, claim, launch, stop):
+    if stop["kind"] != "NormalControllerStop":
+        raise WatchProtocolError("normal controller stop required")
+    admission, admission_hash = _read_causal(request, claim, launch, "LaunchAdmission")
+    quiescence, quiescence_hash = _read_causal(request, claim, launch, "ProcessTreeQuiescence")
+    try:
+        ready = _read_exact_regular_file(request.evidence_root / _READY_NAME, "ready record")
+    except _HandleOwnershipError as error:
+        owner = _controller_owner(error, request.evidence_root / _READY_NAME)
+        owner.resolve()
+        raise WatchProtocolError("ready evidence read close failed") from error
+    _parse_ready(ready, request, launch.worker_pid, watch_request_sha256(request), launch.worker_creation_time)
+    if admission["readySha256"] != hashlib.sha256(ready).hexdigest() or quiescence["admissionSha256"] != admission_hash or stop["admissionSha256"] != admission_hash or stop["quiescenceSha256"] != quiescence_hash:
+        raise WatchProtocolError("causal chain hash mismatch")
+    if (admission["processPid"], admission["processCreationTime"]) != (quiescence["processPid"], quiescence["processCreationTime"]):
+        raise WatchProtocolError("causal root identity mismatch")
+
+
+def _durable_worker_exit(request, claim, launch, captured):
+    stop, stop_hash = _read_causal(request, claim, launch, "NormalControllerStop")
+    _validate_stop_chain(request, claim, launch, stop)
+    pin, data = _pin_record(request.stop_token_path)
+    pending = None
+    try:
+        terminal = _parse_terminal(_read_exact_regular_file(request.evidence_root / _TERMINAL_NAME, "terminal record"),
+            request, launch.worker_pid, watch_request_sha256(request), launch.worker_creation_time)
+        expected = {"sha256": hashlib.sha256(data).hexdigest(), "volumeSerial": pin.identity.volume_serial, "fileId": pin.identity.file_id}
+        if expected["sha256"] != stop_hash or terminal["stopBinding"] != expected:
+            raise WatchProtocolError("terminal exact stop identity/hash mismatch")
+    except BaseException as error:
+        pending = _controller_owner(error, request.evidence_root / _TERMINAL_NAME)
+        raise pending
+    finally:
+        try:
+            pin.close()
+        except BaseException as error:
+            cleanup = ExactObjectOwnershipError(str(error), verification=(pin,))
+            if pending is not None:
+                raise _merge_controller_errors(pending, cleanup)
+            raise cleanup from error
+    proof, _ = _read_causal(request, claim, launch, "WorkerExitObservation")
+    if proof["stopSha256"] != stop_hash or proof["terminalSha256"] != captured.terminal_bytes_sha256 or proof["eventSha256"] != captured.journal.sha256:
+        raise WatchProtocolError("worker exit evidence hash mismatch")
+    return proof
+
+
+def _start_watch(
     request: WatchRequest,
     *,
     on_created: Callable[[int], None] | None = None,
+    vault: EvidenceVault, runtime_guard: object,
 ) -> int:
     """Start one watcher owned exclusively by this controller process."""
     _require_windows()
@@ -1200,6 +1486,8 @@ def start_watch(
         process = subprocess.Popen(
             claim.worker_command,
             shell=False,
+            cwd=str(Path(__file__).absolute().parents[2]),
+            env={key: value for key, value in os.environ.items() if not key.upper().startswith("PYTHON")},
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1246,6 +1534,7 @@ def start_watch(
             process=process,
             lock=threading.Lock(),
             poison_reasons=[],
+            vault=vault, runtime_guard=runtime_guard, record_pins=[],
         )
         with _LOCAL_SESSIONS_LOCK:
             if request_key in _LOCAL_SESSIONS:
@@ -1307,6 +1596,13 @@ def start_watch(
                     request_sha256,
                     worker_creation_time,
                 )
+                for record_path, expected in ((request_path, request_bytes), (claim_path, claim_bytes),
+                                              (launch_path, launch_bytes), (ready_path, ready_bytes)):
+                    pin, data = _pin_record(record_path)
+                    session.record_pins.append(pin)
+                    if data != expected:
+                        raise WatchProtocolError("startup record changed before pin")
+                vault.verify()
                 return worker_pid
         raise WatchProtocolError("watch worker did not become ready")
     except BaseException as error:
@@ -1509,8 +1805,10 @@ def _terminal_document(
     root_identities_unchanged: bool,
     opened_root_kinds: tuple[str, ...],
     journal_evidence: _JournalEvidence,
+    stop_binding: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return {
+        "stopBinding": stop_binding,
         "complete": complete,
         "error": None if not errors else "; ".join(errors),
         "eventByteCount": len(journal_evidence.data),
@@ -1611,7 +1909,7 @@ def _arm_directory_state(
     return state
 
 
-def run_watch_worker(request_path: Path) -> int:
+def _run_watch_worker(request_path: Path) -> int:
     """Run one fail-closed worker: 0 complete, 1 incomplete, 2 untrustworthy."""
     _require_windows()
     try:
@@ -1622,7 +1920,7 @@ def run_watch_worker(request_path: Path) -> int:
         request = _load_request_path(canonical_request_path)
         _, request_sha256 = _request_bytes_and_sha256(request)
         claim = controller_claim_from_bytes(
-            (request.evidence_root / _CLAIM_NAME).read_bytes(),
+            _read_exact_regular_file(request.evidence_root / _CLAIM_NAME, "controller claim"),
             request,
         )
         if (
@@ -1683,7 +1981,7 @@ def run_watch_worker(request_path: Path) -> int:
         if launch_path.exists():
             try:
                 launch = worker_launch_from_bytes(
-                    launch_path.read_bytes(),
+                    _read_exact_regular_file(launch_path, "worker launch"),
                     request,
                 )
                 if launch.worker_pid != worker_pid or (
@@ -1736,6 +2034,9 @@ def run_watch_worker(request_path: Path) -> int:
     failed_closes = 0
     journal_evidence = _JournalEvidence(0, 0, b"", 0, 0)
     unresolved_protocol_ownership: WatchProtocolOwnershipError | None = None
+    stop_pin = None
+    stop_binding = None
+    normal_stop_valid = False
     try:
         if errors:
             raise WatchProtocolError(errors[-1])
@@ -1875,6 +2176,16 @@ def run_watch_worker(request_path: Path) -> int:
             ready = True
         while not stopping.is_set():
             if request.stop_token_path.exists():
+                stop_pin, stop_data = _pin_record(request.stop_token_path, wait_for_publication=True)
+                stop = causal_record_from_bytes(stop_data, request, claim, launch)
+                if stop["kind"] != "NormalControllerStop":
+                    errors.append("recovery-cleanup-stop")
+                else:
+                    _validate_stop_chain(request, claim, launch, stop)
+                    normal_stop_valid = True
+                stop_binding = {"sha256": hashlib.sha256(stop_data).hexdigest(),
+                                "volumeSerial": stop_pin.identity.volume_serial,
+                                "fileId": stop_pin.identity.file_id}
                 stopping.set()
                 break
             if controller_handle:
@@ -1972,8 +2283,15 @@ def run_watch_worker(request_path: Path) -> int:
             if close_error:
                 errors.append(close_error)
                 failed_closes += 1
+        if stop_pin is not None:
+            try:
+                stop_pin.close()
+            except BaseException as error:
+                raise ExactObjectOwnershipError(str(error), verification=(stop_pin,)) from error
         event_digest = journal_evidence.sha256
-        complete = ready and not errors and failed_closes == 0 and root_identities_unchanged
+        if not normal_stop_valid and not errors:
+            errors.append("normal-controller-stop-missing")
+        complete = ready and normal_stop_valid and not errors and failed_closes == 0 and root_identities_unchanged
         terminal = _terminal_document(
             request,
             worker_pid=worker_pid,
@@ -1987,6 +2305,7 @@ def run_watch_worker(request_path: Path) -> int:
             root_identities_unchanged=root_identities_unchanged,
             opened_root_kinds=tuple(opened_kinds),
             journal_evidence=journal_evidence,
+            stop_binding=stop_binding,
         )
         if unresolved_protocol_ownership is not None:
             raise unresolved_protocol_ownership
@@ -2137,6 +2456,7 @@ def _parse_terminal(
     _exact_fields(
         value,
         {
+            "stopBinding",
             "complete",
             "error",
             "eventByteCount",
@@ -2191,6 +2511,16 @@ def _parse_terminal(
         _required_text(error, "terminal error")
     if bool(value["complete"]) == (error is not None):
         raise WatchProtocolError("terminal complete/error fields are inconsistent")
+    binding = value["stopBinding"]
+    if binding is not None:
+        if type(binding) is not dict or set(binding) != {"sha256", "volumeSerial", "fileId"}:
+            raise WatchProtocolError("terminal stop binding fields must be exact")
+        if type(binding["sha256"]) is not str or not re.fullmatch(r"[0-9a-f]{64}", binding["sha256"]):
+            raise WatchProtocolError("terminal stop hash invalid")
+        _required_int(binding["volumeSerial"], "stop volume")
+        _required_int(binding["fileId"], "stop file", minimum=1)
+    if value["complete"] and binding is None:
+        raise WatchProtocolError("complete terminal requires exact normal stop")
     if value["complete"] and not value["ready"]:
         raise WatchProtocolError("complete terminal requires ready")
     if value["complete"] and not value["rootIdentitiesUnchanged"]:
@@ -2236,7 +2566,7 @@ def _process_alive(pid: int) -> bool:
     return result == _WAIT_TIMEOUT
 
 
-def watch_receipt_from_files(
+def _watch_receipt_from_files(
     request: WatchRequest,
     worker_pid: int,
     ready_path: Path,
@@ -2482,7 +2812,7 @@ def _watch_outcome(
         ready = captured.ready
         roots_unchanged = captured.root_identities_unchanged
     return WatchOutcome(
-        schema_version=_SCHEMA_VERSION,
+        schema_version=1,
         request_id=request.request_id,
         request_sha256=watch_request_sha256(request),
         session_id=request.session_id,
@@ -2578,6 +2908,19 @@ def _validate_outcome_raw_evidence(
         if loss_bytes != controller_loss_to_bytes(loss, request, claim, launch):
             raise WatchProtocolError("controller loss canonical bytes mismatch")
         reasons.append("controller-session-lost")
+    try:
+        proof = _durable_worker_exit(request, claim, launch, captured)
+    except (WatchProtocolOwnershipError, ExactObjectOwnershipError):
+        raise
+    except (OSError, WatchProtocolError):
+        reasons.append("causal-worker-exit-unproven")
+    else:
+        # Durable observation came from the original owner after native closes.
+        # A later controller exit cannot retrospectively poison this observation.
+        reasons = list((*captured.completion_reasons, *proof["reasonCodes"]))
+        observed_exit_code = proof["workerExitCode"]
+        if loss_path.exists():
+            reasons.append("controller-session-lost")
     if observed_exit_code is None:
         reasons.append("worker-exit-unproven")
     elif observed_exit_code != 0:
@@ -2746,6 +3089,7 @@ def _stop_local_session(
     session: _LocalWatchSession,
     *,
     forced_reason: str | None = None,
+    recovery: bool = False,
 ) -> WatchReceipt:
     with session.lock:
         request = session.request
@@ -2757,6 +3101,32 @@ def _stop_local_session(
             "_modlab_close_owner",
             None,
         )
+        if (isinstance(retained_process_owner, _PopenVerificationOwner)
+                and not retained_process_owner.handle and session.finalized_outcome is None
+                and session.poison_reasons):
+            # A prior close failed after the original worker exit was observed.
+            # Retry retained owners; never reopen the root/job or invent success.
+            _close_session_resources(session)
+            captured = None
+            reasons = list(session.poison_reasons)
+            try:
+                captured = _capture_worker_evidence(request, launch)
+                reasons.extend(captured.completion_reasons)
+            except _HandleOwnershipError as error:
+                raise _controller_owner(error, request.evidence_root)
+            except (WatchProtocolOwnershipError, ExactObjectOwnershipError):
+                raise
+            except (OSError, WatchProtocolError) as error:
+                reasons.append(_worker_evidence_reason(error))
+            outcome = _watch_outcome(request, claim, launch,
+                completion=WatchEvidenceCompletion.INCOMPLETE,
+                worker_exit_code=session.observed_worker_exit_code,
+                reasons=tuple(reasons), captured=captured)
+            published = _publish_or_load_outcome(outcome, request, claim, launch)
+            session.finalized_outcome = published
+            with _LOCAL_SESSIONS_LOCK:
+                _LOCAL_SESSIONS.pop(request_path.absolute(), None)
+            return _receipt_from_outcome(published)
         if (
             outcome_path.exists()
             and isinstance(retained_process_owner, _PopenVerificationOwner)
@@ -2772,15 +3142,21 @@ def _stop_local_session(
                 return _receipt_from_outcome(existing)
             except WatchProtocolOwnershipError as error:
                 _resolve_watch_protocol_ownership(error)
+                return _incomplete_without_outcome(request, launch.worker_pid, str(error))
             except (OSError, ContainmentFormatError, WatchProtocolError):
-                # A live worker or raw-evidence mismatch must continue through
-                # the retained local stop/capture path. The no-replace outcome
-                # collision below will then require exact derived equality.
-                pass
+                return _incomplete_without_outcome(request, launch.worker_pid, "stored outcome failed raw reconstruction")
         try:
             observed_request = _load_request_path(request_path)
             observed_claim = _load_controller_claim(observed_request)
             observed_launch = _load_worker_launch(observed_request)
+        except _HandleOwnershipError as error:
+            if "same-controller-protocol-uncertain" not in session.poison_reasons:
+                session.poison_reasons.append("same-controller-protocol-uncertain")
+            raise _controller_owner(error, request.evidence_root)
+        except (WatchProtocolOwnershipError, ExactObjectOwnershipError):
+            if "same-controller-protocol-uncertain" not in session.poison_reasons:
+                session.poison_reasons.append("same-controller-protocol-uncertain")
+            raise
         except (OSError, WatchProtocolError):
             if "same-controller-protocol-uncertain" not in session.poison_reasons:
                 session.poison_reasons.append("same-controller-protocol-uncertain")
@@ -2811,7 +3187,30 @@ def _stop_local_session(
         except (OSError, WatchProtocolError):
             reasons.append("worker-pre-stop-observation-failed")
         try:
-            _write_new(request.stop_token_path, b"stop\n")
+            if recovery or forced_reason is not None:
+                reasons.append("recovery-cleanup-stop")
+            elif session.admission is None or session.quiescence is None or session.process_owner is None:
+                reasons.append("process-admission-or-quiescence-missing")
+            else:
+                # Query the same retained owner again at the actual stop boundary.
+                if not session.process_owner.resumed:
+                    reasons.append("process-resume-unproven")
+                observed = session.process_owner.observe()
+                if observed.root_exit_code is None or observed.active_processes != 0:
+                    reasons.append("process-tree-not-quiescent")
+                if (observed.pid, observed.creation_time, observed.root_exit_code, observed.total_processes) != (
+                    session.quiescence["processPid"], session.quiescence["processCreationTime"], session.quiescence["rootExitCode"], session.quiescence["totalProcesses"]):
+                    reasons.append("process-quiescence-changed")
+            _verify_records(session.vault, request)
+            if reasons:
+                cleanup_pid, cleanup_creation = _current_controller_identity()
+                _publish_causal(request, claim, launch, "RecoveryCleanupStop", cleanupPid=cleanup_pid, cleanupCreationTime=cleanup_creation)
+            else:
+                admission, admission_hash = _read_causal(request, claim, launch, "LaunchAdmission")
+                quiescence, quiescence_hash = _read_causal(request, claim, launch, "ProcessTreeQuiescence")
+                if admission != session.admission or quiescence != session.quiescence:
+                    raise WatchProtocolError("normal stop differs from retained process observations")
+                _publish_causal(request, claim, launch, "NormalControllerStop", admissionSha256=admission_hash, quiescenceSha256=quiescence_hash)
         except FileExistsError:
             reasons.append("stop-token-already-exists")
         except WatchProtocolOwnershipError as error:
@@ -2822,6 +3221,7 @@ def _stop_local_session(
         session.poison_reasons[:] = list(dict.fromkeys(reasons))
         process_handle = 0
         worker_signalled = False
+        process_closed = False
         worker_exit_code: int | None = None
         captured: _CapturedWatchEvidence | None = None
         pending_ownership: BaseException | None = None
@@ -2842,6 +3242,7 @@ def _stop_local_session(
             else:
                 worker_signalled = True
                 worker_exit_code = _get_process_exit_code(process_handle)
+                session.observed_worker_exit_code = worker_exit_code
                 if worker_exit_code == _STILL_ACTIVE:
                     reasons.append("worker-still-active-after-signal")
                 elif worker_exit_code != 0:
@@ -2872,12 +3273,35 @@ def _stop_local_session(
             if close_error is not None:
                 reasons.append("controller-process-handle-close-failed")
             else:
-                with _LOCAL_SESSIONS_LOCK:
-                    _LOCAL_SESSIONS.pop(request_path.absolute(), None)
+                process_closed = True
+        if pending_ownership is not None:
+            reasons.append("evidence-handle-close-failed")
+        # Close original observation ownership before publishing its durable proof.
+        # Never infer suspension from resumed=False or terminate during cleanup.
+        if worker_signalled and process_closed:
+            try:
+                _close_session_resources(session)
+            except BaseException as cleanup:
+                pending_ownership = cleanup if pending_ownership is None else _merge_controller_errors(pending_ownership, cleanup)
+        if worker_signalled and process_closed and worker_exit_code is not None and captured is not None and pending_ownership is None:
+            try:
+                stop, stop_hash = _read_causal(request, claim, launch, "NormalControllerStop")
+                _validate_stop_chain(request, claim, launch, stop)
+                _publish_causal(request, claim, launch, "WorkerExitObservation",
+                    stopSha256=stop_hash, terminalSha256=captured.terminal_bytes_sha256,
+                    eventSha256=captured.journal.sha256, workerExitCode=worker_exit_code,
+                    observationHandlesClosed=True, reasonCodes=list(dict.fromkeys(reasons)))
+                _durable_worker_exit(request, claim, launch, captured)
+            except (WatchProtocolOwnershipError, ExactObjectOwnershipError):
+                raise
+            except (OSError, WatchProtocolError):
+                reasons.append("worker-exit-proof-unavailable")
+        if worker_signalled and process_closed and session.process_owner is None and session.vault is None and session.runtime_guard is None:
+            with _LOCAL_SESSIONS_LOCK:
+                _LOCAL_SESSIONS.pop(request_path.absolute(), None)
         if pending_ownership is not None:
             if isinstance(pending_ownership, (WatchProtocolOwnershipError, ExactObjectOwnershipError)):
                 pending_ownership.resolve()
-                reasons.append("evidence-handle-close-failed")
             else:
                 raise pending_ownership
         completion = (
@@ -2898,6 +3322,8 @@ def _stop_local_session(
         )
         publication_error: BaseException | None = None
         try:
+            if completion is WatchEvidenceCompletion.COMPLETED:
+                _validate_outcome_raw_evidence(outcome, request, claim, launch, captured)
             published = _publish_or_load_outcome(outcome, request, claim, launch)
             session.finalized_outcome = outcome
             return _receipt_from_outcome(published)
@@ -2984,6 +3410,17 @@ def _load_existing_outcome_after_worker_quiescence(
     candidate: WatchOutcome | None = None,
     locally_observed: WatchOutcome | None = None,
 ) -> WatchOutcome:
+    try:
+        proof_path = request.evidence_root / CAUSAL_NAMES["WorkerExitObservation"]
+        if proof_path.exists():
+            captured = _capture_worker_evidence(request, launch)
+            _durable_worker_exit(request, claim, launch, captured)
+            outcome = candidate if candidate is not None else _load_published_outcome(request, claim, launch)
+            return _validate_outcome_raw_evidence(outcome, request, claim, launch, captured)
+    except _HandleOwnershipError as error:
+        raise _controller_owner(error, request.evidence_root)
+    except (WatchProtocolOwnershipError, ExactObjectOwnershipError):
+        raise
     # Only an already-held original session may retain its own exit observation.
     # Detached readers must observe the process themselves; disk cannot supply it.
     current_reasons: tuple[str, ...] = ()
@@ -3086,6 +3523,8 @@ def _stop_non_owner(
     launch: WorkerLaunch,
 ) -> WatchReceipt:
     outcome_path = request.evidence_root / _OUTCOME_NAME
+    if outcome_path.exists() and (request.evidence_root / CAUSAL_NAMES["WorkerExitObservation"]).exists():
+        return _receipt_from_outcome(_load_existing_outcome_after_worker_quiescence(request, claim, launch))
     controller_status, controller_handle, controller_error = _exact_process_status(
         claim.controller_pid,
         claim.controller_creation_time,
@@ -3142,11 +3581,10 @@ def _stop_non_owner(
     )
     pending_error: BaseException | None = None
     try:
-        if worker_status == "uncertain":
-            reasons.append("worker-identity-uncertain")
-        elif worker_status == "live" and worker_handle:
+        if worker_status in {"live", "dead"}:
             try:
-                _write_new(request.stop_token_path, b"stop\n")
+                cleanup_pid, cleanup_creation = _current_controller_identity()
+                _publish_causal(request, claim, launch, "RecoveryCleanupStop", cleanupPid=cleanup_pid, cleanupCreationTime=cleanup_creation)
             except FileExistsError:
                 pass
             except WatchProtocolOwnershipError as error:
@@ -3154,6 +3592,9 @@ def _stop_non_owner(
                 reasons.append("worker-cleanup-refused")
             except (OSError, WatchProtocolError):
                 reasons.append("worker-cleanup-refused")
+        if worker_status == "uncertain":
+            reasons.append("worker-identity-uncertain")
+        elif worker_status == "live" and worker_handle:
             wait_result = _kernel32.WaitForSingleObject(worker_handle, 15_000)
             if wait_result == _WAIT_OBJECT_0:
                 try:
@@ -3270,14 +3711,80 @@ def _stop_non_owner(
     return receipt
 
 
-def stop_watch(request_path: Path) -> WatchReceipt:
+def _close_session_resources(session):
+    pending = None
+    if session.process_owner is not None:
+        try:
+            session.process_owner.close()
+            session.process_owner = None
+        except BaseException as error:
+            error.owner = session.process_owner
+            pending = error
+    for pin in session.record_pins or []:
+        try:
+            pin.close()
+        except BaseException as error:
+            cleanup = ExactObjectOwnershipError(str(error), verification=(pin,))
+            pending = cleanup if pending is None else _merge_controller_errors(pending, cleanup)
+    for attribute in ("runtime_guard", "vault"):
+        guard = getattr(session, attribute)
+        if guard is not None:
+            try:
+                guard.verify()
+                guard.close()
+                setattr(session, attribute, None)
+            except BaseException as cleanup:
+                pending = cleanup if pending is None else _merge_controller_errors(pending, cleanup)
+    if pending is not None:
+        if session.process_owner is not None:
+            pending.owner = session.process_owner
+        if "session-resource-close-failed" not in session.poison_reasons:
+            session.poison_reasons.append("session-resource-close-failed")
+        raise pending
+
+
+def stop_watch(request_path: Path, *, recovery: bool = False) -> WatchReceipt:
+    request = None
+    try:
+        request = _load_request_path(request_path)
+        with _guard_request(request) as vault:
+            _verify_records(vault, request)
+            result = _stop_watch(request_path, recovery=recovery)
+            _verify_records(vault, request, include_outcome=True)
+            return result
+    except _HandleOwnershipError as error:
+        raise _controller_owner(error, Path(request_path).parent if request is None else request.evidence_root)
+    except (WatchProtocolOwnershipError, ExactObjectOwnershipError):
+        raise
+    except (OSError, WatchProtocolError) as error:
+        if getattr(error, "owner", None) is not None:
+            raise
+        return _incomplete_without_outcome(request or object(), 0, f"protected watch stop failed: {error}")
+
+
+def watch_receipt_from_files(request, worker_pid, ready_path, events_path, terminal_path):
+    try:
+        with _guard_request(request) as vault:
+            _verify_records(vault, request)
+            result = _watch_receipt_from_files(request, worker_pid, ready_path, events_path, terminal_path)
+            _verify_records(vault, request, include_outcome=True)
+            return result
+    except _HandleOwnershipError as error:
+        raise _controller_owner(error, request.evidence_root)
+    except (WatchProtocolOwnershipError, ExactObjectOwnershipError):
+        raise
+    except (OSError, WatchProtocolError, TypeError, ValueError, RuntimeError) as error:
+        return _incomplete_without_outcome(request, worker_pid, f"protected watch reconstruction failed: {error}")
+
+
+def _stop_watch(request_path: Path, *, recovery: bool = False) -> WatchReceipt:
     """Complete locally owned watches; external callers are cleanup-only."""
     _require_windows()
     supplied = Path(request_path).absolute()
     with _LOCAL_SESSIONS_LOCK:
         session = _LOCAL_SESSIONS.get(supplied)
     if session is not None:
-        return _stop_local_session(supplied, session)
+        return _stop_local_session(supplied, session, recovery=recovery)
     try:
         request = _load_request_path(supplied)
         claim = _load_controller_claim(request)

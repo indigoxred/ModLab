@@ -128,12 +128,33 @@ class WatchProtocolTests(unittest.TestCase):
             evidence_root=self.evidence,
             stop_token_path=self.evidence / STOP_NAME,
             roots=roots,
+            authority_root=self.evidence, authority_volume_serial=7,
+            authority_file_id=9, authority_creator_sid="S-1-5-21-1-2-3-1000",
         )
+
+    def test_causal_quiescence_rejects_unverified_resume_nonempty_jobs_and_scalar_coercion(self):
+        request = self.request()
+        claim, launch = self.claim(request), self.launch(request)
+        value = windows_watch_protocol.causal_record("ProcessTreeQuiescence", request, claim, launch,
+            admissionSha256="a"*64, processPid=43, processCreationTime=1003,
+            rootExitCode=0, activeProcesses=0, totalProcesses=1, resumeVerified=True)
+        data = windows_watch_protocol.causal_record_to_bytes(value, request, claim, launch)
+        self.assertEqual(value, windows_watch_protocol.causal_record_from_bytes(data,request,claim,launch))
+        for field, invalid in (("rootExitCode", False), ("activeProcesses", 1), ("totalProcesses", 1.0),
+                               ("resumeVerified", False), ("workerPid", 43), ("admissionSha256", "A"*64)):
+            with self.subTest(field=field), self.assertRaises(WatchProtocolError):
+                windows_watch_protocol.causal_record_from_bytes(_canonical(dict(value, **{field:invalid})),request,claim,launch)
+
+    def test_legacy_request_is_never_implicitly_promoted(self):
+        value=json.loads(watch_request_to_bytes(self.request()))
+        value['schemaVersion']=1
+        with self.assertRaises(WatchProtocolError):
+            watch_request_from_bytes(_canonical(value))
 
     def claim(self, request: WatchRequest) -> ControllerClaim:
         request_path = request.evidence_root / REQUEST_NAME
         return ControllerClaim(
-            schema_version=1,
+            schema_version=2,
             request_sha256=watch_request_sha256(request),
             session_id=request.session_id,
             run_id=request.run_id,
@@ -146,7 +167,7 @@ class WatchProtocolTests(unittest.TestCase):
 
     def launch(self, request: WatchRequest) -> WorkerLaunch:
         return WorkerLaunch(
-            schema_version=1,
+            schema_version=2,
             request_sha256=watch_request_sha256(request),
             session_id=request.session_id,
             run_id=request.run_id,
@@ -159,7 +180,7 @@ class WatchProtocolTests(unittest.TestCase):
         claim = self.claim(request)
         launch = self.launch(request)
         return ControllerLoss(
-            schema_version=1,
+            schema_version=2,
             request_sha256=watch_request_sha256(request),
             session_id=request.session_id,
             run_id=request.run_id,
@@ -234,8 +255,8 @@ class WatchProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(WatchProtocolError, "canonical JSON"):
             watch_request_from_bytes(pretty)
         duplicate = watch_request_to_bytes(value).replace(
-            b'"schemaVersion":1,',
-            b'"schemaVersion":1,"schemaVersion":1,',
+            b'"schemaVersion":2,',
+            b'"schemaVersion":2,"schemaVersion":2,',
         )
         with self.assertRaisesRegex(WatchProtocolError, "duplicate JSON key"):
             watch_request_from_bytes(duplicate)
@@ -284,14 +305,19 @@ class WatchProtocolTests(unittest.TestCase):
         claim = self.claim(request)
         document = json.loads(controller_claim_to_bytes(claim, request))
         request_path = request.evidence_root / REQUEST_NAME
-        expected_command = (
-            sys.executable,
-            "-B",
-            "-m",
-            "modlab.validation.windows_watch",
-            "--worker",
-            str(request_path),
-        )
+        expected_command = watch_worker_command(request_path)
+        self.assertEqual((sys.executable, "-I", "-S", "-B", "-c"), expected_command[:5])
+        import ast
+        bootstrap = ast.parse(expected_command[5])
+        search = ast.literal_eval(bootstrap.body[1].value)
+        runtime = Path(sys.base_prefix)
+        self.assertEqual([
+            str(Path(__file__).absolute().parents[1]),
+            str(runtime / f"python{sys.version_info.major}{sys.version_info.minor}.zip"),
+            str(runtime / "DLLs"), str(runtime / "Lib"), str(runtime),
+        ], search)
+        self.assertEqual("modlab.validation.windows_watch", bootstrap.body[2].module)
+        self.assertEqual(("--worker", str(request_path)), expected_command[-2:])
 
         self.assertEqual(str(request_path), document.get("requestPath"))
         self.assertEqual(list(expected_command), document.get("workerCommand"))
