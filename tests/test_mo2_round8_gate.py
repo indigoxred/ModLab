@@ -19,6 +19,7 @@ from pathlib import Path
 import subprocess
 import struct
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import call, patch
@@ -26,8 +27,8 @@ import zlib
 
 
 HERE = Path(__file__).absolute().parent
-REPO = HERE.parents[2]
-HARNESS_PATH = HERE / "task-7B-live-gate-harness.py"
+REPO = HERE.parent
+HARNESS_PATH = REPO / "tools" / "mo2_round8_gate.py"
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
@@ -581,6 +582,7 @@ class OfflineGateTests(unittest.TestCase):
             self.steam,
             {"commit": "1" * 40, "tree": "2" * 40},
             {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=h.authority_run_root(overlong),
         )
         with self.assertRaises(h.GateError):
             h.prepare_gate(config, backend=backend)
@@ -595,6 +597,7 @@ class OfflineGateTests(unittest.TestCase):
                 self.steam,
                 {"commit": "1" * 40, "tree": "2" * 40, "claimed": "forged"},
                 {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+                authority_root=h.authority_run_root(self.run_root),
             )
 
     def test_preparation_calls_two_fresh_bootstraps_and_requires_created_receipts(self):
@@ -605,6 +608,7 @@ class OfflineGateTests(unittest.TestCase):
             self.steam,
             {"commit": "1" * 40, "tree": "2" * 40},
             {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=h.authority_run_root(self.run_root),
         )
         received = h.prepare_gate(config, backend=backend)
         self.assertEqual(["SingleFile", "Package"], backend.imported)
@@ -643,6 +647,7 @@ class OfflineGateTests(unittest.TestCase):
                 self.steam,
                 {"commit": "1" * 40, "tree": "2" * 40},
                 {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+                authority_root=h.authority_run_root(self.run_root),
             ),
             backend=backend,
         )
@@ -663,6 +668,7 @@ class OfflineGateTests(unittest.TestCase):
             self.steam,
             {"commit": "1" * 40, "tree": "2" * 40},
             {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=h.authority_run_root(self.run_root),
         )
         strict_loads = []
 
@@ -685,6 +691,7 @@ class OfflineGateTests(unittest.TestCase):
                 self.steam,
                 {"commit": "1" * 40, "tree": "2" * 40},
                 {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+                authority_root=h.authority_run_root(self.run_root),
             ),
             backend=_FakeBackend(self.scratch, _listing("ModOrganizer.exe", "plugins/base.py")),
         ).value
@@ -702,6 +709,7 @@ class OfflineGateTests(unittest.TestCase):
             self.steam,
             {"commit": "1" * 40, "tree": "2" * 40},
             {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=h.authority_run_root(self.run_root),
         )
         with self.assertRaises(Exception) as raised:
             h.prepare_gate(config, backend=backend)
@@ -732,6 +740,7 @@ class OfflineGateTests(unittest.TestCase):
             self.steam,
             {"commit": "1" * 40, "tree": "2" * 40},
             {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=h.authority_run_root(self.run_root),
         )
         relative = "tools/mo2/skyrim-se-ae/partial.txt"
 
@@ -1568,6 +1577,7 @@ class OfflineGateTests(unittest.TestCase):
             self.steam,
             {"commit": "1" * 40, "tree": "2" * 40},
             {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=h.authority_run_root(self.run_root),
         )
         with patch.object(h, "load_mo2_release") as release, self.assertRaises(h.GateError):
             h.ProductionBackend().inspect_inputs(config)
@@ -1731,6 +1741,7 @@ class OfflineGateTests(unittest.TestCase):
             self.steam,
             source,
             {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=h.authority_run_root(self.run_root),
         )
         record = h.prepare_gate(config, backend=backend).value
         release = SimpleNamespace(
@@ -1811,6 +1822,7 @@ class OfflineGateTests(unittest.TestCase):
                 self.steam,
                 source,
                 {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+                authority_root=h.authority_run_root(self.run_root),
             ),
             backend=backend,
         ).value
@@ -2157,6 +2169,7 @@ class OfflineGateTests(unittest.TestCase):
                 self.steam,
                 {"commit": "1" * 40, "tree": "2" * 40},
                 old_jobs,
+                authority_root=h.authority_run_root(old_root),
             ),
             backend=_FakeBackend(self.scratch, _listing("ModOrganizer.exe")),
         )
@@ -2446,6 +2459,7 @@ class OfflineGateTests(unittest.TestCase):
                     self.steam,
                     {"commit": "1" * 40, "tree": "2" * 40},
                     new_jobs,
+                    authority_root=h.authority_run_root(new_root),
                 ),
                 live_backend=restarted_backend,
                 preparation_backend=_FakeBackend(self.scratch, _listing("ModOrganizer.exe")),
@@ -3976,6 +3990,64 @@ class _FakeInstallBackend:
         self.terminal = True
 
 
+class MaintainedGateBoundaryTests(unittest.TestCase):
+    def test_config_requires_disjoint_same_identity_authority_before_mutation(self):
+        base = Path(tempfile.mkdtemp(prefix="root-", dir=SCRATCH))
+        disposable = base / "disposable" / ("a" * 32)
+        authority = base / "mo2-containment" / ("a" * 32)
+        config = h.GateConfig(
+            disposable, base / "archive.7z", base / "Steam",
+            {"commit": "1" * 40, "tree": "2" * 40},
+            {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=authority,
+        )
+        self.assertEqual(config.authority_root, authority)
+        self.assertFalse(config.run_root.is_relative_to(config.authority_root))
+        for wrong in (disposable, disposable / ("a" * 32), authority.with_name("b" * 32), base / "other" / ("a" * 32)):
+            with self.subTest(authority=wrong), self.assertRaises(h.GateError):
+                replace(config, authority_root=wrong)
+        self.assertFalse(disposable.exists())
+        self.assertFalse(authority.exists())
+
+    def test_cli_prepare_and_restart_bind_both_roots_and_fresh_jobs(self):
+        prepared = []
+        restarted = []
+        def prepare(config):
+            prepared.append(config)
+            return h.ContainmentServiceResult({"preparationId": "preparation-sha256:" + "7" * 64}, ContainmentEffects())
+        def restart(old_root, config):
+            restarted.append((old_root, config))
+            return h.ContainmentServiceResult({"newRunId": config.run_root.name}, ContainmentEffects())
+        options = ["--run-id", "a" * 32, "--archive", "C:/fixture/archive.7z", "--steam-root", "C:/fixture/Steam"]
+        with patch.object(h, "prepare_gate", side_effect=prepare), patch.object(h, "restart_failed_attempt", side_effect=restart), \
+                patch.object(h, "_git_source", return_value={"commit": "1" * 40, "tree": "2" * 40}), patch.object(sys, "stdout", io.StringIO()):
+            self.assertEqual(0, h._cli_main(["prepare", *options]))
+            self.assertEqual(0, h._cli_main(["restart", *options, "--new-run-id", "b" * 32]))
+        self.assertEqual(len(prepared), 1)
+        self.assertEqual(len(restarted), 1)
+        for config, run_id in ((prepared[0], "a" * 32), (restarted[0][1], "b" * 32)):
+            self.assertEqual(config.run_root, REPO / "workspace/runtime/validation/mo2-bridge-capability" / run_id)
+            self.assertEqual(config.authority_root, REPO / "workspace/runtime/validation-authority/mo2-containment" / run_id)
+            self.assertEqual(set(config.bootstrap_job_ids), {"SingleFile", "Package"})
+            self.assertEqual(len(set(config.bootstrap_job_ids.values())), 2)
+        self.assertEqual(restarted[0][0], prepared[0].run_root)
+
+    def test_maintained_harness_discovers_its_repository(self):
+        self.assertEqual(h.REPO_ROOT, REPO)
+
+    def test_exact_read_coexists_with_live_vault_guard_and_bounds_bytes(self):
+        from modlab.validation.windows_vault_security import create_vault
+        directory = Path(tempfile.mkdtemp(prefix="read-", dir=SCRATCH))
+        with create_vault(directory / "authority") as vault:
+            target = vault.path / "input.json"
+            h.windows_exact_fs.publish_new_pinned(target, b"{}\n", lambda data: data)
+            self.assertEqual(h.read_exact(target), b"{}\n")
+            self.assertEqual(h.read_exact(target, maximum_bytes=3), b"{}\n")
+            with self.assertRaises(h.windows_exact_fs.ExactObjectError):
+                h.read_exact(target, maximum_bytes=2)
+            vault.verify()
+
+
 class HarnessPresenceTest(unittest.TestCase):
     def test_reviewed_disposable_harness_exists(self):
         self.assertIsNotNone(h, "Task 7B live-gate harness has not been implemented")
@@ -3985,6 +4057,7 @@ def main() -> int:
     stream = io.StringIO()
     suite = unittest.TestSuite()
     suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(HarnessPresenceTest))
+    suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(MaintainedGateBoundaryTests))
     suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(OfflineGateTests))
     live_calls = {"archive": 0, "watcher": 0, "application": 0}
 
@@ -4038,7 +4111,7 @@ def main() -> int:
 if __name__ == "__main__":
     args = list(sys.argv[1:])
     if len(args) != 4 or args[:2] != ["--scratch", args[1]] or args[2] != "--log":
-        raise SystemExit("usage: task-7B-live-gate-tests.py --scratch <fresh-dir> --log <fresh-log>")
+        raise SystemExit("usage: test_mo2_round8_gate.py --scratch <fresh-dir> --log <fresh-log>")
     SCRATCH = Path(args[1]).absolute()
     LOG_PATH = Path(args[3]).absolute()
     if SCRATCH.exists() or LOG_PATH.exists():
@@ -4046,5 +4119,5 @@ if __name__ == "__main__":
     SCRATCH.mkdir(parents=True)
     raise SystemExit(main())
 else:
-    SCRATCH = HERE / "offline-test-import-scratch"
+    SCRATCH = Path(tempfile.mkdtemp(prefix="r8-"))
     LOG_PATH = None

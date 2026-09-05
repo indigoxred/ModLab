@@ -185,3 +185,13 @@ The test should inspect the actual original paths used by the implementation, no
 - [ ] Replace Low watch/job authority with protected equivalents and a separate disposable child job. Capture screenshot/log bytes into new protected files with bounded exact reads and provenance. Protect preparation, installation, selection, envelope and cleanup inputs as well as phase records. Call the shared causal validator rather than reimplementing its verdict.
 - [ ] Run the adapted offline suite and covering integration tests. Commit task files and report correction diff separately from imported baseline.
 - [ ] After task review, run full repository suite with real archive/Steam opt-ins unset and isolated Round 8 offline gate once. Record all skips and failures. Obtain one final review, address findings, export report/patch/verification to task outputs. Leave real UI validation for a later UI-capable task; no merge or push.
+
+#### Task 5 execution slices
+
+Task5 retains the requirements above and is implemented in three sequential, independently reviewed slices. The split changes review boundaries, not the feature scope or architecture.
+
+- **5A — Maintained baseline, paired roots and capability boundary:** exact historical import baseline, repository discovery, explicit paired root contract, schema3 authorityRoot capability records, and shared bounded exact-reader/vault compatibility. Preserve schema2 historical parsing without current authority promotion. Full gate behavior remains pending.
+- **5B — Protected preparation and immutable reconstruction:** protect preparation/captured originals, separate historical reconstruction from fresh action preflight, retain every live prerequisite at launch/restart/current-use boundaries, and cover preparation failures/recovery without legacy adoption.
+- **5C — Ten-phase causal ownership and complete offline gate:** protect all phase/screenshot/log/selection/envelope originals, wire retained original process ownership and shared causal completion/cleanup, preserve the ten-phase behavior and adapt the full offline suite.
+
+After 5C review, the controller performs the full repository and isolated gate verification and final integrated review already required above. Historical source remains untouched, imported lines are reported separately from corrections, and no live MO2/game/merge/push is authorized by these slices.

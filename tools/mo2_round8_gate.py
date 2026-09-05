@@ -13,7 +13,7 @@ import base64
 import argparse
 import binascii
 import ctypes
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
@@ -30,7 +30,7 @@ from typing import Any, Callable, Mapping
 from ctypes import wintypes
 import zlib
 
-_SCRIPT_REPO_ROOT = Path(__file__).absolute().parents[3]
+_SCRIPT_REPO_ROOT = Path(__file__).absolute().parents[1]
 if str(_SCRIPT_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
 
@@ -109,6 +109,7 @@ from modlab.validation.mo2_containment_service import (
     ContainmentEffects,
     ContainmentServiceResult,
 )
+from modlab.validation.mo2_containment_store import evidence_root_for
 from modlab.validation import mo2_containment_service as containment_service
 from modlab.validation.mo2_containment_fixtures import _external_low_watch_roots
 from modlab.validation.windows_integrity import (
@@ -190,9 +191,15 @@ class GateConfig:
     steam_root: Path
     source: Mapping[str, str]
     bootstrap_job_ids: Mapping[str, str]
+    authority_root: Path = field(kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_root", Path(self.run_root).absolute())
+        object.__setattr__(self, "authority_root", Path(self.authority_root).absolute())
+        if (self.authority_root != authority_run_root(self.run_root)
+                or self.run_root.is_relative_to(self.authority_root)
+                or self.authority_root.is_relative_to(self.run_root)):
+            raise GateError("authority root must be the disjoint evidence vault for this fresh run")
         object.__setattr__(self, "archive_path", Path(self.archive_path).absolute())
         object.__setattr__(self, "steam_root", Path(self.steam_root).absolute())
         if _RUN.fullmatch(self.run_root.name) is None:
@@ -208,6 +215,14 @@ class GateConfig:
             _HEX40.fullmatch(self.source[name]) is None for name in required_source
         ):
             raise GateError("source commit and tree identities are required")
+
+
+def authority_run_root(run_root: Path) -> Path:
+    """Derive evidence from trusted path configuration, never a disposable record."""
+    root = Path(run_root).absolute()
+    if _RUN.fullmatch(root.name) is None or ".." in root.parts:
+        raise GateError("invalid disposable run identity")
+    return evidence_root_for(root.parent).with_name("mo2-containment") / root.name
 
 
 @dataclass(frozen=True)
@@ -5641,7 +5656,8 @@ def _cli_main(arguments: list[str] | None = None) -> int:
     if options.command == "prepare":
         jobs = {layout: "bootstrap-job:" + secrets.token_hex(16) for layout in LAYOUTS}
         received = prepare_gate(
-            GateConfig(root, options.archive, options.steam_root, _git_source(), jobs)
+            GateConfig(root, options.archive, options.steam_root, _git_source(), jobs,
+                       authority_root=authority_run_root(root))
         )
         _write_cli_result(
             {
@@ -5691,7 +5707,8 @@ def _cli_main(arguments: list[str] | None = None) -> int:
         new_root = capability_run_root(options.new_run_id)
         received = restart_failed_attempt(
             root,
-            GateConfig(new_root, options.archive, options.steam_root, _git_source(), jobs),
+            GateConfig(new_root, options.archive, options.steam_root, _git_source(), jobs,
+                       authority_root=authority_run_root(new_root)),
         )
         _write_cli_result({"command": "restart", **received.value})
         return 0

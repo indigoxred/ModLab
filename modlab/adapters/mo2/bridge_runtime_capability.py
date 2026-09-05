@@ -15,6 +15,8 @@ from pathlib import Path
 import re
 import stat
 
+from modlab.validation.windows_vault_security import open_vault
+
 from modlab.platform.windows_exact_fs import (
     RetainedObjectOwner, RetainedObjectRole,
     identity_at_path, pin_stable_direct_object, publish_new_pinned, read_pinned_file,
@@ -38,6 +40,7 @@ RUNTIME_CONTENT = ((EXE_HASH, 5028352),
                    ("0522fc235f8ffb2b673d9ced0cd31e4c28da6743b977ffc45253ed261b171a56", 7439360),
                    ("bc4dd10aef20df58f55e00d407ea15c66dda0618d8468ddea5fbe9c293ce2a00", 1516544))
 MATRIX_FIELDS = {"schemaVersion", "runId", "root", "source", "archive", "candidates"}
+PROTECTED_MATRIX_FIELDS = MATRIX_FIELDS | {"authorityRoot"}
 OBS_FIELDS = {"phase", "sequence", "job", "nonce", "pid", "before", "after", "ownBefore", "ownAfter",
               "runtimeBefore", "runtimeAfter", "exitCode", "normalClose", "loaded", "guarded", "ui", "logs", "launchProcess"}
 
@@ -165,7 +168,7 @@ def _observation(value, candidate, matrix, index):
     _fields(value, OBS_FIELDS, "observation")
     _require(value["phase"] == PHASES[index] and type(value["sequence"]) is int and value["sequence"] == index,
              "missing, duplicate, or unordered launch phase")
-    job = Path(matrix["root"]) / candidate["layout"] / "jobs" / PHASES[index]
+    job = Path(matrix["authorityRoot"] if matrix.get("schemaVersion") == 3 else matrix["root"]) / candidate["layout"] / "jobs" / PHASES[index]
     _require(value["job"] == str(job) and _hex(value["nonce"], 32), "launch job/nonce binding differs")
     _require(_integer(value["pid"], 1) and type(value["exitCode"]) is int and type(value["normalClose"]) is bool,
              "launch outcome types invalid")
@@ -248,10 +251,16 @@ def parse_json(data):
 
 
 def select_capability(matrix):
-    _fields(matrix, MATRIX_FIELDS, "matrix")
-    _require(type(matrix["schemaVersion"]) is int and matrix["schemaVersion"] == 2 and _hex(matrix["runId"], 32), "invalid matrix identity")
+    fields = PROTECTED_MATRIX_FIELDS if type(matrix) is dict and matrix.get("schemaVersion") == 3 else MATRIX_FIELDS
+    _fields(matrix, fields, "matrix")
+    _require(type(matrix["schemaVersion"]) is int and matrix["schemaVersion"] in (2, 3) and _hex(matrix["runId"], 32), "invalid matrix identity")
     root = _path(matrix["root"])
     _require(root.name == matrix["runId"], "run root binding differs")
+    if matrix["schemaVersion"] == 3:
+        authority = _path(matrix["authorityRoot"])
+        _require(".." not in root.parts and ".." not in authority.parts
+                 and authority.name == matrix["runId"] and not authority.is_relative_to(root)
+                 and not root.is_relative_to(authority), "authority/disposable root binding differs")
     _fields(matrix["source"], {"commit", "tree"}, "source")
     _require(all(_hex(v, 40) for v in matrix["source"].values()), "source identity invalid")
     _fields(matrix["archive"], {"sha256", "size"}, "archive")
@@ -282,8 +291,9 @@ def select_capability(matrix):
 
 
 def capability_to_bytes(value):
-    _fields(value, MATRIX_FIELDS | {"selection", "capabilityId"}, "capability")
-    expected = select_capability({key: value[key] for key in MATRIX_FIELDS})
+    fields = PROTECTED_MATRIX_FIELDS if type(value) is dict and value.get("schemaVersion") == 3 else MATRIX_FIELDS
+    _fields(value, fields | {"selection", "capabilityId"}, "capability")
+    expected = select_capability({key: value[key] for key in fields})
     _require(value == expected, "fabricated capability selection/content identity")
     return _canonical(value)
 
@@ -295,8 +305,8 @@ def capability_from_bytes(data):
 
 
 @contextmanager
-def _pinned(path, kind):
-    pinned = pin_stable_direct_object(path, kind)
+def _pinned(path, kind, *, delete_access=True, allow_writes=False):
+    pinned = pin_stable_direct_object(path, kind, delete_access=delete_access, allow_writes=allow_writes)
     prior = None
     try:
         yield pinned
@@ -314,7 +324,7 @@ def _pinned(path, kind):
 
 
 @contextmanager
-def _parents(path):
+def _parents(path, *, delete_access=True, allow_writes=False):
     absolute = Path(path).absolute()
     def direct_chain():
         identities = []
@@ -325,17 +335,17 @@ def _parents(path):
             identities.append((metadata.st_dev, metadata.st_ino, metadata.st_mode, getattr(metadata, "st_file_attributes", 0)))
         return identities
     before = direct_chain()
-    with _pinned(absolute, "directory") as retained:
+    with _pinned(absolute, "directory", delete_access=delete_access, allow_writes=allow_writes) as retained:
         _require(direct_chain() == before, "ancestor identity changed during acquisition")
         yield
         _require(direct_chain() == before, "ancestor identity changed during verification")
         _require(identity_at_path(absolute) == retained.identity, "retained root path identity changed")
 
 
-def read_exact(path):
+def read_exact(path, *, maximum_bytes=None):
     target = Path(path).absolute()
-    with _parents(target.parent), _pinned(target, "file") as pinned:
-        return read_pinned_file(pinned)
+    with _parents(target.parent, delete_access=False, allow_writes=True), _pinned(target, "file", delete_access=False) as pinned:
+        return read_pinned_file(pinned, maximum_bytes=maximum_bytes)
 
 
 def _entry(path, relative, kind):
@@ -397,32 +407,74 @@ def publish_document(path, value):
 
 
 def publish_capability(path, value):
-    capability_to_bytes(value)
+    data = capability_to_bytes(value)
+    if value["schemaVersion"] == 3:
+        target = Path(path).absolute()
+        authority = Path(value["authorityRoot"])
+        _require(target.is_relative_to(authority), "capability file is outside authority vault")
+        with open_vault(authority) as vault:
+            vault.verify_descendant(target.parent)
+            _verify_raw_evidence(value, vault=vault)
+            result = publish_new_pinned(target, data, capability_from_bytes)
+            vault.verify_descendant(target)
+            return result
     _verify_raw_evidence(value)
-    return publish_new_pinned(Path(path), capability_to_bytes(value), capability_from_bytes)
+    return publish_new_pinned(Path(path), data, capability_from_bytes)
 
 
-def load_capability(path):
-    value = capability_from_bytes(read_exact(path))
-    _verify_raw_evidence(value)
-    return value
+def load_capability(path, *, authority_root=None):
+    target = Path(path).absolute()
+    initial = None
+    if authority_root is None:
+        # Discovery is non-authorizing. Schema 3 must be reread under its vault.
+        initial = read_exact(target)
+        value = capability_from_bytes(initial)
+        if value["schemaVersion"] == 2:
+            _verify_raw_evidence(value)
+            return value
+        authority = Path(value["authorityRoot"])
+    else:
+        authority = _path(str(Path(authority_root).absolute()))
+    _require(target.is_relative_to(authority), "capability file is outside authority vault")
+    with open_vault(authority) as vault:
+        vault.verify_descendant(target)
+        exact = read_exact(target)
+        if initial is not None:
+            _require(exact == initial, "capability changed during vault acquisition")
+        value = capability_from_bytes(exact)
+        _require(value["schemaVersion"] == 3 and value["authorityRoot"] == str(authority),
+                 "capability does not bind the required authority vault")
+        _verify_raw_evidence(value, vault=vault)
+        vault.verify()
+        return value
 
 
-def _verify_raw_evidence(value):
+def _verify_raw_evidence(value, *, vault=None):
+    if value.get("schemaVersion") == 3 and vault is None:
+        with open_vault(Path(value["authorityRoot"])) as guarded:
+            return _verify_raw_evidence(value, vault=guarded)
     for candidate in value["candidates"]:
         for observation in (candidate["control"], *candidate["observations"]):
             logs = []
             for reference in observation["logs"]:
-                data = read_exact(reference["path"])
+                if vault is not None:
+                    vault.verify_descendant(Path(reference["path"]))
+                data = read_exact(reference["path"], maximum_bytes=reference["size"])
                 _require(len(data) == reference["size"] and hashlib.sha256(data).hexdigest() == reference["sha256"], "raw log identity differs")
                 logs.append(data)
             loaded = loaded_from_logs(logs, observation["phase"], observation["nonce"])
             _require(loaded == observation["loaded"], "loaded claim differs from raw log evidence")
             guarded_path = Path(observation["job"]) / "guarded.json"
+            if vault is not None:
+                vault.verify_descendant(guarded_path.parent)
             if observation["guarded"] is not None:
+                if vault is not None:
+                    vault.verify_descendant(guarded_path)
                 _require(parse_json(read_exact(guarded_path)) == observation["guarded"], "guarded claim differs from raw evidence")
             else:
                 _require(not guarded_path.exists(), "undeclared guarded evidence exists")
+    if vault is not None:
+        vault.verify()
 
 
 def candidate_sources(root, layout):

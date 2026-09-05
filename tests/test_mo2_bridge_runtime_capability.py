@@ -728,5 +728,95 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual("a" * 32, cap.run_root("a" * 32).name)
 
 
+
+class ProtectedCapabilityTests(unittest.TestCase):
+    def setUp(self):
+        self.parent = Path(tempfile.mkdtemp(prefix="r8-cap-"))
+        self.value = fixture(self.parent / "disposable")
+        self.authority = self.parent / "authority" / self.value["runId"]
+        self.value.update(schemaVersion=3, authorityRoot=str(self.authority))
+        for candidate in self.value["candidates"]:
+            for observation in (candidate["control"], *candidate["observations"]):
+                job = self.authority / candidate["layout"] / "jobs" / observation["phase"]
+                observation["job"] = str(job)
+                data = b"control\n" if observation["loaded"] is None else (
+                    "MODLAB_CAPABILITY_V2 " + json.dumps(observation["loaded"], sort_keys=True, separators=(",", ":")) + "\n"
+                ).encode()
+                observation["logs"] = [{"path": str(job / "observed.log"), "size": len(data),
+                                         "sha256": hashlib.sha256(data).hexdigest()}]
+
+    def test_separate_authority_preserves_disposable_runtime_and_classifier(self):
+        selected = cap.select_capability(self.value)
+        self.assertEqual(selected["selection"], "SingleFile")
+        self.assertEqual(selected, cap.capability_from_bytes(cap.capability_to_bytes(selected)))
+        self.assertEqual(str(Path(self.value["root"]) / "SingleFile" / "app"), selected["candidates"][0]["appRoot"])
+        for change in ("overlap", "wrong-id", "low-job", "alias", "unknown"):
+            altered = copy.deepcopy(self.value)
+            if change == "overlap":
+                altered["authorityRoot"] = altered["root"]
+            elif change == "wrong-id":
+                altered["authorityRoot"] = str(self.authority.with_name("b" * 32))
+            elif change == "alias":
+                altered["authorityRoot"] = str(self.authority.parent / "unused" / ".." / self.authority.name)
+                for candidate in altered["candidates"]:
+                    for observation in (candidate["control"], *candidate["observations"]):
+                        job = Path(altered["authorityRoot"]) / candidate["layout"] / "jobs" / observation["phase"]
+                        observation["job"] = str(job)
+                        observation["logs"][0]["path"] = str(job / "observed.log")
+            elif change == "low-job":
+                altered["candidates"][0]["control"]["job"] = str(Path(altered["root"]) / "SingleFile" / "jobs" / "Control")
+            else:
+                altered["legacyAuthority"] = True
+            with self.subTest(change=change), self.assertRaises(cap.CapabilityError):
+                cap.select_capability(altered)
+
+    def test_load_protects_capability_and_reads_only_vault_raw_inputs(self):
+        from modlab.validation.windows_vault_security import create_vault
+        self.authority.parent.mkdir()
+        with create_vault(self.authority) as vault:
+            for candidate in self.value["candidates"]:
+                for observation in (candidate["control"], *candidate["observations"]):
+                    job = Path(observation["job"])
+                    job.mkdir(parents=True)
+                    data = b"control\n" if observation["loaded"] is None else (
+                        "MODLAB_CAPABILITY_V2 " + json.dumps(observation["loaded"], sort_keys=True, separators=(",", ":")) + "\n"
+                    ).encode()
+                    (job / "observed.log").write_bytes(data)
+                    if observation["guarded"] is not None:
+                        cap.publish_document(job / "guarded.json", observation["guarded"])
+            selected = cap.select_capability(self.value)
+            target = self.authority / "selection.json"
+            cap.publish_capability(target, selected)
+            observed = []
+            real_read = cap.read_exact
+            def record_read(path, **kwargs):
+                observed.append(Path(path))
+                return real_read(path, **kwargs)
+            with patch.object(cap, "read_exact", side_effect=record_read):
+                self.assertEqual(selected, cap.load_capability(target))
+                self.assertEqual(selected, cap.load_capability(target, authority_root=self.authority))
+            self.assertTrue(observed)
+            self.assertTrue(all(path.is_relative_to(self.authority) for path in observed))
+            self.assertIn(target, observed)
+            (self.parent / "read-inventory.json").write_text(json.dumps({
+                "authorityRoot": str(self.authority), "reads": [str(path) for path in observed],
+            }, indent=2) + "\n", encoding="utf-8")
+            unprotected = self.parent / "selection.json"
+            unprotected.write_bytes(cap.capability_to_bytes(selected))
+            with self.assertRaises(cap.CapabilityError):
+                cap.load_capability(unprotected)
+            observed.clear()
+            with patch.object(cap, "read_exact", side_effect=record_read):
+                with self.assertRaises(cap.CapabilityError):
+                    cap.load_capability(unprotected, authority_root=self.authority)
+            self.assertEqual([], observed, "known vault must reject external input before reading it")
+            legacy_target = self.authority / "legacy-selection.json"
+            legacy = cap.select_capability(fixture(self.parent / "legacy-disposable"))
+            legacy_target.write_bytes(cap.capability_to_bytes(legacy))
+            with self.assertRaisesRegex(cap.CapabilityError, "required authority vault"):
+                cap.load_capability(legacy_target, authority_root=self.authority)
+            vault.verify()
+
+
 if __name__ == "__main__":
     unittest.main()
