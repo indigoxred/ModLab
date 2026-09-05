@@ -261,6 +261,7 @@ class _LocalWatchSession:
     quiescence: dict[str, object] | None = None
     record_pins: list[PinnedObject] | None = None
     observed_worker_exit_code: int | None = None
+    resource_cleanup_started: bool = False
 
 
 _LOCAL_SESSIONS: dict[Path, _LocalWatchSession] = {}
@@ -3713,13 +3714,26 @@ def _stop_non_owner(
 
 def _close_session_resources(session):
     pending = None
+    if not session.resource_cleanup_started:
+        # Verify while all original pins are open. Cleanup is unconditional;
+        # retries must not verify pins already closed by an earlier attempt.
+        session.resource_cleanup_started = True
+        for attribute in ("runtime_guard", "vault"):
+            guard = getattr(session, attribute)
+            if guard is not None:
+                try:
+                    guard.verify()
+                except BaseException as error:
+                    pending = error if pending is None else _merge_controller_errors(pending, error)
+                    if "session-guard-verification-failed" not in session.poison_reasons:
+                        session.poison_reasons.append("session-guard-verification-failed")
     if session.process_owner is not None:
         try:
             session.process_owner.close()
             session.process_owner = None
         except BaseException as error:
             error.owner = session.process_owner
-            pending = error
+            pending = error if pending is None else _merge_controller_errors(pending, error)
     for pin in session.record_pins or []:
         try:
             pin.close()
@@ -3730,7 +3744,6 @@ def _close_session_resources(session):
         guard = getattr(session, attribute)
         if guard is not None:
             try:
-                guard.verify()
                 guard.close()
                 setattr(session, attribute, None)
             except BaseException as cleanup:

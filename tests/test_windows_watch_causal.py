@@ -295,3 +295,73 @@ print(json.dumps([str(path),pid]),flush=True)
         self.assertFalse(watch.stop_watch(path).complete)
         self.assertTrue(request.stop_token_path.exists(),'restart must publish canonical recovery even after worker exits')
         self.assertEqual('RecoveryCleanupStop',json.loads(request.stop_token_path.read_bytes())['kind'])
+
+
+    def _session_guard_partial_close_retry(self, attribute):
+        from unittest import mock
+        from modlab.platform.windows_exact_fs import PinnedObject, ExactObjectOwnershipError
+        request,path,pid,low=self._case()
+        self._launch(path,low)
+        watch.complete_watch_launch(path)
+        session=watch._local_launch_session(path)
+        guard=getattr(session,attribute)
+        retained_pin=guard._pins[-1]
+        real_close=PinnedObject.close
+        def fail_one_pin(pin):
+            if pin is retained_pin:
+                raise OSError('injected session guard partial close')
+            return real_close(pin)
+        try:
+            with mock.patch.object(PinnedObject,'close',new=fail_one_pin):
+                with self.assertRaises((ExactObjectOwnershipError,watch.WatchProtocolOwnershipError)):
+                    watch.stop_watch(path)
+            self.assertIs(guard,getattr(session,attribute))
+            self.assertEqual([retained_pin],[pin for pin in guard._pins if pin.handle])
+            self.assertIn('session-resource-close-failed',session.poison_reasons)
+            try:
+                receipt=watch.stop_watch(path)
+            except BaseException as error:
+                self.fail(f'{attribute} cleanup retry did not release remaining pins: {error}')
+            self.assertFalse(receipt.complete)
+            self.assertIn('session-resource-close-failed',receipt.error)
+            self.assertTrue(all(not pin.handle for pin in guard._pins))
+            self.assertIsNone(getattr(session,attribute))
+            self.assertNotIn(path.absolute(),watch._LOCAL_SESSIONS)
+            self.assertFalse((request.evidence_root/'worker-exit.json').exists())
+            self.assertFalse(self._read(request,pid).complete)
+        finally:
+            # RED cleanup releases real handles without changing the assertion.
+            guard.close()
+            setattr(session,attribute,None)
+
+    def test_session_runtime_guard_partial_close_retries_remaining_native_pin(self):
+        self._session_guard_partial_close_retry('runtime_guard')
+
+    def test_session_vault_partial_close_retries_remaining_native_pin(self):
+        self._session_guard_partial_close_retry('vault')
+
+
+    def test_session_guard_verification_failure_poison_does_not_skip_native_cleanup(self):
+        from unittest import mock
+        from modlab.platform.windows_exact_fs import ExactObjectError
+        request,path,pid,low=self._case()
+        self._launch(path,low)
+        watch.complete_watch_launch(path)
+        session=watch._local_launch_session(path)
+        runtime=session.runtime_guard
+        vault=session.vault
+        try:
+            with mock.patch.object(runtime,'verify',side_effect=ExactObjectError('injected guard verification failure')):
+                with self.assertRaises(ExactObjectError):
+                    watch.stop_watch(path)
+            self.assertTrue(all(not pin.handle for pin in runtime._pins),
+                            'verification failure skipped runtime guard cleanup')
+            self.assertTrue(all(not pin.handle for pin in vault._pins))
+            self.assertIn('session-guard-verification-failed',session.poison_reasons)
+            self.assertFalse((request.evidence_root/'worker-exit.json').exists())
+            self.assertFalse(self._read(request,pid).complete)
+        finally:
+            runtime.close()
+            vault.close()
+            session.runtime_guard=None
+            session.vault=None
