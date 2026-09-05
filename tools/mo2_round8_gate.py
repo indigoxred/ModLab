@@ -4724,7 +4724,7 @@ class ProductionLiveBackend:
 
 
 class JsonLineExchange:
-    """Two-message root/operator exchange while the controller stays alive."""
+    """Readiness, capture and close exchange with the original controller."""
 
     def __init__(self, input_stream=None, output_stream=None) -> None:
         self.input = sys.stdin.buffer if input_stream is None else input_stream
@@ -4746,6 +4746,21 @@ class JsonLineExchange:
         if type(value) is not dict:
             raise GateError("operator exchange payload is not an object")
         return value
+
+    def ready(self, session: LivePhaseSession) -> None:
+        # Readiness is synchronization only. The authoritative screenshot must
+        # still be captured afresh between the two native observations.
+        value = self._receive({
+            "operatorAction": "wait-for-main-window",
+            "runId": session.run_root.name,
+            "layout": session.layout,
+            "phase": session.phase,
+            "pid": session.launch.pid,
+            "creationTime": session.launch.creation_time,
+            "executable": session.executable,
+        })
+        if set(value) != {"ready"} or value["ready"] is not True:
+            raise GateError("operator did not confirm main-window readiness")
 
     def window(self, session: LivePhaseSession) -> Mapping[str, object]:
         return self._receive(
@@ -5653,6 +5668,7 @@ def run_operator_phase(
             raise GateError("phase begin did not return a service effect receipt")
         session = begun.value
         effects = ContainmentEffects.merged(effects, begun.effects)
+        exchange.ready(session)
         native_before = backend.native(session, "native-before")
         window = exchange.window(session)
         native_after = backend.native(session, "native-after")

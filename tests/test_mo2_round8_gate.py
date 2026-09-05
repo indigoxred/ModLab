@@ -2131,6 +2131,8 @@ class OfflineGateTests(unittest.TestCase):
         for changed in (
             {**window, "image": {**window["image"], "sha256": "0" * 64}},
             {**window, "nativeAfter": {**native, "pid": 99}},
+            {**window, "nativeAfter": {**native, "hwnd": 9002}},
+            {**window, "nativeAfter": {**native, "title": "Title changed after readiness"}},
             {**window, "title": "Unrelated window"},
         ):
             with self.assertRaises(h.GateError):
@@ -2302,7 +2304,7 @@ class OfflineGateTests(unittest.TestCase):
         )
         self.assertEqual(
             [
-                "source-check", "load-state", "begin:Control", "native-before",
+                "source-check", "load-state", "begin:Control", "exchange-ready", "native-before",
                 "exchange-window", "native-after", "exchange-close",
                 "finalize:Control", "publish:Control",
             ],
@@ -2610,13 +2612,14 @@ class OfflineGateTests(unittest.TestCase):
         try:
             with patch.object(backend, "begin_phase", return_value=h.ContainmentServiceResult(session,
                         ContainmentEffects(written_paths=(watch / "request.json",), watcher_pid=31, mo2_pid=41))), \
-                    patch.object(backend, "native", side_effect=primary), \
+                    patch.object(backend, "native", side_effect=primary) as native, \
                     patch.object(h.windows_watch, "complete_watch_launch", side_effect=complete), \
                     patch.object(h, "_load_bound_watch_identity", side_effect=identity), \
                     patch.object(h, "stop_watch", side_effect=stop), \
                     patch.object(h, "_publish_gate_json", side_effect=failure_publish), \
                     self.assertRaises(Exception) as raised:
-                h.run_operator_phase(root, "SingleFile", "Control", backend=backend, exchange=None)
+                h.run_operator_phase(root, "SingleFile", "Control", backend=backend, exchange=SimpleNamespace(ready=lambda _session: None))
+            native.assert_called_once_with(session, "native-before")
             failure = raised.exception
             failure_path = job / "failure.json"
             self.assertTrue(failure_path.is_file())
@@ -2812,6 +2815,72 @@ class OfflineGateTests(unittest.TestCase):
                 "observation-sha256:" + "8" * 64,
                 backend=backend,
             )
+
+    def test_readiness_failure_retains_launch_effects_and_terminalizes_phase(self):
+        backend = _FakeLiveBackend(self.run_root)
+        seen = []
+        class Exchange(_FakeExchange):
+            def ready(inner, session):
+                seen.append(session.owner)
+                raise h.GateError("operator not ready")
+        with self.assertRaisesRegex(h.GateError, "operator not ready") as failed:
+            h.run_operator_phase(self.run_root, "SingleFile", "Control", backend=backend, exchange=Exchange())
+        self.assertEqual([backend.owner], seen)
+        self.assertTrue(backend.terminal)
+        self.assertNotIn("native-before", backend.events)
+        self.assertNotIn("exchange-window", backend.events)
+        self.assertEqual(41, failed.exception.effects.mo2_pid)
+        self.assertEqual(31, failed.exception.effects.watcher_pid)
+
+    def test_operator_readiness_precedes_native_screenshot_bracket(self):
+        # Removing/moving readiness after native-before recreates the real
+        # startup HWND/title mismatch, even though the later screenshot is valid.
+        main = {"hwnd": 51, "pid": 41, "title": "Skyrim Special Edition – Mod Organizer v2.5.2",
+                "className": "Qt671QWindowIcon", "visible": True}
+        for startup in (dict(main, hwnd=50, title="ModOrganizer"),
+                        dict(main, title="ModOrganizer")):
+            with self.subTest(startup=startup):
+                current = [startup]
+                observed = []
+                class Backend(_FakeLiveBackend):
+                    def begin_phase(inner, *args):
+                        received = super().begin_phase(*args)
+                        received.value.process_handle = 777
+                        received.value.launch = SimpleNamespace(pid=41, creation_time=101)
+                        return received
+                    def native(inner, session, kind):
+                        result = h.ProductionLiveBackend.native(inner, session, kind)
+                        observed.append(list(current))
+                        return result
+                class Exchange(_FakeExchange):
+                    def ready(inner, session):
+                        current[:] = [main]
+                    def window(inner, session):
+                        current[:] = [main]
+                        return super().window(session)
+                backend = Backend(self.run_root)
+                executable = str(self.run_root / "SingleFile/app/ModOrganizer.exe")
+                with patch.object(h.windows_watch, "_verify_retained_process_handle"), \
+                        patch.object(h.windows_watch._kernel32, "WaitForSingleObject", return_value=h.windows_watch._WAIT_TIMEOUT), \
+                        patch.object(h, "_candidate_processes", return_value=(SimpleNamespace(pid=41, executable_path=executable),)), \
+                        patch.object(h, "_native_windows_for_pid", side_effect=lambda _pid: list(current)):
+                    h.run_operator_phase(self.run_root, "SingleFile", "Control", backend=backend, exchange=Exchange())
+                self.assertEqual([[main], [main]], observed)
+
+    def test_json_line_readiness_requires_explicit_true_before_capture(self):
+        session = SimpleNamespace(run_root=self.run_root, layout="SingleFile", phase="Control",
+            launch=SimpleNamespace(pid=41, creation_time=101), executable="fixture.exe")
+        output = io.BytesIO()
+        exchange = h.JsonLineExchange(io.BytesIO(b'{"ready":true}\n'), output)
+        exchange.ready(session)
+        prompt = json.loads(output.getvalue())
+        self.assertEqual("wait-for-main-window", prompt["operatorAction"])
+        self.assertEqual("fixture.exe", prompt["executable"])
+        self.assertEqual(41, prompt["pid"])
+        for reply in (b'', b'{}\n', b'{"ready":false}\n', b'{"ready":1}\n',
+                      b'{"ready":true,"extra":null}\n'):
+            with self.subTest(reply=reply), self.assertRaises(h.GateError):
+                h.JsonLineExchange(io.BytesIO(reply), io.BytesIO()).ready(session)
 
     def test_initial_native_window_waits_for_live_process_readiness(self):
         session = SimpleNamespace(process_handle=777,
@@ -4077,6 +4146,9 @@ class OfflineGateTests(unittest.TestCase):
             return receipt
 
         class Exchange:
+            def ready(self, session):
+                pass
+
             def window(self, session):
                 return {
                     "windowId": 51,
@@ -5328,6 +5400,9 @@ class _FakeBackend:
 
 
 class _FakeExchange:
+    def ready(self, launch):
+        launch.events.append("exchange-ready")
+
     def window(self, launch):
         launch.events.append("exchange-window")
         return {"windowId": 51, "app": "process:" + launch.executable, "title": "Mod Organizer", "screenshotIds": ["shot-1"]}
