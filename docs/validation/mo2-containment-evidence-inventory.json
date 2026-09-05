@@ -1,0 +1,320 @@
+[
+  {
+    "input": "watch/request.json",
+    "sourcePath": "trusted-controller-or-watcher",
+    "capturePath": "authority/<run>/scenarios/<scenario>/watch/request.json",
+    "consumer": "Task4 shared watcher reconstruction; Task5"
+  },
+  {
+    "input": "watch/controller-claim.json",
+    "sourcePath": "trusted-controller-or-watcher",
+    "capturePath": "authority/<run>/scenarios/<scenario>/watch/controller-claim.json",
+    "consumer": "Task4 shared watcher reconstruction; Task5"
+  },
+  {
+    "input": "watch/worker-launch.json",
+    "sourcePath": "trusted-controller-or-watcher",
+    "capturePath": "authority/<run>/scenarios/<scenario>/watch/worker-launch.json",
+    "consumer": "Task4 shared watcher reconstruction; Task5"
+  },
+  {
+    "input": "watch/ready.json",
+    "sourcePath": "trusted-controller-or-watcher",
+    "capturePath": "authority/<run>/scenarios/<scenario>/watch/ready.json",
+    "consumer": "Task4 shared watcher reconstruction; Task5"
+  },
+  {
+    "input": "watch/events.ndjson",
+    "sourcePath": "trusted-controller-or-watcher",
+    "capturePath": "authority/<run>/scenarios/<scenario>/watch/events.ndjson",
+    "consumer": "Task4 shared watcher reconstruction; Task5"
+  },
+  {
+    "input": "watch/terminal.json",
+    "sourcePath": "trusted-controller-or-watcher",
+    "capturePath": "authority/<run>/scenarios/<scenario>/watch/terminal.json",
+    "consumer": "Task4 shared watcher reconstruction; Task5"
+  },
+  {
+    "input": "watch/controller-loss.json",
+    "sourcePath": "trusted-controller-or-watcher",
+    "capturePath": "authority/<run>/scenarios/<scenario>/watch/controller-loss.json",
+    "consumer": "Task4 shared watcher reconstruction; Task5"
+  },
+  {
+    "input": "watch/stop.token",
+    "sourcePath": "trusted-controller-or-watcher",
+    "capturePath": "authority/<run>/scenarios/<scenario>/watch/stop.token",
+    "consumer": "Task4 shared watcher reconstruction; Task5"
+  },
+  {
+    "input": "watch/launch-admission.json",
+    "sourcePath": "trusted-controller-or-watcher",
+    "capturePath": "authority/<run>/scenarios/<scenario>/watch/launch-admission.json",
+    "consumer": "Task4 shared watcher reconstruction; Task5"
+  },
+  {
+    "input": "watch/process-quiescence.json",
+    "sourcePath": "trusted-controller-or-watcher",
+    "capturePath": "authority/<run>/scenarios/<scenario>/watch/process-quiescence.json",
+    "consumer": "Task4 shared watcher reconstruction; Task5"
+  },
+  {
+    "input": "watch/worker-exit.json",
+    "sourcePath": "trusted-controller-or-watcher",
+    "capturePath": "authority/<run>/scenarios/<scenario>/watch/worker-exit.json",
+    "consumer": "Task4 shared watcher reconstruction; Task5"
+  },
+  {
+    "input": "watch/outcome.json",
+    "sourcePath": "trusted-controller-or-watcher",
+    "capturePath": "authority/<run>/scenarios/<scenario>/watch/outcome.json",
+    "consumer": "Task4 shared watcher reconstruction; Task5"
+  },
+  {
+    "input": "scenario/journal.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/scenarios/<scenario>/journal.json",
+    "consumer": "Task4 store/result/decision/recovery"
+  },
+  {
+    "input": "scenario/started.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/scenarios/<scenario>/started.json",
+    "consumer": "Task4 store/result/decision/recovery"
+  },
+  {
+    "input": "scenario/launch.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/scenarios/<scenario>/launch.json",
+    "consumer": "Task4 store/result/decision/recovery"
+  },
+  {
+    "input": "scenario/before.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/scenarios/<scenario>/before.json",
+    "consumer": "Task4 store/result/decision/recovery"
+  },
+  {
+    "input": "scenario/after.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/scenarios/<scenario>/after.json",
+    "consumer": "Task4 store/result/decision/recovery"
+  },
+  {
+    "input": "scenario/evaluation.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/scenarios/<scenario>/evaluation.json",
+    "consumer": "Task4 store/result/decision/recovery"
+  },
+  {
+    "input": "scenario/result.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/scenarios/<scenario>/result.json",
+    "consumer": "Task4 store/result/decision/recovery"
+  },
+  {
+    "input": "scenario/recovery.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/scenarios/<scenario>/recovery.json",
+    "consumer": "Task4 store/result/decision/recovery"
+  },
+  {
+    "input": "scenario/retry.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/scenarios/<scenario>/retry.json",
+    "consumer": "Task4 store/result/decision/recovery"
+  },
+  {
+    "input": "scenario/retry-consumption.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/scenarios/<scenario>/retry-consumption.json",
+    "consumer": "Task4 store/result/decision/recovery"
+  },
+  {
+    "input": "run/intent.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/intent.json",
+    "consumer": "Task4 preparation/selection/decision; Task5 preparation reference"
+  },
+  {
+    "input": "run/request.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/request.json",
+    "consumer": "Task4 preparation/selection/decision; Task5 preparation reference"
+  },
+  {
+    "input": "run/decision.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/decision.json",
+    "consumer": "Task4 preparation/selection/decision; Task5 preparation reference"
+  },
+  {
+    "input": "run/preparation-attempt.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/preparation-attempt.json",
+    "consumer": "Task4 preparation/selection/decision; Task5 preparation reference"
+  },
+  {
+    "input": "run/preparation-failure.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/preparation-failure.json",
+    "consumer": "Task4 preparation/selection/decision; Task5 preparation reference"
+  },
+  {
+    "input": "run/preparation-recovery.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/preparation-recovery.json",
+    "consumer": "Task4 preparation/selection/decision; Task5 preparation reference"
+  },
+  {
+    "input": "run/preparation-replacement.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/preparation-replacement.json",
+    "consumer": "Task4 preparation/selection/decision; Task5 preparation reference"
+  },
+  {
+    "input": "run/preparation-startup-initialized.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/preparation-startup-initialized.json",
+    "consumer": "Task4 preparation/selection/decision; Task5 preparation reference"
+  },
+  {
+    "input": "run/preparation-startup-failure.json",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/<run>/preparation-startup-failure.json",
+    "consumer": "Task4 preparation/selection/decision; Task5 preparation reference"
+  },
+  {
+    "input": "preparation-projection",
+    "sourcePath": "trusted-native-projection-observation",
+    "capturePath": "authority/<run>/preparation-projections/<scenario>.json",
+    "consumer": "Task4 preparation recovery"
+  },
+  {
+    "input": "preparation-projection-cleanup",
+    "sourcePath": "trusted-native-cleanup-observation",
+    "capturePath": "authority/<run>/preparation-projections/<scenario>-cleanup.json",
+    "consumer": "Task4 preparation recovery"
+  },
+  {
+    "input": "catalog/retirements",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/authority/retirements/<id>.json",
+    "consumer": "Task4 current eligibility"
+  },
+  {
+    "input": "catalog/supersessions",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/authority/supersessions/<id>.json",
+    "consumer": "Task4 current eligibility"
+  },
+  {
+    "input": "catalog/reviews",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/authority/reviews/<id>.json",
+    "consumer": "Task4 current eligibility"
+  },
+  {
+    "input": "catalog/eligibilities",
+    "sourcePath": "trusted-controller",
+    "capturePath": "authority/authority/eligibilities/<id>.json",
+    "consumer": "Task4 current eligibility"
+  },
+  {
+    "input": "gate/selection",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/selection.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "gate/installation",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/installation.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "gate/envelope",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/envelope.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "gate/phase-begin",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/phase-begin.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "gate/process",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/process.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "gate/operator",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/operator.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "gate/runtime",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/runtime.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "gate/observation",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/observation.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "gate/effect",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/effect.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "gate/guarded-phase",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/guarded-phase.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "gate/final",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/final.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "gate/failure",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/failure.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "gate/cleanup",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/cleanup.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "gate/restart",
+    "sourcePath": "trusted-gate-controller",
+    "capturePath": "authority/<gate-run>/restart.json",
+    "consumer": "Task5 integration required; not a Task4 consumer"
+  },
+  {
+    "input": "capture/screenshot.png",
+    "sourcePath": "disposable/<job>/screenshot.png",
+    "capturePath": "authority/<run>/captures/screenshot.png",
+    "consumer": "Task4 bounded capture primitive; Task5 verdict consumer"
+  },
+  {
+    "input": "capture/log.txt",
+    "sourcePath": "disposable/<job>/log.txt",
+    "capturePath": "authority/<run>/captures/log.txt",
+    "consumer": "Task4 bounded capture primitive; Task5 verdict consumer"
+  }
+]

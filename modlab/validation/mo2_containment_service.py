@@ -84,6 +84,7 @@ from .mo2_containment_store import (
     ContainmentStoreNotFound,
     ContainmentStoreOwnershipError,
     mutable_replacement_part_path,
+    evidence_root_for,
 )
 from .windows_integrity import (
     IntegrityLabelError,
@@ -117,9 +118,11 @@ from .mo2_preparation_recovery import (
     PreparationReplacementV2, PreparationStartupInitialized, PreparationStartupFailure,
     native_preparation_process_inventory, native_process_absent, record_id, record_to_bytes,
 )
-from .windows_watch import start_watch, stop_watch, watch_root
+from .mo2_containment_evaluation import ScenarioEvidence, ScenarioEvaluationError, evaluate_scenario as _evaluate_scenario
+from .windows_watch import start_watch, stop_watch, watch_root, admit_watch_launch, complete_watch_launch
 from .windows_watch_protocol import (
     CLAIM_NAME,
+    CAUSAL_NAMES,
     LAUNCH_NAME,
     ROOT_KINDS,
     WatchRequest,
@@ -275,6 +278,17 @@ class ContainmentServiceError(RuntimeError):
         self.effects = ContainmentEffects() if effects is None else effects
 
 
+def _process_owner_from_error(error):
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        owner = getattr(error, "owner", None)
+        if owner is not None:
+            return owner
+        error = getattr(error, "cause", None) or error.__cause__
+    return None
+
+
 class ContainmentOperationError(ContainmentServiceError):
     """A mutating service operation failed with an exact partial receipt."""
 
@@ -287,6 +301,7 @@ class ContainmentOperationError(ContainmentServiceError):
     ) -> None:
         super().__init__(message, effects=effects)
         self.cause = cause
+        self.owner = _process_owner_from_error(cause)
 
 
 class ContainmentDecisionNotReady(ContainmentServiceError):
@@ -1006,6 +1021,7 @@ def _mutation_root_guard(
                 existing,
                 "directory",
                 allow_writes=True,
+                delete_access=False,
             )
         except ExactObjectOwnershipError as error:
             raise ContainmentStoreOwnershipError(
@@ -1300,7 +1316,7 @@ def _mutation_root_observation(
                 return pinned
         if path in _ACTIVE_GUARDED_MUTATION_ROOTS.get():
             return None
-        pinned = pin_stable_direct_object(path, kind)
+        pinned = pin_stable_direct_object(path, kind, delete_access=False, allow_writes=kind == "directory")
         retained.append(pinned)
         pinned_direct[path] = pinned
         return pinned
@@ -1867,6 +1883,69 @@ def _delegated_mutations(
         _close_mutation_root_guards(tuple(guards), primary)
 
 
+def _watch_effect_observation(vault, root):
+    rows = {}
+    pending = [root]
+    while pending:
+        path = pending.pop()
+        vault.verify_descendant(path)
+        identity = identity_at_path(path)
+        metadata = path.lstat()
+        if identity != identity_at_path(path) or identity.attributes & 0x400:
+            raise ContainmentServiceError("watch effect object identity changed")
+        if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
+            raise ContainmentServiceError("watch effect object is not direct")
+        rows[path] = (identity, metadata.st_size, metadata.st_mtime_ns)
+        if stat.S_ISDIR(metadata.st_mode):
+            pending.extend(sorted(path.iterdir()))
+    vault.verify_descendant(root)
+    return rows
+
+
+def _delegated_watch_mutation(store, run_id, scenario, operation):
+    """Observe watcher effects under its vault; metadata never proves completion.
+
+    The journal remains open for append while the worker runs. Stable byte
+    snapshots belong to closed raw reconstruction, not this receipt bookkeeping.
+    """
+    root = store.watch_path(run_id, scenario)
+    with store.open_evidence_vault(run_id) as vault:
+        before = _watch_effect_observation(vault, root)
+        primary = None
+        try:
+            return operation()
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            try:
+                after = _watch_effect_observation(vault, root)
+                changed = {path for path in before.keys() | after.keys()
+                           if before.get(path) != after.get(path)}
+                if changed:
+                    _current_effects().child_mutation_root(root)
+                    for path in sorted(changed - {root}):
+                        _current_effects().write(path)
+            except BaseException as observation_error:
+                if primary is not None:
+                    observation_error.owner = _process_owner_from_error(primary)
+                    observation_error.add_note(f"watcher operation failed: {primary}")
+                    original_ownership = getattr(primary, "ownership", primary)
+                    observed_ownership = getattr(observation_error, "ownership", observation_error)
+                    if isinstance(original_ownership, ExactObjectOwnershipError):
+                        combined = union_retained_ownership(
+                            "watch operation and observer retain ownership",
+                            prior=original_ownership,
+                            owners=(observed_ownership.owners
+                                    if isinstance(observed_ownership, ExactObjectOwnershipError) else ()),
+                        )
+                        combined.owner = _process_owner_from_error(primary)
+                        combined.add_note(f"watch effect observation failed: {observation_error}")
+                        raise combined from primary
+                    raise observation_error from primary
+                raise
+
+
 def _delegated_mutation(
     root: Path,
     operation: Callable[[], _V],
@@ -2253,36 +2332,6 @@ class FixtureRecord:
 
 
 @dataclass(frozen=True)
-class ScenarioEvidence:
-    run_id: str
-    scenario: ContainmentScenario
-    protected_before: ProtectedState
-    protected_after: ProtectedState
-    watch_outcome: WatchOutcome
-    mo2_process: ProcessEvidence | None
-    source_integrity: IntegrityObservation
-    stage_integrity: IntegrityObservation
-    scenario_started: bool
-    fresh_retry_eligible: bool
-    projection_count: int
-    projection_targets_verified: bool
-    projection_observation_complete: bool
-    projection_payload_bytes_copied: int
-    production_backup_names: tuple[str, ...]
-    production_observation_complete: bool
-    staging_new_names: tuple[str, ...]
-    staging_observation_complete: bool
-    staging_output_names: tuple[str, ...]
-    output_observation_complete: bool
-    adopted_name: str | None
-    adopted_tree: TreeIdentity | None
-    adopted_integrity: IntegrityObservation | None
-    source_restored_after_quarantine: bool
-    safety_reasons: tuple[str, ...]
-    incomplete_reasons: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class RecoveryCleanupEvidence:
     watch_outcome: WatchOutcome | None
     protected_after: ProtectedState
@@ -2332,180 +2381,11 @@ class _RetryReplayEvidence:
 
 
 def evaluate_scenario(value: ScenarioEvidence) -> ScenarioResult:
-    """Apply exact scenario policy with Failed > Incomplete > Passed precedence."""
-    if not isinstance(value, ScenarioEvidence):
-        raise ContainmentServiceError("scenario evaluation requires ScenarioEvidence")
-    outcome = value.watch_outcome
-    if outcome.run_id != value.run_id or outcome.scenario is not value.scenario:
-        raise ContainmentServiceError("watch outcome is not bound to the scenario")
-
-    violations = set(value.safety_reasons)
-    incomplete = set(value.incomplete_reasons)
-    if outcome.events:
-        violations.add("forbidden-watcher-event")
-    if value.protected_before != value.protected_after:
-        violations.add("protected-state-changed")
-    if outcome.evidence_completion is not WatchEvidenceCompletion.COMPLETED:
-        incomplete.add("watch-evidence-incomplete")
-    if value.mo2_process is None:
-        incomplete.add("mo2-process-evidence-missing")
-    else:
-        expected_executable = Path(value.mo2_process.working_directory) / "ModOrganizer.exe"
-        if (
-            value.mo2_process.integrity is not IntegrityObservation.LOW
-            or value.mo2_process.executable_version != "2.5.2.0"
-            or tuple(value.mo2_process.arguments) != ("--profile", "ModLab - Lab")
-            or not _same_path(value.mo2_process.executable, expected_executable)
-        ):
-            violations.add("mo2-process-evidence-invalid")
-    if value.source_integrity not in {
-        IntegrityObservation.MEDIUM,
-        IntegrityObservation.HIGH,
-        IntegrityObservation.SYSTEM,
-    }:
-        violations.add("source-integrity-invalid")
-    if value.stage_integrity is not IntegrityObservation.LOW:
-        violations.add("stage-integrity-invalid")
-    if not value.projection_observation_complete:
-        incomplete.add("projection-observation-incomplete")
-    else:
-        if value.projection_count <= 0:
-            violations.add("projection-count-invalid")
-        if not value.projection_targets_verified:
-            violations.add("projection-target-changed")
-    if value.projection_payload_bytes_copied != 0:
-        violations.add("projection-payload-copied")
-    if not value.production_observation_complete:
-        incomplete.add("production-observation-incomplete")
-    elif value.production_backup_names:
-        violations.add("production-backup-created")
-    if not value.source_restored_after_quarantine:
-        violations.add("source-not-restored-after-quarantine")
-
-    expected_name = _EXPECTED_NEW[value.scenario]
-    expected_outputs = _EXPECTED_OUTPUTS.get(value.scenario, ())
-    adoption = value.scenario in _EXPECTED_OUTPUTS
-    if adoption:
-        if not value.staging_observation_complete:
-            incomplete.add("staging-observation-incomplete")
-        elif value.staging_new_names != (expected_name,) and (
-            value.staging_new_names or value.output_observation_complete
-        ):
-            violations.add("staging-new-folder-set-invalid")
-        if not value.output_observation_complete:
-            incomplete.add("output-observation-incomplete")
-        elif value.staging_output_names != expected_outputs:
-            violations.add("staging-output-set-invalid")
-        if value.output_observation_complete and (
-            value.adopted_name != expected_name
-            or value.adopted_tree is None
-            or value.adopted_integrity is not IntegrityObservation.MEDIUM
-        ):
-            violations.add("adoption-proof-invalid")
-    elif value.scenario is ContainmentScenario.REPLACE_EXISTING:
-        if not value.staging_observation_complete:
-            incomplete.add("staging-observation-incomplete")
-        if not value.output_observation_complete:
-            incomplete.add("output-observation-incomplete")
-        elif value.staging_output_names != _EXPECTED_REPLACEMENT_OUTPUTS:
-            violations.add("staging-output-set-invalid")
-        if (
-            value.staging_new_names
-            or value.adopted_name is not None
-            or value.adopted_tree is not None
-            or value.adopted_integrity is not None
-        ):
-            violations.add("unexpected-staging-output")
-    elif not value.staging_observation_complete or not value.output_observation_complete:
-        incomplete.add("staging-observation-incomplete")
-    elif (
-        value.staging_new_names
-        or value.staging_output_names
-        or value.adopted_name is not None
-        or value.adopted_tree is not None
-        or value.adopted_integrity is not None
-    ):
-        violations.add("unexpected-staging-output")
-
-    probe = ScenarioResult(
-        _SCHEMA_VERSION, value.run_id, value.scenario, ScenarioOutcome.INCOMPLETE,
-        value.protected_before, value.protected_after, value.mo2_process,
-        value.source_integrity, value.stage_integrity, watch_outcome_id_for(outcome),
-        outcome.evidence_completion, value.scenario_started, False, outcome.events,
-        value.projection_count, value.projection_targets_verified,
-        value.projection_observation_complete,
-        value.projection_payload_bytes_copied,
-        tuple(sorted(set(value.production_backup_names))),
-        value.production_observation_complete,
-        tuple(sorted(set(value.staging_new_names))),
-        value.staging_observation_complete,
-        tuple(sorted(set(value.staging_output_names))),
-        value.output_observation_complete,
-        value.adopted_name,
-        value.adopted_tree, value.adopted_integrity,
-        value.source_restored_after_quarantine, ("classification-probe",),
-    )
-    typed_violations = set(deterministic_policy_violations(probe))
-    violations.update(typed_violations)
-    positive_breach = bool(outcome.events) or value.protected_before != value.protected_after
-    positive_failure = positive_breach or (
-        outcome.evidence_completion is WatchEvidenceCompletion.COMPLETED
-        and bool(typed_violations)
-    )
-    if violations and positive_failure:
-        scenario_outcome = ScenarioOutcome.FAILED
-        reasons = tuple(sorted(violations | incomplete))
-        retry = False
-    elif violations or incomplete:
-        scenario_outcome = ScenarioOutcome.INCOMPLETE
-        reasons = tuple(sorted(violations | incomplete))
-        retry = bool(
-            value.fresh_retry_eligible
-            and not value.scenario_started
-            and outcome.evidence_completion is WatchEvidenceCompletion.INCOMPLETE
-            and "controller-session-lost" in outcome.reason_codes
-        )
-    else:
-        scenario_outcome = ScenarioOutcome.PASSED
-        reasons = ()
-        retry = False
-
-    result = ScenarioResult(
-        schema_version=_SCHEMA_VERSION,
-        run_id=value.run_id,
-        scenario=value.scenario,
-        outcome=scenario_outcome,
-        protected_before=value.protected_before,
-        protected_after=value.protected_after,
-        mo2_process=value.mo2_process,
-        source_integrity=value.source_integrity,
-        stage_integrity=value.stage_integrity,
-        watch_outcome_id=watch_outcome_id_for(outcome),
-        watch_evidence_completion=outcome.evidence_completion,
-        scenario_started=value.scenario_started,
-        fresh_retry_eligible=retry,
-        watcher_events=outcome.events,
-        projection_count=value.projection_count,
-        projection_targets_verified=value.projection_targets_verified,
-        projection_observation_complete=value.projection_observation_complete,
-        projection_payload_bytes_copied=value.projection_payload_bytes_copied,
-        production_backup_names=tuple(sorted(set(value.production_backup_names))),
-        production_observation_complete=value.production_observation_complete,
-        staging_new_names=tuple(sorted(set(value.staging_new_names))),
-        staging_observation_complete=value.staging_observation_complete,
-        staging_output_names=tuple(sorted(set(value.staging_output_names))),
-        output_observation_complete=value.output_observation_complete,
-        adopted_name=value.adopted_name,
-        adopted_tree=value.adopted_tree,
-        adopted_integrity=value.adopted_integrity,
-        source_restored_after_quarantine=value.source_restored_after_quarantine,
-        reasons=reasons,
-    )
+    """Preserve the service exception contract around the shared pure policy."""
     try:
-        scenario_result_to_bytes(result, outcome)
-    except ContainmentFormatError as error:
-        raise ContainmentServiceError(f"scenario evaluation is not serializable: {error}") from error
-    return result
+        return _evaluate_scenario(value)
+    except ScenarioEvaluationError as error:
+        raise ContainmentServiceError(str(error)) from error
 
 
 def adjudicate_results(
@@ -2709,6 +2589,7 @@ def _preflight_preparation(source, artifact_id, steam, validation, run_id):
     if not isinstance(run_id, str) or not re.fullmatch(r"containment-run:[0-9a-f]{32}", run_id):
         raise ContainmentServiceError("path budget: invalid future run identity")
     root = Path(validation) / run_id.split(":")[1]
+    evidence_root = evidence_root_for(validation) / run_id.split(":")[1]
     rows = []
     fixtures = []
     for scenario in ContainmentScenario:
@@ -2724,11 +2605,11 @@ def _preflight_preparation(source, artifact_id, steam, validation, run_id):
         )
         fixtures.append((scenario, admission))
         rows.extend(admission.paths)
-        scenario_root = root / "scenarios" / scenario.value
+        scenario_root = evidence_root / "scenarios" / scenario.value
         record_names = (
             "journal.json", "result.json", "retry.json", "retry-consumption.json",
             "launch.json", *(label + ".json" for label in PROTECTED_STATE_LABELS),
-            "recovery.json",
+            "recovery.json", "evaluation.json", "started.json",
         )
         for name in record_names:
             rows.extend(publication_paths(scenario_root / name, "containment-record"))
@@ -2741,10 +2622,11 @@ def _preflight_preparation(source, artifact_id, steam, validation, run_id):
             )),
         ))
         for name in ("request.json", "controller-claim.json", "worker-launch.json", "ready.json",
-                     "events.ndjson", "terminal.json", "controller-loss.json", "outcome.json", "stop.token"):
+                     "events.ndjson", "terminal.json", "controller-loss.json", "outcome.json", "stop.token",
+                     *set(CAUSAL_NAMES.values())):
             rows.extend(publication_paths(scenario_root / "watch" / name, "watcher-record"))
         for suffix in (".json", "-cleanup.json"):
-            rows.extend(publication_paths(root / "preparation-projections" / (scenario.value + suffix), "preparation-projection"))
+            rows.extend(publication_paths(evidence_root / "preparation-projections" / (scenario.value + suffix), "preparation-projection"))
         # Preparation cleanup relocates the exact projection itself, not its target.
         rows.append(PlannedPath("preparation-recovery", "preparation-wide",
             str(root / ("preparation-quarantine-" + scenario.value) / "Protected Existing")))
@@ -2773,7 +2655,9 @@ def _preflight_preparation(source, artifact_id, steam, validation, run_id):
     for name in ("intent.json", "request.json", "decision.json", "preparation-attempt.json",
                  "preparation-failure.json", "preparation-recovery.json", "preparation-replacement.json",
                  "preparation-startup-initialized.json", "preparation-startup-failure.json"):
-        rows.extend(publication_paths(root / name, "containment-run-record"))
+        rows.extend(publication_paths(evidence_root / name, "containment-run-record"))
+    for kind in ("retirements", "supersessions", "reviews", "eligibilities"):
+        rows.extend(publication_paths(evidence_root.parent / "authority" / kind / ("f" * 64 + ".json"), "capability-authority"))
     return _PreparationAdmission(admit_paths(rows), tuple(fixtures))
 
 
@@ -2902,7 +2786,7 @@ def prepare_run(
             # Receipts use a separate direct parent: the fixture operation holds
             # DELETE-denying ancestor guards through post-observation.
             _delegated_mutations_with_created_root(
-                store.run_path(run_id) / "preparation-projections", (),
+                store.evidence_run_path(run_id) / "preparation-projections", (),
                 lambda: None, lambda _prepared: None, require_absent=True)
             for scenario in ContainmentScenario:
                 fixture_parent = fixture_root / scenario.value
@@ -3036,7 +2920,7 @@ def _require_early_preparation(store, run_id):
     for path in (store.request_path(run_id), store.decision_path(run_id)):
         if _path_exists_no_follow(path):
             raise ContainmentServiceError("prepared or scenario-bearing run cannot use preparation recovery")
-    scenarios = store.run_path(run_id) / "scenarios"
+    scenarios = store.evidence_run_path(run_id) / "scenarios"
     if _path_exists_no_follow(scenarios):
         store._require_existing_direct_directory(scenarios, "preparation scenarios")
         if tuple(scenarios.iterdir()):
@@ -3385,34 +3269,39 @@ def arm_scenario(
     )
     evidence_root = store.watch_path(run_id, scenario)
     roots = _watch_roots(record)
-    request = WatchRequest(
-        request_id="watch-request:" + secrets.token_hex(32),
-        session_id="watch-session:" + secrets.token_hex(32),
-        run_id=run_id,
-        scenario=scenario,
-        evidence_root=evidence_root,
-        stop_token_path=evidence_root / "stop.token",
-        roots=roots,
-    )
-    try:
-        worker_pid = _delegated_mutation(
-            evidence_root,
-            lambda: start_watch(
-                request,
-                on_created=_current_effects().watcher,
-            ),
+    with store.open_evidence_vault(run_id) as vault:
+        request = WatchRequest(
+            request_id="watch-request:" + secrets.token_hex(32),
+            session_id="watch-session:" + secrets.token_hex(32),
+            run_id=run_id,
+            scenario=scenario,
+            evidence_root=evidence_root,
+            stop_token_path=evidence_root / "stop.token",
+            roots=roots,
+            authority_root=vault.path,
+            authority_volume_serial=vault.identity.volume_serial,
+            authority_file_id=vault.identity.file_id,
+            authority_creator_sid=vault.creator_sid,
         )
-        if type(worker_pid) is not int or worker_pid <= 0:
-            raise ContainmentServiceError("watch startup returned an invalid worker PID")
-    except ContainmentStoreOwnershipError:
-        raise
-    except (OSError, RuntimeError) as error:
-        store.transition(
-            journal,
-            ScenarioState.RECOVERY_REQUIRED,
-            error=f"watch startup failed: {error}",
-        )
-        raise ContainmentServiceError(f"watch startup failed: {error}") from error
+        try:
+            worker_pid = _delegated_watch_mutation(
+                store, run_id, scenario,
+                lambda: start_watch(
+                    request,
+                    on_created=_current_effects().watcher,
+                ),
+            )
+            if type(worker_pid) is not int or worker_pid <= 0:
+                raise ContainmentServiceError("watch startup returned an invalid worker PID")
+        except ContainmentStoreOwnershipError:
+            raise
+        except (OSError, RuntimeError) as error:
+            store.transition(
+                journal,
+                ScenarioState.RECOVERY_REQUIRED,
+                error=f"watch startup failed: {error}",
+            )
+            raise ContainmentServiceError(f"watch startup failed: {error}") from error
     return store.transition(journal, ScenarioState.ARMED, monitor_pid=worker_pid)
 
 
@@ -3474,6 +3363,8 @@ def launch_scenario(
             record.stage_app,
             record.stage_environment,
             on_created=record_created_pid,
+            retain_owner=True,
+            before_resume=lambda value: admit_watch_launch(store.watch_path(run_id, scenario) / "request.json", value),
         )
         observed_integrity = inspect_process_integrity(launch.pid)
         observation = inspect_mo2_processes(record.stage_root)
@@ -3590,9 +3481,9 @@ def capture_scenario(
 
     watch_evidence_root = store.watch_path(run_id, scenario)
     request_path = watch_evidence_root / "request.json"
-    receipt = _delegated_mutation(
-        watch_evidence_root,
-        lambda: stop_watch(request_path),
+    receipt = _delegated_watch_mutation(
+        store, run_id, scenario,
+        lambda: _complete_and_stop_watch(request_path),
     )
     if receipt.watch_outcome_id is None:
         store.transition(
@@ -3661,8 +3552,7 @@ def capture_scenario(
     )
     source_observation = _integrity_observation(record.source_root)
     stage_observation = _integrity_observation(record.stage_root)
-    result = evaluate_scenario(
-        ScenarioEvidence(
+    evaluation = ScenarioEvidence(
             run_id,
             scenario,
             journal.protected_before,
@@ -3689,8 +3579,9 @@ def capture_scenario(
             projection.source_restored_after_quarantine,
             projection.safety_reasons,
             projection.incomplete_reasons,
-        )
     )
+    store.write_evaluation(evaluation)
+    result = evaluate_scenario(evaluation)
     _record_result_effects(result)
     store.write_result(result)
     store.transition(journal, ScenarioState.CAPTURED)
@@ -3815,8 +3706,7 @@ def recover_scenario(
         prior_process = _load_launch_process(store, run_id, scenario, _load_fixture_record(store, run_id, scenario))
     except (ContainmentStoreError, ContainmentServiceError):
         prior_process = None
-    result = evaluate_scenario(
-        ScenarioEvidence(
+    evaluation = ScenarioEvidence(
             run_id,
             scenario,
             journal.protected_before,
@@ -3843,8 +3733,9 @@ def recover_scenario(
             cleanup.protected_after == journal.protected_before,
             (),
             ("interrupted-scenario-cleaned",),
-        )
     )
+    store.write_evaluation(evaluation)
+    result = evaluate_scenario(evaluation)
     _record_result_effects(result)
     written = store.write_result(result)
     result_id = written.content_id
@@ -4581,6 +4472,12 @@ def _finalize_projection(
     )
 
 
+def _complete_and_stop_watch(request_path: Path, *, recovery=False, finalized=False):
+    if not finalized:
+        complete_watch_launch(request_path)
+    return stop_watch(request_path, recovery=recovery)
+
+
 def _perform_recovery_cleanup(
     store: ContainmentStore,
     record: FixtureRecord,
@@ -4593,9 +4490,9 @@ def _perform_recovery_cleanup(
     request_path = store.watch_path(journal.run_id, journal.scenario) / "request.json"
     if request_path.exists():
         recovery_watch_root = store.watch_path(journal.run_id, journal.scenario)
-        receipt = _delegated_mutation(
-            recovery_watch_root,
-            lambda: stop_watch(request_path),
+        receipt = _delegated_watch_mutation(
+            store, journal.run_id, journal.scenario,
+            lambda: _complete_and_stop_watch(request_path, recovery=True, finalized=watch is not None and watch.evidence_completion is WatchEvidenceCompletion.COMPLETED),
         )
         if receipt.watch_outcome_id is None:
             blockers.append("durable-watch-outcome-unavailable")
@@ -4755,7 +4652,7 @@ def _prove_recovery(
     record: FixtureRecord,
     journal: ScenarioJournal,
 ) -> RecoveryProofEvidence:
-    """Read-only ownership and absence proof; no cleanup mutation is permitted here."""
+    """Observe original ownership before relocation; persist causal quiescence only."""
     blockers: list[str] = []
     watch: WatchOutcome | None = None
     after = journal.protected_before
@@ -4769,15 +4666,15 @@ def _prove_recovery(
         blockers.append("journal-request-fixture-binding-mismatch")
     request_path = store.watch_path(journal.run_id, journal.scenario) / "request.json"
     try:
-        request_bytes = request_path.read_bytes()
+        request_bytes = store._read(request_path, "recovery watch request")
         request = watch_request_from_bytes(request_bytes)
         if request_bytes != _windows_watch.watch_request_to_bytes(request):
             raise ContainmentServiceError("watch request is not canonical")
         claim = controller_claim_from_bytes(
-            (request.evidence_root / CLAIM_NAME).read_bytes(), request
+            store._read(request.evidence_root / CLAIM_NAME, "controller claim"), request
         )
         launch = worker_launch_from_bytes(
-            (request.evidence_root / LAUNCH_NAME).read_bytes(), request
+            store._read(request.evidence_root / LAUNCH_NAME, "worker launch"), request
         )
         if (
             request.run_id != journal.run_id
@@ -4790,18 +4687,6 @@ def _prove_recovery(
             or launch.scenario is not claim.scenario
         ):
             raise ContainmentServiceError("watch request/claim/launch binding mismatch")
-        if not _exact_process_absent(
-            claim.controller_pid,
-            claim.controller_creation_time,
-            "prior-controller",
-        ):
-            blockers.append("prior-controller-live-or-uncertain")
-        if not _exact_process_absent(
-            launch.worker_pid,
-            launch.worker_creation_time,
-            "prior-watcher",
-        ):
-            blockers.append("prior-watcher-live-or-uncertain")
         try:
             watch = store.load_watch_outcome(journal.run_id, journal.scenario)
         except ContainmentStoreNotFound:
@@ -4819,7 +4704,20 @@ def _prove_recovery(
         ):
             blockers.append("watch-outcome-binding-mismatch")
             watch = None
+        if watch is None or watch.evidence_completion is not WatchEvidenceCompletion.COMPLETED:
+            try:
+                _delegated_watch_mutation(store, journal.run_id, journal.scenario, lambda: complete_watch_launch(request_path))
+            except (ExactObjectOwnershipError, ContainmentStoreOwnershipError):
+                raise
+            except (OSError, RuntimeError) as error:
+                if getattr(error, "owner", None) is not None:
+                    raise ContainmentServiceError("original process tree is live or quiescence is unknown") from error
+                blockers.append("original-process-job-ownership-unavailable")
+    except (ExactObjectOwnershipError, ContainmentStoreOwnershipError):
+        raise
     except (OSError, RuntimeError, ValueError, ContainmentStoreError) as error:
+        if _process_owner_from_error(error) is not None:
+            raise
         blockers.append(f"watch-proof-unavailable:{type(error).__name__}")
 
     try:
@@ -4829,6 +4727,8 @@ def _prove_recovery(
         )
         if journal.mo2_pid is not None and launch_process.pid != journal.mo2_pid:
             blockers.append("mo2-launch-journal-binding-mismatch")
+    except (ExactObjectOwnershipError, ContainmentStoreOwnershipError):
+        raise
     except ContainmentStoreNotFound:
         launch_document = None
         if _journal_requires_launch(journal):
@@ -4915,8 +4815,7 @@ def _persist_proven_recovery_breach(
     if existing is not None:
         _record_result_effects(existing)
         return scenario_result_id_for(existing, outcome)
-    result = evaluate_scenario(
-        ScenarioEvidence(
+    evaluation = ScenarioEvidence(
             run_id=journal.run_id,
             scenario=journal.scenario,
             protected_before=journal.protected_before,
@@ -4945,8 +4844,9 @@ def _persist_proven_recovery_breach(
             ),
             safety_reasons=(),
             incomplete_reasons=proof.blockers,
-        )
     )
+    store.write_evaluation(evaluation)
+    result = evaluate_scenario(evaluation)
     if result.outcome is not ScenarioOutcome.FAILED:
         return None
     _record_result_effects(result)
@@ -5206,6 +5106,7 @@ def _command_fingerprint(
     steam_root: Path,
 ) -> str:
     document = {
+        "evidencePolicy": "fresh-medium-vault-causal-process-tree-v1",
         "classificationPolicy": _CLASSIFICATION_POLICY,
         "fixturePolicy": _FIXTURE_POLICY,
         "mechanism": _MECHANISM,
@@ -5506,24 +5407,29 @@ def _require_reserved_startup_only(store, replacement):
     """Observe known startup bytes only; this never grants object ownership."""
     if _path_exists_no_follow(store.preparation_path(replacement.run_id, "startup-initialized")):
         raise ContainmentServiceError("startup initialization barrier is present or uncertain")
-    root = store.run_path(replacement.consumed_by_run_id)
-    if not _path_exists_no_follow(root):
-        return
-    store._require_existing_direct_directory(root, "reserved startup root")
+    run_id = replacement.consumed_by_run_id
     expected = {
-        store.intent_path(replacement.consumed_by_run_id): replacement.successor_intent.encode("utf-8"),
-        store.preparation_path(replacement.consumed_by_run_id, "attempt"): record_to_bytes(replacement.successor_attempt),
+        store.intent_path(run_id): replacement.successor_intent.encode("utf-8"),
+        store.preparation_path(run_id, "attempt"): record_to_bytes(replacement.successor_attempt),
     }
-    for path in root.iterdir():
-        if path in expected:
-            if store._read(path, "reserved startup evidence") != expected[path]:
-                raise ContainmentServiceError("reserved startup evidence was substituted")
-        elif path.name in {"scenarios", "quarantine"}:
-            store._require_existing_direct_directory(path, "reserved startup scaffold")
-            if tuple(path.iterdir()):
-                raise ContainmentServiceError("reserved startup has started or unknown child evidence")
-        else:
-            raise ContainmentServiceError("reserved startup has fixture or unknown evidence")
+    for root, authoritative in ((store.run_path(run_id), False),
+                                 (store.evidence_run_path(run_id), True)):
+        if not _path_exists_no_follow(root):
+            continue
+        store._require_existing_direct_directory(root, "reserved startup root")
+        with (store.open_evidence_vault(run_id) if authoritative else nullcontext()) as vault:
+            for path in root.iterdir():
+                if vault is not None:
+                    vault.verify_descendant(path)
+                if path in expected:
+                    if store._read(path, "reserved startup evidence") != expected[path]:
+                        raise ContainmentServiceError("reserved startup evidence was substituted")
+                elif path.name in {"scenarios", "quarantine"}:
+                    store._require_existing_direct_directory(path, "reserved startup scaffold")
+                    if tuple(path.iterdir()):
+                        raise ContainmentServiceError("reserved startup has started or unknown child evidence")
+                else:
+                    raise ContainmentServiceError("reserved startup has fixture or unknown evidence")
     if (_path_exists_no_follow(store.preparation_path(replacement.consumed_by_run_id, "attempt"))
             and not _path_exists_no_follow(store.intent_path(replacement.consumed_by_run_id))):
         raise ContainmentServiceError("reserved startup attempt lacks its intent")

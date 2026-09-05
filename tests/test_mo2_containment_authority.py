@@ -332,7 +332,11 @@ class AuthorityFixture:
 class Mo2ContainmentAuthorityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="modlab-authority-")
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name) / "validation"
+        self.root.mkdir()
+        # Graph policy fixtures isolate raw native lifecycle validation.
+        self.enterContext(mock.patch.object(ContainmentStore, "_validate_watch_raw"))
+        self.enterContext(mock.patch.object(ContainmentStore, "_validate_result_derivation"))
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -689,7 +693,7 @@ class Mo2ContainmentAuthorityTests(unittest.TestCase):
                 ) as root:
                     fixture = AuthorityFixture(Path(root)).complete()
                     scenario = ContainmentScenario.NEW_FOLDER
-                    redirected = fixture.store.run_path(
+                    redirected = fixture.store.evidence_run_path(
                         fixture.replacement_run_id
                     ) / "scenarios"
                     if ancestor != "scenarios":

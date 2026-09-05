@@ -660,6 +660,7 @@ def pin_stable_direct_object(
     kind: str,
     *,
     allow_writes: bool = False,
+    delete_access: bool = True,
 ) -> PinnedObject:
     """Retain one direct object while denying rename/delete.
 
@@ -671,9 +672,9 @@ def pin_stable_direct_object(
         raise ExactObjectError(f"unsupported pinned object kind: {kind!r}")
     target = _absolute(path)
     desired_access = (
-        _DELETE | _FILE_READ_ATTRIBUTES
+        (_DELETE if delete_access else _FILE_LIST_DIRECTORY) | _FILE_READ_ATTRIBUTES
         if kind == "directory"
-        else _DELETE | _FILE_READ_ATTRIBUTES | _GENERIC_READ
+        else (_DELETE if delete_access else 0) | _FILE_READ_ATTRIBUTES | _GENERIC_READ
     )
     handle = _kernel32.CreateFileW(
         str(target),
@@ -1091,8 +1092,10 @@ def rename_pinned_no_replace(
         raise ExactObjectError("renamed destination is not the pinned source object")
 
 
-def read_pinned_file(source: PinnedObject) -> bytes:
+def read_pinned_file(source: PinnedObject, *, maximum_bytes: int | None = None) -> bytes:
     """Read a retained direct regular file without reopening its mutable pathname."""
+    if maximum_bytes is not None and (type(maximum_bytes) is not int or maximum_bytes < 0):
+        raise ExactObjectError("maximum byte bound must be a nonnegative integer")
     if not source.handle:
         raise ExactObjectError("cannot read a closed pinned object")
     identity = _handle_identity(source.handle, source.path)
@@ -1105,6 +1108,8 @@ def read_pinned_file(source: PinnedObject) -> bytes:
         raise _winerror(f"GetFileSizeEx failed for {source.path}")
     if size.value < 0:
         raise ExactObjectError(f"pinned file size is negative: {source.path}")
+    if maximum_bytes is not None and size.value > maximum_bytes:
+        raise ExactObjectError(f"pinned file exceeds maximum byte bound: {source.path}")
     if not _kernel32.SetFilePointerEx(source.handle, ctypes.c_longlong(0), None, _FILE_BEGIN):
         raise _winerror(f"SetFilePointerEx failed for {source.path}")
     parts: list[bytes] = []

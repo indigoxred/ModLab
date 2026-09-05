@@ -419,7 +419,7 @@ class PathBudgetPolicyTests(unittest.TestCase):
             )
             proof = SimpleNamespace(watch_outcome=watch, protected_after=protected)
             with (
-                patch.object(service, "_delegated_mutation", return_value=receipt),
+                patch.object(service, "_delegated_watch_mutation", return_value=receipt),
                 patch.object(
                     service,
                     "_retained_relocation_projections",
@@ -698,7 +698,7 @@ class PathBudgetPolicyTests(unittest.TestCase):
             ("FomodDependency", "ModLab Spike FOMOD",
              ("always.txt", "dependency-seen.txt", "meta.ini")),
         ):
-            scenario_root = root / "scenarios" / scenario
+            scenario_root = service.evidence_root_for(validation) / run_id.removeprefix("containment-run:") / "scenarios" / scenario
             self.assertIn(str(scenario_root / "before.json"), paths)
             self.assertIn(str(scenario_root / "after.json"), paths)
             self.assertNotIn(str(scenario_root / "protected-state.json"), paths)
@@ -1212,7 +1212,7 @@ class NativePathBudgetTests(unittest.TestCase):
                         return_value=SimpleNamespace(pid=41),
                     ),
                     patch.object(service, "_exact_process_absent", return_value=True),
-                    patch.object(service, "_delegated_mutation", return_value=receipt),
+                    patch.object(service, "_delegated_watch_mutation", return_value=receipt),
                     patch.object(service, "_capture_protected", return_value=protected),
                     patch.object(
                         service,
@@ -1314,7 +1314,7 @@ class NativePathBudgetTests(unittest.TestCase):
                         verifier,
                         patch.object(
                             service,
-                            "_delegated_mutation",
+                            "_delegated_watch_mutation",
                             return_value=receipt,
                         ),
                         patch.object(

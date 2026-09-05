@@ -70,6 +70,7 @@ class WorkspaceLayout:
     mo2_bootstrap_plans: Path
     mo2_bootstrap_receipts: Path
     mo2_containment_validation: Path
+    mo2_containment_authority: Path
 
 
 def default_workspace_root() -> Path:
@@ -112,6 +113,7 @@ def workspace_layout(root: Path) -> WorkspaceLayout:
         mo2_bootstrap_plans=mo2_bootstrap_jobs / "plans",
         mo2_bootstrap_receipts=skyrim / "tool-installations" / "mo2",
         mo2_containment_validation=resolved / "runtime" / "validation" / "mo2-containment",
+        mo2_containment_authority=resolved / "runtime" / "validation-authority" / "mo2-containment",
     )
 
 

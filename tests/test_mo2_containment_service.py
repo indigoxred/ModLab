@@ -529,6 +529,8 @@ def write_bound_watch_evidence(
 ) -> WatchOutcome:
     evidence_root = store.watch_path(journal.run_id, journal.scenario)
     watched = evidence_root.parent
+    with store.open_evidence_vault(journal.run_id) as vault:
+        authority = (vault.path, vault.identity.volume_serial, vault.identity.file_id, vault.creator_sid)
     request = WatchRequest(
         "watch-request:" + "6" * 64,
         "watch-session:" + "7" * 64,
@@ -540,11 +542,12 @@ def write_bound_watch_evidence(
             WatchRoot(kind, watched, 71, 72)
             for kind in WATCH_ROOT_KINDS
         ),
+        *authority,
     )
     request_path = evidence_root / "request.json"
     request_path.write_bytes(watch_request_to_bytes(request))
     claim = ControllerClaim(
-        1,
+        2,
         watch_request_sha256(request),
         request.session_id,
         request.run_id,
@@ -558,7 +561,7 @@ def write_bound_watch_evidence(
         controller_claim_to_bytes(claim, request)
     )
     launch = WorkerLaunch(
-        1,
+        2,
         watch_request_sha256(request),
         request.session_id,
         request.run_id,
@@ -659,6 +662,11 @@ def evidence(
 
 
 class ContainmentServiceTests(unittest.TestCase):
+    def setUp(self):
+        # Synthetic policy/receipt fixtures are not native causal lifecycle proof.
+        self.enterContext(patch.object(ContainmentStore, "_validate_watch_raw"))
+        self.enterContext(patch.object(ContainmentStore, "_validate_result_derivation"))
+
     def test_relocation_baseline_presence_is_scenario_specific(self):
         with tempfile.TemporaryDirectory(
             prefix="modlab-relocation-baseline-",
@@ -1475,14 +1483,20 @@ class ContainmentServiceTests(unittest.TestCase):
                 run_root / "fixtures" / "v2" / item.value
                 for item in ContainmentScenario
             )
-            fixture_roots = (run_root / "preparation-projections", run_root / "fixtures", run_root / "fixtures/v2", *scenario_fixture_roots)
+            evidence_run_root = service.evidence_root_for(validation) / run_id.removeprefix("containment-run:")
+            fixture_roots = (evidence_run_root / "preparation-projections", run_root / "fixtures", run_root / "fixtures/v2", *scenario_fixture_roots)
             self.assertEqual(fixture_roots, prepared.effects.child_mutation_roots)
             self.assertEqual(
                 (
-                    run_root / "intent.json",
-                    run_root / "preparation-attempt.json",
+                    evidence_run_root.parent.parent,
+                    evidence_run_root.parent,
+                    evidence_run_root,
+                    run_root,
+                    run_root / "quarantine",
+                    evidence_run_root / "intent.json",
+                    evidence_run_root / "preparation-attempt.json",
                     *fixture_roots,
-                    run_root / "request.json",
+                    evidence_run_root / "request.json",
                 ),
                 prepared.effects.written_paths,
             )
@@ -1607,20 +1621,25 @@ class ContainmentServiceTests(unittest.TestCase):
 
             self.assertTrue((fixture_root / "partial.marker").is_file())
             self.assertEqual(
-                (fixture_root.parents[2] / "preparation-projections", fixture_root.parent.parent, fixture_root.parent, fixture_root),
+                (service.evidence_root_for(layout.mo2_containment_validation) / ("e" * 32) / "preparation-projections", fixture_root.parent.parent, fixture_root.parent, fixture_root),
                 raised.exception.effects.child_mutation_roots,
             )
             self.assertEqual(
                 (
-                    layout.mo2_containment_validation
+                    service.evidence_root_for(layout.mo2_containment_validation).parent,
+                    service.evidence_root_for(layout.mo2_containment_validation),
+                    service.evidence_root_for(layout.mo2_containment_validation) / ("e" * 32),
+                    layout.mo2_containment_validation / ("e" * 32),
+                    layout.mo2_containment_validation / ("e" * 32) / "quarantine",
+                    service.evidence_root_for(layout.mo2_containment_validation)
                     / ("e" * 32)
                     / "intent.json",
-                    layout.mo2_containment_validation / ("e" * 32) / "preparation-attempt.json",
-                    layout.mo2_containment_validation / ("e" * 32) / "preparation-projections",
+                    service.evidence_root_for(layout.mo2_containment_validation) / ("e" * 32) / "preparation-attempt.json",
+                    service.evidence_root_for(layout.mo2_containment_validation) / ("e" * 32) / "preparation-projections",
                     fixture_root.parent.parent,
                     fixture_root.parent,
                     fixture_root,
-                    layout.mo2_containment_validation / ("e" * 32) / "preparation-failure.json",
+                    service.evidence_root_for(layout.mo2_containment_validation) / ("e" * 32) / "preparation-failure.json",
                 ),
                 raised.exception.effects.written_paths,
             )
@@ -1632,7 +1651,8 @@ class ContainmentServiceTests(unittest.TestCase):
             source = Path(directory) / "source"
             layout = initialize_workspace(source)
             steam = Path(directory) / "steam"
-            (layout.mo2_containment_validation / ("f" * 32)).write_bytes(
+            service.evidence_root_for(layout.mo2_containment_validation).mkdir(parents=True)
+            (service.evidence_root_for(layout.mo2_containment_validation) / ("f" * 32)).write_bytes(
                 b"run-shaped file impostor\n"
             )
 
@@ -1697,6 +1717,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     store.scenario_path(RUN_ID, record.scenario) / "before.json",
                     store.journal_path(RUN_ID, record.scenario),
                     watch_root,
+                    watch_root / "request.json",
                 ),
                 armed_receipt.effects.written_paths,
             )
@@ -1783,8 +1804,8 @@ class ContainmentServiceTests(unittest.TestCase):
                 patch.object(service, "start_watch", side_effect=start_successfully),
                 patch.object(
                     service,
-                    "_mutation_root_observation",
-                    side_effect=((("before",),), None),
+                    "_watch_effect_observation",
+                    side_effect=({}, RuntimeError("effect observation is unavailable")),
                 ),
                 self.assertRaises(service.ContainmentOperationError) as raised,
             ):
@@ -1828,8 +1849,8 @@ class ContainmentServiceTests(unittest.TestCase):
                 patch.object(service, "start_watch", side_effect=fail_after_entering),
                 patch.object(
                     service,
-                    "_mutation_root_observation",
-                    side_effect=((("before",),), None),
+                    "_watch_effect_observation",
+                    side_effect=({}, RuntimeError("effect observation is unavailable")),
                 ),
                 self.assertRaises(service.ContainmentOperationError) as raised,
             ):
@@ -1913,6 +1934,7 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertIsNone(launch_receipt.effects.watcher_pid)
             self.assertEqual(
                 (
+                    store.started_path(RUN_ID, record.scenario),
                     store.journal_path(RUN_ID, record.scenario),
                     store.launch_path(RUN_ID, record.scenario),
                 ),
@@ -1931,7 +1953,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 request_bytes_sha256=outcome.request_sha256,
             )
 
-            def fake_stop(_request_path):
+            def fake_stop(_request_path, **_kwargs):
                 (store.watch_path(RUN_ID, record.scenario) / "terminal.json").write_bytes(
                     b"terminal\n"
                 )
@@ -1964,6 +1986,7 @@ class ContainmentServiceTests(unittest.TestCase):
             with (
                 patch.object(service, "_load_fixture_record", return_value=record),
                 patch.object(service, "inspect_mo2_processes", return_value=SimpleNamespace(complete=True, relevant=())),
+                patch.object(service, "complete_watch_launch"),
                 patch.object(service, "stop_watch", side_effect=fake_stop),
                 patch.object(service, "_capture_protected", return_value=protected()),
                 patch.object(
@@ -1995,8 +2018,11 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertEqual(
                 (
                     store.watch_path(RUN_ID, record.scenario),
+                    store.watch_path(RUN_ID, record.scenario) / "terminal.json",
                     store.quarantine_path(RUN_ID) / record.scenario.value,
                     store.scenario_path(RUN_ID, record.scenario) / "after.json",
+                    store.scenario_path(RUN_ID, record.scenario) / "before.json",
+                    store.evaluation_path(RUN_ID, record.scenario),
                     store.result_path(RUN_ID, record.scenario),
                     store.journal_path(RUN_ID, record.scenario),
                 ),
@@ -2058,6 +2084,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     store.scenario_path(RUN_ID, record.scenario) / "before.json",
                     store.journal_path(RUN_ID, record.scenario),
                     store.watch_path(RUN_ID, record.scenario),
+                    store.watch_path(RUN_ID, record.scenario) / "request.json",
                 ),
                 effects.written_paths,
             )
@@ -2135,6 +2162,7 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertEqual(5151, effects.mo2_pid)
             self.assertEqual(
                 (
+                    store.started_path(RUN_ID, record.scenario),
                     store.journal_path(RUN_ID, record.scenario),
                     store.launch_path(RUN_ID, record.scenario),
                 ),
@@ -2171,6 +2199,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     None,
                 )
             )
+            store.write_scenario_started(replace(journal, state=ScenarioState.SCENARIO_STARTED, mo2_pid=None))
             store.write_launch_evidence(
                 RUN_ID,
                 record.scenario,
@@ -2200,7 +2229,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 request_bytes_sha256=outcome.request_sha256,
             )
 
-            def fake_stop(_request_path):
+            def fake_stop(_request_path, **_kwargs):
                 (store.watch_path(RUN_ID, record.scenario) / "terminal.json").write_bytes(
                     b"terminal\n"
                 )
@@ -2234,6 +2263,7 @@ class ContainmentServiceTests(unittest.TestCase):
                     return_value=SimpleNamespace(complete=True, relevant=()),
                 ),
                 patch.object(service, "_exact_process_absent", return_value=True),
+                patch.object(service, "complete_watch_launch"),
                 patch.object(service, "stop_watch", side_effect=fake_stop),
                 patch.object(service, "_capture_protected", return_value=protected()),
                 patch.object(
@@ -2263,8 +2293,11 @@ class ContainmentServiceTests(unittest.TestCase):
             self.assertEqual(
                 (
                     store.watch_path(RUN_ID, record.scenario),
+                    store.watch_path(RUN_ID, record.scenario) / "terminal.json",
                     store.quarantine_path(RUN_ID) / record.scenario.value,
                     store.scenario_path(RUN_ID, record.scenario) / "after.json",
+                    store.scenario_path(RUN_ID, record.scenario) / "before.json",
+                    store.evaluation_path(RUN_ID, record.scenario),
                     store.result_path(RUN_ID, record.scenario),
                     store.journal_path(RUN_ID, record.scenario),
                 ),
@@ -2756,6 +2789,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 ).value
 
             current_document = {
+                "evidencePolicy": "fresh-medium-vault-causal-process-tree-v1",
                 "classificationPolicy": "scenario-classification-v4",
                 "fixturePolicy": "disposable-shell-environment-v3",
                 "mechanism": "isolated-low-integrity-junction-projection-v1",
@@ -2856,6 +2890,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 ).value
 
             current_document = {
+                "evidencePolicy": "fresh-medium-vault-causal-process-tree-v1",
                 **previous_document,
                 "fixturePolicy": "disposable-shell-environment-v3",
                 "operatorPolicy": "foreground-interactive-confirmation-v1",
@@ -2949,6 +2984,7 @@ class ContainmentServiceTests(unittest.TestCase):
                 ).value
 
             current_document = {
+                "evidencePolicy": "fresh-medium-vault-causal-process-tree-v1",
                 **previous_document,
                 "operatorPolicy": "foreground-interactive-confirmation-v1",
             }
@@ -4846,7 +4882,7 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
                 real_scandir = os.scandir
                 scans = 0
 
-                def pin(path, _kind):
+                def pin(path, _kind, **_kwargs):
                     if Path(path) == root:
                         if position == "root_pin":
                             raise interruption
@@ -4891,7 +4927,7 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
                 interruption = KeyboardInterrupt("read interrupted")
                 close_error = ExactObjectOwnershipError("close retained an additional owner", verification=(extra_pin,))
 
-                def pin(path, _kind):
+                def pin(path, _kind, **_kwargs):
                     if Path(path) == root:
                         return root_pin
                     if acquisition_fails:
@@ -6199,7 +6235,7 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
 
             self.assertEqual(6060, raised.exception.effects.mo2_pid)
             self.assertEqual(
-                (store.journal_path(RUN_ID, record.scenario),),
+                (store.started_path(RUN_ID, record.scenario), store.journal_path(RUN_ID, record.scenario)),
                 raised.exception.effects.written_paths,
             )
             self.assertEqual(
@@ -6290,7 +6326,7 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
             self.assertIs(ownership, raised.exception)
             self.assertEqual(7070, ownership.effects.mo2_pid)
             self.assertEqual(
-                (store.journal_path(RUN_ID, record.scenario),),
+                (store.started_path(RUN_ID, record.scenario), store.journal_path(RUN_ID, record.scenario)),
                 ownership.effects.written_paths,
             )
             self.assertIs(
@@ -6301,6 +6337,8 @@ class Task4ExactEffectsFixTests(unittest.TestCase):
 
 class ContainmentRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.enterContext(patch.object(ContainmentStore, "_validate_watch_raw"))
+        self.enterContext(patch.object(ContainmentStore, "_validate_result_derivation"))
         self.temporary = tempfile.TemporaryDirectory(prefix="modlab-containment-recovery-")
         self.root = Path(self.temporary.name)
         self.store = ContainmentStore(self.root)
@@ -6359,7 +6397,7 @@ class ContainmentRecoveryTests(unittest.TestCase):
             with (
                 patch.object(service, "_load_fixture_record", return_value=record),
                 patch.object(service, "_prove_recovery", return_value=proof),
-                patch.object(service, "_delegated_mutation", return_value=receipt),
+                patch.object(service, "_delegated_watch_mutation", return_value=receipt),
                 patch.object(
                     service,
                     "_retained_relocation_projections",
@@ -6464,6 +6502,9 @@ class ContainmentRecoveryTests(unittest.TestCase):
         self.assertEqual(
             (
                 self.store.journal_path(RUN_ID, self.journal.scenario),
+                self.store.scenario_path(RUN_ID, self.journal.scenario) / "before.json",
+                self.store.scenario_path(RUN_ID, self.journal.scenario) / "after.json",
+                self.store.evaluation_path(RUN_ID, self.journal.scenario),
                 self.store.result_path(RUN_ID, self.journal.scenario),
                 self.store.scenario_path(RUN_ID, self.journal.scenario)
                 / "recovery.json",
@@ -6709,7 +6750,7 @@ class ContainmentRecoveryTests(unittest.TestCase):
             ) / "request.json"
             request = service.watch_request_from_bytes(request_path.read_bytes())
             mismatched = WorkerLaunch(
-                1,
+                2,
                 watch_request_sha256(request),
                 request.session_id,
                 request.run_id,
@@ -6833,6 +6874,7 @@ class ContainmentRecoveryTests(unittest.TestCase):
         )
 
         with (
+            patch.object(service, "complete_watch_launch"),
             patch.object(
                 service._windows_watch,
                 "_exact_process_status",
@@ -6850,7 +6892,7 @@ class ContainmentRecoveryTests(unittest.TestCase):
             request_path = self.store.watch_path(old_run, scenario) / "request.json"
             request = service.watch_request_from_bytes(request_path.read_bytes())
             mismatched = WorkerLaunch(
-                1,
+                2,
                 watch_request_sha256(request),
                 request.session_id,
                 request.run_id,

@@ -336,8 +336,9 @@ class ContainmentCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="modlab-show-malformed-") as directory:
             workspace = Path(directory) / "workspace"
             validation = cli._validation_root(workspace)
-            run_root = validation / RUN_ID.removeprefix("containment-run:")
-            run_root.mkdir(parents=True)
+            store = containment_service.ContainmentStore(validation)
+            store.prepare_run_root(RUN_ID)
+            run_root = store.evidence_run_path(RUN_ID)
             decision = run_root / "decision.json"
             decision.write_bytes(b"{malformed\n")
             before = tuple(

@@ -1708,7 +1708,7 @@ class WindowsExactFsTests(unittest.TestCase):
         )
         self.assertIn(
             "publish_new_pinned",
-            inspect.getsource(mo2_containment_store.ContainmentStore._write_immutable),
+            inspect.getsource(mo2_containment_store.ContainmentStore._write_immutable_guarded),
         )
         self.assertEqual(
             1,

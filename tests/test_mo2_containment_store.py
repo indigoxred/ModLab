@@ -222,7 +222,12 @@ def valid_prepared_journal(root: Path) -> ScenarioJournal:
 class ContainmentStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="modlab-containment-store-")
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name) / "validation"
+        self.root.mkdir()
+        # These fixtures exercise serialization/publication, not native causal proof.
+        # Actual raw reconstruction is covered by test_containment_evidence_vault.
+        self.enterContext(mock.patch.object(ContainmentStore, "_validate_watch_raw"))
+        self.enterContext(mock.patch.object(ContainmentStore, "_validate_result_derivation"))
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -231,7 +236,7 @@ class ContainmentStoreTests(unittest.TestCase):
         target = self.root / "journal.json"
         token = "1" * 32
 
-        with mock.patch.object(containment_store.os, "name", "posix"):
+        with mock.patch.object(containment_store, "os", SimpleNamespace(**{**vars(containment_store.os), "name": "posix"})):
             part = containment_store.mutable_replacement_part_path(target, token)
 
         self.assertIs(type(target), type(part))
@@ -336,7 +341,7 @@ class ContainmentStoreTests(unittest.TestCase):
         store = ContainmentStore(self.root)
         journal = store.create(valid_prepared_journal(self.root))
         path = (
-            self.root
+            store.evidence_root
             / RUN_ID.removeprefix("containment-run:")
             / "scenarios"
             / ContainmentScenario.MERGE_EXISTING.value
@@ -431,8 +436,10 @@ class ContainmentStoreTests(unittest.TestCase):
     def test_effect_recorder_distinguishes_post_publication_from_prepublication_failure(self):
         recorded = []
         store = ContainmentStore(self.root, _effect_recorder=recorded.append)
-        written_target = self.root / "written.json"
-        refused_target = self.root / "refused.json"
+        store.prepare_run_root(RUN_ID)
+        recorded.clear()
+        written_target = store.evidence_run_path(RUN_ID) / "written.json"
+        refused_target = store.evidence_run_path(RUN_ID) / "refused.json"
         data = b'{"exact":true}\n'
 
         def publish_then_fail(path, payload, _validator):
@@ -466,7 +473,9 @@ class ContainmentStoreTests(unittest.TestCase):
     def test_effect_recorder_keeps_posix_promotion_before_late_failure(self):
         recorded = []
         store = ContainmentStore(self.root, _effect_recorder=recorded.append)
-        target = self.root / "promoted.json"
+        store.prepare_run_root(RUN_ID)
+        recorded.clear()
+        target = store.evidence_run_path(RUN_ID) / "promoted.json"
         data = b'{"promoted":true}\n'
 
         def promote_then_fail(source, destination):
@@ -474,7 +483,7 @@ class ContainmentStoreTests(unittest.TestCase):
             raise OSError("injected failure after promotion")
 
         with (
-            mock.patch.object(containment_store.os, "name", "posix"),
+            mock.patch.object(containment_store, "os", SimpleNamespace(**{**vars(containment_store.os), "name": "posix"})),
             mock.patch.object(
                 containment_store,
                 "_promote_no_replace_posix",
@@ -489,17 +498,19 @@ class ContainmentStoreTests(unittest.TestCase):
 
     def test_windows_immutable_writes_route_only_to_retained_publication(self):
         store = ContainmentStore(self.root)
+        store.prepare_run_root(RUN_ID)
         calls = []
 
         def publish(path, data, validator):
             calls.append((path, data))
+            path.write_bytes(data)
             self.assertEqual(data, validator(data))
             return data
 
         records = (
-            (self.root / "request.json", b'{"record":"request"}\n', "request"),
-            (self.root / "result.json", b'{"record":"result"}\n', "scenario result"),
-            (self.root / "decision.json", b'{"record":"decision"}\n', "capability decision"),
+            (store.evidence_run_path(RUN_ID) / "request.json", b'{"record":"request"}\n', "request"),
+            (store.evidence_run_path(RUN_ID) / "result.json", b'{"record":"result"}\n', "scenario result"),
+            (store.evidence_run_path(RUN_ID) / "decision.json", b'{"record":"decision"}\n', "capability decision"),
         )
         with (
             mock.patch.object(
@@ -521,12 +532,14 @@ class ContainmentStoreTests(unittest.TestCase):
             calls,
         )
         posix_promotion.assert_not_called()
-        self.assertTrue(all(not target.exists() for target, _data, _label in records))
+        self.assertTrue(all(target.exists() for target, _data, _label in records))
 
     def test_failed_windows_immutable_publication_records_unexpected_new_target(self):
         recorded = []
         store = ContainmentStore(self.root, _effect_recorder=recorded.append)
-        target = self.root / "unexpected-windows.json"
+        store.prepare_run_root(RUN_ID)
+        recorded.clear()
+        target = store.evidence_run_path(RUN_ID) / "unexpected-windows.json"
 
         def publish_then_fail(path, _data, _validator):
             path.write_bytes(b"unexpected\n")
@@ -549,14 +562,16 @@ class ContainmentStoreTests(unittest.TestCase):
     def test_failed_posix_immutable_promotion_records_unexpected_new_target(self):
         recorded = []
         store = ContainmentStore(self.root, _effect_recorder=recorded.append)
-        target = self.root / "unexpected-posix.json"
+        store.prepare_run_root(RUN_ID)
+        recorded.clear()
+        target = store.evidence_run_path(RUN_ID) / "unexpected-posix.json"
 
         def promote_then_fail(_source, destination):
             destination.write_bytes(b"unexpected\n")
             raise OSError("injected failure after unexpected promotion")
 
         with (
-            mock.patch.object(containment_store.os, "name", "posix"),
+            mock.patch.object(containment_store, "os", SimpleNamespace(**{**vars(containment_store.os), "name": "posix"})),
             mock.patch.object(
                 containment_store,
                 "_promote_no_replace_posix",
@@ -572,7 +587,9 @@ class ContainmentStoreTests(unittest.TestCase):
     def test_failed_replacement_records_deleted_target(self):
         recorded = []
         store = ContainmentStore(self.root, _effect_recorder=recorded.append)
-        target = self.root / "deleted-replacement.json"
+        store.prepare_run_root(RUN_ID)
+        recorded.clear()
+        target = store.evidence_run_path(RUN_ID) / "deleted-replacement.json"
         target.write_bytes(b"before\n")
 
         def delete_then_fail(_source, destination):
@@ -600,9 +617,11 @@ class ContainmentStoreTests(unittest.TestCase):
     def test_failed_immutable_cleanup_records_surviving_part(self):
         recorded = []
         store = ContainmentStore(self.root, _effect_recorder=recorded.append)
-        target = self.root / "part-survival.json"
+        store.prepare_run_root(RUN_ID)
+        recorded.clear()
+        target = store.evidence_run_path(RUN_ID) / "part-survival.json"
         token = "1" * 32
-        part = self.root / f".{target.name}.{token}.part"
+        part = store.evidence_run_path(RUN_ID) / f".{target.name}.{token}.part"
         real_unlink = Path.unlink
 
         def refuse_part_cleanup(path, *args, **kwargs):
@@ -611,7 +630,7 @@ class ContainmentStoreTests(unittest.TestCase):
             return real_unlink(path, *args, **kwargs)
 
         with (
-            mock.patch.object(containment_store.os, "name", "posix"),
+            mock.patch.object(containment_store, "os", SimpleNamespace(**{**vars(containment_store.os), "name": "posix"})),
             mock.patch.object(
                 containment_store.uuid,
                 "uuid4",
@@ -633,10 +652,12 @@ class ContainmentStoreTests(unittest.TestCase):
     def test_failed_replacement_cleanup_records_surviving_part_only(self):
         recorded = []
         store = ContainmentStore(self.root, _effect_recorder=recorded.append)
-        target = self.root / "replace-part-survival.json"
+        store.prepare_run_root(RUN_ID)
+        recorded.clear()
+        target = store.evidence_run_path(RUN_ID) / "replace-part-survival.json"
         target.write_bytes(b"before\n")
         token = "2" * 32
-        part = self.root / f".{target.name}.{token}.part"
+        part = store.evidence_run_path(RUN_ID) / f".{target.name}.{token}.part"
         real_unlink = Path.unlink
 
         def refuse_part_cleanup(path, *args, **kwargs):
@@ -673,7 +694,7 @@ class ContainmentStoreTests(unittest.TestCase):
         source = self.root / "first.part"
         target = self.root / "immutable.json"
         source.write_bytes(b"first")
-        with mock.patch.object(containment_store.os, "name", "posix"):
+        with mock.patch.object(containment_store, "os", SimpleNamespace(**{**vars(containment_store.os), "name": "posix"})):
             containment_store._promote_no_replace_posix(source, target)
         self.assertFalse(source.exists())
         self.assertEqual(b"first", target.read_bytes())
@@ -681,7 +702,7 @@ class ContainmentStoreTests(unittest.TestCase):
         colliding_source = self.root / "second.part"
         colliding_source.write_bytes(b"second")
         with (
-            mock.patch.object(containment_store.os, "name", "posix"),
+            mock.patch.object(containment_store, "os", SimpleNamespace(**{**vars(containment_store.os), "name": "posix"})),
             self.assertRaises(FileExistsError),
         ):
             containment_store._promote_no_replace_posix(colliding_source, target)
@@ -700,9 +721,10 @@ class ContainmentStoreTests(unittest.TestCase):
 
     def test_windows_immutable_write_preserves_structured_ownership_for_retry(self):
         store = ContainmentStore(self.root)
+        store.prepare_run_root(RUN_ID)
         candidates = (
-            PinnedObject(self.root / "immutable-one.json", 81, PinnedIdentity(1, 1, 0)),
-            PinnedObject(self.root / "immutable-two.json", 82, PinnedIdentity(1, 2, 0)),
+            PinnedObject(store.evidence_run_path(RUN_ID) / "immutable-one.json", 81, PinnedIdentity(1, 1, 0)),
+            PinnedObject(store.evidence_run_path(RUN_ID) / "immutable-two.json", 82, PinnedIdentity(1, 2, 0)),
         )
         owner_type = windows_exact_fs.RetainedObjectOwner
         role = windows_exact_fs.RetainedObjectRole
@@ -715,7 +737,7 @@ class ContainmentStoreTests(unittest.TestCase):
             mock.patch.object(containment_store, "resolve_retained_ownership", side_effect=ownership),
         ):
             with self.assertRaises(ContainmentStoreOwnershipError) as raised:
-                store._write_immutable(self.root / "immutable.json", b"{}\n", "immutable record")
+                store._write_immutable(store.evidence_run_path(RUN_ID) / "immutable.json", b"{}\n", "immutable record")
         self.assertEqual(ownership.owners, raised.exception.owners)
         self.assertIs(candidates[0], raised.exception.candidate)
         self.assertEqual(candidates, raised.exception.candidates)
@@ -723,7 +745,9 @@ class ContainmentStoreTests(unittest.TestCase):
     def test_windows_ownership_failure_records_surviving_candidate_path(self):
         recorded = []
         store = ContainmentStore(self.root, _effect_recorder=recorded.append)
-        candidate_path = self.root / ".immutable.json.retained.tmp"
+        store.prepare_run_root(RUN_ID)
+        recorded.clear()
+        candidate_path = store.evidence_run_path(RUN_ID) / ".immutable.json.retained.tmp"
         candidate_path.write_bytes(b"partial\n")
         candidate = PinnedObject(
             candidate_path,
@@ -748,7 +772,7 @@ class ContainmentStoreTests(unittest.TestCase):
             self.assertRaises(ContainmentStoreOwnershipError),
         ):
             store._write_immutable(
-                self.root / "immutable.json",
+                store.evidence_run_path(RUN_ID) / "immutable.json",
                 b"expected\n",
                 "immutable record",
             )
@@ -757,7 +781,8 @@ class ContainmentStoreTests(unittest.TestCase):
 
     def test_windows_immutable_write_never_publishes_a_substitute_at_candidate_path(self):
         store = ContainmentStore(self.root)
-        target = self.root / "immutable.json"
+        store.prepare_run_root(RUN_ID)
+        target = store.evidence_run_path(RUN_ID) / "immutable.json"
         data = b'{"ok":true}\n'
         real_read = windows_exact_fs.read_pinned_file
         swapped = False
@@ -781,7 +806,7 @@ class ContainmentStoreTests(unittest.TestCase):
 
         self.assertTrue(swapped)
         self.assertEqual(data, target.read_bytes())
-        replacements = list(self.root.glob(".immutable.json.*.tmp"))
+        replacements = list(store.evidence_run_path(RUN_ID).glob(".immutable.json.*.tmp"))
         self.assertEqual(1, len(replacements))
         self.assertEqual(b'{"replacement":true}\n', replacements[0].read_bytes())
 
@@ -831,7 +856,7 @@ class ContainmentStoreTests(unittest.TestCase):
         source = self.root / "source.part"
         target = self.root / "journal.json"
         with (
-            mock.patch.object(containment_store.os, "name", "posix"),
+            mock.patch.object(containment_store, "os", SimpleNamespace(**{**vars(containment_store.os), "name": "posix"})),
             mock.patch.object(containment_store.os, "replace") as replace_call,
             mock.patch.object(containment_store.os, "open", return_value=71) as open_call,
             mock.patch.object(containment_store.os, "fsync") as fsync_call,
@@ -1080,7 +1105,7 @@ class ContainmentStoreTests(unittest.TestCase):
         self.assertFalse(first.existed)
         self.assertTrue(second.existed)
         self.assertEqual(document, store.load_intent(RUN_ID))
-        self.assertTrue(first.path.is_relative_to(store.run_path(RUN_ID)))
+        self.assertTrue(first.path.is_relative_to(store.evidence_run_path(RUN_ID)))
         self.assertFalse(store.request_path(RUN_ID).exists())
         with self.assertRaisesRegex(ContainmentStoreError, "different bytes"):
             store.write_intent(
@@ -1114,10 +1139,11 @@ class ContainmentStoreTests(unittest.TestCase):
 
     def test_list_run_ids_accepts_valid_direct_directory_and_ignores_unrelated(self):
         store = ContainmentStore(self.root)
+        store.evidence_root.mkdir(exist_ok=True)
         valid_hex = RUN_ID.removeprefix("containment-run:")
-        (self.root / valid_hex).mkdir()
-        (self.root / "notes").mkdir()
-        (self.root / "not-a-containment-run.txt").write_text(
+        store.prepare_run_root(RUN_ID)
+        (store.evidence_root / "notes").mkdir()
+        (store.evidence_root / "not-a-containment-run.txt").write_text(
             "unrelated\n", encoding="utf-8"
         )
 
@@ -1125,14 +1151,16 @@ class ContainmentStoreTests(unittest.TestCase):
 
     def test_list_run_ids_rejects_regular_file_impostor(self):
         store = ContainmentStore(self.root)
-        (self.root / ("a" * 32)).write_bytes(b"not a run directory\n")
+        store.evidence_root.mkdir(exist_ok=True)
+        (store.evidence_root / ("a" * 32)).write_bytes(b"not a run directory\n")
 
         with self.assertRaisesRegex(ContainmentStoreError, "direct.*directory"):
             store.list_run_ids()
 
     def test_list_run_ids_rejects_case_variant_run_name(self):
         store = ContainmentStore(self.root)
-        (self.root / ("A" * 32)).mkdir()
+        store.evidence_root.mkdir(exist_ok=True)
+        (store.evidence_root / ("A" * 32)).mkdir()
 
         with self.assertRaisesRegex(ContainmentStoreError, "noncanonical"):
             store.list_run_ids()
@@ -1141,6 +1169,7 @@ class ContainmentStoreTests(unittest.TestCase):
         for error in (PermissionError("access denied"), FileNotFoundError("gone")):
             with self.subTest(error=type(error).__name__):
                 store = ContainmentStore(self.root)
+                store.evidence_root.mkdir(exist_ok=True)
                 entry = mock.Mock()
                 entry.name = "b" * 32
                 entry.stat.side_effect = error
@@ -1160,6 +1189,7 @@ class ContainmentStoreTests(unittest.TestCase):
 
     def test_list_run_ids_rejects_reparse_directory_metadata(self):
         store = ContainmentStore(self.root)
+        store.evidence_root.mkdir(exist_ok=True)
         entry = mock.Mock()
         entry.name = "c" * 32
         entry.stat.return_value = SimpleNamespace(
@@ -1178,9 +1208,10 @@ class ContainmentStoreTests(unittest.TestCase):
 
     def test_list_run_ids_rejects_symlink_when_supported(self):
         store = ContainmentStore(self.root)
-        target = self.root / "target"
+        store.evidence_root.mkdir(exist_ok=True)
+        target = store.evidence_root / "target"
         target.mkdir()
-        link = self.root / ("d" * 32)
+        link = store.evidence_root / ("d" * 32)
         try:
             link.symlink_to(target, target_is_directory=True)
         except OSError as error:

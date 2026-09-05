@@ -129,7 +129,7 @@ class RealPreparationRestartTests(unittest.TestCase):
             old_attempt = store.load_preparation_attempt(old_id)
             from modlab.validation.mo2_preparation_recovery import record_id
             failure = store.load_preparation_failure(old_id)
-            old_paths = list(store.run_path(old_id).glob("*.json"))
+            old_paths = list(store.evidence_run_path(old_id).glob("*.json"))
             receipt_ids = []
             for scenario in service.ContainmentScenario:
                 path = store.preparation_path(old_id, "projection", scenario.value)
@@ -159,7 +159,7 @@ class RealPreparationRestartTests(unittest.TestCase):
                 self.assertEqual(data, path.read_bytes())
             self.assertFalse(store.request_path(old_id).exists())
             self.assertFalse(store.decision_path(old_id).exists())
-            self.assertEqual((), tuple((store.run_path(old_id) / "scenarios").iterdir()))
+            self.assertEqual((), tuple((store.evidence_run_path(old_id) / "scenarios").iterdir()))
 
 
 class PreparationRecoveryContractTests(unittest.TestCase):
@@ -253,7 +253,7 @@ class PreparationRecoveryContractTests(unittest.TestCase):
             attempt_id=None, effects=(), projection_ids=(),
             reason="legacy creation receipts unavailable", legacy=True,
         )
-        with tempfile.TemporaryDirectory(prefix="modlab-preparation-record-", dir=Path(__file__).resolve().parents[1]) as directory:
+        with tempfile.TemporaryDirectory(prefix="modlab-preparation-record-") as directory:
             store = ContainmentStore(Path(directory))
             with self.assertRaises(ContainmentStoreError):
                 store.write_preparation_failure(failure)  # no exact source intent
@@ -279,7 +279,7 @@ class PreparationRecoveryContractTests(unittest.TestCase):
 
     def test_restart_preparation_is_an_explicit_operation(self):
         self.assertTrue(callable(getattr(service, "restart_preparation", None)), "explicit fresh restart API is missing")
-        with tempfile.TemporaryDirectory(prefix="modlab-preparation-absent-", dir=Path(__file__).resolve().parents[1]) as directory:
+        with tempfile.TemporaryDirectory(prefix="modlab-preparation-absent-") as directory:
             absent = Path(directory) / "absent"
             with self.assertRaises((service.ContainmentServiceError, ContainmentStoreError)):
                 service.restart_preparation(absent, "containment-run:" + "a" * 32)
@@ -289,7 +289,7 @@ class PreparationRecoveryContractTests(unittest.TestCase):
 @unittest.skipUnless(os.name == "nt", "native preparation recovery requires Windows")
 class PreparationRecoveryAdversarialTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="modlab-prep-adversarial-", dir=Path(__file__).resolve().parents[1])
+        self.temporary = tempfile.TemporaryDirectory(prefix="modlab-prep-adversarial-")
         self.root = Path(self.temporary.name)
         # Startup/ownership tests use their explicit native failed fixture,
         # not a real release vault. Keep the archive boundary isolated; the
@@ -341,7 +341,7 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
                 attempt = recovery.PreparationAttempt(run_id, intent_id, fingerprint, "c" * 40, "d" * 40,
                     "e" * 64, "preparation-session:" + "f" * 32, pid, created, None)
                 store.write_preparation_attempt(attempt)
-                (store.run_path(run_id) / "preparation-projections").mkdir()
+                (store.evidence_run_path(run_id) / "preparation-projections").mkdir()
                 projection = recovery.PreparationProjection(run_id, intent_id, fingerprint, recovery.record_id(attempt), "NewFolder",
                     tuple(recovery.ProjectionIdentity(str(pin.path), *pin.identity) for pin in owner.pins), owner.payload.hex())
                 store.write_preparation_projection(projection)
@@ -358,8 +358,8 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
         # The real retained failed fixture has no admitted replacement archive.
         # Admission must refuse before recovery relocates its owned projection.
         def snapshot():
-            return {str(path.relative_to(store.run_path(run_id))): path.read_bytes()
-                    for path in store.run_path(run_id).rglob("*")
+            return {str(path.relative_to(store.evidence_run_path(run_id))): path.read_bytes()
+                    for path in store.evidence_run_path(run_id).rglob("*")
                     if path.is_file() and not path.is_symlink()}
         before = snapshot()
         identity = link.lstat().st_ino
@@ -380,8 +380,8 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
         self.preflight_patch.stop()
         store, run_id, fixture, link, target = self.failed_fixture(real_archive=True)
         def snapshot():
-            return {str(path.relative_to(store.run_path(run_id))): path.read_bytes()
-                    for path in store.run_path(run_id).rglob("*") if path.is_file()}
+            return {str(path.relative_to(store.evidence_run_path(run_id))): path.read_bytes()
+                    for path in store.evidence_run_path(run_id).rglob("*") if path.is_file()}
         before = snapshot()
         identity = link.lstat().st_ino
         with self.assertRaisesRegex(service.ContainmentServiceError, "path budget.*tar-cwd") as raised:
@@ -409,7 +409,7 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
     def test_source_binding_failure_precedes_consumption_without_fresh_effects(self):
         store, old, *_ = self.failed_fixture()
         service.recover_preparation(store.root, old)
-        before = {p: p.read_bytes() for p in store.run_path(old).glob("*.json")}
+        before = {p: p.read_bytes() for p in store.evidence_run_path(old).glob("*.json")}
         with patch.object(service, "_new_preparation_attempt", side_effect=RuntimeError("source binding unavailable")):
             with self.assertRaisesRegex(service.ContainmentServiceError, "source binding unavailable"):
                 service.restart_preparation(store.root, old)
@@ -441,7 +441,7 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
         replacement = self.cut_startup(store, old, phase)
         reserved = replacement.successor_attempt
         self.assertTrue(native_process_absent(reserved.controller_pid, reserved.controller_creation_time))
-        before = {p: p.read_bytes() for p in store.run_path(old).glob("*.json")}
+        before = {p: p.read_bytes() for p in store.evidence_run_path(old).glob("*.json")}
         new_root = store.run_path(reserved.run_id)
         fresh_before = {p: p.read_bytes() for p in new_root.glob("*.json")}
         result = service.recover_preparation(store.root, old)
@@ -476,7 +476,7 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
     def test_startup_abandonment_refuses_unknown_child_and_uncertain_barrier(self):
         store, old, *_ = self.failed_fixture()
         replacement = self.cut_startup(store, old, "attempt")
-        child = store.run_path(replacement.consumed_by_run_id) / "scenarios" / "unknown.json"
+        child = store.evidence_run_path(replacement.consumed_by_run_id) / "scenarios" / "unknown.json"
         child.write_bytes(b"unknown child evidence")
         with self.assertRaises(service.ContainmentServiceError):
             service.recover_preparation(store.root, old)
@@ -676,6 +676,10 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
         self.assertFalse(store.preparation_path(run_id, "failure").exists())
 
     def test_exact_consumed_preparation_predecessor_does_not_require_fake_scenario_history(self):
+        # This cohort helper supplies synthetic policy results; raw native
+        # lifecycle reconstruction is tested separately.
+        self.enterContext(patch.object(ContainmentStore, "_validate_watch_raw"))
+        self.enterContext(patch.object(ContainmentStore, "_validate_result_derivation"))
         from tests.test_mo2_containment_service import write_cohort_run
         from modlab.validation.mo2_containment_model import CapabilityVerdict
         store, run_id, *_ = self.failed_fixture()
@@ -691,7 +695,7 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
         decision = service.adjudicate_run(store.root, fresh_id).value
         self.assertEqual(CapabilityVerdict.SUPPORTED, decision.verdict, decision.reasons)
         self.assertFalse(store.request_path(run_id).exists())
-        self.assertEqual((), tuple((store.run_path(run_id) / "scenarios").iterdir()))
+        self.assertEqual((), tuple((store.evidence_run_path(run_id) / "scenarios").iterdir()))
 
     def test_unknown_link_blocks_cleanup_before_any_owned_link_moves(self):
         from modlab.validation import windows_junction as junction
@@ -780,7 +784,7 @@ class PreparationRecoveryAdversarialTests(unittest.TestCase):
 
     def test_started_scenario_child_is_not_empty_direct_scaffolding(self):
         store, run_id, *_ = self.failed_fixture()
-        (store.run_path(run_id) / "scenarios/NewFolder").mkdir()
+        (store.evidence_run_path(run_id) / "scenarios/NewFolder").mkdir()
         with self.assertRaises(service.ContainmentServiceError):
             service.recover_preparation(store.root, run_id)
         self.assertFalse(store.preparation_path(run_id, "recovery").exists())

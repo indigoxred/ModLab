@@ -56,3 +56,41 @@ The observed Skyrim production inputs—the exact Steam app manifest for app `48
 ## Scope
 
 This retired document proves no current capability and authorizes nothing. It remains useful only as historical evidence about the observed disposable run. Production bridge or installation work requires a new corrected decision, immutable supersession and eligibility records, and a passing independent review.
+
+
+## Protected evidence (Round 8)
+
+New runs use `runtime/validation-authority/mo2-containment/<run>` for authority.
+`ContainmentStore.root` and `run_path()` remain disposable under
+`runtime/validation/mo2-containment`; `evidence_root`, `evidence_run_path()` and
+`open_evidence_vault()` identify protected originals. The roots cannot overlap.
+Alternate validation roots derive a deterministic sibling `<name>-authority`,
+or accept an explicit disjoint `authority_root`. Read-only opening creates
+nothing. Existing disposable history is unchanged and cannot be adopted.
+
+The [source/capture inventory](mo2-containment-evidence-inventory.json) lists every
+verdict input and its consumer. The inventory is checked by offline tests;
+Task5 rows identify later gate integration rather than completed gate work.
+Screenshot and log captures use `capture_evidence_file` with a maximum byte
+bound, copy into a new protected object, and record source native identity,
+byte count, SHA-256 and capture stage in a separate `.capture.json`. Later
+reads use `read_evidence_file`; they cannot read back from the disposable tree.
+These captures establish provenance, not authenticity of an application's UI.
+
+The service admits the original suspended Low process through `before_resume`
+and retains its original job owner in the shared watcher session. Capture and
+recovery require exact root exit and zero job active processes before any
+relocation. A living helper or grandchild blocks both. Missing original
+ownership of an incomplete attempt blocks cleanup; a raw-validated Completed
+causal chain proves a previously finalized, closed attempt. No PID reopen
+substitutes for the original job.
+
+Watcher effect receipts observe direct identities, membership, sizes and
+modification metadata under a verified vault so the live journal writer can
+continue. Those metadata observations are bookkeeping only. Completion uses
+closed original raw bytes, normal stop, process quiescence and durable original
+controller worker-exit proof. Recovery stop never upgrades an incomplete
+attempt. The store reconstructs independent protected evaluation inputs with
+the shared classifier and compares stored results; outcome/result verdict
+fields alone never authorize a decision. Attempt result and cleanup records
+remain separate and immutable.

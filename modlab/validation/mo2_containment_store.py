@@ -11,8 +11,8 @@ from .mo2_preparation_recovery import (
 
 import ctypes
 from ctypes import wintypes
-from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from contextlib import contextmanager, ExitStack
+from dataclasses import dataclass, replace, fields
 import hashlib
 import json
 import os
@@ -28,6 +28,9 @@ from modlab.platform.windows_exact_fs import (
     ExactObjectOwnershipError,
     publish_new_pinned,
     resolve_retained_ownership,
+    pin_stable_direct_object, pin_direct_object, read_pinned_file,
+    create_pinned_directory_child, RetainedObjectOwner, RetainedObjectRole,
+    union_retained_ownership,
 )
 from .mo2_containment_authority import (
     CapabilityEligibility,
@@ -41,6 +44,7 @@ from .mo2_containment_model import (
     ContainmentScenario,
     IntegrityObservation,
     ProtectedState,
+    ProcessEvidence,
     ScenarioJournal,
     ScenarioRecovery,
     ScenarioResult,
@@ -76,6 +80,18 @@ from .mo2_containment_serialization import (
     watch_outcome_id_for,
     watch_outcome_to_bytes,
 )
+
+
+from .mo2_containment_evaluation import ScenarioEvidence, evaluate_scenario
+from .windows_vault_security import create_vault, open_vault, pin_trusted_paths
+
+
+def evidence_root_for(validation_root: Path) -> Path:
+    """Deterministic authority namespace, never taken from disposable records."""
+    root = Path(validation_root).expanduser().absolute()
+    if root.parent.name == "validation":
+        return root.parent.parent / "validation-authority" / root.name
+    return root.with_name(root.name + "-authority")
 
 
 PROTECTED_STATE_LABELS = ("before", "after")
@@ -261,23 +277,28 @@ class ContainmentStore:
         validation_root: Path,
         *,
         _effect_recorder: Callable[[Path], None] | None = None,
+        authority_root: Path | None = None,
     ):
         self._effect_recorder = _effect_recorder
+        self.evidence_root = Path(authority_root).absolute() if authority_root is not None else evidence_root_for(validation_root)
         self._open_root(validation_root, create=True)
 
     @classmethod
-    def open_readonly(cls, validation_root: Path) -> "ContainmentStore":
+    def open_readonly(cls, validation_root: Path, *, authority_root: Path | None = None) -> "ContainmentStore":
         """Open one existing direct validation root without preparing any path."""
         store = cls.__new__(cls)
         store._effect_recorder = None
+        store.evidence_root = Path(authority_root).absolute() if authority_root is not None else evidence_root_for(validation_root)
         store._open_root(validation_root, create=False)
         return store
 
     def _open_root(self, validation_root: Path, *, create: bool) -> None:
         root = Path(validation_root).expanduser().absolute()
         self.root = root
+        if root == self.evidence_root or root in self.evidence_root.parents or self.evidence_root in root.parents:
+            raise ContainmentStoreError("disposable and authority roots must be separate")
         if create:
-            self._ensure_direct_directory(root)
+            self._create_trusted_directories(root)
         else:
             self._require_existing_direct_directory(root, "validation root")
         try:
@@ -383,6 +404,8 @@ class ContainmentStore:
                 replacement,
                 "journal",
             )
+            if new_state is ScenarioState.SCENARIO_STARTED:
+                self.write_scenario_started(replacement)
             self._atomic_replace(target, replacement_data, current_data, "journal")
             loaded = self._load_journal_unlocked(current.run_id, current.scenario)
             if loaded != replacement:
@@ -456,12 +479,12 @@ class ContainmentStore:
         suffix = ""
         if kind in {"projection", "cleanup"}:
             try:
-                return self.run_path(run_id) / "preparation-projections" / (ContainmentScenario(scenario).value + ("-cleanup" if kind == "cleanup" else "") + ".json")
+                return self.evidence_run_path(run_id) / "preparation-projections" / (ContainmentScenario(scenario).value + ("-cleanup" if kind == "cleanup" else "") + ".json")
             except (TypeError, ValueError) as error:
                 raise ContainmentStoreError("invalid preparation projection scenario") from error
         elif scenario is not None:
             raise ContainmentStoreError("scenario cannot qualify this preparation record")
-        return self.run_path(run_id) / ("preparation-" + kind + suffix + ".json")
+        return self.evidence_run_path(run_id) / ("preparation-" + kind + suffix + ".json")
 
     def _preparation_binding(self, value) -> None:
         intent = self._load_intent_unlocked(value.run_id)
@@ -881,7 +904,7 @@ class ContainmentStore:
     ) -> CapabilityDecision:
         with self._run_lock(run_id):
             self._require_existing_direct_directory(
-                self.run_path(run_id),
+                self.evidence_run_path(run_id),
                 "containment run",
             )
             raw = self._read(self.decision_path(run_id), "capability decision")
@@ -1005,37 +1028,42 @@ class ContainmentStore:
 
     def list_run_ids(self) -> tuple[str, ...]:
         rows: list[str] = []
-        try:
-            entries = tuple(os.scandir(self.root))
-        except OSError as error:
-            raise ContainmentStoreError(f"cannot enumerate containment runs: {error}") from error
-        for entry in entries:
-            if re.fullmatch(r"[0-9A-Fa-f]{32}", entry.name) is None:
-                continue
-            if re.fullmatch(r"[0-9a-f]{32}", entry.name) is None:
-                raise ContainmentStoreError(
-                    f"containment run entry name is noncanonical: {entry.name}"
-                )
+        if not self.evidence_root.exists():
+            return ()
+        with pin_trusted_paths((self.evidence_root,)):
             try:
-                metadata = entry.stat(follow_symlinks=False)
+                entries = tuple(os.scandir(self.evidence_root))
             except OSError as error:
-                raise ContainmentStoreError(
-                    f"cannot prove containment run entry {entry.name}: {error}"
-                ) from error
-            if stat.S_ISLNK(metadata.st_mode) or bool(
-                getattr(metadata, "st_file_attributes", 0)
-                & _FILE_ATTRIBUTE_REPARSE_POINT
-            ):
-                raise ContainmentStoreError(
-                    f"containment run entry is a reparse object: {entry.name}"
-                )
-            if not stat.S_ISDIR(metadata.st_mode):
-                raise ContainmentStoreError(
-                    "containment run entry is not a direct non-reparse directory: "
-                    + entry.name
-                )
-            rows.append("containment-run:" + entry.name)
-        return tuple(sorted(rows))
+                raise ContainmentStoreError(f"cannot enumerate containment runs: {error}") from error
+            for entry in entries:
+                if re.fullmatch(r"[0-9A-Fa-f]{32}", entry.name) is None:
+                    continue
+                if re.fullmatch(r"[0-9a-f]{32}", entry.name) is None:
+                    raise ContainmentStoreError(
+                        f"containment run entry name is noncanonical: {entry.name}"
+                    )
+                try:
+                    metadata = entry.stat(follow_symlinks=False)
+                except OSError as error:
+                    raise ContainmentStoreError(
+                        f"cannot prove containment run entry {entry.name}: {error}"
+                    ) from error
+                if stat.S_ISLNK(metadata.st_mode) or bool(
+                    getattr(metadata, "st_file_attributes", 0)
+                    & _FILE_ATTRIBUTE_REPARSE_POINT
+                ):
+                    raise ContainmentStoreError(
+                        f"containment run entry is a reparse object: {entry.name}"
+                    )
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise ContainmentStoreError(
+                        "containment run entry is not a direct non-reparse directory: "
+                        + entry.name
+                    )
+                with open_vault(Path(entry.path)):
+                    pass
+                rows.append("containment-run:" + entry.name)
+            return tuple(sorted(rows))
 
     @contextmanager
     def command_lock(self, command_fingerprint: str):
@@ -1070,16 +1098,19 @@ class ContainmentStore:
     def run_path(self, run_id: str) -> Path:
         return self.root / self._run_hex(run_id)
 
+    def evidence_run_path(self, run_id: str) -> Path:
+        return self.evidence_root / self._run_hex(run_id)
+
     def request_path(self, run_id: str) -> Path:
-        return self.run_path(run_id) / "request.json"
+        return self.evidence_run_path(run_id) / "request.json"
 
     def intent_path(self, run_id: str) -> Path:
-        return self.run_path(run_id) / "intent.json"
+        return self.evidence_run_path(run_id) / "intent.json"
 
     def scenario_path(self, run_id: str, scenario: ContainmentScenario) -> Path:
         if not isinstance(scenario, ContainmentScenario):
             raise ContainmentStoreError("scenario must be ContainmentScenario")
-        return self.run_path(run_id) / "scenarios" / scenario.value
+        return self.evidence_run_path(run_id) / "scenarios" / scenario.value
 
     def journal_path(self, run_id: str, scenario: ContainmentScenario) -> Path:
         return self.scenario_path(run_id, scenario) / "journal.json"
@@ -1107,10 +1138,10 @@ class ContainmentStore:
         return self.run_path(run_id) / "quarantine"
 
     def decision_path(self, run_id: str) -> Path:
-        return self.run_path(run_id) / "decision.json"
+        return self.evidence_run_path(run_id) / "decision.json"
 
     def authority_path(self) -> Path:
-        return self.root / "authority"
+        return self.evidence_root / "authority"
 
     def retirement_path(self, identifier: str) -> Path:
         return self._authority_record_path(identifier, "retirements")
@@ -1133,8 +1164,9 @@ class ContainmentStore:
         return "containment-recovery-sha256:" + hashlib.sha256(data).hexdigest()
 
     def _prepare_run(self, run_id: str) -> None:
+        self._prepare_vault(self.evidence_run_path(run_id))
         self._ensure_direct_directory(self.run_path(run_id))
-        self._ensure_direct_directory(self.run_path(run_id) / "scenarios")
+        self._ensure_direct_directory(self.evidence_run_path(run_id) / "scenarios")
         self._ensure_direct_directory(self.quarantine_path(run_id))
 
     def _prepare_scenario(self, run_id: str, scenario: ContainmentScenario) -> None:
@@ -1236,7 +1268,135 @@ class ContainmentStore:
             raise ContainmentStoreMalformedEvidence(
                 "watch outcome bytes are not canonical"
             )
+        self._validate_watch_raw(run_id, scenario, value)
         return value
+
+    def _validate_watch_raw(self, run_id, scenario, value):
+        from .windows_watch import watch_receipt_from_files
+        from .windows_watch_protocol import watch_request_from_bytes, watch_request_to_bytes, WatchProtocolError
+        root = self.watch_path(run_id, scenario)
+        with self._evidence_guard(root):
+            raw = self._read(root / "request.json", "watch request")
+            try:
+                request = watch_request_from_bytes(raw)
+            except WatchProtocolError as error:
+                raise ContainmentStoreMalformedEvidence(f"invalid protected watch request: {error}") from error
+            if raw != watch_request_to_bytes(request) or request.evidence_root != root or request.authority_root != self.evidence_run_path(run_id):
+                raise ContainmentStoreMalformedEvidence("watch request authority binding mismatch")
+            receipt = watch_receipt_from_files(request, value.worker_pid,
+                root / "ready.json", root / "events.ndjson", root / "terminal.json")
+            if receipt.watch_outcome_id != watch_outcome_id_for(value):
+                raise ContainmentStoreMalformedEvidence("raw protected watcher reconstruction failed: " + str(receipt.error))
+
+    def evaluation_path(self, run_id, scenario):
+        return self.scenario_path(run_id, scenario) / "evaluation.json"
+
+    def started_path(self, run_id, scenario):
+        return self.scenario_path(run_id, scenario) / "started.json"
+
+    def write_scenario_started(self, journal):
+        if journal.state is not ScenarioState.SCENARIO_STARTED:
+            raise ContainmentStoreError("immutable start requires ScenarioStarted")
+        data = scenario_journal_to_bytes(journal)
+        self._write_immutable(self.started_path(journal.run_id, journal.scenario), data, "ScenarioStarted")
+
+    def write_evaluation(self, value: ScenarioEvidence):
+        """Persist original independent inputs, before constructing the result."""
+        if not isinstance(value, ScenarioEvidence):
+            raise ContainmentStoreError("evaluation requires original ScenarioEvidence")
+        run_id, scenario = value.run_id, value.scenario
+        with self._run_lock(run_id):
+            self._prepare_scenario(run_id, scenario)
+            self.write_protected_state(run_id, scenario, "before", value.protected_before)
+            self.write_protected_state(run_id, scenario, "after", value.protected_after)
+            bound = {"protected_before", "protected_after", "watch_outcome", "mo2_process", "run_id", "scenario", "scenario_started"}
+            observations = {field.name: getattr(value, field.name) for field in fields(value) if field.name not in bound}
+            for name in ("source_integrity", "stage_integrity", "adopted_integrity"):
+                if observations[name] is not None:
+                    observations[name] = observations[name].value
+            if value.adopted_tree is not None:
+                observations["adopted_tree"] = _tree_document(value.adopted_tree)
+            document = {"schemaVersion": 1, "runId": run_id, "scenario": scenario.value,
+                "watchOutcomeId": watch_outcome_id_for(value.watch_outcome), "observations": observations,
+                "beforeSha256": hashlib.sha256(self._read(self.scenario_path(run_id, scenario)/"before.json", "before")).hexdigest(),
+                "afterSha256": hashlib.sha256(self._read(self.scenario_path(run_id, scenario)/"after.json", "after")).hexdigest(),
+                "startedSha256": None, "launchSha256": None}
+            for key, path in (("startedSha256", self.started_path(run_id, scenario)), ("launchSha256", self.launch_path(run_id, scenario))):
+                if path.exists():
+                    document[key] = hashlib.sha256(self._read(path, key)).hexdigest()
+            self._write_immutable(self.evaluation_path(run_id, scenario), _canonical(document), "evaluation inputs")
+            reconstructed = self._load_evaluation_unlocked(run_id, scenario, value.watch_outcome)
+            if reconstructed != value:
+                raise ContainmentStoreError("evaluation inputs differ from protected independent bindings")
+            return reconstructed
+
+    def _load_evaluation_unlocked(self, run_id, scenario, watch):
+        raw = self._read(self.evaluation_path(run_id, scenario), "evaluation inputs")
+        try:
+            document = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_json)
+            if _canonical(document) != raw or set(document) != {"schemaVersion", "runId", "scenario", "watchOutcomeId", "observations", "beforeSha256", "afterSha256", "startedSha256", "launchSha256"}:
+                raise ValueError("noncanonical evaluation fields")
+            if document["schemaVersion"] != 1 or document["runId"] != run_id or document["scenario"] != scenario.value or document["watchOutcomeId"] != watch_outcome_id_for(watch):
+                raise ValueError("evaluation binding differs")
+            for label in ("before", "after"):
+                data = self._read(self.scenario_path(run_id, scenario)/(label+".json"), label)
+                if hashlib.sha256(data).hexdigest() != document[label+"Sha256"]:
+                    raise ValueError(label + " protected observation changed")
+            journal = self._load_journal_unlocked(run_id, scenario)
+            before = self._load_protected_state_unlocked(run_id, scenario, "before")
+            after = self._load_protected_state_unlocked(run_id, scenario, "after")
+            if journal.protected_before != before:
+                raise ValueError("journal baseline binding differs")
+            started = False
+            process = None
+            if document["startedSha256"] is not None:
+                data = self._read(self.started_path(run_id, scenario), "ScenarioStarted")
+                start = scenario_journal_from_bytes(data)
+                if hashlib.sha256(data).hexdigest() != document["startedSha256"] or start.run_id != run_id or start.scenario is not scenario or start.state is not ScenarioState.SCENARIO_STARTED or start.protected_before != before:
+                    raise ValueError("ScenarioStarted binding differs")
+                started = True
+            elif self.started_path(run_id, scenario).exists() or journal.mo2_pid is not None or journal.state in {ScenarioState.SCENARIO_STARTED, ScenarioState.LAUNCHED, ScenarioState.CAPTURED}:
+                raise ValueError("missing immutable ScenarioStarted")
+            if document["launchSha256"] is not None:
+                data = self._read(self.launch_path(run_id, scenario), "launch")
+                if hashlib.sha256(data).hexdigest() != document["launchSha256"]:
+                    raise ValueError("launch bytes changed")
+                try:
+                    launch = self._load_launch_evidence_unlocked(run_id, scenario)
+                except ContainmentStoreError:
+                    launch = None
+                # Damaged original launch evidence proves no process identity.
+                # The shared classifier may still preserve a proven breach;
+                # it can never derive Passed with this missing process input.
+                if launch is not None and started and launch["pid"] == journal.mo2_pid:
+                    process = ProcessEvidence(launch["pid"], launch["executable"], launch["executableVersion"], tuple(launch["arguments"]), launch["workingDirectory"], IntegrityObservation(launch["integrity"]))
+            elif self.launch_path(run_id, scenario).exists():
+                raise ValueError("evaluation omitted protected launch")
+            observations = dict(document["observations"])
+            for name in ("source_integrity", "stage_integrity", "adopted_integrity"):
+                if observations[name] is not None:
+                    observations[name] = IntegrityObservation(observations[name])
+            if observations["adopted_tree"] is not None:
+                observations["adopted_tree"] = _tree_from_document(observations["adopted_tree"], "adopted tree")
+            for name in ("production_backup_names", "staging_new_names", "staging_output_names", "safety_reasons", "incomplete_reasons"):
+                if type(observations[name]) is not list or any(type(item) is not str for item in observations[name]):
+                    raise ValueError("invalid observation list")
+                observations[name] = tuple(observations[name])
+            for name in ("fresh_retry_eligible", "projection_targets_verified", "projection_observation_complete", "production_observation_complete", "staging_observation_complete", "output_observation_complete", "source_restored_after_quarantine"):
+                if type(observations[name]) is not bool:
+                    raise ValueError("invalid boolean observation")
+            for name in ("projection_count", "projection_payload_bytes_copied"):
+                if type(observations[name]) is not int or observations[name] < 0:
+                    raise ValueError("invalid integer observation")
+            return ScenarioEvidence(run_id=run_id, scenario=scenario, protected_before=before, protected_after=after,
+                watch_outcome=watch, mo2_process=process, scenario_started=started, **observations)
+        except (ValueError, TypeError, KeyError) as error:
+            raise ContainmentStoreMalformedEvidence(f"invalid protected evaluation inputs: {error}") from error
+
+    def _validate_result_derivation(self, run_id, scenario, watch, value):
+        inputs = self._load_evaluation_unlocked(run_id, scenario, watch)
+        if evaluate_scenario(inputs) != value:
+            raise ContainmentStoreMalformedEvidence("scenario result differs from independent protected evaluation")
 
     def _load_result_unlocked(
         self,
@@ -1258,6 +1418,7 @@ class ContainmentStore:
             raise ContainmentStoreMalformedEvidence(
                 "scenario result bytes are not canonical"
             )
+        self._validate_result_derivation(run_id, scenario, watch, value)
         return value
 
     def _load_recovery_unlocked(
@@ -1328,6 +1489,7 @@ class ContainmentStore:
         except ContainmentFormatError as error:
             raise ContainmentStoreError(f"{label} is invalid: {error}") from error
         target = self._authority_record_path(identifier, kind)
+        self._prepare_vault(self.authority_path())
         self._ensure_direct_directory(target.parent)
         self._validate_authority_layout()
         existed = self._write_immutable(target, data, label)
@@ -1483,7 +1645,7 @@ class ContainmentStore:
         if not decision.scenario_result_ids:
             return (), ()
         self._require_existing_direct_directory(
-            self.run_path(decision.run_id) / "scenarios",
+            self.evidence_run_path(decision.run_id) / "scenarios",
             "scenario collection",
         )
         wanted = set(decision.scenario_result_ids)
@@ -1775,7 +1937,14 @@ class ContainmentStore:
     def _effect_observation_suffix(detail: str | None) -> str:
         return "" if detail is None else f"; {detail}"
 
-    def _write_immutable(self, target: Path, data: bytes, label: str, *, require_new=False) -> bool:
+    def _write_immutable(self, target: Path, data: bytes, label: str, *, require_new=False):
+        with self._evidence_guard(target.parent):
+            value = self._write_immutable_guarded(target, data, label, require_new=require_new)
+            with self._evidence_guard(target):
+                pass
+            return value
+
+    def _write_immutable_guarded(self, target: Path, data: bytes, label: str, *, require_new=False) -> bool:
         if target.exists():
             if require_new:
                 raise ContainmentStoreError(f"stored {label} already exists; fresh publication required")
@@ -1894,7 +2063,14 @@ class ContainmentStore:
         finally:
             self._cleanup_staging_part(part, label)
 
-    def _atomic_replace(
+    def _atomic_replace(self, target: Path, data: bytes, expected: bytes, label: str):
+        with self._evidence_guard(target.parent):
+            value = self._atomic_replace_guarded(target, data, expected, label)
+            with self._evidence_guard(target):
+                pass
+            return value
+
+    def _atomic_replace_guarded(
         self,
         target: Path,
         data: bytes,
@@ -1939,22 +2115,154 @@ class ContainmentStore:
         if self._effect_recorder is not None:
             self._effect_recorder(path)
 
+    @contextmanager
+    def _stable_pin(self, path: Path, kind: str):
+        pin = pin_stable_direct_object(path, kind, delete_access=False, allow_writes=kind == "directory")
+        prior = None
+        try:
+            yield pin
+        except BaseException as error:
+            prior = error
+            raise
+        finally:
+            try:
+                pin.close()
+            except BaseException as error:
+                if pin.handle:
+                    raise union_retained_ownership("evidence read retains exact ownership", prior=prior,
+                        owners=(RetainedObjectOwner(RetainedObjectRole.VERIFICATION, pin),)) from error
+                raise
+
     def _read(self, target: Path, label: str) -> bytes:
         try:
-            metadata = target.lstat()
+            with self._evidence_guard(target), self._stable_pin(target, "file") as pin:
+                return read_pinned_file(pin)
         except FileNotFoundError as error:
             raise ContainmentStoreNotFound(f"{label} is missing: {target}") from error
-        except OSError as error:
-            raise ContainmentStoreError(f"cannot inspect {label}: {error}") from error
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ContainmentStoreError(f"{label} must be a direct regular file")
-        self._reject_redirect(target)
+        except ExactObjectOwnershipError:
+            raise
+        except (ExactObjectError, OSError) as error:
+            if not target.exists():
+                raise ContainmentStoreNotFound(f"{label} is missing: {target}") from error
+            raise ContainmentStoreError(f"cannot read protected {label}: {error}") from error
+
+    @contextmanager
+    def _evidence_guard(self, target: Path):
         try:
-            return target.read_bytes()
-        except OSError as error:
-            raise ContainmentStoreError(f"cannot read {label}: {error}") from error
+            relative = Path(target).relative_to(self.evidence_root)
+        except ValueError as error:
+            raise ContainmentStoreError("authoritative access outside evidence root") from error
+        if not relative.parts:
+            raise ContainmentStoreError("authority access requires a run or catalog vault")
+        root = self.evidence_root / relative.parts[0]
+        primary = None
+        try:
+            with open_vault(root) as vault:
+                vault.verify_descendant(target)
+                try:
+                    yield vault
+                    vault.verify_descendant(target)
+                except BaseException as error:
+                    primary = error
+                    raise
+        except ExactObjectOwnershipError as error:
+            if isinstance(primary, ContainmentStoreOwnershipError):
+                raise union_retained_ownership(
+                    "store operation and vault guard retain original handles",
+                    prior=primary.ownership, owners=error.owners,
+                ) from primary
+            raise
+
+    def open_evidence_vault(self, run_id: str):
+        """Return an explicitly owned verified run vault; caller closes it."""
+        return open_vault(self.evidence_run_path(run_id))
+
+    def _prepare_vault(self, path: Path) -> None:
+        self._create_trusted_directories(path.parent)
+        if path.exists():
+            with open_vault(path):
+                pass
+        else:
+            with create_vault(path):
+                self._record_written_path(path)
+
+    def _create_trusted_directories(self, path: Path) -> None:
+        missing = []
+        current = path
+        while not current.exists():
+            missing.append(current)
+            current = current.parent
+        with pin_trusted_paths((current,)):
+            with ExitStack() as stack:
+                for child in reversed(missing):
+                    parent = pin_direct_object(child.parent, kind="directory", delete_access=False)
+                    pin = None
+                    primary = None
+                    try:
+                        pin = create_pinned_directory_child(child, parent, delete_access=False)
+                        self._record_written_path(child)
+                        stack.enter_context(pin_trusted_paths((child,)))
+                    except BaseException as error:
+                        primary = error
+                        raise
+                    finally:
+                        failures = []
+                        owners = []
+                        for owned, role in ((pin, RetainedObjectRole.VERIFICATION),
+                                            (parent, RetainedObjectRole.DESTINATION_PARENT)):
+                            if owned is None:
+                                continue
+                            try:
+                                owned.close()
+                            except BaseException as error:
+                                failures.append(error)
+                                if isinstance(error, ExactObjectOwnershipError):
+                                    owners.extend(error.owners)
+                            if owned.handle:
+                                owners.append(RetainedObjectOwner(role, owned))
+                        if owners:
+                            cause = primary if primary is not None else failures[0]
+                            raise union_retained_ownership("fresh directory creation retains original handles",
+                                prior=getattr(cause, "ownership", cause), owners=tuple(owners)) from cause
+                        if failures and primary is None:
+                            raise failures[0]
+
+    def read_evidence_file(self, run_id: str, target: Path, *, maximum_bytes: int) -> bytes:
+        target = Path(target).absolute()
+        if self.evidence_run_path(run_id) not in target.parents:
+            raise ContainmentStoreError("capture read is outside the bound run vault")
+        with self._evidence_guard(target), self._stable_pin(target, "file") as pin:
+            return read_pinned_file(pin, maximum_bytes=maximum_bytes)
+
+    def capture_evidence_file(self, run_id: str, source: Path, target: Path, *, maximum_bytes: int, stage: str) -> dict:
+        """Copy exact bounded Low bytes into a new protected object; never move/adopt."""
+        source, target = Path(source).absolute(), Path(target).absolute()
+        if self.evidence_run_path(run_id) not in target.parents or not isinstance(stage, str) or not stage:
+            raise ContainmentStoreError("capture requires a bound run target and origin stage")
+        with ExitStack() as source_guards:
+            for ancestor in reversed(source.parents):
+                source_guards.enter_context(self._stable_pin(ancestor, "directory"))
+            pin = source_guards.enter_context(self._stable_pin(source, "file"))
+            data = read_pinned_file(pin, maximum_bytes=maximum_bytes)
+            receipt = {"schemaVersion": 1, "sourcePath": str(source), "capturePath": str(target),
+                "volumeSerial": pin.identity.volume_serial, "fileId": pin.identity.file_id,
+                "byteCount": len(data), "sha256": hashlib.sha256(data).hexdigest(), "stage": stage}
+            self._write_immutable(target, data, "captured input", require_new=True)
+            self._write_immutable(target.with_name(target.name + ".capture.json"), _canonical(receipt), "capture provenance", require_new=True)
+            if self.read_evidence_file(run_id, target, maximum_bytes=maximum_bytes) != data:
+                raise ContainmentStoreError("captured bytes differ on protected readback")
+            return receipt
 
     def _ensure_direct_directory(self, path: Path) -> None:
+        if self.evidence_root in path.parents:
+            parent = path if path.exists() else path.parent
+            with self._evidence_guard(parent) as vault:
+                self._ensure_direct_directory_unprotected(path)
+                vault.verify_descendant(path)
+        else:
+            self._create_trusted_directories(path)
+
+    def _ensure_direct_directory_unprotected(self, path: Path) -> None:
         try:
             path.mkdir(parents=True, exist_ok=True)
         except OSError as error:
