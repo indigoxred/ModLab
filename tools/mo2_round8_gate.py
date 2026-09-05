@@ -5400,6 +5400,18 @@ def install_operator_candidate(
         try:
             selected.fail_install(root, layout, control_id, error, effects)
         except BaseException as failure_error:
+            failure_ownership = getattr(failure_error, "ownership", failure_error)
+            if isinstance(failure_ownership, windows_exact_fs.ExactObjectOwnershipError):
+                primary = error.cause if isinstance(error, containment_service.ContainmentOperationError) and error.cause is not None else error
+                ownership = windows_exact_fs.union_retained_ownership(
+                    f"installation and failure publication retain original handles: {failure_error}",
+                    prior=getattr(primary, "ownership", primary), owners=failure_ownership.owners,
+                )
+                partial = getattr(failure_error, "effects", None)
+                if isinstance(partial, ContainmentEffects):
+                    effects = ContainmentEffects.merged(effects, partial)
+                ownership.effects = effects
+                raise ownership from error
             if hasattr(error, "add_note"):
                 error.add_note(f"terminal installation failure publication also failed: {failure_error}")
         raise

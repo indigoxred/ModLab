@@ -1722,6 +1722,68 @@ class OfflineGateTests(unittest.TestCase):
             received.effects.written_paths,
         )
 
+    def _assert_public_install_failure_retains_ownership(self, *, primary_owned):
+        """Drive the real public failure publisher with retained native handles."""
+        authority = h.authority_run_root(self.run_root)
+        authority.parent.mkdir(parents=True, exist_ok=True)
+        from modlab.validation.windows_vault_security import create_vault
+        with create_vault(authority):
+            (authority / "SingleFile").mkdir()
+        layout_root = self.run_root / "SingleFile"
+        layout_root.mkdir(parents=True)
+        primary_effects = ContainmentEffects(written_paths=(layout_root / "installation-partial",))
+        exact = h.windows_exact_fs
+        primary_pin = None
+        secondary_pin = None
+        if primary_owned:
+            primary_pin = exact.pin_stable_direct_object(self.archive, kind="file", delete_access=False)
+            primary_cause = exact.ExactObjectOwnershipError("primary install close failed", verification=(primary_pin,))
+            primary = ContainmentOperationError("primary install publication failed", effects=primary_effects, cause=primary_cause)
+        else:
+            primary = h.GateError("ordinary primary install publication failed")
+            primary.effects = primary_effects
+        backend = _FakeInstallBackend(self.run_root)
+        backend.fail_install = h.ProductionLiveBackend().fail_install
+        original_publish = h._publish_gate_json
+        failure_target = authority / "SingleFile" / "installation-failure.json"
+        secondary_effects = ContainmentEffects(written_paths=(failure_target,))
+        def publish_then_retain(root, target, value):
+            nonlocal secondary_pin
+            original_publish(root, target, value)
+            secondary_pin = exact.pin_stable_direct_object(target, kind="file", delete_access=False)
+            failure = exact.ExactObjectOwnershipError("secondary failure publication close failed", verification=(secondary_pin,))
+            failure.effects = secondary_effects
+            raise failure
+        try:
+            with patch.object(backend, "publish_install", side_effect=primary), \
+                    patch.object(h, "_publish_gate_json", side_effect=publish_then_retain), self.assertRaises(Exception) as raised:
+                h.install_operator_candidate(self.run_root, "SingleFile", "observation-sha256:" + "8" * 64, backend=backend)
+            failure = raised.exception
+            expected_pins = {id(secondary_pin)} | ({id(primary_pin)} if primary_pin is not None else set())
+            self.assertEqual(expected_pins, {id(owner.pinned) for owner in getattr(failure, "owners", ())})
+            self.assertIs(primary, failure.__cause__)
+            self.assertIn("secondary failure publication close failed", str(failure))
+            expected_effects = ContainmentEffects.merged(
+                ContainmentEffects(written_paths=(self.run_root,), child_mutation_roots=(self.run_root,)),
+                primary_effects, secondary_effects,
+            )
+            self.assertEqual(expected_effects, failure.effects)
+            self.assertTrue(failure_target.is_file())
+            self.assertTrue(all(owner.pinned.handle for owner in failure.owners))
+        finally:
+            if secondary_pin is not None:
+                secondary_pin.close()
+            if primary_pin is not None:
+                primary_pin.close()
+
+    def test_public_install_preserves_failure_publication_owner_after_ordinary_primary_error(self):
+        """The public API must return secondary ownership, not merely a note."""
+        self._assert_public_install_failure_retains_ownership(primary_owned=False)
+
+    def test_public_install_unions_primary_and_failure_publication_owners(self):
+        """A service-wrapped primary owner and secondary publisher owner both survive."""
+        self._assert_public_install_failure_retains_ownership(primary_owned=True)
+
     def test_production_install_publication_receipts_its_own_record(self):
         layout_root = self.run_root / "SingleFile"
         layout_root.mkdir(parents=True)
