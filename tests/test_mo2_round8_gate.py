@@ -265,16 +265,18 @@ def _synthetic_causal_records(request, claim, launch, pid, creation):
         workerExitCode=0, observationHandlesClosed=True, reasonCodes=[])
 
 
-def _synthetic_worker_records(request, claim, launch, pid, creation):
+def _synthetic_worker_records(request, claim, launch, pid, creation, *, events=()):
     watch = request.evidence_root
     request_sha = h.watch_request_sha256(request)
     (watch / "ready.json").write_bytes(h._canonical(h.windows_watch._ready_document(
         request, launch.worker_pid, request_sha, launch.worker_creation_time)))
-    (watch / "events.ndjson").write_bytes(b"")
+    event_bytes = b"".join(h._canonical(event) for event in events)
+    (watch / "events.ndjson").write_bytes(event_bytes)
     journal = h.windows_watch._read_exact_journal(watch / "events.ndjson")
     (watch / "terminal.json").write_bytes(h._canonical({
-        "complete": True, "error": None, "eventByteCount": 0,
-        "eventBytesSha256": h._sha256(b""), "eventCount": 0, "finalSequence": 0,
+        "complete": True, "error": None, "eventByteCount": len(event_bytes),
+        "eventBytesSha256": h._sha256(event_bytes), "eventCount": len(events),
+        "finalSequence": events[-1]["sequence"] if events else 0,
         "journalFileId": journal.file_id, "journalVolumeSerial": journal.volume_serial,
         "openHandleCount": 0, "openedRootKinds": list(ROOT_KINDS), "ready": True,
         "requestBytesSha256": request_sha, "requestId": request.request_id,
@@ -288,6 +290,22 @@ def _synthetic_worker_records(request, claim, launch, pid, creation):
 
 
 OBSERVED_GATE_READS = []
+
+
+def _fixture_integrity(path):
+    parts = Path(path).parts
+    if any(part in ("app", "environment", "logs", "webcache", "cache", "test-profiles", "jobs") for part in parts):
+        return IntegrityLevel.LOW
+    return IntegrityLevel.MEDIUM
+
+
+def _jpeg_bytes():
+    """Explicit synthetic image fixture; never live Computer Use evidence."""
+    from PIL import Image
+    stream = io.BytesIO()
+    with Image.new("RGB", (2, 2), (90, 130, 180)) as picture:
+        picture.save(stream, format="JPEG")
+    return stream.getvalue()
 
 
 class OfflineGateTests(unittest.TestCase):
@@ -599,7 +617,7 @@ class OfflineGateTests(unittest.TestCase):
                 patch.object(h, "_git_source", return_value=dict(config.source)), \
                 patch.object(h, "load_mo2_release_bytes", return_value=release), \
                 patch.object(h, "load_mo2_release", return_value=release), \
-                patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW), \
+                patch.object(h, "inspect_path_integrity", side_effect=_fixture_integrity), \
                 patch.object(h, "read_windows_file_version", return_value="2.5.2.0"):
             self.assertEqual(record, h._fresh_preparation_preflight(self.run_root))
             for label, path, reason in paths:
@@ -733,7 +751,7 @@ class OfflineGateTests(unittest.TestCase):
                 patch.object(h, "load_mo2_release", return_value=release), \
                 patch.object(h, "_stable_file", side_effect=stable), \
                 patch.object(h, "read_windows_file_version", return_value="2.5.2.0"), \
-                patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW), \
+                patch.object(h, "inspect_path_integrity", side_effect=_fixture_integrity), \
                 patch.object(h, "_require_process_absence"), \
                 patch.object(h, "_load_phase_failure", return_value=failure), \
                 patch.object(h, "_load_phase_cleanup", return_value=cleanup), \
@@ -783,7 +801,8 @@ class OfflineGateTests(unittest.TestCase):
             self.assertIn(str(path), failure["effects"]["writtenPaths"])
         self.assertFalse((authority / "preparation.json").exists())
 
-    def _complete_phase_evidence(self, case: str):
+    def _complete_phase_evidence(self, case: str, *, screenshot=None, screenshot_name="window.png"):
+        screenshot = _png_bytes() if screenshot is None else screenshot
         root = self.scratch / case / "d" / ("a" * 32)
         layout = "SingleFile"
         phase = "Control"
@@ -800,6 +819,15 @@ class OfflineGateTests(unittest.TestCase):
         app.mkdir(parents=True)
         manager.mkdir(parents=True)
         (app / "ModOrganizer.exe").write_bytes(b"fixture MO2")
+        ini_data = h._disposable_profile_ini(render_modorganizer_ini(h.workspace_layout(workspace),
+            self.game, SimpleNamespace(product_version="2.5.2")))
+        (app / "ModOrganizer.ini").write_bytes(ini_data)
+        initial_ini = h._preparation_capture_paths(authority)[layout + ":ini"]
+        initial_ini.parent.mkdir(parents=True, exist_ok=True)
+        initial_ini.write_bytes(ini_data)
+        h._evidence_store(root).capture_evidence_file("containment-run:" + root.name,
+            app / "ModOrganizer.ini", job / "ModOrganizer.ini",
+            maximum_bytes=h.MAX_PREPARATION_INPUT_BYTES, stage=f"{layout}:{phase}:Configuration")
         roots = {}
         for kind in ROOT_KINDS:
             path = root / "protected" / kind
@@ -898,6 +926,7 @@ class OfflineGateTests(unittest.TestCase):
             }
             for index, name in enumerate(("App", "Manager", "Environment"), 1)
         }
+        writable["App"]["inventory"] = h.snapshot_tree(app)
         nonce = hashlib.sha256((case + ":nonce").encode()).hexdigest()[:32]
         begin = {
             "schemaVersion": 1,
@@ -909,7 +938,7 @@ class OfflineGateTests(unittest.TestCase):
             "preparationId": "preparation-sha256:" + "1" * 64,
             "startedAt": "2026-09-04T00:00:00+00:00",
             "pluginsBefore": [],
-            "appBefore": [],
+            "appBefore": writable["App"]["inventory"],
             "runtimeBefore": [],
             "writableBefore": writable,
             "protectedBefore": protected,
@@ -930,11 +959,11 @@ class OfflineGateTests(unittest.TestCase):
         }
         process["processId"] = "phase-process-sha256:" + h._sha256(h._canonical(process))
         h.publish_exact_json(job / "process.json", process)
-        (job / "window.png").write_bytes(_png_bytes())
+        (job / screenshot_name).write_bytes(screenshot)
         image = {
-            "path": str(job / "window.png"),
-            "sha256": hashlib.sha256(_png_bytes()).hexdigest(),
-            "size": len(_png_bytes()),
+            "path": str(job / screenshot_name),
+            "sha256": hashlib.sha256(screenshot).hexdigest(),
+            "size": len(screenshot),
         }
         native = {
             "hwnd": 9001,
@@ -957,7 +986,7 @@ class OfflineGateTests(unittest.TestCase):
             "nativeBefore": native,
             "nativeAfter": native,
         }
-        h.publish_exact_json(job / "window.png.capture.json", h._screenshot_capture(window, image))
+        h.publish_exact_json(job / (screenshot_name + ".capture.json"), h._screenshot_capture(window, image))
         close = {
             "action": "Alt+F4",
             "windowId": 51,
@@ -1009,12 +1038,14 @@ class OfflineGateTests(unittest.TestCase):
             layout_root,
             job / "begin.json",
             job / "process.json",
-            job / "window.png",
-            job / "window.png.capture.json",
+            job / screenshot_name,
+            job / (screenshot_name + ".capture.json"),
             captured_log,
             captured_log.with_name(captured_log.name + ".capture.json"),
             job / "operator-evidence.json",
             job / "runtime-delta.json",
+            job / "ModOrganizer.ini",
+            job / "ModOrganizer.ini.capture.json",
             job / "observation.json",
             job / "effect.json",
             job / "phase-final.json",
@@ -1208,7 +1239,7 @@ class OfflineGateTests(unittest.TestCase):
                 patch.object(h, "_derived_watch_roots", return_value={}), \
                 patch.object(h, "build_watch_request", return_value=request), \
                 patch.object(h, "_set_low_integrity_receipted"), \
-                patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW), \
+                patch.object(h, "inspect_path_integrity", side_effect=_fixture_integrity), \
                 patch.object(h, "start_watch", side_effect=start):
             with self.assertRaises(ContainmentOperationError) as raised:
                 backend.begin_phase(root, "SingleFile", "Control")
@@ -1363,7 +1394,7 @@ class OfflineGateTests(unittest.TestCase):
             "tar-plan:Package", "tar-apply:Package",
         }.issubset(processes))
         self.assertEqual(6, len(processes))
-        self.assertEqual(2, sum(item.startswith("icacls-low:") for item in processes))
+        self.assertEqual(12, sum(item.startswith("icacls-low:") for item in processes))
         record = received.value
         self.assertEqual(["SingleFile", "Package"], [row["layout"] for row in record["layouts"]])
         for row in record["layouts"]:
@@ -1687,6 +1718,122 @@ class OfflineGateTests(unittest.TestCase):
             with self.assertRaises(h.GateError):
                 h.validate_runtime_outputs(self.run_root, "SingleFile", "First", base, after, base, runtime_after)
 
+    def test_disposable_profile_copy_is_distinct_and_originals_stay_watched(self):
+        layout_root = self.run_root / "SingleFile"
+        manager = h.workspace_layout(layout_root / "bootstrap").skyrim_mo2
+        source = manager / "profiles" / "ModLab - Lab"
+        source.mkdir(parents=True)
+        (source / "modlist.txt").write_bytes(b"# original\n")
+        app = layout_root / "app"
+        app.mkdir()
+        initial = render_modorganizer_ini(h.workspace_layout(layout_root / "bootstrap"),
+            self.game, SimpleNamespace(product_version="2.5.2"))
+        (app / "ModOrganizer.ini").write_bytes(initial)
+        with patch.object(h.containment_service, "_current_effects"):
+            h._configure_disposable_profile(layout_root, manager)
+        copy_path = manager / "test-profiles" / "ModLab - Lab" / "modlist.txt"
+        self.assertEqual(copy_path.read_bytes(), (source / "modlist.txt").read_bytes())
+        self.assertNotEqual(h._stable_file(copy_path)["identity"],
+            h._stable_file(source / "modlist.txt")["identity"])
+        self.assertIn(b"profiles_directory=%BASE_DIR%/test-profiles\n",
+            (app / "ModOrganizer.ini").read_bytes())
+        copy_path.write_bytes(b"# saved by MO2\n")
+        self.assertEqual(b"# original\n", (source / "modlist.txt").read_bytes())
+        with self.assertRaises(Exception):
+            h._configure_disposable_profile(layout_root, manager)
+
+    def test_disposable_integrity_targets_exclude_originals_and_ancestors(self):
+        layout_root = self.run_root / "SingleFile"
+        manager = h.workspace_layout(layout_root / "bootstrap").skyrim_mo2
+        targets = h._disposable_low_roots(layout_root, manager)
+        self.assertEqual((layout_root / "app", layout_root / "environment",
+            manager / "logs", manager / "webcache", manager / "cache",
+            manager / "test-profiles"), targets)
+        for original in (manager / "profiles", manager / "mods", manager / "downloads",
+                manager / "overwrite"):
+            self.assertFalse(any(h._inside(original, target) for target in targets))
+        self.assertNotIn(layout_root, targets)
+        self.assertNotIn(manager, targets)
+
+    def test_runtime_accepts_recorded_disposable_saves_but_rejects_original_writes(self):
+        roots = h._runtime_writable_roots(self.run_root, "SingleFile")
+        item = {"path": "ModOrganizer.ini", "kind": "file", "sha256": "a" * 64,
+            "size": 12, "volume": 1, "fileId": 20}
+        before = {name: {"rootIdentity": {"volumeSerial": 1, "fileId": i, "attributes": 16},
+            "inventory": []} for i, name in enumerate(roots, 1)}
+        before["App"]["inventory"] = [item]
+        after = copy.deepcopy(before)
+        after["App"]["inventory"] = [{**item, "sha256": "b" * 64, "fileId": 21}]
+        after["Manager"]["inventory"] = [{**item,
+            "path": "test-profiles/ModLab - Lab/settings.ini", "fileId": 22}]
+        delta = h.build_runtime_delta(self.run_root, "SingleFile", "Control", before, after)
+        self.assertEqual(1, len(delta["roots"][0]["changes"]))
+        self.assertEqual(1, len(delta["roots"][1]["changes"]))
+        h.validate_runtime_outputs(self.run_root, "SingleFile", "Control",
+            before["App"]["inventory"], after["App"]["inventory"], [], [])
+        for relative in ("profiles/ModLab - Lab/modlist.txt", "profiles/ModLab - Play/settings.ini",
+                "test-profiles/Other/settings.ini", "test-profiles/ModLab - Lab-escape/settings.ini"):
+            changed = copy.deepcopy(after)
+            changed["Manager"]["inventory"].append({**item, "path": relative})
+            with self.subTest(path=relative), self.assertRaises(h.GateError):
+                h.build_runtime_delta(self.run_root, "SingleFile", "Control", before, changed)
+
+    def test_runtime_ini_accepts_preferences_and_refuses_configuration_escape(self):
+        manager = h.workspace_layout(self.run_root / "SingleFile" / "bootstrap").skyrim_mo2
+        initial = h._disposable_profile_ini(render_modorganizer_ini(
+            h.workspace_layout(self.run_root / "SingleFile" / "bootstrap"),
+            self.game, SimpleNamespace(product_version="2.5.2")))
+        saved = initial + b"filter_regex=false\n\n[Geometry]\nMainWindow_monitor=0\n"
+        h._validate_runtime_ini(initial, saved, manager)
+        for changed in (
+            saved.replace(b"profiles_directory=%BASE_DIR%/test-profiles", b"profiles_directory=%BASE_DIR%/profiles"),
+            saved.replace(b"profile_local_saves=false", b"profile_local_saves=true"),
+            saved.replace(b"@ByteArray(ModLab - Lab)", b"@ByteArray(ModLab - Play)"),
+            initial + b"download_directory=C:/outside\n",
+            initial + b"mod_directory=C:/outside\n",
+            initial + b"overwrite_directory=C:/outside\n",
+            initial + b"cache_directory=C:/outside\n",
+            initial + b"profiles_directory=%BASE_DIR%/test-profiles\n",
+        ):
+            with self.subTest(changed=changed[-100:]), self.assertRaises(h.GateError):
+                h._validate_runtime_ini(initial, changed, manager)
+
+    def test_profile_copy_rejects_aliases_and_changed_contents(self):
+        original = [{"path": "modlist.txt", "kind": "file", "sha256": "a" * 64,
+            "size": 2, "volume": 1, "fileId": 1}]
+        copy_row = {**original[0], "fileId": 2}
+        h._validate_profile_copy(original, [copy_row])
+        for copied in (original, [], [{**copy_row, "sha256": "b" * 64}],
+                [{**copy_row, "path": "different.txt"}]):
+            with self.subTest(copied=copied), self.assertRaises(h.GateError):
+                h._validate_profile_copy(original, copied)
+
+    def test_phase_configuration_capture_is_historical_and_bound_to_snapshot(self):
+        fixture = self._complete_phase_evidence("recorded-configuration")
+        self._reload_complete_phase(fixture)
+        delta = h.load_exact_json(fixture.job / "runtime-delta.json")
+        inventory = delta["roots"][0]["after"]["inventory"]
+        # A later change to Low app storage cannot rewrite the historical result.
+        live_ini = fixture.root / "SingleFile" / "app" / "ModOrganizer.ini"
+        live_ini.write_bytes(b"later unrelated current state")
+        self._reload_complete_phase(fixture)
+        # The original captured native identity is part of the transition proof.
+        forged = copy.deepcopy(inventory)
+        next(row for row in forged if row["path"] == "ModOrganizer.ini")["fileId"] += 1
+        with self.assertRaisesRegex(h.GateError, "phase INI capture differs"):
+            h._validate_phase_ini_capture(fixture.root, "SingleFile", "Control", forged)
+        capture_path = fixture.job / "ModOrganizer.ini.capture.json"
+        capture = h.load_exact_json(capture_path)
+        for change in ({"sourcePath": str(live_ini.parent / "different.ini")},
+                {"stage": "SingleFile:First:Configuration"}, {"byteCount": capture["byteCount"] + 1}):
+            capture_path.write_bytes(h._canonical({**capture, **change}))
+            with self.subTest(change=change), self.assertRaises(h.GateError):
+                h._validate_phase_ini_capture(fixture.root, "SingleFile", "Control", inventory)
+        capture_path.write_bytes(h._canonical(capture))
+        (fixture.job / "ModOrganizer.ini").write_bytes(b"altered original")
+        with self.assertRaises(h.GateError):
+            h._validate_phase_ini_capture(fixture.root, "SingleFile", "Control", inventory)
+
     def test_runtime_delta_confines_app_manager_and_environment_writes(self):
         roots = h._runtime_writable_roots(self.run_root, "SingleFile")
         before = {
@@ -1926,14 +2073,14 @@ class OfflineGateTests(unittest.TestCase):
     def test_screenshot_data_url_requires_bounded_structurally_valid_png(self):
         data = _png_bytes()
         encoded = "data:image/png;base64," + base64.b64encode(data).decode("ascii")
-        self.assertEqual(data, h._decode_png_data_url(encoded))
+        self.assertEqual(data, h._decode_screenshot_data_url(encoded))
         for invalid in (
             "data:image/png;base64," + base64.b64encode(b"arbitrary bytes").decode("ascii"),
             "data:text/plain;base64," + base64.b64encode(data).decode("ascii"),
             "data:image/png;base64,***",
         ):
             with self.subTest(invalid=invalid[:32]), self.assertRaises(h.GateError):
-                h._decode_png_data_url(invalid)
+                h._decode_screenshot_data_url(invalid)
 
     def test_screenshot_png_requires_one_bounded_decodable_scanline_stream(self):
         def chunk(kind: bytes, data: bytes) -> bytes:
@@ -2920,7 +3067,7 @@ class OfflineGateTests(unittest.TestCase):
         with patch.object(h, "capability_run_root", return_value=self.run_root), \
                 patch.object(h, "_git_source", return_value=source), \
                 patch.object(h, "load_mo2_release_bytes", return_value=release), \
-                patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW), \
+                patch.object(h, "inspect_path_integrity", side_effect=_fixture_integrity), \
                 patch.object(h, "_stable_file", side_effect=stable):
             self.assertEqual(record, h._load_preparation(self.run_root))
             forged = json.loads(json.dumps(record))
@@ -3059,7 +3206,7 @@ class OfflineGateTests(unittest.TestCase):
             patch.object(h, "capability_run_root", return_value=self.run_root),
             patch.object(h, "_git_source", return_value=source),
             patch.object(h, "load_mo2_release_bytes", return_value=release),
-            patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW),
+            patch.object(h, "inspect_path_integrity", side_effect=_fixture_integrity),
             patch.object(h, "_stable_file", side_effect=stable),
         )
         with ExitStack() as stack:
@@ -3171,7 +3318,7 @@ class OfflineGateTests(unittest.TestCase):
                 patch.object(h, "_derived_watch_roots", return_value={}), \
                 patch.object(h, "build_watch_request", return_value=request), \
                 patch.object(h, "set_low_integrity_tree", return_value=integrity_receipt), \
-                patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW), \
+                patch.object(h, "inspect_path_integrity", side_effect=_fixture_integrity), \
                 patch.object(h, "start_watch", side_effect=start), \
                 patch.object(h, "launch_low_integrity_process", side_effect=launch_process), \
                 patch.object(h.windows_watch, "admit_watch_launch", side_effect=lambda path, value: admitted.append((path, value.owner, value.owner.resumed))), \
@@ -3469,7 +3616,11 @@ class OfflineGateTests(unittest.TestCase):
 
         # Explicit synthetic *already completed* protocol fixture. Native launch,
         # stop and exit behavior is independently covered by CausalWatchTests.
-        _synthetic_worker_records(request, claim, launch, 41, 101)
+        # This fixture aliases all logical roots to one physical directory,
+        # so its journal must preserve the complete native event fan-out.
+        _synthetic_worker_records(request, claim, launch, 41, 101, events=tuple(
+            {"sequence": index, "rootKind": kind, "action": "Modified", "relativePath": "modlist.txt"}
+            for index, kind in enumerate(ROOT_KINDS, 1)))
         for name in ("worker-exit.json", "stop.token", "events.ndjson", "terminal.json", "outcome.json"):
             target = watch / name
             original = target.read_bytes()
@@ -3490,6 +3641,16 @@ class OfflineGateTests(unittest.TestCase):
         self.assertTrue(cleaned.value["watcherQuiescent"])
         self.assertEqual("Completed", cleaned.value["watchEvidenceCompletion"])
         self.assertEqual([], cleaned.value["watchReasonCodes"])
+        self.assertEqual(len(ROOT_KINDS), len(outcome.events))
+        self.assertEqual(h.watch_outcome_id_for(outcome), cleaned.value["watchOutcomeId"])
+        self.assertEqual(cleaned.value, h._load_phase_cleanup(old_root, "SingleFile", "Control"))
+        event_original = (watch / "events.ndjson").read_bytes()
+        (watch / "events.ndjson").write_bytes(b"")
+        try:
+            with self.assertRaises(h.GateError):
+                h._load_phase_cleanup(old_root, "SingleFile", "Control")
+        finally:
+            (watch / "events.ndjson").write_bytes(event_original)
         self.assertEqual(29, cleaned.value["controllerPid"])
         self.assertEqual(99, cleaned.value["controllerCreationTime"])
         self.assertEqual(100, cleaned.value["watcherCreationTime"])
@@ -3686,7 +3847,7 @@ class OfflineGateTests(unittest.TestCase):
                         patch.object(h, "_derived_watch_roots", return_value={}), \
                         patch.object(h, "build_watch_request", return_value=request), \
                         patch.object(h, "set_low_integrity_tree", return_value=integrity_receipt), \
-                        patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW), \
+                        patch.object(h, "inspect_path_integrity", side_effect=_fixture_integrity), \
                         patch.object(h, "start_watch", side_effect=start), \
                         patch.object(h, "launch_low_integrity_process", side_effect=launch_process), \
                         patch.object(h.windows_watch, "_verified_process_handle", side_effect=OSError("fixture handle failure")), \
@@ -3727,6 +3888,12 @@ class OfflineGateTests(unittest.TestCase):
                 self.assertIsNotNone(backend._pending_session)
 
     def test_production_controller_keeps_one_watch_through_strict_control_finalization(self):
+        self._exercise_production_screenshot(_png_bytes(), "image/png", "window.png")
+
+    def test_production_controller_preserves_original_jpeg_screenshot(self):
+        self._exercise_production_screenshot(_jpeg_bytes(), "image/jpeg", "window.jpg")
+
+    def _exercise_production_screenshot(self, screenshot, mime, screenshot_name):
         layout_root = self.run_root / "SingleFile"
         app = layout_root / "app"
         plugins = app / "plugins"
@@ -3735,6 +3902,10 @@ class OfflineGateTests(unittest.TestCase):
         plugins.mkdir(parents=True)
         manager_logs.mkdir(parents=True)
         (app / "ModOrganizer.exe").write_bytes(b"fixture executable")
+        ini_data = h._disposable_profile_ini(render_modorganizer_ini(
+            h.workspace_layout(layout_root / "bootstrap"), self.game, SimpleNamespace(product_version="2.5.2")))
+        (app / "ModOrganizer.ini").write_bytes(ini_data)
+        ini_file = h._stable_file(app / "ModOrganizer.ini")
         source_log = manager_logs / "mo_interface.log"
         source_log.write_bytes(b"ordinary MO2 control log\n")
         job = _phase_job(layout_root.parent, layout_root.name, "Control")
@@ -3772,6 +3943,9 @@ class OfflineGateTests(unittest.TestCase):
             })
         baseline = [{**item, "path": item["path"][len("plugins/"):]} for item in runtime[1:]]
         app_tree = [dict(item) for item in runtime]
+        app_tree.append({"path": "ModOrganizer.ini", "kind": "file", "sha256": ini_file["sha256"],
+            "size": ini_file["size"], "volume": ini_file["identity"]["volumeSerial"],
+            "fileId": ini_file["identity"]["fileId"]})
         launch = SimpleNamespace(
             pid=41,
             creation_time=101,
@@ -3833,7 +4007,7 @@ class OfflineGateTests(unittest.TestCase):
                     "app": "process:" + session.executable,
                     "title": "Mod Organizer v2.5.2",
                     "screenshotId": "fixture-shot",
-                    "screenshotDataUrl": "data:image/png;base64," + base64.b64encode(_png_bytes()).decode("ascii"),
+                    "screenshotDataUrl": ("data:" + mime + ";base64,") + base64.b64encode(screenshot).decode("ascii"),
                     "loadedTool": None,
                     "observedAt": "2026-09-04T00:00:00+00:00",
                 }
@@ -3850,7 +4024,8 @@ class OfflineGateTests(unittest.TestCase):
         original_capture = h.ContainmentStore.capture_evidence_file
         def capture(store, run_id, source, target, **kwargs):
             value = original_capture(store, run_id, source, target, **kwargs)
-            captured.append(value)
+            if kwargs.get("stage", "").endswith(":Log"):
+                captured.append(value)
             return value
         backend = h.ProductionLiveBackend()
         with ExitStack() as stack:
@@ -3866,6 +4041,7 @@ class OfflineGateTests(unittest.TestCase):
                 ),
             ))
             stack.enter_context(patch.object(h, "_load_preparation", return_value=preparation))
+            stack.enter_context(patch.object(h, "_prepared_ini", return_value=ini_data))
             stack.enter_context(patch.object(h, "snapshot_tree", side_effect=snapshot))
             stack.enter_context(patch.object(h, "_runtime_inventory", return_value=runtime))
             stack.enter_context(patch.object(h, "_snapshot_runtime_writable", return_value={
@@ -3878,7 +4054,7 @@ class OfflineGateTests(unittest.TestCase):
             stack.enter_context(patch.object(h, "_derived_watch_roots", return_value={}))
             stack.enter_context(patch.object(h, "build_watch_request", return_value=request))
             stack.enter_context(patch.object(h, "set_low_integrity_tree", return_value=integrity_receipt))
-            stack.enter_context(patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW))
+            stack.enter_context(patch.object(h, "inspect_path_integrity", side_effect=_fixture_integrity))
             stack.enter_context(patch.object(h, "start_watch", side_effect=start))
             stack.enter_context(patch.object(h, "launch_low_integrity_process", side_effect=launch_process))
             stack.enter_context(patch.object(h, "stop_watch", side_effect=stop))
@@ -3910,7 +4086,7 @@ class OfflineGateTests(unittest.TestCase):
         self.assertEqual(1, len(captured))
         self.assertEqual(str(source_log), captured[0]["sourcePath"])
         self.assertEqual(source_log.read_bytes(), Path(captured[0]["capturePath"]).read_bytes())
-        (SCRATCH / "phase-log-capture-inventory.json").write_text(json.dumps(captured, indent=2))
+        (SCRATCH / ("phase-" + screenshot_name + "-log-capture-inventory.json")).write_text(json.dumps(captured, indent=2))
         strict_bundle.assert_called_once_with(
             self.run_root.absolute(),
             "SingleFile",
@@ -3935,14 +4111,18 @@ class OfflineGateTests(unittest.TestCase):
         self.assertEqual(received.value, h.load_exact_json(job / "phase-final.json"))
         operator = h.load_exact_json(job / "operator-evidence.json")
         self.assertEqual(operator["operatorEvidenceId"], received.value["operatorEvidenceId"])
-        self.assertTrue((job / "window.png").is_file())
-        self.assertEqual(hashlib.sha256(_png_bytes()).hexdigest(), operator["window"]["image"]["sha256"])
+        self.assertTrue((job / screenshot_name).is_file())
+        provenance = h.load_exact_json(job / (screenshot_name + ".capture.json"))
+        self.assertEqual(h._screenshot_capture(operator["window"], operator["window"]["image"]), provenance)
+        if screenshot_name == "window.jpg":
+            self.assertFalse((job / "window.png.capture.json").exists())
+        self.assertEqual(hashlib.sha256(screenshot).hexdigest(), operator["window"]["image"]["sha256"])
         self.assertNotEqual(operator["window"]["windowId"], operator["window"]["nativeBefore"]["hwnd"])
         written = set(received.effects.written_paths)
         for path in (
             job / "begin.json",
             job / "process.json",
-            job / "window.png",
+            job / screenshot_name,
             job / "operator-evidence.json",
             job / "observed-000.log",
             job / "runtime-delta.json",
@@ -4229,6 +4409,45 @@ class OfflineGateTests(unittest.TestCase):
                 "Control",
                 "preparation-sha256:" + "1" * 64,
             )
+
+    def test_complete_phase_reload_accepts_bound_original_jpeg(self):
+        data = _jpeg_bytes()
+        fixture = self._complete_phase_evidence("jpeg", screenshot=data, screenshot_name="window.jpg")
+        observation, bundle = self._reload_complete_phase(fixture)
+        self.assertEqual(7003, bundle["mo2Pid"])
+        self.assertEqual(data, (fixture.job / "window.jpg").read_bytes())
+        self.assertFalse((fixture.job / "window.png").exists())
+        provenance = h.load_exact_json(fixture.job / "window.jpg.capture.json")
+        self.assertEqual(hashlib.sha256(data).hexdigest(), provenance["sha256"])
+        self.assertEqual(len(data), provenance["byteCount"])
+        (fixture.job / "window.jpg").write_bytes(data[:-2])
+        with self.assertRaises(h.GateError):
+            self._reload_complete_phase(fixture)
+
+    def test_screenshot_decoder_preserves_jpeg_and_rejects_invalid_or_unbounded_inputs(self):
+        from PIL import Image
+        data = _jpeg_bytes()
+        url = "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
+        self.assertEqual(data, h._decode_screenshot_data_url(url))
+        png = _png_bytes()
+        self.assertEqual(png, h._decode_screenshot_data_url(
+            "data:image/png;base64," + base64.b64encode(png).decode("ascii")))
+        for invalid in (
+            "data:image/jpeg;base64,***",
+            "data:image/jpeg;base64," + base64.b64encode(png).decode("ascii"),
+            "data:image/png;base64," + base64.b64encode(data).decode("ascii"),
+            "data:image/jpeg;base64," + base64.b64encode(data[:-2]).decode("ascii"),
+            "data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8invalid JPEG\xff\xd9").decode("ascii"),
+        ):
+            with self.subTest(prefix=invalid[:32]), self.assertRaises(h.GateError):
+                h._decode_screenshot_data_url(invalid)
+        with patch.object(h, "MAX_SCREENSHOT_BYTES", 10), patch.object(Image, "open") as decode:
+            with self.assertRaises(h.GateError):
+                h._decode_screenshot_data_url(url)
+            decode.assert_not_called()
+        with patch.object(h, "MAX_SCREENSHOT_DECOMPRESSED_BYTES", 1):
+            with self.assertRaisesRegex(h.GateError, "dimensions"):
+                h._decode_screenshot_data_url(url)
 
     def test_complete_phase_reload_reconstructs_every_raw_record(self):
         fixture = self._complete_phase_evidence("strict-valid")
@@ -4983,7 +5202,7 @@ class _FakeBackend:
         environment_root = layout_root / "environment"
         roots = [
             manager_root / "downloads", manager_root / "mods", manager_root / "profiles",
-            manager_root / "overwrite", manager_root / "webcache", manager_root / "logs",
+            manager_root / "overwrite", manager_root / "webcache", manager_root / "logs", manager_root / "cache", manager_root / "test-profiles",
             *(environment_root / name for name in ("TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME")),
         ]
         for root in roots:
@@ -4992,6 +5211,7 @@ class _FakeBackend:
             target = manager_root / "profiles" / profile / "modlist.txt"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b"# fixture\n")
+        h._configure_disposable_profile(layout_root, manager_root)
         marker = layout_root / "app" / "nxmhandler.ini"
         marker.write_bytes(h._NOREGISTER)
         integrity_receipt = {
@@ -5002,17 +5222,22 @@ class _FakeBackend:
             "stderr_sha256": "b" * 64,
             "integrity": int(IntegrityLevel.LOW),
         }
-        canonical = h._canonical(integrity_receipt)
-        h.containment_service._current_effects().preparation_process(
-            "icacls-low:" + h._sha256(canonical) + ":" + canonical.decode("utf-8").rstrip("\n")
-        )
+        receipts = []
+        for target in (layout_root / "app", environment_root, manager_root / "logs",
+                manager_root / "webcache", manager_root / "cache", manager_root / "test-profiles"):
+            receipt = {**integrity_receipt,
+                "arguments": [str(target), "/setintegritylevel", "(OI)(CI)L", "/T", "/C", "/Q"]}
+            receipts.append(receipt)
+            canonical = h._canonical(receipt)
+            h.containment_service._current_effects().preparation_process(
+                "icacls-low:" + h._sha256(canonical) + ":" + canonical.decode("utf-8").rstrip("\n"))
         return {
             "managerRoot": str(manager_root),
             "environmentRoot": str(environment_root),
             "roots": [str(path) for path in roots],
             "modOrganizerIni": h._stable_file(layout_root / "app" / "ModOrganizer.ini"),
             "noregister": h._stable_file(marker),
-            "lowIntegrity": [integrity_receipt],
+            "lowIntegrity": receipts,
         }
 
     def runtime_identities(self, layout: str, app_root: Path):

@@ -1,0 +1,2 @@
+# JPEG decoding for the optional Round 8 validation harness.
+Pillow==12.3.0

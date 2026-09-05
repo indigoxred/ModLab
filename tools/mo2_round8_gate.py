@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -47,7 +48,8 @@ from modlab.adapters.mo2.bootstrap_model import (
     BootstrapJobState,
     BootstrapReceiptMode,
 )
-from modlab.adapters.mo2.bootstrap_config import render_modorganizer_ini
+from modlab.adapters.mo2.bootstrap_config import render_modorganizer_ini, _expected_profile_paths
+from modlab.adapters.mo2.ini import Mo2IniError, parse_ini_bytes
 from modlab.adapters.mo2.bootstrap_serialization import (
     journal_from_dict,
     journal_to_dict,
@@ -156,12 +158,12 @@ from modlab.workspace import workspace_layout
 
 
 SCHEMA_VERSION = 1
-HARNESS_POLICY_VERSION = 1
+HARNESS_POLICY_VERSION = 2
 EFFECT_POLICY_VERSION = 1
 PROTOCOL_VERSION = 2
 PUBLICATION_POLICY_VERSION = "handle-pinned-no-replace-v2"
-RUNTIME_POLICY_VERSION = 1
-FIXTURE_VERSION = 2
+RUNTIME_POLICY_VERSION = 2
+FIXTURE_VERSION = 3
 TAR_CWD_LIMIT = LIMITS["tar-cwd"]
 COMPLETE_PATH_LIMIT = LIMITS["preparation-wide"]
 INVENTORY_LIMIT = MAX_PATHS
@@ -172,7 +174,7 @@ MAX_PREPARATION_RECORD_BYTES = 64 * 1024 * 1024
 MAX_RETAINED_LOGS = 128
 MAX_GATE_INVENTORY_ENTRIES = 16384
 MAX_SCREENSHOT_BYTES = 16 * 1024 * 1024
-MAX_PNG_DECOMPRESSED_BYTES = 256 * 1024 * 1024
+MAX_SCREENSHOT_DECOMPRESSED_BYTES = 256 * 1024 * 1024
 _RUN = re.compile(r"^[0-9a-f]{32}$")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -527,6 +529,9 @@ def _runtime_paths(run_root: Path, layout: str, sources: Mapping[str, bytes]) ->
         run_root / "selection.json",
         run_root / "full-stack-envelope.json",
     ]
+    rows.extend((manager_root / "test-profiles", manager_root / "test-profiles" / "ModLab - Lab", manager_root / "cache"))
+    rows.extend(manager_root / "test-profiles" / Path(*relative.parts[1:])
+        for relative in _expected_profile_paths() if relative.parts[1] == "ModLab - Lab")
     rows.extend(publication_targets)
     for relative in sources:
         target = layout_root / "app" / "plugins" / Path(*relative.split("/"))
@@ -541,12 +546,15 @@ def _runtime_paths(run_root: Path, layout: str, sources: Mapping[str, bytes]) ->
             job / "process.json",
             job / "operator-evidence.json",
             job / "runtime-delta.json",
+            job / "ModOrganizer.ini",
+            job / "ModOrganizer.ini.capture.json",
             job / "observation.json",
             job / "effect.json",
             job / "phase-final.json",
             job / "failure.json",
             job / "cleanup.json",
             job / "window.png",
+            job / "window.jpg",
             job / "guarded.json",
             job / "mo2.log",
             watch / REQUEST_NAME,
@@ -560,6 +568,7 @@ def _runtime_paths(run_root: Path, layout: str, sources: Mapping[str, bytes]) ->
             watch / OUTCOME_NAME,
             *(watch / name for name in sorted(set(CAUSAL_NAMES.values()))),
             job / "window.png.capture.json",
+            job / "window.jpg.capture.json",
         )
         rows.extend((job, watch, *phase_targets))
         publication_targets.extend(phase_targets)
@@ -1237,6 +1246,133 @@ def _prepare_gate_in_vault(config, selected, inspected, admission, vault):
         raise
 
 
+def _disposable_profile_ini(initial: bytes) -> bytes:
+    """The bootstrap renderer ends in [Settings]; use MO2's native override."""
+    parsed = parse_ini_bytes(initial)
+    if parsed.get("Settings", "profiles_directory") is not None:
+        raise GateError("fresh configuration already overrides the profile directory")
+    return initial + b"profiles_directory=%BASE_DIR%/test-profiles\n"
+
+
+def _disposable_low_roots(layout_root: Path, manager: Path) -> tuple[Path, ...]:
+    return (layout_root / "app", layout_root / "environment", manager / "logs",
+        manager / "webcache", manager / "cache", manager / "test-profiles")
+
+
+def _configure_disposable_profile(layout_root: Path, manager: Path) -> None:
+    source = manager / "profiles" / "ModLab - Lab"
+    destination = manager / "test-profiles" / "ModLab - Lab"
+    inventory = snapshot_tree(source)
+    targets = [destination.parent, destination,
+        *(destination.joinpath(*row["path"].split("/")) for row in inventory)]
+    admit_paths(PlannedPath("gate-disposable-profile", "preparation-wide", str(p)) for p in targets)
+    ledger = containment_service._current_effects()
+    for target in targets:
+        ledger.write(target)
+    destination.mkdir(parents=True, exist_ok=False)
+    for row in inventory:
+        relative = Path(*row["path"].split("/"))
+        if row["kind"] == "directory":
+            (destination / relative).mkdir()
+        else:
+            data = read_exact(source / relative)
+            if len(data) != row["size"] or _sha256(data) != row["sha256"]:
+                raise GateError("source profile changed while copying")
+            with (destination / relative).open("xb") as stream:
+                stream.write(data)
+    if snapshot_tree(source) != inventory:
+        raise GateError("source profile changed during disposable copy")
+    copied = snapshot_tree(destination)
+    _validate_profile_copy(inventory, copied)
+    ini = layout_root / "app" / "ModOrganizer.ini"
+    initial = read_exact(ini)
+    changed = _disposable_profile_ini(initial)
+    ledger.write(ini)
+    with ini.open("ab") as stream:
+        stream.write(changed[len(initial):])
+    if read_exact(ini) != changed:
+        raise GateError("disposable profile configuration write differs")
+
+
+def _validate_profile_copy(original: list[dict[str, object]], copied: list[dict[str, object]]) -> None:
+    source = _strict_inventory(original, "original profile")
+    target = _strict_inventory(copied, "disposable profile")
+    if not source or set(source) != set(target):
+        raise GateError("disposable profile copy has different entries")
+    for key, row in source.items():
+        other = target[key]
+        if (any(row[name] != other[name] for name in ("path", "kind", "sha256", "size"))
+                or (row["volume"], row["fileId"]) == (other["volume"], other["fileId"])):
+            raise GateError("disposable profile copy differs or aliases its original")
+
+
+def _verify_disposable_integrity(layout_root: Path, manager: Path) -> None:
+    for root in _disposable_low_roots(layout_root, manager):
+        if inspect_path_integrity(root) is not IntegrityLevel.LOW:
+            raise GateError(f"current disposable path is not Low integrity: {root}")
+    protected = {layout_root, manager, *manager.parents}
+    protected = {p for p in protected if _inside(p, layout_root)}
+    for name in ("profiles", "mods", "downloads", "overwrite"):
+        root = manager / name
+        protected.add(root)
+        protected.update(root.joinpath(*row["path"].split("/")) for row in snapshot_tree(root))
+    for current in protected:
+        if inspect_path_integrity(current) is not IntegrityLevel.MEDIUM:
+            raise GateError(f"original profile or ancestor is not Medium integrity: {current}")
+
+
+def _validate_runtime_ini(initial: bytes, current: bytes, manager: Path) -> None:
+    if not 0 < len(current) <= MAX_PREPARATION_INPUT_BYTES:
+        raise GateError("current ModOrganizer.ini is empty or unbounded")
+    try:
+        expected, actual = parse_ini_bytes(initial), parse_ini_bytes(current)
+        for section, entries in expected.sections.items():
+            for key, value in entries.items():
+                if actual.get(section, key) != value:
+                    raise GateError(f"current ModOrganizer.ini changed required {section}/{key}")
+        # Qt may persist defaults. Permit only the exact default destinations,
+        # never additional path overrides that the bootstrap did not declare.
+        defaults = {"download_directory": "downloads", "mod_directory": "mods",
+            "overwrite_directory": "overwrite", "cache_directory": "webcache"}
+        for key, value in actual.sections.get("settings", {}).items():
+            if not key.endswith("_directory") or expected.get("Settings", key) is not None:
+                continue
+            if key not in defaults:
+                raise GateError("current ModOrganizer.ini introduced an unknown directory override")
+            destination = defaults[key]
+            absolute = str(manager / destination).replace("\\", "\\\\")
+            if value not in ("%BASE_DIR%/" + destination, absolute, (manager / destination).as_posix()):
+                raise GateError(f"current ModOrganizer.ini escaped {key}")
+    except Mo2IniError as error:
+        raise GateError(f"current ModOrganizer.ini is ambiguous or invalid: {error}") from error
+
+
+def _validate_phase_ini_capture(run_root: Path, layout: str, phase: str,
+        app_inventory: list[dict[str, object]]) -> None:
+    target = authority_run_root(run_root) / layout / "jobs" / phase / "ModOrganizer.ini"
+    app = run_root / layout / "app"
+    capture = _load_gate_json(run_root, target.with_name(target.name + ".capture.json"))
+    _exact_object(capture, {"schemaVersion", "sourcePath", "capturePath", "volumeSerial",
+        "fileId", "byteCount", "sha256", "stage"}, "phase INI capture")
+    content = _read_gate_evidence(run_root, target, maximum_bytes=MAX_PREPARATION_INPUT_BYTES)
+    expected = {"path": "ModOrganizer.ini", "kind": "file", "sha256": _sha256(content),
+        "size": len(content), "volume": capture["volumeSerial"], "fileId": capture["fileId"]}
+    entries = _strict_inventory(app_inventory, "phase INI App inventory")
+    if (capture["schemaVersion"] != 1 or capture["sourcePath"] != str(app / "ModOrganizer.ini")
+            or capture["capturePath"] != str(target) or capture["sha256"] != expected["sha256"]
+            or capture["byteCount"] != len(content) or capture["stage"] != f"{layout}:{phase}:Configuration"
+            or entries.get("modorganizer.ini") != expected):
+        raise GateError("phase INI capture differs from the recorded configuration")
+    manager = workspace_layout(run_root / layout / "bootstrap").skyrim_mo2
+    _validate_runtime_ini(_prepared_ini(run_root, layout), content, manager)
+
+
+def _prepared_ini(run_root: Path, layout: str) -> bytes:
+    return _read_gate_evidence(run_root,
+        _preparation_capture_paths(authority_run_root(run_root))[layout + ":ini"],
+        maximum_bytes=MAX_PREPARATION_INPUT_BYTES)
+
+
 class ProductionBackend:
     """Thin production seams used only by an explicitly invoked live preparation."""
 
@@ -1322,12 +1458,15 @@ class ProductionBackend:
             manager_root / "overwrite",
             manager_root / "webcache",
             manager_root / "logs",
+            manager_root / "cache",
+            manager_root / "test-profiles",
             *(environment_root / name for name in ("TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME")),
         ]
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
             if directory.is_symlink():
                 raise GateError(f"configured root is redirected: {directory}")
+        _configure_disposable_profile(layout_root, manager_root)
         marker = layout_root / "app" / "nxmhandler.ini"
         if marker.exists():
             raise GateError("fresh app unexpectedly already contains nxmhandler.ini")
@@ -1336,10 +1475,9 @@ class ProductionBackend:
             _NOREGISTER,
             lambda data: data if data == _NOREGISTER else (_ for _ in ()).throw(GateError("noregister bytes differ")),
         )
-        integrity = [_json_value(_set_low_integrity_receipted(layout_root))]
-        for directory in (layout_root, layout_root / "app", layout_root / "app" / "plugins", *directories):
-            if inspect_path_integrity(directory) is not IntegrityLevel.LOW:
-                raise GateError(f"configured disposable path is not Low integrity: {directory}")
+        integrity = [_json_value(_set_low_integrity_receipted(path))
+            for path in _disposable_low_roots(layout_root, manager_root)]
+        _verify_disposable_integrity(layout_root, manager_root)
         return {
             "managerRoot": str(manager_root),
             "environmentRoot": str(environment_root),
@@ -1685,7 +1823,7 @@ def _validate_prepared_layout(
     )
     environment = root / layout / "environment"
     configured_roots = [
-        manager / "downloads", manager / "mods", manager / "profiles", manager / "overwrite", manager / "webcache", manager / "logs",
+        manager / "downloads", manager / "mods", manager / "profiles", manager / "overwrite", manager / "webcache", manager / "logs", manager / "cache", manager / "test-profiles",
         *(environment / name for name in ("TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME")),
     ]
     if (
@@ -1698,11 +1836,11 @@ def _validate_prepared_layout(
     manager_ini = _file_identity_dict(configuration["modOrganizerIni"], "ModOrganizer.ini")
     if manager_ini["path"] != str(manager_ini_path):
         raise GateError("prepared ModOrganizer.ini path differs")
-    expected_manager_ini = render_modorganizer_ini(
+    expected_manager_ini = _disposable_profile_ini(render_modorganizer_ini(
         workspace_layout(workspace),
         Path(str(preparation["gameRoot"])),
         release,
-    )
+    ))
     if captures[layout + ":ini"] != expected_manager_ini:
         raise GateError("ModOrganizer.ini no longer binds the exact contained manager and game roots")
     marker_path = app / "nxmhandler.ini"
@@ -1710,22 +1848,19 @@ def _validate_prepared_layout(
     if marker["path"] != str(marker_path) or captures[layout + ":marker"] != _NOREGISTER:
         raise GateError("noregister marker bytes differ")
     low = configuration["lowIntegrity"]
-    if type(low) is not list or len(low) != 1:
+    low_roots = _disposable_low_roots(root / layout, manager)
+    if type(low) is not list or len(low) != len(low_roots):
         raise GateError("Low-integrity application evidence is incomplete")
-    low_receipt = _exact_object(
-        low[0],
-        {"executable", "arguments", "exit_code", "stdout_sha256", "stderr_sha256", "integrity"},
-        f"{layout} Low-integrity receipt",
-    )
-    if (
-        low_receipt["executable"] != r"C:\Windows\System32\icacls.exe"
-        or low_receipt["arguments"] != [str(root / layout), "/setintegritylevel", "(OI)(CI)L", "/T", "/C", "/Q"]
-        or low_receipt["exit_code"] != 0
-        or low_receipt["integrity"] != int(IntegrityLevel.LOW)
-        or _HEX64.fullmatch(str(low_receipt["stdout_sha256"])) is None
-        or _HEX64.fullmatch(str(low_receipt["stderr_sha256"])) is None
-    ):
-        raise GateError("Low-integrity application receipt differs")
+    for low_receipt, low_root in zip(low, low_roots, strict=True):
+        _exact_object(low_receipt,
+            {"executable", "arguments", "exit_code", "stdout_sha256", "stderr_sha256", "integrity"},
+            f"{layout} Low-integrity receipt")
+        if (low_receipt["executable"] != r"C:\Windows\System32\icacls.exe"
+                or low_receipt["arguments"] != [str(low_root), "/setintegritylevel", "(OI)(CI)L", "/T", "/C", "/Q"]
+                or low_receipt["exit_code"] != 0 or low_receipt["integrity"] != int(IntegrityLevel.LOW)
+                or _HEX64.fullmatch(str(low_receipt["stdout_sha256"])) is None
+                or _HEX64.fullmatch(str(low_receipt["stderr_sha256"])) is None):
+            raise GateError("Low-integrity application receipt differs")
     runtime = _exact_object(row["runtime"], {"layout", "files"}, f"{layout} runtime")
     files = runtime["files"]
     if type(files) is not list or runtime["layout"] != layout or len(files) != len(RUNTIME_PATHS):
@@ -1756,11 +1891,17 @@ def _validate_prepared_layout(
         require_current_roots=False,
     )
 
-    canonical_low = _canonical(low_receipt)
+    manager_inventory = row["writableBaseline"]["Manager"]["inventory"]
+    def profile_entries(prefix):
+        return [{**item, "path": item["path"][len(prefix):]} for item in manager_inventory
+            if item["path"].startswith(prefix)]
+    _validate_profile_copy(profile_entries("profiles/ModLab - Lab/"),
+        profile_entries("test-profiles/ModLab - Lab/"))
     processes = (
         *planning["programs_launched"],
         *application["programs_launched"],
-        "icacls-low:" + _sha256(canonical_low) + ":" + canonical_low.decode("utf-8").rstrip("\n"),
+        *("icacls-low:" + _sha256(_canonical(item)) + ":" + _canonical(item).decode("utf-8").rstrip("\n")
+            for item in low),
     )
     required_paths = {
         metadata_path,
@@ -1769,6 +1910,8 @@ def _validate_prepared_layout(
         manager_ini_path,
         marker_path,
         *configured_roots,
+        *(manager.joinpath(*item["path"].split("/")) for item in manager_inventory
+            if item["path"].startswith("test-profiles/")),
         manager / "profiles" / "ModLab - Lab" / "modlist.txt",
         manager / "profiles" / "ModLab - Play" / "modlist.txt",
         *runtime_paths,
@@ -2070,11 +2213,11 @@ def _fresh_preparation_preflight(run_root: Path) -> Mapping[str, object]:
         roots = [Path(path) for path in configuration["roots"]]
         if any(not path.is_dir() or path.is_symlink() for path in roots):
             raise GateError("current configured writable roots differ")
-        for key, name in (("modOrganizerIni", "ModOrganizer.ini"), ("noregister", "nxmhandler.ini")):
-            _require_current_file(configuration[key], app / name, name)
-        for current in (root / layout, app, app / "plugins", *roots):
-            if inspect_path_integrity(current) is not IntegrityLevel.LOW:
-                raise GateError(f"current disposable path is not Low integrity: {current}")
+        _require_current_file(configuration["noregister"], app / "nxmhandler.ini", "nxmhandler.ini")
+        _validate_runtime_ini(_prepared_ini(root, layout),
+            read_exact(app / "ModOrganizer.ini", maximum_bytes=MAX_PREPARATION_INPUT_BYTES),
+            Path(row["managerRoot"]))
+        _verify_disposable_integrity(root / layout, Path(row["managerRoot"]))
         for current in row["runtime"]["files"]:
             _require_current_file({key: current[key] for key in ("path", "sha256", "size", "identity")},
                 app.joinpath(*current["relativePath"].split("/")), f"{layout} runtime {current['relativePath']}")
@@ -2314,7 +2457,7 @@ def _validate_png_bytes(data: bytes) -> bytes:
                 or compression != 0
                 or filtering != 0
                 or interlace != 0
-                or height * (1 + width * channels) > MAX_PNG_DECOMPRESSED_BYTES
+                or height * (1 + width * channels) > MAX_SCREENSHOT_DECOMPRESSED_BYTES
             ):
                 raise GateError("screenshot PNG header is unsupported")
         elif kind == b"IHDR":
@@ -2352,18 +2495,59 @@ def _validate_png_bytes(data: bytes) -> bytes:
     return data
 
 
-def _decode_png_data_url(value: object) -> bytes:
-    prefix = "data:image/png;base64,"
-    if type(value) is not str or not value.startswith(prefix):
-        raise GateError("screenshot must be a PNG data URL")
-    encoded = value[len(prefix) :]
+def _screenshot_name(data: bytes) -> str:
+    if type(data) is bytes and data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "window.png"
+    if type(data) is bytes and data.startswith(b"\xff\xd8"):
+        return "window.jpg"
+    raise GateError("screenshot bytes are neither PNG nor JPEG")
+
+
+def _validate_screenshot_bytes(data: bytes) -> bytes:
+    if _screenshot_name(data) == "window.png":
+        return _validate_png_bytes(data)
+    if not 4 <= len(data) <= MAX_SCREENSHOT_BYTES or not data.endswith(b"\xff\xd9"):
+        raise GateError("screenshot JPEG size or terminal marker is invalid")
+    try:
+        from PIL import Image, ImageFile
+    except ImportError as error:
+        raise GateError("JPEG evidence requires Pillow; see tools/requirements-round8.txt") from error
+    if ImageFile.LOAD_TRUNCATED_IMAGES:
+        raise GateError("JPEG evidence requires strict image decoding")
+    try:
+        with Image.open(io.BytesIO(data), formats=["JPEG"]) as picture:
+            if (picture.format != "JPEG" or picture.mode not in {"RGB", "L"}
+                    or picture.height * (1 + picture.width * len(picture.getbands()))
+                    > MAX_SCREENSHOT_DECOMPRESSED_BYTES):
+                raise GateError("screenshot JPEG dimensions or colour mode are unsupported")
+            picture.load()
+    except (OSError, ValueError, Image.DecompressionBombError) as error:
+        raise GateError("screenshot JPEG cannot be decoded") from error
+    return data
+
+
+def _decode_screenshot_data_url(value: object) -> bytes:
+    formats = {"data:image/png;base64,": "window.png", "data:image/jpeg;base64,": "window.jpg"}
+    prefix = next((item for item in formats if type(value) is str and value.startswith(item)), None)
+    if prefix is None:
+        raise GateError("screenshot must be a PNG or JPEG data URL")
+    encoded = value[len(prefix):]
     if not encoded or len(encoded) > ((MAX_SCREENSHOT_BYTES + 2) // 3) * 4 + 4:
         raise GateError("screenshot data URL is empty or unbounded")
     try:
         data = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as error:
         raise GateError("screenshot data URL is not valid base64") from error
-    return _validate_png_bytes(data)
+    if _screenshot_name(data) != formats[prefix]:
+        raise GateError("screenshot MIME type differs from its original bytes")
+    return _validate_screenshot_bytes(data)
+
+
+def _phase_screenshot_path(job: Path, image: object) -> Path:
+    allowed = {str(job / name) for name in ("window.png", "window.jpg")}
+    if not isinstance(image, Mapping) or type(image.get("path")) is not str or image["path"] not in allowed:
+        raise GateError("phase screenshot path is not an admitted original image")
+    return Path(image["path"])
 
 
 def _native_windows_for_pid(pid: int) -> list[dict[str, object]]:
@@ -2744,6 +2928,8 @@ def _validate_phase_evidence_chain(
         begin_record,
         runtime_delta,
     )
+    _validate_phase_ini_capture(root, layout, phase,
+        checked_delta["roots"][0]["after"]["inventory"])
     if checked_delta.get("runtimeDeltaId") != final.get("runtimeDeltaId"):
         raise GateError("phase final runtime-delta binding differs")
     window = operator_record.get("window")
@@ -2751,11 +2937,11 @@ def _validate_phase_evidence_chain(
     if not isinstance(window, Mapping) or not isinstance(ui, Mapping):
         raise GateError("operator/UI evidence is malformed")
     image = window.get("image")
+    image_path = _phase_screenshot_path(job, image)
     close = operator_record.get("close")
     if (
         not isinstance(image, Mapping)
         or not isinstance(close, Mapping)
-        or image.get("path") != str(job / "window.png")
         or ui.get("windowId") != window.get("windowId")
         or ui.get("app") != window.get("app")
         or ui.get("title") != window.get("title")
@@ -2775,7 +2961,7 @@ def _validate_phase_evidence_chain(
         run_root=root,
     )
 
-    if _load_gate_json(root, job / "window.png.capture.json") != _screenshot_capture(window, image):
+    if _load_gate_json(root, image_path.with_name(image_path.name + ".capture.json")) != _screenshot_capture(window, image):
         raise GateError("screenshot original capture provenance differs")
     for reference in observation.get("logs", ()):
         target = Path(reference["path"])
@@ -2799,10 +2985,12 @@ def _validate_phase_evidence_chain(
         root / layout,
         job / "begin.json",
         job / "process.json",
-        job / "window.png",
-        job / "window.png.capture.json",
+        image_path,
+        image_path.with_name(image_path.name + ".capture.json"),
         job / "operator-evidence.json",
         job / "runtime-delta.json",
+        job / "ModOrganizer.ini",
+        job / "ModOrganizer.ini.capture.json",
         job / "observation.json",
         job / "effect.json",
         job / "phase-final.json",
@@ -3154,7 +3342,6 @@ def _load_cleanup_watch_evidence(
             or receipt.opened_root_kinds != ROOT_KINDS
             or receipt.ready is not True
             or outcome.root_identities_unchanged is not True
-            or outcome.events != ()
             or outcome.evidence_completion not in {
                 WatchEvidenceCompletion.COMPLETED,
                 WatchEvidenceCompletion.INCOMPLETE,
@@ -3760,7 +3947,7 @@ class ProductionLiveBackend:
             or (session.phase != "Control" and window["loadedTool"] != "ModLab Capability Probe")
         ):
             raise GateError("operator window is not bound to the exact disposable MO2 phase")
-        screenshot = _decode_png_data_url(window["screenshotDataUrl"])
+        screenshot = _decode_screenshot_data_url(window["screenshotDataUrl"])
         if type(close) is not dict or set(close) != {"action", "windowId", "returned", "observedAt"}:
             raise GateError("normal-close fields are not exact")
         if (
@@ -3802,15 +3989,15 @@ class ProductionLiveBackend:
         if len(correlated) != 1:
             raise GateError("Computer Use title does not bind one stable native HWND for the launched PID")
         native_window = dict(correlated[0])
-        image_path = session.job_root / "window.png"
+        image_path = session.job_root / _screenshot_name(screenshot)
         operator_path = session.job_root / "operator-evidence.json"
         ledger = containment_service._current_effects()
         ledger.write(image_path)
-        ledger.write(image_path.with_name("window.png.capture.json"))
+        ledger.write(image_path.with_name(image_path.name + ".capture.json"))
         ledger.write(operator_path)
 
         def validate_image(data: bytes) -> bytes:
-            _validate_png_bytes(data)
+            _validate_screenshot_bytes(data)
             if data != screenshot:
                 raise GateError("published screenshot bytes differ from Computer Use")
             return data
@@ -3823,7 +4010,7 @@ class ProductionLiveBackend:
             "sha256": observed_image["sha256"],
             "size": observed_image["size"],
         }
-        _publish_gate_json(session.run_root, image_path.with_name("window.png.capture.json"),
+        _publish_gate_json(session.run_root, image_path.with_name(image_path.name + ".capture.json"),
                            _screenshot_capture(window, image))
         process = {
             "pid": session.launch.pid,
@@ -3901,6 +4088,16 @@ class ProductionLiveBackend:
         app_after = snapshot_tree(session.app_root)
         runtime_after = _runtime_inventory(session.preparation, session.layout)
         writable_after = _snapshot_runtime_writable(session.run_root, session.layout)
+        ini_target = session.job_root / "ModOrganizer.ini"
+        ledger.write(ini_target)
+        ledger.write(ini_target.with_name(ini_target.name + ".capture.json"))
+        _evidence_store(session.run_root).capture_evidence_file(
+            "containment-run:" + session.run_root.name,
+            session.app_root / "ModOrganizer.ini", ini_target,
+            maximum_bytes=MAX_PREPARATION_INPUT_BYTES,
+            stage=f"{session.layout}:{session.phase}:Configuration")
+        _validate_phase_ini_capture(session.run_root, session.layout, session.phase,
+            writable_after["App"]["inventory"])
         runtime_delta = build_runtime_delta(
             session.run_root,
             session.layout,
@@ -4044,6 +4241,8 @@ class ProductionLiveBackend:
             raise GateError("service effect MO2 PID differs from the exact phase launch")
         if not isinstance(runtime_delta, Mapping):
             raise GateError("phase draft lacks an exact runtime delta")
+        _validate_phase_ini_capture(session.run_root, session.layout, session.phase,
+            runtime_delta["roots"][0]["after"]["inventory"])
         runtime_delta = _validate_runtime_delta_record(
             session.run_root,
             session.layout,
@@ -4051,14 +4250,20 @@ class ProductionLiveBackend:
             _load_gate_json(session.run_root, session.job_root / "begin.json"),
             runtime_delta,
         )
+        operator = _load_gate_json(session.run_root, session.job_root / "operator-evidence.json")
+        if not isinstance(operator, Mapping) or not isinstance(operator.get("window"), Mapping):
+            raise GateError("published operator evidence is malformed")
+        image_path = _phase_screenshot_path(session.job_root, operator["window"].get("image"))
         ledger = containment_service._current_effects()
         publication_paths = [
             session.job_root / "begin.json",
             session.job_root / "process.json",
-            session.job_root / "window.png",
-            session.job_root / "window.png.capture.json",
+            image_path,
+            image_path.with_name(image_path.name + ".capture.json"),
             session.job_root / "operator-evidence.json",
             session.job_root / "runtime-delta.json",
+            session.job_root / "ModOrganizer.ini",
+            session.job_root / "ModOrganizer.ini.capture.json",
             session.job_root / "observation.json",
             session.job_root / "effect.json",
             session.job_root / "phase-final.json",
@@ -4832,12 +5037,17 @@ def _runtime_change_allowed(phase: str, root_name: str, relative: str) -> bool:
     prefixes = {
         current: {
             "App": (),
-            "Manager": ("logs", "webcache", "cache"),
+            "Manager": ("logs", "webcache", "cache", "test-profiles/modlab - lab"),
             "Environment": ("temp", "tmp", "appdata", "localappdata", "userprofile", "home"),
         }
         for current in PHASES
     }
     lowered = relative.casefold()
+    if root_name == "App" and lowered == "modorganizer.ini":
+        return True
+    # The active profile directory is fixed; only entries below it may change.
+    if root_name == "Manager" and lowered == "test-profiles/modlab - lab":
+        return False
     return not _runtime_entry_forbidden(relative) and any(
         lowered == prefix or lowered.startswith(prefix + "/")
         for prefix in prefixes[phase][root_name]
@@ -5000,7 +5210,7 @@ def validate_runtime_outputs(
     if _inventory_map(runtime_before, "runtime before") != _inventory_map(runtime_after, "runtime after"):
         raise GateError("MO2/Python/mobase runtime identity drifted")
     for key, item in previous.items():
-        if current.get(key) != item:
+        if current.get(key) != item and str(item["path"]).casefold() != "modorganizer.ini":
             raise GateError(f"pre-existing runtime entry changed: {item['path']}")
     additions = [item["path"] for key, item in current.items() if key not in previous]
     for relative in additions:
@@ -5153,7 +5363,9 @@ def validate_operator_evidence(
                   else _read_gate_evidence(run_root, image_path, maximum_bytes=MAX_SCREENSHOT_BYTES))
     if image.get("size") != len(image_data) or image.get("sha256") != _sha256(image_data):
         raise GateError("reviewable image bytes differ from the observation")
-    _validate_png_bytes(image_data)
+    _validate_screenshot_bytes(image_data)
+    if image_path.suffix != Path(_screenshot_name(image_data)).suffix:
+        raise GateError("screenshot filename differs from its original format")
     if phase != "Control":
         if (
             type(tool) is not dict
