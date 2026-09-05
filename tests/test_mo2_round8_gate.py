@@ -2131,6 +2131,108 @@ class OfflineGateTests(unittest.TestCase):
         """A service-wrapped primary owner and secondary publisher owner both survive."""
         self._assert_public_phase_failure_retains_ownership(primary_owned=True)
 
+    def _assert_public_cleanup_failure_receipt(self, case, *, sources, publisher_owned=False, primary_owned=False, cleanup_owned=True):
+        # Native launch/watch observations are explicit offline seams; every
+        # retained pin and publication asserted below is a real native operation.
+        root = self.scratch / case / "d" / ("a" * 32)
+        job = _phase_job(root, "SingleFile", "Control")
+        watch = job / "watch"
+        watch.mkdir(parents=True)
+        request = SimpleNamespace(evidence_root=watch, request_id="watch-request:" + "2" * 64,
+            session_id="watch-session:" + "3" * 64, run_id="containment-run:" + root.name,
+            scenario=ContainmentScenario.NEW_FOLDER)
+        original_publish = h._publish_gate_json
+        original_publish(root, watch / "request.json", {"fixture": "offline watch identity"})
+        session = SimpleNamespace(run_root=root, layout="SingleFile", phase="Control", request=request,
+            process_handle=777, launch=SimpleNamespace(pid=41, creation_time=101, owner=_OfflineOwner()),
+            watcher_pid=31, watcher_created=True)
+        production = h.ProductionLiveBackend()
+        backend = _FakeLiveBackend(root)
+        backend.fail_phase = production.fail_phase
+        pins = []
+        actual_cleanup_writes = []
+        exact = h.windows_exact_fs
+        primary = h.GateError("ordinary phase failure")
+        if primary_owned:
+            pin = exact.pin_stable_direct_object(self.archive, kind="file", delete_access=False)
+            pins.append(pin)
+            primary.__cause__ = exact.ExactObjectOwnershipError("primary retained pin", verification=(pin,))
+
+        def retain(target, label):
+            pin = exact.pin_stable_direct_object(target, kind="file", delete_access=False)
+            pins.append(pin)
+            owned = exact.ExactObjectOwnershipError(label, verification=(pin,))
+            wrapped = h.GateError("wrapped " + label)
+            wrapped.__cause__ = owned
+            return wrapped
+
+        def complete(path, owner):
+            target = watch / h.CAUSAL_NAMES["ProcessTreeQuiescence"]
+            original_publish(root, target, {"fixture": "quiescence publication"})
+            actual_cleanup_writes.append(target)
+            if "quiescence" in sources:
+                raise retain(target, "quiescence retained pin") if cleanup_owned else OSError("ordinary quiescence error")
+
+        def identity(job_root, run_root):
+            if "identity" in sources:
+                raise retain(watch / "request.json", "identity retained pin")
+            return SimpleNamespace(request=request, launch=SimpleNamespace(worker_pid=31, worker_creation_time=100),
+                claim=SimpleNamespace(controller_pid=29, controller_creation_time=99),
+                request_sha256="4" * 64, claim_sha256="5" * 64, launch_sha256="6" * 64)
+
+        def stop(path):
+            target = watch / "stop.token"
+            original_publish(root, target, {"fixture": "stop publication"})
+            actual_cleanup_writes.append(target)
+            raise retain(target, "stop retained pin")
+
+        def failure_publish(run_root, target, value):
+            original_publish(run_root, target, value)
+            if publisher_owned:
+                raise retain(target, "publisher retained pin")
+
+        try:
+            with patch.object(backend, "begin_phase", return_value=h.ContainmentServiceResult(session,
+                        ContainmentEffects(written_paths=(watch / "request.json",), watcher_pid=31, mo2_pid=41))), \
+                    patch.object(backend, "native", side_effect=primary), \
+                    patch.object(h.windows_watch, "complete_watch_launch", side_effect=complete), \
+                    patch.object(h, "_load_bound_watch_identity", side_effect=identity), \
+                    patch.object(h, "stop_watch", side_effect=stop), \
+                    patch.object(h, "_publish_gate_json", side_effect=failure_publish), \
+                    self.assertRaises(Exception) as raised:
+                h.run_operator_phase(root, "SingleFile", "Control", backend=backend, exchange=None)
+            failure = raised.exception
+            failure_path = job / "failure.json"
+            self.assertTrue(failure_path.is_file())
+            published = h._load_gate_json(root, failure_path)
+            self.assertTrue(published["terminal"])
+            self.assertFalse(published["retryPermitted"])
+            self.assertTrue(published["cleanupErrors"])
+            retained = h._phase_native_ownership(failure)
+            self.assertEqual({id(pin) for pin in pins}, {id(item.pinned) for item in retained.owners} if retained else set())
+            self.assertTrue(all(pin.handle for pin in pins))
+            self.assertIs(session, production._pending_session)
+            self.assertIn(failure_path, failure.effects.written_paths)
+            for target in actual_cleanup_writes:
+                self.assertIn(target, failure.effects.written_paths)
+            self.assertEqual(h.build_effect_record("SingleFile:Control:failed", failure.effects), published["effects"])
+        finally:
+            for pin in pins:
+                if pin.handle:
+                    pin.close()
+
+    def test_public_phase_retains_cleanup_owners_after_successful_failure_publication(self):
+        for source in ("quiescence", "identity", "stop"):
+            with self.subTest(source=source):
+                self._assert_public_cleanup_failure_receipt(source, sources=(source,))
+
+    def test_public_phase_unions_primary_cleanup_and_failure_publisher_owners(self):
+        self._assert_public_cleanup_failure_receipt("combined-cleanup", sources=("quiescence", "identity"),
+            publisher_owned=True, primary_owned=True)
+
+    def test_public_phase_successful_failure_publication_returns_actual_effects(self):
+        self._assert_public_cleanup_failure_receipt("ordinary-cleanup", sources=("quiescence",), cleanup_owned=False)
+
     def test_production_install_publication_receipts_its_own_record(self):
         layout_root = self.run_root / "SingleFile"
         layout_root.mkdir(parents=True)

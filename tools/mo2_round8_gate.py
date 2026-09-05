@@ -4178,7 +4178,7 @@ class ProductionLiveBackend:
         error: BaseException,
         effects: ContainmentEffects,
         session: LivePhaseSession | None = None,
-    ) -> None:
+    ) -> ContainmentEffects:
         job = authority_run_root(run_root) / layout / "jobs" / phase
         pending = self._pending_session
         if session is None and pending is not None and (
@@ -4188,7 +4188,7 @@ class ProductionLiveBackend:
         ):
             session = pending
         if not job.is_dir() or (job / "failure.json").exists():
-            return
+            return effects
         owner = session
         request = getattr(owner, "request", None) if owner is not None else None
         launch = getattr(owner, "launch", None) if owner is not None else None
@@ -4210,6 +4210,7 @@ class ProductionLiveBackend:
         if executable is None and launch is not None:
             executable = getattr(launch, "executable", None)
         cleanup_errors: list[str] = []
+        cleanup_failures: list[BaseException] = []
         cleanup_writes = []
         process_live = False
         process_handle_cleanup_pending = False
@@ -4231,6 +4232,7 @@ class ProductionLiveBackend:
                         windows_watch.complete_watch_launch(request.evidence_root / REQUEST_NAME, process_owner)
                 except BaseException as cleanup_error:
                     cleanup_errors.append(str(cleanup_error) or type(cleanup_error).__name__)
+                    cleanup_failures.append(cleanup_error)
                     process_live = True
 
         evidence_root = getattr(request, "evidence_root", None) if request is not None else None
@@ -4251,6 +4253,7 @@ class ProductionLiveBackend:
                     raise GateError("failed phase watcher callback identity differs")
             except BaseException as identity_error:
                 cleanup_errors.append(str(identity_error) or type(identity_error).__name__)
+                cleanup_failures.append(identity_error)
                 watch_identity = None
         watch_cleanup_pending = watcher_created and (process_live or watch_identity is None)
         if watcher_created and not process_live:
@@ -4267,6 +4270,7 @@ class ProductionLiveBackend:
             except BaseException as watch_error:
                 watch_cleanup_pending = True
                 cleanup_errors.append(str(watch_error) or type(watch_error).__name__)
+                cleanup_failures.append(watch_error)
         cleanup = {
             "watcherCreated": watcher_created,
             "watcherPid": watcher_pid,
@@ -4288,6 +4292,16 @@ class ProductionLiveBackend:
             "processHandleAcquired": process_handle_acquired,
             "processHandleCleanupPending": process_handle_cleanup_pending,
         }
+        cleanup_ownership = None
+        for cleanup_failure in cleanup_failures:
+            partial = getattr(cleanup_failure, "effects", None)
+            if isinstance(partial, ContainmentEffects):
+                effects = ContainmentEffects.merged(effects, partial)
+            retained = _phase_native_ownership(cleanup_failure)
+            if retained is not None:
+                cleanup_ownership = windows_exact_fs.union_retained_ownership(
+                    "phase failure cleanup retains original handles",
+                    prior=cleanup_ownership or _phase_native_ownership(error), owners=retained.owners)
         effects = ContainmentEffects.merged(effects, ContainmentEffects(written_paths=tuple(cleanup_writes)))
         failure = {
             "schemaVersion": SCHEMA_VERSION,
@@ -4314,15 +4328,33 @@ class ProductionLiveBackend:
         }
         failure["failureId"] = "phase-failure-sha256:" + _sha256(_canonical(failure))
         failure_effects = ContainmentEffects.merged(effects, ContainmentEffects(written_paths=(job / "failure.json",)))
+        pending_cleanup = process_live or process_handle_cleanup_pending or watch_cleanup_pending
+        self._pending_session = owner if pending_cleanup and owner is not None else None
         try:
             _publish_gate_json(run_root, job / "failure.json", failure)
         except BaseException as publication_error:
-            publication_error.effects = ContainmentEffects.merged(failure_effects, getattr(publication_error, "effects", None) or ContainmentEffects())
+            partial = getattr(publication_error, "effects", None)
+            if isinstance(partial, ContainmentEffects):
+                failure_effects = ContainmentEffects.merged(failure_effects, partial)
+            publication_error.effects = failure_effects
             if process_owner is not None:
                 publication_error.owner = process_owner
+            if cleanup_ownership is not None:
+                publication_ownership = _phase_native_ownership(publication_error)
+                combined = windows_exact_fs.union_retained_ownership(
+                    f"phase cleanup and failure publication retain original handles: {publication_error}",
+                    prior=cleanup_ownership,
+                    owners=() if publication_ownership is None else publication_ownership.owners)
+                combined.owner = process_owner
+                combined.effects = failure_effects
+                raise combined from publication_error
             raise
-        pending_cleanup = process_live or process_handle_cleanup_pending or watch_cleanup_pending
-        self._pending_session = owner if pending_cleanup and owner is not None else None
+        if cleanup_ownership is not None:
+            # Publish immutable failure facts before returning retryable native pins.
+            cleanup_ownership.owner = process_owner
+            cleanup_ownership.effects = failure_effects
+            raise cleanup_ownership from error
+        return failure_effects
 
     def cleanup_failed_phase(
         self,
@@ -5335,13 +5367,15 @@ def run_operator_phase(
         if isinstance(partial, ContainmentEffects):
             effects = ContainmentEffects.merged(effects, partial)
         try:
-            backend.fail_phase(root, layout, phase, error, effects, session)
+            failure_effects = backend.fail_phase(root, layout, phase, error, effects, session)
+            if isinstance(failure_effects, ContainmentEffects):
+                effects = ContainmentEffects.merged(effects, failure_effects)
         except BaseException as failure_error:
             partial = getattr(failure_error, "effects", None)
             if isinstance(partial, ContainmentEffects):
                 effects = ContainmentEffects.merged(effects, partial)
             primary = error.cause if isinstance(error, containment_service.ContainmentOperationError) and error.cause is not None else error
-            secondary_ownership = getattr(failure_error, "ownership", failure_error)
+            secondary_ownership = _phase_native_ownership(failure_error)
             if isinstance(secondary_ownership, windows_exact_fs.ExactObjectOwnershipError):
                 combined = windows_exact_fs.union_retained_ownership(
                     f"phase and failure publication retain original handles: {failure_error}",
