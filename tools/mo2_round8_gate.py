@@ -89,7 +89,7 @@ from modlab.adapters.mo2.path_budget import (
     publication_paths,
     stage_name,
 )
-from modlab.adapters.mo2.release import bundled_mo2_252_path, load_mo2_release
+from modlab.adapters.mo2.release import bundled_mo2_252_path, load_mo2_release, load_mo2_release_bytes
 from modlab.artifacts.serialization import artifact_from_dict, artifact_to_dict
 from modlab.artifacts.vault import ArchiveVault
 from modlab.adapters.skyrim.windows_version import read_windows_file_version
@@ -109,7 +109,8 @@ from modlab.validation.mo2_containment_service import (
     ContainmentEffects,
     ContainmentServiceResult,
 )
-from modlab.validation.mo2_containment_store import evidence_root_for
+from modlab.validation.mo2_containment_store import ContainmentStore, evidence_root_for
+from modlab.validation.windows_vault_security import create_vault, open_vault
 from modlab.validation import mo2_containment_service as containment_service
 from modlab.validation.mo2_containment_fixtures import _external_low_watch_roots
 from modlab.validation.windows_integrity import (
@@ -162,6 +163,8 @@ FIXTURE_VERSION = 2
 TAR_CWD_LIMIT = LIMITS["tar-cwd"]
 COMPLETE_PATH_LIMIT = LIMITS["preparation-wide"]
 INVENTORY_LIMIT = MAX_PATHS
+MAX_PREPARATION_INPUT_BYTES = 2 * 1024 * 1024
+MAX_GATE_RECORD_BYTES = 16 * 1024 * 1024
 MAX_RETAINED_LOGS = 128
 MAX_SCREENSHOT_BYTES = 16 * 1024 * 1024
 MAX_PNG_DECOMPRESSED_BYTES = 256 * 1024 * 1024
@@ -223,6 +226,136 @@ def authority_run_root(run_root: Path) -> Path:
     if _RUN.fullmatch(root.name) is None or ".." in root.parts:
         raise GateError("invalid disposable run identity")
     return evidence_root_for(root.parent).with_name("mo2-containment") / root.name
+
+
+def _evidence_store(run_root: Path) -> ContainmentStore:
+    root = Path(run_root).absolute()
+    return ContainmentStore.open_readonly(root.parent, authority_root=authority_run_root(root).parent)
+
+
+def _read_gate_evidence(run_root: Path, target: Path, *, maximum_bytes: int = MAX_GATE_RECORD_BYTES) -> bytes:
+    return _evidence_store(run_root).read_evidence_file(
+        "containment-run:" + Path(run_root).name, target, maximum_bytes=maximum_bytes,
+    )
+
+
+def _load_gate_json(run_root: Path, target: Path) -> object:
+    data = _read_gate_evidence(run_root, target)
+    value = parse_json(data)
+    if _canonical(value) != data:
+        raise GateError("protected gate record is not canonical")
+    return value
+
+
+def _publish_gate_json(run_root: Path, target: Path, value: object) -> object:
+    with open_vault(authority_run_root(run_root)) as vault:
+        vault.verify_descendant(Path(target).parent)
+        result = publish_exact_json(target, value)
+        vault.verify_descendant(target)
+        if _load_gate_json(run_root, target) != result:
+            raise GateError("protected gate publication readback differs")
+        return result
+
+
+def _preparation_capture_paths(authority: Path) -> dict[str, Path]:
+    captures = {"harness": authority / "originals" / "harness.py",
+                "nativeHelper": authority / "originals" / "windows_exact_fs.py",
+                "release": authority / "originals" / "release.json"}
+    for layout in LAYOUTS:
+        for key, name in (("metadata", "artifact.json"), ("ini", "ModOrganizer.ini"), ("marker", "nxmhandler.ini")):
+            captures[layout + ":" + key] = authority / layout / "originals" / name
+    return captures
+
+
+def _capture_preparation_originals(config: GateConfig, record: Mapping[str, object], vault: object, release_path: Path) -> dict[str, object]:
+    """Retain bounded source bytes and the original native observations, before use."""
+    store = _evidence_store(config.run_root)
+    destinations = _preparation_capture_paths(config.authority_root)
+    sources = {"harness": Path(__file__).absolute(), "nativeHelper": Path(windows_exact_fs.__file__).absolute(),
+               "release": release_path}
+    observations = {}
+    for row in record["layouts"]:
+        layout = row["layout"]
+        workspace = Path(row["workspace"])
+        artifact = artifact_from_dict(row["artifact"])
+        sources[layout + ":metadata"] = workspace / "library" / "metadata" / "artifacts" / (artifact.sha256 + ".json")
+        sources[layout + ":ini"] = Path(row["configuration"]["modOrganizerIni"]["path"])
+        sources[layout + ":marker"] = Path(row["configuration"]["noregister"]["path"])
+        observations[layout] = {
+            "payload": _stable_file(workspace / Path(*artifact.stored_relative_path.split("/"))),
+            "relocation": row["relocation"], "configuration": row["configuration"],
+            "runtime": row["runtime"], "writableBaseline": row["writableBaseline"],
+        }
+    captures = {}
+    ledger = containment_service._current_effects()
+    for key, target in destinations.items():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        vault.verify_descendant(target.parent)
+        # Capture can publish an original/provenance and then fail verification or
+        # close. Admit both attempted writes before delegating, as for other gate publications.
+        ledger.write(target)
+        ledger.write(target.with_name(target.name + ".capture.json"))
+        captures[key] = store.capture_evidence_file("containment-run:" + config.run_root.name,
+            sources[key], target, maximum_bytes=MAX_PREPARATION_INPUT_BYTES, stage="Preparation")
+    original = {"schemaVersion": 1, "runId": config.run_root.name, "authorityRoot": str(config.authority_root),
+        "source": record["source"], "archive": record["archive"], "extractor": record["extractor"],
+        "game": record["game"], "layouts": observations, "captures": captures}
+    target = config.authority_root / "preparation-originals.json"
+    ledger.write(target)
+    _publish_gate_json(config.run_root, target, original)
+    return original
+
+
+def _load_preparation_originals(root: Path, preparation: Mapping[str, object]) -> tuple[dict, dict[str, bytes]]:
+    authority = authority_run_root(root)
+    original = _load_gate_json(root, authority / "preparation-originals.json")
+    _exact_object(original, {"schemaVersion", "runId", "authorityRoot", "source", "archive", "extractor", "game", "layouts", "captures"}, "preparation originals")
+    if (original["schemaVersion"] != 1 or original["runId"] != root.name
+            or original["authorityRoot"] != str(authority)
+            or preparation["originalsSha256"] != _sha256(_canonical(original))
+            or any(original[key] != preparation[key] for key in ("source", "archive", "extractor", "game"))):
+        raise GateError("preparation original observations differ")
+    paths = _preparation_capture_paths(authority)
+    if type(original["captures"]) is not dict or set(original["captures"]) != set(paths):
+        raise GateError("preparation captures are incomplete")
+    if type(original["layouts"]) is not dict or set(original["layouts"]) != set(LAYOUTS):
+        raise GateError("preparation layout observations are incomplete")
+    data = {}
+    for key, target in paths.items():
+        receipt = original["captures"][key]
+        _exact_object(receipt, {"schemaVersion", "sourcePath", "capturePath", "volumeSerial", "fileId", "byteCount", "sha256", "stage"}, "preparation capture")
+        if (receipt["schemaVersion"] != 1 or receipt["capturePath"] != str(target)
+                or receipt["stage"] != "Preparation"
+                or type(receipt["byteCount"]) is not int or not 0 < receipt["byteCount"] <= MAX_PREPARATION_INPUT_BYTES
+                or _load_gate_json(root, target.with_name(target.name + ".capture.json")) != receipt):
+            raise GateError("preparation capture provenance differs")
+        captured = _read_gate_evidence(root, target, maximum_bytes=MAX_PREPARATION_INPUT_BYTES)
+        if len(captured) != receipt["byteCount"] or _sha256(captured) != receipt["sha256"]:
+            raise GateError("preparation captured bytes differ")
+        data[key] = captured
+    for row in preparation["layouts"]:
+        observed = original["layouts"][row["layout"]]
+        _exact_object(observed, {"payload", "relocation", "configuration", "runtime", "writableBaseline"}, "prepared layout original observations")
+        if any(observed[key] != row[key] for key in ("relocation", "configuration", "runtime", "writableBaseline")):
+            raise GateError("preparation layout original observations differ")
+        artifact = artifact_from_dict(row["artifact"])
+        expected_sources = {"metadata": Path(row["workspace"]) / "library" / "metadata" / "artifacts" / (artifact.sha256 + ".json"),
+            "ini": Path(row["appRoot"]) / "ModOrganizer.ini", "marker": Path(row["appRoot"]) / "nxmhandler.ini"}
+        for kind, source in expected_sources.items():
+            receipt = original["captures"][row["layout"] + ":" + kind]
+            if receipt["sourcePath"] != str(source):
+                raise GateError("preparation capture source binding differs")
+            if kind != "metadata":
+                file = row["configuration"]["modOrganizerIni" if kind == "ini" else "noregister"]
+                if (receipt["sha256"] != file["sha256"] or receipt["byteCount"] != file["size"]
+                        or receipt["volumeSerial"] != file["identity"]["volumeSerial"] or receipt["fileId"] != file["identity"]["fileId"]):
+                    raise GateError("preparation capture original identity differs")
+    if (original["captures"]["harness"]["sourcePath"] != str(Path(__file__).absolute())
+            or original["captures"]["nativeHelper"]["sourcePath"] != str(Path(windows_exact_fs.__file__).absolute())
+            or preparation["harnessSha256"] != _sha256(data["harness"])
+            or preparation["nativeHelperSha256"] != _sha256(data["nativeHelper"])):
+        raise GateError("preparation captured source binding differs")
+    return original, data
 
 
 @dataclass(frozen=True)
@@ -466,6 +599,15 @@ def admit_gate_paths(
                 )
             )
             rows.extend(_runtime_paths(root, layout, candidate_sources(root, layout)))
+        authority = authority_run_root(root)
+        targets = [authority / name for name in ("preparation.json", "preparation-effect.json", "preparation-originals.json", "failure.json", "restart.json", "selection.json", "full-stack-envelope.json")]
+        for layout in LAYOUTS:
+            targets.extend(authority / layout / name for name in ("installation.json", "installation-failure.json"))
+        for target in _preparation_capture_paths(authority).values():
+            targets.extend((target, target.with_name(target.name + ".capture.json")))
+        for target in targets:
+            rows.extend(publication_paths(target, "gate-authority:publication"))
+            rows.append(PlannedPath("gate-authority", "preparation-wide", str(target)))
         return GatePathAdmission(admit_paths(rows))
     except (OSError, PathBudgetError, ValueError) as error:
         raise GateError(f"full-stack path budget refused before mutation: {error}") from error
@@ -803,7 +945,7 @@ def _candidate_record(run_root: Path, layout: str) -> dict[str, object]:
 def _load_preparation_failure(run_root: Path) -> Mapping[str, object]:
     root = Path(run_root).absolute()
     value = _record_id(
-        load_exact_json(root / "failure.json"),
+        _load_gate_json(root, authority_run_root(root) / "failure.json"),
         "failureId",
         "preparation-failure-sha256:",
         "failed preparation record",
@@ -833,7 +975,7 @@ def _load_preparation_failure(run_root: Path) -> Mapping[str, object]:
     effect = validate_effect_record(value["effects"])
     if (
         effect.get("scope") != "Preparation:failed"
-        or str(root / "failure.json") not in effect.get("writtenPaths", ())
+        or str(authority_run_root(root) / "failure.json") not in effect.get("writtenPaths", ())
         or effect.get("childMutationRoots") != [str(root)]
         or effect.get("sourceChanges") != []
         or effect.get("gameChanges") != []
@@ -844,8 +986,8 @@ def _load_preparation_failure(run_root: Path) -> Mapping[str, object]:
 
 
 def _write_failure(run_root: Path, error: BaseException) -> None:
-    target = run_root / "failure.json"
-    if not run_root.is_dir() or target.exists():
+    target = authority_run_root(run_root) / "failure.json"
+    if not target.parent.is_dir() or target.exists():
         return
     try:
         ledger = containment_service._current_effects()
@@ -864,10 +1006,16 @@ def _write_failure(run_root: Path, error: BaseException) -> None:
             "authority": False,
         }
         record["failureId"] = "preparation-failure-sha256:" + _sha256(_canonical(record))
-        publish_exact_json(target, record)
+        _publish_gate_json(run_root, target, record)
         if _load_preparation_failure(run_root) != record:
             raise GateError("failed preparation evidence exact reload differs")
     except BaseException as publication_error:
+        publication_ownership = getattr(publication_error, "ownership", publication_error)
+        if isinstance(publication_ownership, windows_exact_fs.ExactObjectOwnershipError):
+            raise windows_exact_fs.union_retained_ownership(
+                "preparation and failure publication retain original handles",
+                prior=getattr(error, "ownership", error), owners=publication_ownership.owners,
+            ) from error
         if hasattr(error, "add_note"):
             error.add_note(f"failure evidence publication also failed: {publication_error}")
 
@@ -876,8 +1024,8 @@ def prepare_gate(config: GateConfig, *, backend: object | None = None) -> Contai
     """Prepare both layouts only after complete read-only admission succeeds."""
     if not isinstance(config, GateConfig):
         raise GateError("prepare_gate requires GateConfig")
-    if config.run_root.exists():
-        raise GateError("a disposable run root must be completely fresh")
+    if config.run_root.exists() or config.authority_root.exists():
+        raise GateError("disposable and authority run roots must both be completely fresh")
     selected = ProductionBackend() if backend is None else backend
     inspected = selected.inspect_inputs(config)
     admission = admit_gate_paths(
@@ -901,7 +1049,19 @@ def _prepare_gate_mutation(
     inspected: object,
     admission: GatePathAdmission,
 ) -> Mapping[str, object]:
-    """Create one admitted attempt beneath one service-owned mutation root."""
+    """Keep verified fresh authority ownership across every delegated mutation."""
+    if config.run_root.exists() or config.authority_root.exists():
+        raise GateError("disposable and authority run roots must both be completely fresh")
+    store = ContainmentStore(config.run_root.parent, authority_root=config.authority_root.parent)
+    store._create_trusted_directories(config.authority_root.parent)
+    with create_vault(config.authority_root) as vault:
+        containment_service._current_effects().write(config.authority_root)
+        result = _prepare_gate_in_vault(config, selected, inspected, admission, vault)
+        vault.verify()
+        return result
+
+
+def _prepare_gate_in_vault(config, selected, inspected, admission, vault):
     try:
         containment_service._current_effects().child_mutation_root(config.run_root)
         config.run_root.mkdir(parents=True, exist_ok=False)
@@ -995,6 +1155,7 @@ def _prepare_gate_mutation(
             "kind": "task-7B-live-gate-preparation",
             "runId": config.run_root.name,
             "runRoot": str(config.run_root),
+            "authorityRoot": str(config.authority_root),
             "steamRoot": str(config.steam_root),
             "bootstrapJobIds": dict(config.bootstrap_job_ids),
             "source": dict(config.source),
@@ -1032,8 +1193,10 @@ def _prepare_gate_mutation(
             "authority": False,
         }
         ledger = containment_service._current_effects()
-        preparation_path = config.run_root / "preparation.json"
-        effect_path = config.run_root / "preparation-effect.json"
+        original = _capture_preparation_originals(config, record, vault, Path(getattr(selected, "release_path", bundled_mo2_252_path())).absolute())
+        record["originalsSha256"] = _sha256(_canonical(original))
+        preparation_path = config.authority_root / "preparation.json"
+        effect_path = config.authority_root / "preparation-effect.json"
         ledger.write(preparation_path)
         ledger.write(effect_path)
         preparation_effect = build_effect_record("Preparation", ledger.freeze())
@@ -1046,12 +1209,12 @@ def _prepare_gate_mutation(
             "effect": preparation_effect,
             "authority": False,
         }
-        publish_exact_json(preparation_path, record)
-        publish_exact_json(effect_path, effect_record)
+        _publish_gate_json(config.run_root, preparation_path, record)
+        _publish_gate_json(config.run_root, effect_path, effect_record)
         if load_exact_json(preparation_path) != record or load_exact_json(effect_path) != effect_record:
             raise GateError("preparation and effect exact reload differs")
         if isinstance(selected, ProductionBackend):
-            strict = _load_preparation(config.run_root)
+            strict = _fresh_preparation_preflight(config.run_root)
             if strict != record:
                 raise GateError("production preparation strict reload differs")
         return record
@@ -1283,6 +1446,8 @@ def _validate_prepared_layout(
     layout: str,
     record: object,
     jobs: Mapping[str, str],
+    originals: Mapping[str, object],
+    captures: Mapping[str, bytes],
 ) -> tuple[str, tuple[str, ...], set[Path]]:
     row = _exact_object(
         record,
@@ -1309,11 +1474,13 @@ def _validate_prepared_layout(
         if artifact_to_dict(artifact) != row["artifact"]:
             raise GateError("archive artifact record is not canonical")
         metadata_path = workspace / "library" / "metadata" / "artifacts" / f"{artifact.sha256}.json"
-        metadata = artifact_from_dict(parse_json(read_exact(metadata_path)))
+        metadata = artifact_from_dict(parse_json(captures[layout + ":metadata"]))
         if artifact_to_dict(metadata) != row["artifact"]:
             raise GateError("archive artifact differs from retained metadata")
         payload_path = workspace / Path(*artifact.stored_relative_path.split("/"))
-        payload = _stable_file(payload_path)
+        payload = _file_identity_dict(originals["layouts"][layout]["payload"], "retained payload observation")
+        if payload["path"] != str(payload_path):
+            raise GateError("retained payload path differs")
     except GateError:
         raise
     except Exception as error:
@@ -1379,7 +1546,7 @@ def _validate_prepared_layout(
         or asdict(plan.extractor.executable) != extractor_identity
         or plan.extractor.version != top_extractor["version"]
         or plan.archive.artifact_id != artifact.artifact_id
-        or plan.archive.metadata_sha256 != _stable_file(metadata_path)["sha256"]
+        or plan.archive.metadata_sha256 != _sha256(captures[layout + ":metadata"])
         or plan.archive.original_name != artifact.original_name
         or plan.archive.stored_path != artifact.stored_relative_path
         or plan.archive.sha256 != artifact.sha256
@@ -1460,13 +1627,7 @@ def _validate_prepared_layout(
         or relocation["noReplace"] is not True
         or relocation["source"] != str(source)
         or relocation["destination"] != str(app)
-        or source.exists()
-        or not app.is_dir()
-        or app.is_symlink()
         or relocation["sourceIdentity"] != relocation["destinationIdentity"]
-        or relocation["destinationIdentity"] != _identity(windows_exact_fs.identity_at_path(app))
-        or relocation["sourceParentIdentity"] != _identity(windows_exact_fs.identity_at_path(source.parent))
-        or relocation["destinationParentIdentity"] != _identity(windows_exact_fs.identity_at_path(app.parent))
     ):
         raise GateError("relocation identity/path binding differs")
 
@@ -1487,25 +1648,22 @@ def _validate_prepared_layout(
         configuration["managerRoot"] != str(manager)
         or configuration["environmentRoot"] != str(environment)
         or configuration["roots"] != [str(path) for path in configured_roots]
-        or any(not path.is_dir() or path.is_symlink() for path in configured_roots)
     ):
         raise GateError("configured writable roots differ")
     manager_ini_path = app / "ModOrganizer.ini"
-    manager_ini = _require_current_file(
-        configuration["modOrganizerIni"],
-        manager_ini_path,
-        "ModOrganizer.ini",
-    )
+    manager_ini = _file_identity_dict(configuration["modOrganizerIni"], "ModOrganizer.ini")
+    if manager_ini["path"] != str(manager_ini_path):
+        raise GateError("prepared ModOrganizer.ini path differs")
     expected_manager_ini = render_modorganizer_ini(
         workspace_layout(workspace),
         Path(str(preparation["gameRoot"])),
         SimpleNamespace(product_version=str(preparation["mo2"]["version"])),
     )
-    if read_exact(Path(manager_ini["path"])) != expected_manager_ini:
+    if captures[layout + ":ini"] != expected_manager_ini:
         raise GateError("ModOrganizer.ini no longer binds the exact contained manager and game roots")
     marker_path = app / "nxmhandler.ini"
-    marker = _require_current_file(configuration["noregister"], marker_path, "noregister marker")
-    if read_exact(Path(marker["path"])) != _NOREGISTER:
+    marker = _file_identity_dict(configuration["noregister"], "noregister marker")
+    if marker["path"] != str(marker_path) or captures[layout + ":marker"] != _NOREGISTER:
         raise GateError("noregister marker bytes differ")
     low = configuration["lowIntegrity"]
     if type(low) is not list or len(low) != 1:
@@ -1524,10 +1682,6 @@ def _validate_prepared_layout(
         or _HEX64.fullmatch(str(low_receipt["stderr_sha256"])) is None
     ):
         raise GateError("Low-integrity application receipt differs")
-    for current in (root / layout, app, app / "plugins", *configured_roots):
-        if inspect_path_integrity(current) is not IntegrityLevel.LOW:
-            raise GateError(f"current disposable path is not Low integrity: {current}")
-
     runtime = _exact_object(row["runtime"], {"layout", "files"}, f"{layout} runtime")
     files = runtime["files"]
     if type(files) is not list or runtime["layout"] != layout or len(files) != len(RUNTIME_PATHS):
@@ -1542,11 +1696,9 @@ def _validate_prepared_layout(
         )
         if current["relativePath"] != relative:
             raise GateError("prepared runtime relative path differs")
-        _require_current_file(
-            {key: current[key] for key in ("path", "sha256", "size", "identity")},
-            current_path,
-            f"{layout} runtime {relative}",
-        )
+        _file_identity_dict({key: current[key] for key in ("path", "sha256", "size", "identity")}, f"{layout} runtime {relative}")
+        if current["path"] != str(current_path):
+            raise GateError("prepared runtime absolute path differs")
         runtime_paths.append(current_path)
     if files[0]["sha256"] != preparation["mo2"]["sha256"] or files[0]["size"] != preparation["mo2"]["size"]:
         raise GateError("current MO2 runtime differs from the curated executable")
@@ -1557,7 +1709,7 @@ def _validate_prepared_layout(
         layout,
         row["writableBaseline"],
         f"{layout} preparation writable baseline",
-        require_current_roots=True,
+        require_current_roots=False,
     )
 
     canonical_low = _canonical(low_receipt)
@@ -1588,13 +1740,13 @@ def _load_preparation(run_root: Path) -> Mapping[str, object]:
     root = Path(run_root).absolute()
     if root != capability_run_root(root.name):
         raise GateError("run root is outside the exact capability namespace")
-    value = load_exact_json(root / "preparation.json")
+    value = _load_gate_json(root, authority_run_root(root) / "preparation.json")
     if type(value) is not dict:
         raise GateError("preparation record is not an exact object")
     _exact_object(
         value,
         {
-            "schemaVersion", "kind", "runId", "runRoot", "steamRoot",
+            "schemaVersion", "kind", "runId", "runRoot", "authorityRoot", "originalsSha256", "steamRoot",
             "bootstrapJobIds", "source", "sourceArtifactManifest", "sourceArtifactId",
             "archive", "extractor", "mo2", "gameRoot", "game", "pathAdmission",
             "harnessSha256", "nativeHelperSha256", "policies", "layouts",
@@ -1613,12 +1765,13 @@ def _load_preparation(run_root: Path) -> Mapping[str, object]:
         or value.get("runId") != root.name
         or value.get("runRoot") != str(root)
         or value.get("authority") is not False
-        or value.get("source") != _git_source()
-        or value.get("harnessSha256") != _stable_file(Path(__file__))["sha256"]
-        or value.get("nativeHelperSha256") != _stable_file(Path(windows_exact_fs.__file__))["sha256"]
+        or value.get("authorityRoot") != str(authority_run_root(root))
     ):
         raise GateError("preparation source/run/harness binding differs")
     _exact_object(value.get("source"), {"commit", "tree"}, "preparation source")
+    if any(_HEX40.fullmatch(str(value["source"][key])) is None for key in ("commit", "tree")):
+        raise GateError("preparation source identity is malformed")
+    originals, captures = _load_preparation_originals(root, value)
     steam_root = Path(str(value.get("steamRoot", ""))).absolute()
     expected_game_root = steam_root / "steamapps" / "common" / "Skyrim Special Edition"
     jobs = value.get("bootstrapJobIds")
@@ -1632,7 +1785,7 @@ def _load_preparation(run_root: Path) -> Mapping[str, object]:
     ):
         raise GateError("preparation Steam/game/bootstrap-job binding differs")
     archive = value.get("archive")
-    release_record = load_mo2_release(bundled_mo2_252_path())
+    release_record = load_mo2_release_bytes(captures["release"], authority_run_root(root) / "originals" / "release.json")
     release = release_record.descriptor
     if (
         type(archive) is not dict
@@ -1642,11 +1795,9 @@ def _load_preparation(run_root: Path) -> Mapping[str, object]:
         or archive.get("originalName") != release.archive_name
     ):
         raise GateError("preparation archive/release binding differs")
-    current_archive = _stable_file(Path(archive["path"]))
     if (
         archive["path"] != str(Path(archive["path"]).absolute())
         or archive["originalName"] != Path(archive["path"]).name
-        or current_archive != {key: archive[key] for key in ("path", "sha256", "size", "identity")}
     ):
         raise GateError("current preparation archive identity differs")
     extractor = value.get("extractor")
@@ -1661,17 +1812,14 @@ def _load_preparation(run_root: Path) -> Mapping[str, object]:
         or not extractor["version"]
     ):
         raise GateError("preparation extractor binding is malformed")
-    current_extractor = _stable_file(Path(extractor["path"]))
-    if any(current_extractor[name] != extractor[name] for name in ("path", "sha256", "size")):
-        raise GateError("current extractor identity differs")
     game = _exact_object(value.get("game"), {"root", "rootIdentity", "skyrimExecutable"}, "preparation game")
     _exact_object(game["rootIdentity"], {"volumeSerial", "fileId", "attributes"}, "preparation game root identity")
     if (
         game["root"] != str(expected_game_root)
-        or game["rootIdentity"] != _identity(windows_exact_fs.identity_at_path(expected_game_root))
     ):
         raise GateError("current game-root identity differs")
-    _require_current_file(game["skyrimExecutable"], expected_game_root / "SkyrimSE.exe", "Skyrim executable")
+    if _file_identity_dict(game["skyrimExecutable"], "Skyrim executable")["path"] != str(expected_game_root / "SkyrimSE.exe"):
+        raise GateError("prepared Skyrim executable path differs")
     policies = value.get("policies")
     if policies != {
         "harness": HARNESS_POLICY_VERSION,
@@ -1705,8 +1853,12 @@ def _load_preparation(run_root: Path) -> Mapping[str, object]:
     expected_processes: list[str] = []
     expected_written_paths: set[Path] = {
         root,
-        root / "preparation.json",
-        root / "preparation-effect.json",
+        authority_run_root(root),
+        authority_run_root(root) / "preparation.json",
+        authority_run_root(root) / "preparation-effect.json",
+        authority_run_root(root) / "preparation-originals.json",
+        *_preparation_capture_paths(authority_run_root(root)).values(),
+        *(path.with_name(path.name + ".capture.json") for path in _preparation_capture_paths(authority_run_root(root)).values()),
     }
     for layout, record in zip(LAYOUTS, layouts, strict=True):
         if not isinstance(record, Mapping):
@@ -1717,6 +1869,8 @@ def _load_preparation(run_root: Path) -> Mapping[str, object]:
             layout,
             record,
             jobs,
+            originals,
+            captures,
         )
         artifact_ids.add(strict_artifact)
         expected_processes.extend(strict_process_rows)
@@ -1796,7 +1950,7 @@ def _load_preparation(run_root: Path) -> Mapping[str, object]:
     }:
         raise GateError("preparation MO2 release binding differs")
     effect_record = _exact_object(
-        load_exact_json(root / "preparation-effect.json"),
+        _load_gate_json(root, authority_run_root(root) / "preparation-effect.json"),
         {"schemaVersion", "kind", "preparationId", "effect", "authority"},
         "preparation effect publication",
     )
@@ -1817,9 +1971,68 @@ def _load_preparation(run_root: Path) -> Mapping[str, object]:
         or effect["productionMo2Changes"] != []
         or effect["preparationProcesses"] != expected_processes
         or written != expected_written_paths
-        or any(not _inside(path, root) for path in written)
+        or any(not (_inside(path, root) or _inside(path, authority_run_root(root))) for path in written)
     ):
         raise GateError("preparation service-effect binding differs")
+    return value
+
+
+def _fresh_preparation_preflight(run_root: Path) -> Mapping[str, object]:
+    """Current-use admission; historical reconstruction alone never authorizes actions."""
+    root = Path(run_root).absolute()
+    value = _load_preparation(root)
+    if (value["source"] != _git_source()
+            or value["harnessSha256"] != _stable_file(Path(__file__))["sha256"]
+            or value["nativeHelperSha256"] != _stable_file(Path(windows_exact_fs.__file__))["sha256"]):
+        raise GateError("preparation source/run/harness binding differs")
+    archive = value["archive"]
+    if _stable_file(Path(archive["path"])) != {key: archive[key] for key in ("path", "sha256", "size", "identity")}:
+        raise GateError("current preparation archive identity differs")
+    release = load_mo2_release(bundled_mo2_252_path())
+    if release.sha256 != value["sourceArtifactManifest"]["releaseDescriptorSha256"]:
+        raise GateError("current release descriptor differs")
+    extractor = value["extractor"]
+    current_extractor = _stable_file(Path(extractor["path"]))
+    if any(current_extractor[name] != extractor[name] for name in ("path", "sha256", "size")):
+        raise GateError("current extractor identity differs")
+    game = value["game"]
+    if game["rootIdentity"] != _identity(windows_exact_fs.identity_at_path(Path(game["root"]))):
+        raise GateError("current game-root identity differs")
+    _require_current_file(game["skyrimExecutable"], Path(game["root"]) / "SkyrimSE.exe", "Skyrim executable")
+    for layout in LAYOUTS:
+        row = _layout_record(value, layout)
+        workspace, app = Path(row["workspace"]), Path(row["appRoot"])
+        artifact = artifact_from_dict(row["artifact"])
+        metadata = workspace / "library" / "metadata" / "artifacts" / (artifact.sha256 + ".json")
+        if artifact_to_dict(artifact_from_dict(parse_json(read_exact(metadata)))) != row["artifact"]:
+            raise GateError("current retained archive metadata differs")
+        if _stable_file(metadata)["sha256"] != row["bootstrap"]["plan"]["archive"]["metadataSha256"]:
+            raise GateError("current retained archive metadata hash differs")
+        payload = _stable_file(workspace / Path(*artifact.stored_relative_path.split("/")))
+        if payload["sha256"] != artifact.sha256 or payload["size"] != artifact.size:
+            raise GateError("current retained archive payload differs")
+        relocation = row["relocation"]
+        source = Path(relocation["source"])
+        if (source.exists() or not app.is_dir() or app.is_symlink()
+                or relocation["destinationIdentity"] != _identity(windows_exact_fs.identity_at_path(app))
+                or relocation["sourceParentIdentity"] != _identity(windows_exact_fs.identity_at_path(source.parent))
+                or relocation["destinationParentIdentity"] != _identity(windows_exact_fs.identity_at_path(app.parent))):
+            raise GateError("current relocation identity/path binding differs")
+        configuration = row["configuration"]
+        roots = [Path(path) for path in configuration["roots"]]
+        if any(not path.is_dir() or path.is_symlink() for path in roots):
+            raise GateError("current configured writable roots differ")
+        for key, name in (("modOrganizerIni", "ModOrganizer.ini"), ("noregister", "nxmhandler.ini")):
+            _require_current_file(configuration[key], app / name, name)
+        for current in (root / layout, app, app / "plugins", *roots):
+            if inspect_path_integrity(current) is not IntegrityLevel.LOW:
+                raise GateError(f"current disposable path is not Low integrity: {current}")
+        for current in row["runtime"]["files"]:
+            _require_current_file({key: current[key] for key in ("path", "sha256", "size", "identity")},
+                app.joinpath(*current["relativePath"].split("/")), f"{layout} runtime {current['relativePath']}")
+        _runtime_inventory(value, layout)
+        _validated_writable_snapshots(root, layout, row["writableBaseline"],
+            f"{layout} preparation writable baseline", require_current_roots=True)
     return value
 
 
@@ -1847,7 +2060,8 @@ def _load_installation(run_root: Path, layout: str) -> Mapping[str, object]:
     root = Path(run_root).absolute()
     if layout not in LAYOUTS or _RUN.fullmatch(root.name) is None:
         raise GateError("installation run/layout binding is invalid")
-    value = load_exact_json(root / layout / "installation.json")
+    authority_layout = authority_run_root(root) / layout
+    value = _load_gate_json(root, authority_layout / "installation.json")
     fields = {
         "schemaVersion", "kind", "runId", "layout", "controlId", "declared",
         "before", "after", "writableBefore", "writableAfter", "observedAt",
@@ -1877,16 +2091,16 @@ def _load_installation(run_root: Path, layout: str) -> Mapping[str, object]:
         or effect.get("watcherPid") is not None
         or effect.get("mo2Pid") is not None
         or effect.get("childMutationRoots") != [str(layout_root)]
-        or str(layout_root / "installation.json") not in effect.get("writtenPaths", ())
-        or any(not _inside(Path(path), layout_root) for path in effect.get("writtenPaths", ()))
+        or str(authority_layout / "installation.json") not in effect.get("writtenPaths", ())
+        or any(not (_inside(Path(path), layout_root) or _inside(Path(path), authority_layout)) for path in effect.get("writtenPaths", ()))
         or effect.get("sourceChanges") != []
         or effect.get("gameChanges") != []
         or effect.get("productionMo2Changes") != []
     ):
         raise GateError("candidate installation effect binding differs")
-    control = load_exact_json(layout_root / "jobs" / "Control" / "observation.json")
+    control = _load_gate_json(root, authority_layout / "jobs" / "Control" / "observation.json")
     control_id = "observation-sha256:" + _sha256(_canonical(control))
-    control_final = load_exact_json(layout_root / "jobs" / "Control" / "phase-final.json")
+    control_final = _load_gate_json(root, authority_layout / "jobs" / "Control" / "phase-final.json")
     if (
         value.get("controlId") != control_id
         or not isinstance(control_final, Mapping)
@@ -2993,14 +3207,14 @@ class ProductionLiveBackend:
         self._pending_session: LivePhaseSession | PendingPhaseCleanup | None = None
 
     def source_check(self, run_root: Path) -> None:
-        _load_preparation(run_root)
+        _fresh_preparation_preflight(run_root)
         _require_process_absence()
 
     def load_state(self, run_root: Path, layout: str) -> DurableLayoutState:
-        preparation = _load_preparation(run_root)
+        preparation = _fresh_preparation_preflight(run_root)
         layout_root = Path(run_root) / layout
         terminal = list(layout_root.glob("jobs/*/failure.json"))
-        installation_failure = layout_root / "installation-failure.json"
+        installation_failure = authority_run_root(run_root) / layout / "installation-failure.json"
         incomplete = [
             path for path in layout_root.glob("jobs/*")
             if path.is_dir() and not (path / "phase-final.json").is_file()
@@ -3019,7 +3233,7 @@ class ProductionLiveBackend:
                 str(preparation["preparationId"]),
             )
             deltas[phase] = load_exact_json(layout_root / "jobs" / phase / "runtime-delta.json")
-        installed = (layout_root / "installation.json").is_file()
+        installed = (authority_run_root(run_root) / layout / "installation.json").is_file()
         installation = None
         if installed:
             installation = _load_installation(run_root, layout)
@@ -3043,15 +3257,16 @@ class ProductionLiveBackend:
         return containment_service._receipted(self._install_candidate)(run_root, layout, control_id)
 
     def _install_candidate(self, run_root: Path, layout: str, control_id: str) -> Mapping[str, object]:
+        self.source_check(run_root)
         state = self.load_state(run_root, layout)
         if state != DurableLayoutState(("Control",), False):
             raise GateError("candidate installation requires exactly one completed Control")
         root = Path(run_root).absolute()
         layout_root = root / layout
-        control_final = load_exact_json(layout_root / "jobs" / "Control" / "phase-final.json")
+        control_final = _load_gate_json(root, authority_run_root(root) / layout / "jobs" / "Control" / "phase-final.json")
         if control_final.get("observationId") != control_id:
             raise GateError("candidate installation control identity differs")
-        control = load_exact_json(layout_root / "jobs" / "Control" / "observation.json")
+        control = _load_gate_json(root, authority_run_root(root) / layout / "jobs" / "Control" / "observation.json")
         if "observation-sha256:" + _sha256(_canonical(control)) != control_id:
             raise GateError("candidate installation control bytes differ")
         preparation = _load_preparation(root)
@@ -3137,7 +3352,7 @@ class ProductionLiveBackend:
         effects: ContainmentEffects,
     ) -> Mapping[str, object]:
         root = Path(run_root).absolute()
-        target = root / layout / "installation.json"
+        target = authority_run_root(root) / layout / "installation.json"
         containment_service._current_effects().write(target)
         combined = ContainmentEffects.merged(
             effects,
@@ -3153,7 +3368,7 @@ class ProductionLiveBackend:
             "authority": False,
         }
         record["installationId"] = "installation-sha256:" + _sha256(_canonical(record))
-        publish_exact_json(target, record)
+        _publish_gate_json(root, target, record)
         exact = _load_installation(root, layout)
         if exact != record:
             raise GateError("candidate installation exact reload differs")
@@ -3170,15 +3385,15 @@ class ProductionLiveBackend:
         effects: ContainmentEffects,
     ) -> None:
         root = Path(run_root).absolute()
-        target = root / layout / "installation-failure.json"
+        target = authority_run_root(root) / layout / "installation-failure.json"
         if not target.parent.is_dir() or target.exists():
             return
         failure_effects = ContainmentEffects.merged(
             effects,
             ContainmentEffects(written_paths=(target,)),
         )
-        publish_exact_json(
-            target,
+        _publish_gate_json(
+            root, target,
             {
                 "schemaVersion": SCHEMA_VERSION,
                 "kind": "task-7B-candidate-installation-failed-attempt",
@@ -3198,6 +3413,7 @@ class ProductionLiveBackend:
         return containment_service._receipted(self._begin_phase)(run_root, layout, phase)
 
     def _begin_phase(self, run_root: Path, layout: str, phase: str) -> LivePhaseSession:
+        self.source_check(run_root)
         preparation = _load_preparation(run_root)
         durable = self.load_state(run_root, layout)
         if next_action(durable.completed, installed=durable.installed) != phase:
@@ -3826,7 +4042,7 @@ class ProductionLiveBackend:
 
     def _finalize_gate(self, run_root: Path) -> Mapping[str, object]:
         root = Path(run_root).absolute()
-        preparation = _load_preparation(root)
+        preparation = _fresh_preparation_preflight(root)
         _require_process_absence()
         containment_service._current_effects().child_mutation_root(root)
         candidates: list[dict[str, object]] = []
@@ -3884,10 +4100,10 @@ class ProductionLiveBackend:
             "candidates": candidates,
         }
         selection = derive_selection(matrix)
-        containment_service._current_effects().write(root / "selection.json")
-        publish_capability(root / "selection.json", selection)
-        exact_selection = load_capability(root / "selection.json")
-        if exact_selection != selection or capability_to_bytes(exact_selection) != read_exact(root / "selection.json"):
+        containment_service._current_effects().write(authority_run_root(root) / "selection.json")
+        publish_capability(authority_run_root(root) / "selection.json", selection)
+        exact_selection = load_capability(authority_run_root(root) / "selection.json", authority_root=authority_run_root(root))
+        if exact_selection != selection or capability_to_bytes(exact_selection) != read_exact(authority_run_root(root) / "selection.json"):
             raise GateError("selection exact publication/reload differs")
         source = {
             **dict(preparation["source"]),
@@ -3902,9 +4118,9 @@ class ProductionLiveBackend:
             effect_ids=tuple(effect_ids),
             selection=exact_selection,
         )
-        containment_service._current_effects().write(root / "full-stack-envelope.json")
-        publish_exact_json(root / "full-stack-envelope.json", envelope)
-        exact_envelope = load_envelope(root / "full-stack-envelope.json")
+        containment_service._current_effects().write(authority_run_root(root) / "full-stack-envelope.json")
+        _publish_gate_json(root, authority_run_root(root) / "full-stack-envelope.json", envelope)
+        exact_envelope = load_envelope(authority_run_root(root) / "full-stack-envelope.json")
         if exact_envelope != envelope:
             raise GateError("full-stack envelope exact publication/reload differs")
         return {"selection": exact_selection, "envelope": exact_envelope}
@@ -5192,7 +5408,7 @@ def install_operator_candidate(
 def _load_restart_record(run_root: Path) -> Mapping[str, object]:
     root = Path(run_root).absolute()
     value = _record_id(
-        load_exact_json(root / "restart.json"),
+        _load_gate_json(root, authority_run_root(root) / "restart.json"),
         "restartId",
         "failed-attempt-restart-sha256:",
         "failed attempt restart record",
@@ -5266,7 +5482,7 @@ def _load_restart_record(run_root: Path) -> Mapping[str, object]:
     effect = validate_effect_record(value["effect"])
     if (
         effect.get("scope") != "Restart"
-        or effect.get("writtenPaths") != [str(root), str(root / "restart.json")]
+        or effect.get("writtenPaths") != [str(root), str(authority_run_root(root) / "restart.json")]
         or effect.get("childMutationRoots") != [str(root)]
         or effect.get("watcherPid") is not None
         or effect.get("mo2Pid") is not None
@@ -5287,7 +5503,7 @@ def _publish_restart_record(
     failures: list[Mapping[str, object]],
     cleanups: list[Mapping[str, object]],
 ) -> Mapping[str, object]:
-    target = new_config.run_root / "restart.json"
+    target = new_config.authority_root / "restart.json"
     ledger = containment_service._current_effects()
     ledger.child_mutation_root(new_config.run_root)
     ledger.write(target)
@@ -5310,7 +5526,7 @@ def _publish_restart_record(
         "authority": False,
     }
     record["restartId"] = "failed-attempt-restart-sha256:" + _sha256(_canonical(record))
-    publish_exact_json(target, record)
+    _publish_gate_json(new_config.run_root, target, record)
     exact = _load_restart_record(new_config.run_root)
     if exact != record:
         raise GateError("fresh attempt restart exact reload differs")
@@ -5332,7 +5548,7 @@ def restart_failed_attempt(
         or new_config.run_root.exists()
     ):
         raise GateError("restart requires one distinct completely fresh run root")
-    old_preparation = _load_preparation(failed_root)
+    old_preparation = _fresh_preparation_preflight(failed_root)
     failures = [
         _load_phase_failure(failed_root, layout, phase)
         for layout in LAYOUTS
@@ -5459,10 +5675,10 @@ def build_envelope(
 def load_envelope(path: Path) -> Mapping[str, object]:
     """Rebuild every final binding from durable product and phase evidence."""
     target = Path(path).absolute()
-    root = target.parent
-    if target.name != "full-stack-envelope.json" or _RUN.fullmatch(root.name) is None:
+    root = capability_run_root(target.parent.name)
+    if target != authority_run_root(root) / "full-stack-envelope.json" or _RUN.fullmatch(root.name) is None:
         raise GateError("full-stack envelope path/run binding is invalid")
-    value = load_exact_json(target)
+    value = _load_gate_json(root, target)
     fields = {
         "schemaVersion", "kind", "runId", "source", "preparationId",
         "phaseIds", "watchOutcomeIds", "effectIds", "selectionId",
@@ -5493,7 +5709,6 @@ def load_envelope(path: Path) -> Mapping[str, object]:
     if value.get("policies") != expected_policies:
         raise GateError("full-stack envelope policy binding differs")
 
-    _require_process_absence()
     preparation = _load_preparation(root)
     expected_source = {
         **dict(preparation["source"]),
@@ -5505,10 +5720,10 @@ def load_envelope(path: Path) -> Mapping[str, object]:
     ):
         raise GateError("full-stack envelope source/preparation binding differs")
 
-    selection_path = root / "selection.json"
-    selection_bytes = read_exact(selection_path)
+    selection_path = authority_run_root(root) / "selection.json"
+    selection_bytes = _read_gate_evidence(root, selection_path)
     try:
-        selection = load_capability(selection_path)
+        selection = load_capability(selection_path, authority_root=authority_run_root(root))
     except (OSError, RuntimeError, TypeError, ValueError) as error:
         raise GateError(f"durable capability selection is invalid: {error}") from error
     if (

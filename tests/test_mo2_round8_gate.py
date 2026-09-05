@@ -195,13 +195,375 @@ class OfflineGateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.scratch = SCRATCH / self._testMethodName
         self.scratch.mkdir(parents=True)
-        self.run_root = self.scratch / ("a" * 32)
+        self.run_root = self.scratch / "d" / ("a" * 32)
+        self.run_root.parent.mkdir()
         self.archive = self.scratch / "Mod.Organizer-2.5.2.7z"
         self.steam = self.scratch / "Steam"
         self.archive.write_bytes(b"synthetic-not-a-live-archive")
         self.game = self.steam / "steamapps" / "common" / "Skyrim Special Edition"
         self.game.mkdir(parents=True)
         (self.game / "SkyrimSE.exe").write_bytes(b"fixture-skyrim")
+
+    def test_preparation_originals_are_protected_before_any_live_phase(self):
+        authority = h.authority_run_root(self.run_root)
+        config = h.GateConfig(
+            self.run_root, self.archive, self.steam,
+            {"commit": "1" * 40, "tree": "2" * 40},
+            {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=authority,
+        )
+        receipts = []
+        capture = h.ContainmentStore.capture_evidence_file
+        def record_capture(store, run_id, source, target, **kwargs):
+            receipt = capture(store, run_id, source, target, **kwargs)
+            receipts.append(receipt)
+            return receipt
+        with patch.object(h.ContainmentStore, "capture_evidence_file", record_capture):
+            received = h.prepare_gate(config, backend=_FakeBackend(self.scratch, _listing("ModOrganizer.exe", "plugins/base.py")))
+        self.assertEqual(9, len(receipts))
+        admitted = {row.path for row in h.budget_from_dict(received.value["pathAdmission"]["budget"]).paths}
+        for receipt in receipts:
+            target = Path(receipt["capturePath"])
+            self.assertTrue(target.is_relative_to(authority))
+            self.assertEqual("Preparation", receipt["stage"])
+            self.assertEqual(receipt["byteCount"], len(target.read_bytes()))
+            self.assertEqual(receipt["sha256"], h._sha256(target.read_bytes()))
+            identity = h.windows_exact_fs.identity_at_path(Path(receipt["sourcePath"]))
+            self.assertEqual((identity.volume_serial, identity.file_id), (receipt["volumeSerial"], receipt["fileId"]))
+            for final in (target, target.with_name(target.name + ".capture.json")):
+                self.assertIn(str(final), admitted)
+                self.assertTrue({row.path for row in h.publication_paths(final, "test")}.issubset(admitted))
+        (SCRATCH / "preparation-capture-inventory.json").write_text(json.dumps(receipts, indent=2))
+        self.assertTrue((authority / "preparation.json").is_file())
+        self.assertFalse((self.run_root / "preparation.json").exists())
+        from modlab.validation.windows_vault_security import open_vault
+        with open_vault(authority) as vault:
+            vault.verify_descendant(authority / "preparation.json")
+            self.assertEqual(received.value, h.load_exact_json(authority / "preparation.json"))
+        self.assertIsNone(received.effects.watcher_pid)
+        self.assertIsNone(received.effects.mo2_pid)
+
+    def _protected_preparation_fixture(self):
+        backend = _FakeBackend(self.scratch, _listing("ModOrganizer.exe", "plugins/base.py"))
+        config = h.GateConfig(
+            self.run_root, self.archive, self.steam,
+            {"commit": "1" * 40, "tree": "2" * 40},
+            {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=h.authority_run_root(self.run_root),
+        )
+        record = h.prepare_gate(config, backend=backend).value
+        release = SimpleNamespace(sha256="6" * 64, descriptor=SimpleNamespace(
+            archive_sha256=record["archive"]["sha256"], archive_size=record["archive"]["size"],
+            archive_name=record["archive"]["originalName"], executable=SimpleNamespace(
+                file_version="2.5.2.0", sha256=record["mo2"]["sha256"], size=record["mo2"]["size"],
+            ),
+        ))
+        return config, backend, record, release
+
+    def test_historical_preparation_uses_originals_after_low_inputs_change(self):
+        """A historical read must neither consume Low bytes nor run current probes."""
+        config, backend, record, release = self._protected_preparation_fixture()
+        with patch.object(h, "capability_run_root", return_value=self.run_root), \
+                patch.object(h, "load_mo2_release_bytes", return_value=release):
+            original_read = h.ContainmentStore.read_evidence_file
+            reads = []
+            def read(store, run_id, target, **kwargs):
+                reads.append(str(target))
+                return original_read(store, run_id, target, **kwargs)
+            self.archive.write_bytes(b"changed archive")
+            (self.game / "SkyrimSE.exe").write_bytes(b"changed game")
+            for row in record["layouts"]:
+                Path(row["configuration"]["modOrganizerIni"]["path"]).write_bytes(b"changed config")
+                Path(row["runtime"]["files"][0]["path"]).write_bytes(b"changed runtime")
+            with patch.object(h, "_stable_file", side_effect=AssertionError("historical current-file read")), \
+                    patch.object(h, "_git_source", side_effect=AssertionError("historical source probe")), \
+                    patch.object(h, "inspect_path_integrity", side_effect=AssertionError("historical integrity probe")):
+                with patch.object(h.ContainmentStore, "read_evidence_file", read):
+                    self.assertEqual(record, h._load_preparation(self.run_root))
+            self.assertTrue(reads)
+            self.assertTrue(all(Path(path).is_relative_to(config.authority_root) for path in reads))
+            (SCRATCH / "preparation-original-read-inventory.json").write_text(json.dumps(reads, indent=2))
+
+    def test_missing_or_substituted_preparation_capture_refuses_reconstruction(self):
+        """Protected references cannot be redirected to intact disposable originals."""
+        config, backend, record, release = self._protected_preparation_fixture()
+        captures = list(config.authority_root.rglob("*.capture.json")) if config.authority_root.exists() else []
+        self.assertTrue(captures, "preparation must retain actual captured originals")
+        receipt_path = next(path for path in captures if path.name == "ModOrganizer.ini.capture.json")
+        receipt = json.loads(receipt_path.read_bytes())
+        captured = Path(receipt["capturePath"])
+        with patch.object(h, "capability_run_root", return_value=self.run_root), \
+                patch.object(h, "load_mo2_release_bytes", return_value=release):
+            self.assertEqual(record, h._load_preparation(self.run_root))
+            originals_path = config.authority_root / "preparation-originals.json"
+            preparation_path = config.authority_root / "preparation.json"
+            original_record = originals_path.read_bytes()
+            original_preparation = preparation_path.read_bytes()
+            redirected = json.loads(original_record)
+            key = next(key for key, value in redirected["captures"].items() if value["capturePath"] == str(captured))
+            redirected["captures"][key]["capturePath"] = receipt["sourcePath"]
+            originals_path.write_bytes(h._canonical(redirected))
+            forged = json.loads(original_preparation)
+            forged["originalsSha256"] = h._sha256(h._canonical(redirected))
+            forged["preparationId"] = "preparation-sha256:" + h._sha256(h._canonical({key: value for key, value in forged.items() if key != "preparationId"}))
+            preparation_path.write_bytes(h._canonical(forged))
+            try:
+                with self.assertRaisesRegex(h.GateError, "capture provenance"):
+                    h._load_preparation(self.run_root)
+            finally:
+                originals_path.write_bytes(original_record)
+                preparation_path.write_bytes(original_preparation)
+            original = captured.read_bytes()
+            captured.write_bytes(b"substituted")
+            with self.assertRaisesRegex(h.GateError, "captur"):
+                h._load_preparation(self.run_root)
+            captured.write_bytes(original)
+            captured.unlink()
+            with self.assertRaises((h.GateError, OSError, RuntimeError)):
+                h._load_preparation(self.run_root)
+
+    def test_fresh_actions_recheck_preparation_before_phase_state_or_mutation(self):
+        """Historical success must not let direct/public/CLI action paths skip preflight."""
+        config, backend, record, release = self._protected_preparation_fixture()
+        self.archive.write_bytes(b"changed archive")
+        live = h.ProductionLiveBackend()
+        new_config = h.GateConfig(
+            self.scratch / ("b" * 32), self.archive, self.steam, config.source,
+            {"SingleFile": "bootstrap-job:" + "3" * 32, "Package": "bootstrap-job:" + "4" * 32},
+            authority_root=h.authority_run_root(self.scratch / ("b" * 32)),
+        )
+        with patch.object(h, "capability_run_root", side_effect=lambda run_id: self.run_root if run_id == self.run_root.name else new_config.run_root), \
+                patch.object(h, "_git_source", return_value=dict(config.source)), \
+                patch.object(h, "load_mo2_release_bytes", return_value=release), \
+                patch.object(h, "load_mo2_release", return_value=release):
+            for label, action in (
+                ("direct begin", lambda: live.begin_phase(self.run_root, "SingleFile", "Control")),
+                ("direct install", lambda: live.install_candidate(self.run_root, "SingleFile", "observation-sha256:" + "9" * 64)),
+                ("public phase", lambda: h.run_operator_phase(self.run_root, "SingleFile", "Control", backend=live, exchange=None)),
+                ("public install", lambda: h.install_operator_candidate(self.run_root, "SingleFile", "observation-sha256:" + "9" * 64, backend=live)),
+                ("public restart", lambda: h.restart_failed_attempt(self.run_root, new_config, live_backend=live, preparation_backend=backend)),
+                ("current status", lambda: live.load_state(self.run_root, "SingleFile")),
+                ("direct finalize", lambda: live.finalize_gate(self.run_root)),
+                ("CLI phase", lambda: h._cli_main(["phase", "--run-id", self.run_root.name, "SingleFile", "Control"])),
+                ("CLI install", lambda: h._cli_main(["install", "--run-id", self.run_root.name, "SingleFile", "--control-id", "observation-sha256:" + "9" * 64])),
+                ("CLI finalize", lambda: h._cli_main(["finalize", "--run-id", self.run_root.name])),
+                ("CLI restart", lambda: h._cli_main(["restart", "--run-id", self.run_root.name, "--new-run-id", new_config.run_root.name, "--archive", str(self.archive), "--steam-root", str(self.steam)])),
+            ):
+                with self.subTest(action=label), self.assertRaisesRegex(Exception, "current preparation archive identity differs"):
+                    action()
+            self.assertFalse(new_config.run_root.exists())
+            self.assertFalse((self.run_root / "SingleFile" / "jobs").exists())
+
+    def test_current_preflight_preserves_each_live_preparation_prerequisite(self):
+        """Every moved live check still blocks current use while history is unchanged."""
+        config, backend, record, release = self._protected_preparation_fixture()
+        row = record["layouts"][0]
+        artifact = row["artifact"]
+        workspace = Path(row["workspace"])
+        paths = (
+            ("archive", self.archive, "current preparation archive"),
+            ("game", self.game / "SkyrimSE.exe", "current Skyrim executable"),
+            ("metadata", workspace / "library" / "metadata" / "artifacts" / (artifact["sha256"] + ".json"), "archive"),
+            ("payload", workspace.joinpath(*artifact["storedRelativePath"].split("/")), "current retained archive payload"),
+            ("config", Path(row["appRoot"]) / "ModOrganizer.ini", "current ModOrganizer.ini"),
+            ("marker", Path(row["appRoot"]) / "nxmhandler.ini", "current nxmhandler.ini"),
+            ("runtime", Path(row["runtime"]["files"][1]["path"]), "current SingleFile runtime"),
+        )
+        original_stable = h._stable_file
+        extractor_changed = False
+        def stable(path):
+            if Path(path).absolute() == backend.extractor_path:
+                return {"path": str(backend.extractor_path), "sha256": "0" * 64 if extractor_changed else backend.extractor_sha256,
+                    "size": backend.extractor_size, "identity": {"volumeSerial": 1, "fileId": 1, "attributes": 32}}
+            return original_stable(path)
+        with patch.object(h, "_stable_file", side_effect=stable), \
+                patch.object(h, "capability_run_root", return_value=self.run_root), \
+                patch.object(h, "_git_source", return_value=dict(config.source)), \
+                patch.object(h, "load_mo2_release_bytes", return_value=release), \
+                patch.object(h, "load_mo2_release", return_value=release), \
+                patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW), \
+                patch.object(h, "read_windows_file_version", return_value="2.5.2.0"):
+            self.assertEqual(record, h._fresh_preparation_preflight(self.run_root))
+            for label, path, reason in paths:
+                original = path.read_bytes()
+                try:
+                    if label == "metadata":
+                        changed = json.loads(original)
+                        changed["sourceNote"] = "changed current metadata"
+                        path.write_bytes(h._canonical(changed))
+                    else:
+                        path.write_bytes(b"changed current input")
+                    self.assertEqual(record, h._load_preparation(self.run_root))
+                    with self.subTest(input=label), self.assertRaises(Exception) as raised:
+                        h._fresh_preparation_preflight(self.run_root)
+                    self.assertIn(reason, str(raised.exception).lower() if label == "metadata" else str(raised.exception))
+                finally:
+                    path.write_bytes(original)
+            extractor_changed = True
+            self.assertEqual(record, h._load_preparation(self.run_root))
+            with self.assertRaisesRegex(h.GateError, "current extractor"):
+                h._fresh_preparation_preflight(self.run_root)
+            extractor_changed = False
+            directory = Path(row["configuration"]["roots"][-1])
+            directory.rmdir()
+            try:
+                self.assertEqual(record, h._load_preparation(self.run_root))
+                with self.assertRaisesRegex(h.GateError, "current configured writable roots"):
+                    h._fresh_preparation_preflight(self.run_root)
+            finally:
+                directory.mkdir()
+            with patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.MEDIUM):
+                self.assertEqual(record, h._load_preparation(self.run_root))
+                with self.assertRaisesRegex(h.GateError, "current disposable path is not Low"):
+                    h._fresh_preparation_preflight(self.run_root)
+            with patch.object(h, "_git_source", return_value={"commit": "f" * 40, "tree": "e" * 40}):
+                self.assertEqual(record, h._load_preparation(self.run_root))
+                with self.assertRaisesRegex(h.GateError, "source/run/harness"):
+                    h._fresh_preparation_preflight(self.run_root)
+
+    def test_historical_disposable_attempt_cannot_acquire_new_authority(self):
+        """Legacy evidence remains byte-for-byte untouched and non-adoptable."""
+        self.run_root.mkdir(parents=True)
+        legacy = self.run_root / "preparation.json"
+        legacy.write_bytes(b"historical original")
+        backend = _FakeBackend(self.scratch, _listing("ModOrganizer.exe"))
+        config = h.GateConfig(self.run_root, self.archive, self.steam,
+            {"commit": "1" * 40, "tree": "2" * 40},
+            {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=h.authority_run_root(self.run_root))
+        with self.assertRaisesRegex(h.GateError, "fresh"):
+            h.prepare_gate(config, backend=backend)
+        with patch.object(h, "capability_run_root", return_value=self.run_root), self.assertRaises(Exception):
+            h._load_preparation(self.run_root)
+        self.assertEqual(b"historical original", legacy.read_bytes())
+        self.assertFalse(config.authority_root.exists())
+        self.assertEqual([], backend.mutations)
+
+    def test_preparation_capture_and_failure_publication_keep_both_original_owners(self):
+        """Secondary failure publication cannot discard a retained capture owner."""
+        backend = _FakeBackend(self.scratch, _listing("ModOrganizer.exe"))
+        config = h.GateConfig(self.run_root, self.archive, self.steam,
+            {"commit": "1" * 40, "tree": "2" * 40},
+            {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=h.authority_run_root(self.run_root))
+        exact = h.windows_exact_fs
+        first = exact.pin_stable_direct_object(self.archive, kind="file", delete_access=False)
+        second = exact.pin_stable_direct_object(self.game / "SkyrimSE.exe", kind="file", delete_access=False)
+        capture_error = exact.ExactObjectOwnershipError("capture close failed", verification=(first,))
+        publication_error = exact.ExactObjectOwnershipError("failure close failed", verification=(second,))
+        original_publish = h._publish_gate_json
+        def publish(root, target, value):
+            if Path(target).name == "failure.json":
+                raise publication_error
+            return original_publish(root, target, value)
+        try:
+            with patch.object(h.ContainmentStore, "capture_evidence_file", side_effect=capture_error), \
+                    patch.object(h, "_publish_gate_json", side_effect=publish), self.assertRaises(ContainmentOperationError) as raised:
+                h.prepare_gate(config, backend=backend)
+            owners = getattr(raised.exception.cause, "owners", ())
+            self.assertEqual({id(first), id(second)}, {id(owner.pinned) for owner in owners})
+            self.assertFalse((config.authority_root / "preparation.json").exists())
+        finally:
+            first.close()
+            second.close()
+
+    def test_vault_root_stays_pinned_across_delegated_preparation(self):
+        """Delegated bootstrap/configuration cannot replace the original authority root."""
+        backend = _FakeBackend(self.scratch, _listing("ModOrganizer.exe"))
+        authority = h.authority_run_root(self.run_root)
+        config = h.GateConfig(self.run_root, self.archive, self.steam,
+            {"commit": "1" * 40, "tree": "2" * 40},
+            {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=authority)
+        configure = backend.configure
+        denied = []
+        def delegated(layout, layout_root, manager):
+            with self.assertRaises(OSError):
+                authority.rename(authority.with_name(authority.name + "-replaced"))
+            denied.append(layout)
+            return configure(layout, layout_root, manager)
+        backend.configure = delegated
+        h.prepare_gate(config, backend=backend)
+        self.assertEqual(["SingleFile", "Package"], denied)
+        self.assertTrue((authority / "preparation.json").is_file())
+
+    def test_restart_uses_protected_preparations_and_record_at_explicit_phase_boundary(self):
+        """Restart keeps the failed attempt immutable and captures a new preparation."""
+        config, backend, record, release = self._protected_preparation_fixture()
+        new_root = self.run_root.with_name("b" * 32)
+        new_config = h.GateConfig(new_root, self.archive, self.steam, config.source,
+            {"SingleFile": "bootstrap-job:" + "3" * 32, "Package": "bootstrap-job:" + "4" * 32},
+            authority_root=h.authority_run_root(new_root))
+        # 5C owns phase causal reconstruction. These explicit phase stubs prove
+        # B's preparation/restart record flow, never a live UI or watcher result.
+        failure = {"failureId": "phase-failure-sha256:" + "8" * 64, "layout": "SingleFile", "phase": "Control"}
+        cleanup = {"cleanupId": "phase-cleanup-sha256:" + "9" * 64}
+        failed_path = self.run_root / "SingleFile" / "jobs" / "Control" / "failure.json"
+        failed_path.parent.mkdir(parents=True)
+        failed_path.write_bytes(b"explicit phase fixture, no native UI evidence")
+        old_bytes = (config.authority_root / "preparation.json").read_bytes()
+        live = h.ProductionLiveBackend()
+        original_stable = h._stable_file
+        def stable(path):
+            if Path(path).absolute() == backend.extractor_path:
+                return {"path": str(backend.extractor_path), "sha256": backend.extractor_sha256,
+                    "size": backend.extractor_size, "identity": {"volumeSerial": 1, "fileId": 1, "attributes": 32}}
+            return original_stable(path)
+        with patch.object(h, "capability_run_root", side_effect=lambda run_id: self.run_root if run_id == self.run_root.name else new_root), \
+                patch.object(h, "_git_source", return_value=dict(config.source)), \
+                patch.object(h, "load_mo2_release_bytes", return_value=release), \
+                patch.object(h, "load_mo2_release", return_value=release), \
+                patch.object(h, "_stable_file", side_effect=stable), \
+                patch.object(h, "read_windows_file_version", return_value="2.5.2.0"), \
+                patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW), \
+                patch.object(h, "_require_process_absence"), \
+                patch.object(h, "_load_phase_failure", return_value=failure), \
+                patch.object(h, "_load_phase_cleanup", return_value=cleanup), \
+                patch.object(live, "cleanup_failed_phase", return_value=h.ContainmentServiceResult(cleanup, ContainmentEffects())):
+            received = h.restart_failed_attempt(self.run_root, new_config, live_backend=live, preparation_backend=backend)
+            target = new_config.authority_root / "restart.json"
+            self.assertEqual(received.value, h._load_restart_record(new_root))
+            self.assertEqual(received.value, h._load_gate_json(new_root, target))
+            self.assertFalse((new_root / "restart.json").exists())
+            self.assertEqual(old_bytes, (config.authority_root / "preparation.json").read_bytes())
+            self.archive.write_bytes(b"current archive changed after restart")
+            self.assertEqual(received.value, h._load_restart_record(new_root))
+            with self.assertRaisesRegex(h.GateError, "current preparation archive"):
+                h._fresh_preparation_preflight(new_root)
+
+    def test_envelope_rejects_disposable_reference_before_any_original_read(self):
+        """A Low envelope path cannot choose an authority vault through its JSON."""
+        self.run_root.mkdir(parents=True)
+        target = self.run_root / "full-stack-envelope.json"
+        target.write_bytes(b"legacy disposable envelope")
+        with patch.object(h, "capability_run_root", return_value=self.run_root), \
+                patch.object(h, "load_exact_json", side_effect=AssertionError("untrusted original read")), \
+                patch.object(h, "_read_gate_evidence", side_effect=AssertionError("unexpected protected read")), \
+                self.assertRaisesRegex(h.GateError, "path/run binding"):
+            h.load_envelope(target)
+
+    def test_failed_preparation_receipts_capture_published_before_a_later_error(self):
+        """A partial durable capture must remain in the immutable failure effects."""
+        backend = _FakeBackend(self.scratch, _listing("ModOrganizer.exe"))
+        authority = h.authority_run_root(self.run_root)
+        config = h.GateConfig(self.run_root, self.archive, self.steam,
+            {"commit": "1" * 40, "tree": "2" * 40},
+            {"SingleFile": "bootstrap-job:" + "1" * 32, "Package": "bootstrap-job:" + "2" * 32},
+            authority_root=authority)
+        capture = h.ContainmentStore.capture_evidence_file
+        published = []
+        def fail_after_capture(store, run_id, source, target, **kwargs):
+            capture(store, run_id, source, target, **kwargs)
+            published.extend((target, target.with_name(target.name + ".capture.json")))
+            raise RuntimeError("injected failure after durable original capture")
+        with patch.object(h.ContainmentStore, "capture_evidence_file", fail_after_capture), self.assertRaises(ContainmentOperationError):
+            h.prepare_gate(config, backend=backend)
+        failure = h._load_preparation_failure(self.run_root)
+        self.assertEqual(2, len(published))
+        for path in published:
+            self.assertTrue(path.is_file())
+            self.assertIn(str(path), failure["effects"]["writtenPaths"])
+        self.assertFalse((authority / "preparation.json").exists())
 
     def _complete_phase_evidence(self, case: str):
         root = self.scratch / case / ("a" * 32)
@@ -629,7 +991,7 @@ class OfflineGateTests(unittest.TestCase):
             self.assertEqual("Created", row["bootstrap"]["mode"])
             self.assertEqual("Verified", row["bootstrap"]["state"])
             self.assertTrue(Path(row["appRoot"]).is_dir())
-        self.assertEqual(record, h.load_exact_json(self.run_root / "preparation.json"))
+        self.assertEqual(record, h.load_exact_json(h.authority_run_root(self.run_root) / "preparation.json"))
         self.assertRegex(record["preparationId"], r"^preparation-sha256:[0-9a-f]{64}$")
         self.assertRegex(record["sourceArtifactId"], r"^containment-source-artifact-sha256:[0-9a-f]{64}$")
         self.assertEqual("handle-pinned-no-replace-v2", record["policies"]["publication"])
@@ -652,13 +1014,13 @@ class OfflineGateTests(unittest.TestCase):
             backend=backend,
         )
         preparation = received.value
-        effect = h.load_exact_json(self.run_root / "preparation-effect.json")
+        effect = h.load_exact_json(h.authority_run_root(self.run_root) / "preparation-effect.json")
         self.assertEqual(preparation["preparationId"], effect["preparationId"])
         self.assertEqual(preparation["preparationEffectId"], effect["effect"]["effectId"])
         self.assertEqual(effect["effect"], h.validate_effect_record(effect["effect"]))
         self.assertEqual(h.build_effect_record("Preparation", received.effects), effect["effect"])
-        self.assertIn(str(self.run_root / "preparation.json"), effect["effect"]["writtenPaths"])
-        self.assertIn(str(self.run_root / "preparation-effect.json"), effect["effect"]["writtenPaths"])
+        self.assertIn(str(h.authority_run_root(self.run_root) / "preparation.json"), effect["effect"]["writtenPaths"])
+        self.assertIn(str(h.authority_run_root(self.run_root) / "preparation-effect.json"), effect["effect"]["writtenPaths"])
 
     def test_real_preparation_path_requires_the_full_strict_reload_before_success(self):
         backend = _FakeBackend(self.scratch, _listing("ModOrganizer.exe", "plugins/base.py"))
@@ -674,13 +1036,13 @@ class OfflineGateTests(unittest.TestCase):
 
         def strict_load(path):
             strict_loads.append(Path(path).absolute())
-            return h.load_exact_json(Path(path) / "preparation.json")
+            return h.load_exact_json(h.authority_run_root(path) / "preparation.json")
 
         with patch.object(h, "ProductionBackend", _FakeBackend), \
-                patch.object(h, "_load_preparation", side_effect=strict_load):
+                patch.object(h, "_fresh_preparation_preflight", side_effect=strict_load):
             received = h.prepare_gate(config, backend=backend)
         self.assertEqual([self.run_root], strict_loads)
-        self.assertEqual(received.value, h.load_exact_json(self.run_root / "preparation.json"))
+        self.assertEqual(received.value, h.load_exact_json(h.authority_run_root(self.run_root) / "preparation.json"))
 
     def test_preparation_binds_current_game_executable_and_root_identity(self):
         """A pathname alone is not durable evidence of the protected game tree."""
@@ -716,20 +1078,20 @@ class OfflineGateTests(unittest.TestCase):
         self.assertEqual((self.run_root,), raised.exception.effects.child_mutation_roots)
         self.assertTrue(self.run_root.is_dir())
         self.assertFalse((self.run_root / "preparation.json").exists())
-        failure = h.load_exact_json(self.run_root / "failure.json")
+        failure = h.load_exact_json(h.authority_run_root(self.run_root) / "failure.json")
         self.assertTrue(failure["terminal"])
         self.assertFalse(failure["retryPermitted"])
         effect = h.validate_effect_record(failure["effects"])
         self.assertEqual("Preparation:failed", effect["scope"])
         self.assertEqual([str(self.run_root)], effect["childMutationRoots"])
-        self.assertIn(str(self.run_root / "failure.json"), effect["writtenPaths"])
+        self.assertIn(str(h.authority_run_root(self.run_root) / "failure.json"), effect["writtenPaths"])
         self.assertTrue(any(path.endswith("fixture-plan.json") for path in effect["writtenPaths"]))
         self.assertIn("tar-plan:SingleFile", effect["preparationProcesses"])
         self.assertIn("tar-apply:SingleFile", effect["preparationProcesses"])
         self.assertEqual([], effect["sourceChanges"])
         self.assertEqual([], effect["gameChanges"])
         self.assertEqual([], effect["productionMo2Changes"])
-        self.assertEqual(failure, h.load_exact_json(self.run_root / "failure.json"))
+        self.assertEqual(failure, h.load_exact_json(h.authority_run_root(self.run_root) / "failure.json"))
 
     def test_raised_bootstrap_refusal_retains_real_partial_failure_effects(self):
         backend = _FakeBackend(self.scratch, _listing("ModOrganizer.exe"))
@@ -774,7 +1136,7 @@ class OfflineGateTests(unittest.TestCase):
         backend.apply_setup = refuse
         with self.assertRaises(ContainmentOperationError):
             h.prepare_gate(config, backend=backend)
-        failure = h.load_exact_json(self.run_root / "failure.json")
+        failure = h.load_exact_json(h.authority_run_root(self.run_root) / "failure.json")
         effect = h.validate_effect_record(failure["effects"])
         expected = str(self.run_root / "SingleFile" / "bootstrap" / Path(*relative.split("/")))
         self.assertIn(expected, effect["writtenPaths"])
@@ -1382,7 +1744,12 @@ class OfflineGateTests(unittest.TestCase):
             },
             "observedAt": "fixture",
         }
-        target = layout_root / "installation.json"
+        target = h.authority_run_root(self.run_root) / "SingleFile" / "installation.json"
+        authority = h.authority_run_root(self.run_root)
+        authority.parent.mkdir(parents=True, exist_ok=True)
+        from modlab.validation.windows_vault_security import create_vault
+        with create_vault(authority):
+            (authority / "SingleFile").mkdir()
         backend = h.ProductionLiveBackend()
         with patch.object(
             h,
@@ -1414,6 +1781,11 @@ class OfflineGateTests(unittest.TestCase):
         layout_root = self.run_root / "SingleFile"
         job = layout_root / "jobs" / "Control"
         job.mkdir(parents=True)
+        authority = h.authority_run_root(self.run_root)
+        authority.parent.mkdir(parents=True, exist_ok=True)
+        from modlab.validation.windows_vault_security import create_vault
+        with create_vault(authority):
+            (authority / "SingleFile").mkdir()
         backend = h.ProductionLiveBackend()
         backend.fail_install(
             self.run_root,
@@ -1425,12 +1797,18 @@ class OfflineGateTests(unittest.TestCase):
                 child_mutation_roots=(layout_root,),
             ),
         )
-        target = layout_root / "installation-failure.json"
+        target = h.authority_run_root(self.run_root) / "SingleFile" / "installation-failure.json"
         self.assertIn(str(target), h.load_exact_json(target)["effects"]["writtenPaths"])
 
     def test_installation_reload_requires_exact_control_and_effect_binding(self):
         layout_root = self.run_root / "SingleFile"
-        control_job = layout_root / "jobs" / "Control"
+        self.run_root.parent.mkdir(parents=True, exist_ok=True)
+        authority = h.authority_run_root(self.run_root)
+        authority.parent.mkdir(parents=True, exist_ok=True)
+        from modlab.validation.windows_vault_security import create_vault
+        with create_vault(authority):
+            pass
+        control_job = authority / "SingleFile" / "jobs" / "Control"
         control_job.mkdir(parents=True)
         observation = {"after": [], "runtimeAfter": []}
         control_id = "observation-sha256:" + h._sha256(h._canonical(observation))
@@ -1439,7 +1817,7 @@ class OfflineGateTests(unittest.TestCase):
         effect = h.build_effect_record(
             "SingleFile:Install",
             ContainmentEffects(
-                written_paths=(layout_root, layout_root / "installation.json"),
+                written_paths=(layout_root, authority / "SingleFile" / "installation.json"),
                 child_mutation_roots=(layout_root,),
             ),
         )
@@ -1465,27 +1843,27 @@ class OfflineGateTests(unittest.TestCase):
             "authority": False,
         }
         record["installationId"] = "installation-sha256:" + h._sha256(h._canonical(record))
-        h.publish_exact_json(layout_root / "installation.json", record)
+        h.publish_exact_json(authority / "SingleFile" / "installation.json", record)
         self.assertEqual(record, h._load_installation(self.run_root, "SingleFile"))
         forged = {**record, "controlId": "observation-sha256:" + "0" * 64}
         body = {key: item for key, item in forged.items() if key != "installationId"}
         forged["installationId"] = "installation-sha256:" + h._sha256(h._canonical(body))
 
-        original = h.load_exact_json
-        def forged_load(path):
-            return forged if Path(path).name == "installation.json" else original(path)
+        original = h._load_gate_json
+        def forged_load(root, path):
+            return forged if Path(path).name == "installation.json" else original(root, path)
 
-        with patch.object(h, "load_exact_json", side_effect=forged_load), self.assertRaises(h.GateError):
+        with patch.object(h, "_load_gate_json", side_effect=forged_load), self.assertRaises(h.GateError):
             h._load_installation(self.run_root, "SingleFile")
 
         forged_schema = {**record, "schemaVersion": h.SCHEMA_VERSION + 1}
         body = {key: item for key, item in forged_schema.items() if key != "installationId"}
         forged_schema["installationId"] = "installation-sha256:" + h._sha256(h._canonical(body))
 
-        def forged_schema_load(path):
-            return forged_schema if Path(path).name == "installation.json" else original(path)
+        def forged_schema_load(root, path):
+            return forged_schema if Path(path).name == "installation.json" else original(root, path)
 
-        with patch.object(h, "load_exact_json", side_effect=forged_schema_load), self.assertRaises(h.GateError):
+        with patch.object(h, "_load_gate_json", side_effect=forged_schema_load), self.assertRaises(h.GateError):
             h._load_installation(self.run_root, "SingleFile")
 
     def test_candidate_install_failure_is_terminal_and_cannot_be_reused(self):
@@ -1757,8 +2135,8 @@ class OfflineGateTests(unittest.TestCase):
                 ),
             ),
         )
-        original_load = h.load_exact_json
-        effect = original_load(self.run_root / "preparation-effect.json")
+        original_load = h._load_gate_json
+        effect = original_load(self.run_root, h.authority_run_root(self.run_root) / "preparation-effect.json")
         original_stable = h._stable_file
 
         def stable(path):
@@ -1772,13 +2150,13 @@ class OfflineGateTests(unittest.TestCase):
             return original_stable(path)
 
         def forged_load(value):
-            return lambda path: value if Path(path).name == "preparation.json" else (
-                effect if Path(path).name == "preparation-effect.json" else original_load(path)
+            return lambda root, path: value if Path(path).name == "preparation.json" else (
+                effect if Path(path).name == "preparation-effect.json" else original_load(root, path)
             )
 
         with patch.object(h, "capability_run_root", return_value=self.run_root), \
                 patch.object(h, "_git_source", return_value=source), \
-                patch.object(h, "load_mo2_release", return_value=release), \
+                patch.object(h, "load_mo2_release_bytes", return_value=release), \
                 patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW), \
                 patch.object(h, "_stable_file", side_effect=stable):
             self.assertEqual(record, h._load_preparation(self.run_root))
@@ -1787,7 +2165,7 @@ class OfflineGateTests(unittest.TestCase):
             forged["sourceArtifactId"] = h.source_artifact_id_for(forged["sourceArtifactManifest"])
             body = {key: item for key, item in forged.items() if key != "preparationId"}
             forged["preparationId"] = "preparation-sha256:" + h._sha256(h._canonical(body))
-            with patch.object(h, "load_exact_json", side_effect=forged_load(forged)), self.assertRaises(h.GateError):
+            with patch.object(h, "_load_gate_json", side_effect=forged_load(forged)), self.assertRaises(h.GateError):
                 h._load_preparation(self.run_root)
             for label, mutate in (
                 ("game root", lambda item: item.__setitem__("gameRoot", str(self.scratch / "other-game"))),
@@ -1809,7 +2187,7 @@ class OfflineGateTests(unittest.TestCase):
                     mutate(forged)
                     body = {key: item for key, item in forged.items() if key != "preparationId"}
                     forged["preparationId"] = "preparation-sha256:" + h._sha256(h._canonical(body))
-                    with patch.object(h, "load_exact_json", side_effect=forged_load(forged)), self.assertRaises(h.GateError):
+                    with patch.object(h, "_load_gate_json", side_effect=forged_load(forged)), self.assertRaises(h.GateError):
                         h._load_preparation(self.run_root)
 
     def test_preparation_reload_rejects_product_valid_nested_and_effect_substitutions(self):
@@ -1826,7 +2204,7 @@ class OfflineGateTests(unittest.TestCase):
             ),
             backend=backend,
         ).value
-        effect = h.load_exact_json(self.run_root / "preparation-effect.json")
+        effect = h.load_exact_json(h.authority_run_root(self.run_root) / "preparation-effect.json")
         release = SimpleNamespace(
             sha256="6" * 64,
             descriptor=SimpleNamespace(
@@ -1840,7 +2218,7 @@ class OfflineGateTests(unittest.TestCase):
                 ),
             ),
         )
-        original_load = h.load_exact_json
+        original_load = h._load_gate_json
         original_stable = h._stable_file
 
         def stable(path):
@@ -1858,13 +2236,13 @@ class OfflineGateTests(unittest.TestCase):
             value["preparationId"] = "preparation-sha256:" + h._sha256(h._canonical(body))
 
         def load_with(preparation, preparation_effect):
-            def load(path):
+            def load(root, path):
                 name = Path(path).name
                 if name == "preparation.json":
                     return preparation
                 if name == "preparation-effect.json":
                     return preparation_effect
-                return original_load(path)
+                return original_load(root, path)
             return load
 
         attacks = []
@@ -1914,7 +2292,7 @@ class OfflineGateTests(unittest.TestCase):
         common = (
             patch.object(h, "capability_run_root", return_value=self.run_root),
             patch.object(h, "_git_source", return_value=source),
-            patch.object(h, "load_mo2_release", return_value=release),
+            patch.object(h, "load_mo2_release_bytes", return_value=release),
             patch.object(h, "inspect_path_integrity", return_value=IntegrityLevel.LOW),
             patch.object(h, "_stable_file", side_effect=stable),
         )
@@ -1927,7 +2305,7 @@ class OfflineGateTests(unittest.TestCase):
                     forged = json.loads(json.dumps(record))
                     mutate(forged)
                     reidentify(forged)
-                    with patch.object(h, "load_exact_json", side_effect=load_with(forged, effect)), self.assertRaises(h.GateError):
+                    with patch.object(h, "_load_gate_json", side_effect=load_with(forged, effect)), self.assertRaises(h.GateError):
                         h._load_preparation(self.run_root)
 
             forged_effect = json.loads(json.dumps(effect))
@@ -1938,21 +2316,23 @@ class OfflineGateTests(unittest.TestCase):
             forged["preparationEffectId"] = forged_effect["effect"]["effectId"]
             reidentify(forged)
             forged_effect["preparationId"] = forged["preparationId"]
-            with patch.object(h, "load_exact_json", side_effect=load_with(forged, forged_effect)), self.assertRaises(h.GateError):
+            with patch.object(h, "_load_gate_json", side_effect=load_with(forged, forged_effect)), self.assertRaises(h.GateError):
                 h._load_preparation(self.run_root)
 
             manager_ini = Path(record["layouts"][0]["appRoot"]) / "ModOrganizer.ini"
             original_manager_ini = manager_ini.read_bytes()
             manager_ini.write_bytes(original_manager_ini.replace(b"base_directory=", b"base_directory=redirected-"))
-            with self.assertRaises(h.GateError):
-                h._load_preparation(self.run_root)
+            self.assertEqual(record, h._load_preparation(self.run_root))
+            with patch.object(h, "load_mo2_release", return_value=release), self.assertRaisesRegex(h.GateError, "current ModOrganizer.ini"):
+                h._fresh_preparation_preflight(self.run_root)
             manager_ini.write_bytes(original_manager_ini)
 
             artifact = record["layouts"][0]["artifact"]
             payload = Path(record["layouts"][0]["workspace"]).joinpath(*artifact["storedRelativePath"].split("/"))
             payload.write_bytes(b"substituted retained payload")
-            with self.assertRaises(h.GateError):
-                h._load_preparation(self.run_root)
+            self.assertEqual(record, h._load_preparation(self.run_root))
+            with patch.object(h, "load_mo2_release", return_value=release), self.assertRaisesRegex(h.GateError, "current retained archive payload"):
+                h._fresh_preparation_preflight(self.run_root)
 
     def test_production_phase_begin_receipts_processes_and_integrity_commands(self):
         layout_root = self.run_root / "SingleFile"

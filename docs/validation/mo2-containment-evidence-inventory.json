@@ -225,19 +225,19 @@
     "input": "gate/selection",
     "sourcePath": "trusted-gate-controller",
     "capturePath": "authority/<gate-run>/selection.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "consumer": "Task5 integration required; not a Task4 consumer; 5B protected record boundary implemented in tools/mo2_round8_gate.py; 5C phase/causal integration remains required"
   },
   {
     "input": "gate/installation",
     "sourcePath": "trusted-gate-controller",
     "capturePath": "authority/<gate-run>/installation.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "consumer": "Task5 integration required; not a Task4 consumer; 5B protected record boundary implemented in tools/mo2_round8_gate.py; 5C phase/causal integration remains required"
   },
   {
     "input": "gate/envelope",
     "sourcePath": "trusted-gate-controller",
     "capturePath": "authority/<gate-run>/envelope.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "consumer": "Task5 integration required; not a Task4 consumer; 5B protected record boundary implemented in tools/mo2_round8_gate.py; 5C phase/causal integration remains required"
   },
   {
     "input": "gate/phase-begin",
@@ -303,7 +303,7 @@
     "input": "gate/restart",
     "sourcePath": "trusted-gate-controller",
     "capturePath": "authority/<gate-run>/restart.json",
-    "consumer": "Task5 integration required; not a Task4 consumer"
+    "consumer": "Task5 integration required; not a Task4 consumer; 5B protected record boundary implemented in tools/mo2_round8_gate.py; 5C phase/causal integration remains required"
   },
   {
     "input": "capture/screenshot.png",
