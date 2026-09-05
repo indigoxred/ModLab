@@ -89,7 +89,7 @@ from modlab.adapters.mo2.path_budget import (
     publication_paths,
     stage_name,
 )
-from modlab.adapters.mo2.release import bundled_mo2_252_path, load_mo2_release, load_mo2_release_bytes
+from modlab.adapters.mo2.release import Mo2ReleaseDescriptor, bundled_mo2_252_path, load_mo2_release, load_mo2_release_bytes
 from modlab.artifacts.serialization import artifact_from_dict, artifact_to_dict
 from modlab.artifacts.vault import ArchiveVault
 from modlab.adapters.skyrim.windows_version import read_windows_file_version
@@ -1477,6 +1477,7 @@ def _validate_prepared_layout(
     jobs: Mapping[str, str],
     originals: Mapping[str, object],
     captures: Mapping[str, bytes],
+    release: Mo2ReleaseDescriptor,
 ) -> tuple[str, tuple[str, ...], set[Path]]:
     row = _exact_object(
         record,
@@ -1699,7 +1700,7 @@ def _validate_prepared_layout(
     expected_manager_ini = render_modorganizer_ini(
         workspace_layout(workspace),
         Path(str(preparation["gameRoot"])),
-        SimpleNamespace(product_version=str(preparation["mo2"]["version"])),
+        release,
     )
     if captures[layout + ":ini"] != expected_manager_ini:
         raise GateError("ModOrganizer.ini no longer binds the exact contained manager and game roots")
@@ -1916,6 +1917,7 @@ def _load_preparation(run_root: Path) -> Mapping[str, object]:
             jobs,
             originals,
             captures,
+            release,
         )
         artifact_ids.add(strict_artifact)
         expected_processes.extend(strict_process_rows)

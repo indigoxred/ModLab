@@ -368,6 +368,7 @@ class OfflineGateTests(unittest.TestCase):
         )
         record = h.prepare_gate(config, backend=backend).value
         release = SimpleNamespace(sha256="6" * 64, descriptor=SimpleNamespace(
+            product_version="2.5.2",
             archive_sha256=record["archive"]["sha256"], archive_size=record["archive"]["size"],
             archive_name=record["archive"]["originalName"],
             archive_entry_count=plan_from_dict(record["layouts"][0]["bootstrap"]["plan"]).archive.entry_count,
@@ -408,7 +409,7 @@ class OfflineGateTests(unittest.TestCase):
                 forged["bootstrap"]["journal"] = journal_to_dict(journal)
                 with self.assertRaisesRegex(h.GateError, "bootstrap journal cross-binding"):
                     h._validate_prepared_layout(self.run_root, record, "SingleFile", forged,
-                        record["bootstrapJobIds"], originals, captures)
+                        record["bootstrapJobIds"], originals, captures, release.descriptor)
 
     def test_preparation_reconstructs_distinct_preview_and_actual_job_budgets(self):
         config, backend, record, release = self._protected_preparation_fixture()
@@ -448,7 +449,7 @@ class OfflineGateTests(unittest.TestCase):
                     forged["bootstrap"]["journal"] = journal_to_dict(replace(journal, path_budget=plan.path_budget))
                 with self.assertRaisesRegex(h.GateError, "bootstrap.*(budget|cross-binding)"):
                     h._validate_prepared_layout(self.run_root, record, "SingleFile", forged,
-                        record["bootstrapJobIds"], originals, captures)
+                        record["bootstrapJobIds"], originals, captures, release.descriptor)
         for mutate in (
             lambda value: value["archiveListing"]["entries"].pop(),
             lambda value: value["archiveListing"].__setitem__("canonicalSha256", "0" * 64),
@@ -463,7 +464,19 @@ class OfflineGateTests(unittest.TestCase):
             mutate(changed)
             with self.assertRaises((h.GateError, h.PathBudgetError)):
                 h._validate_prepared_layout(self.run_root, record, "SingleFile", row,
-                    record["bootstrapJobIds"], changed, captures)
+                    record["bootstrapJobIds"], changed, captures, release.descriptor)
+
+    def test_preparation_uses_captured_product_version_for_ini(self):
+        config, backend, record, release = self._protected_preparation_fixture()
+        originals, captures = h._load_preparation_originals(self.run_root, record)
+        self.assertIn(b"\nversion=2.5.2\n", captures["SingleFile:ini"])
+        self.assertEqual(record["mo2"]["version"], "2.5.2.0")
+        with patch.object(h, "capability_run_root", return_value=self.run_root), \
+                patch.object(h, "load_mo2_release_bytes", return_value=release):
+            self.assertEqual(record, h._load_preparation(self.run_root))
+            with patch.object(release.descriptor, "product_version", "2.5.2.0"):
+                with self.assertRaisesRegex(h.GateError, "ModOrganizer.ini"):
+                    h._load_preparation(self.run_root)
 
     def test_historical_preparation_uses_originals_after_low_inputs_change(self):
         """A historical read must neither consume Low bytes nor run current probes."""
@@ -2820,6 +2833,7 @@ class OfflineGateTests(unittest.TestCase):
         release = SimpleNamespace(
             sha256="6" * 64,
             descriptor=SimpleNamespace(
+                product_version="2.5.2",
                 archive_sha256=record["archive"]["sha256"],
                 archive_size=record["archive"]["size"],
                 archive_name=record["archive"]["originalName"],
@@ -2905,6 +2919,7 @@ class OfflineGateTests(unittest.TestCase):
         release = SimpleNamespace(
             sha256="6" * 64,
             descriptor=SimpleNamespace(
+                product_version="2.5.2",
                 archive_sha256=record["archive"]["sha256"],
                 archive_size=record["archive"]["size"],
                 archive_name=record["archive"]["originalName"],
@@ -4841,7 +4856,7 @@ class _FakeBackend:
             render_modorganizer_ini(
                 h.workspace_layout(workspace),
                 Path(planned.game_root),
-                SimpleNamespace(product_version="2.5.2.0"),
+                SimpleNamespace(product_version="2.5.2"),
             )
         )
         mo2 = h._stable_file(app / "ModOrganizer.exe")
