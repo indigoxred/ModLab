@@ -38,6 +38,19 @@ def signature(plugins, target, resolve, context):
     return hashlib.sha256(json.dumps(['active-prefix-v1', context, inputs], sort_keys=True).encode()).hexdigest()
 
 
+def error_details(log):
+    """Keep the affected record identity alongside xEdit's field errors."""
+    lines, record, emitted = [], None, None
+    for line in log.splitlines():
+        if re.search(r'\[[A-Z0-9_]{4}:[0-9A-Fa-f]{8}\]\s*$', line) and not ('<Error:' in line or ' -> ' in line):
+            record = line
+        if '<Error:' in line or ' -> ' in line:
+            if record and record != emitted:
+                lines.append(record)
+                emitted = record
+            lines.append(line)
+    return '\n'.join(lines)[:10000]
+
 def read_cache(path):
     if not path.is_file():
         return {'version': 1, 'entries': {}}
@@ -71,6 +84,7 @@ def inspect_targets(plugins, resolve, context, cache_path):
                 continue
             completed.append(plugin.name)
             if entry['errors']:
+                entry['details'] = error_details((Path(entry['job'])/'tool.log').read_text(encoding='utf-8-sig', errors='replace'))
                 findings.append(Finding('Review', 'record-errors', f'Record problems reported: {plugin.origin or plugin.name}',
                     plugin.name + f' — {entry["errors"]} record errors\n' + entry.get('details', '') + '\nLog: ' + str(Path(entry['job'])/'tool.log'),
                     'Check the author’s explanation, updated matching release or required compatibility patch. Install supported fixes through '
@@ -113,7 +127,7 @@ def check_targets(plugins, resolve, context, cache_path, run, status=lambda mess
             errors = check_result(log, min(result['record_errors'], 127), target=plugin.name)
             if signature(plugins, plugin.name, resolve, context) != expected:
                 raise ValueError('Plugin inputs changed during the record check.')
-            details = '\n'.join(line for line in log.splitlines() if '<Error:' in line or ' -> ' in line)[:10000]
+            details = error_details(log)
             data['entries'][plugin.name.casefold()] = dict(signature=expected, job=str(job), log_hash=file_hash(log_path),
                                                          errors=errors, details=details)
             steps.append(f'xEdit checked {plugin.name}: {errors} record errors. Retained job: {job}')

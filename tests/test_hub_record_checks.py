@@ -66,12 +66,14 @@ class RecordChecks(unittest.TestCase):
             root=Path(temp); (root/'Bad.esp').write_bytes(b'plugin')
             plugins=(Plugin('Bad.esp',0,(), 'My follower'),)
             job=root/'job';job.mkdir()
-            (job/'tool.log').write_text('Checking for Errors in [01] Bad.esp\nNPC: <Error: Could not be resolved>\nDone: Checking for Errors, Processed Records: 3, Errors found: 1\n--= All Done =--')
+            (job/'tool.log').write_text('Checking for Errors in [01] Bad.esp\n[00:01] TestFollower "Named follower" [NPC_:01001234]\n[00:01]     NPC: <Error: Could not be resolved>\nDone: Checking for Errors, Processed Records: 3, Errors found: 1\n--= All Done =--')
             findings,_=check_targets(plugins, lambda n:root/n, {}, root/'checks.json',
                 lambda name:(job,{'record_errors':1},None,None))
             issue=next(f for f in findings if f.code=='record-errors')
             self.assertIn('My follower',issue.title)
             self.assertIn('Could not be resolved',issue.detail)
+            self.assertIn('Named follower', issue.detail)
+            self.assertIn('NPC_:01001234', issue.detail)
             self.assertNotEqual('Info',issue.level)
             self.assertIn('clean',issue.explanation.lower())
 
