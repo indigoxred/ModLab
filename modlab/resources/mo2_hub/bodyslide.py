@@ -90,6 +90,14 @@ def plan_build(catalog, selected, preset):
             raise ValueError(f'Project is no longer available: {name}')
         project = catalog.projects[name]
         if name != preset_set and not project.groups.intersection(preset_groups):
+            if not project.groups:
+                raise ValueError(
+                    f'"{name}" has no group metadata matching its project name '
+                    f'({project.source_file}). ModLab cannot establish whether preset "{preset}" '
+                    'applies; this is not proof of incompatibility. Install the author\'s corrected '
+                    'BodySlide group file, or inspect the project and preset in BodySlide and '
+                    'assign a group only after confirming their body family matches. '
+                    'Then reopen Body and outfit choices. Existing generated files are unchanged.')
             raise ValueError(f'The preset "{preset}" has no declared match for "{name}". '
                              'Choose a preset for that project/family, or inspect it in BodySlide.')
         for output in project.outputs:

@@ -55,6 +55,18 @@ class BodySlideTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'preset'):
                 plan_build(catalog, ['Body'], 'Other')
 
+    def test_missing_group_metadata_explains_uncertainty_and_repair(self):
+        with TemporaryDirectory() as directory:
+            catalog = self.catalogue(Path(directory), '<SliderSet name="Ungrouped">'
+                '<OutputPath>meshes</OutputPath><OutputFile>extra</OutputFile></SliderSet>')
+            with self.assertRaises(ValueError) as failure:
+                plan_build(catalog, ['Ungrouped'], 'Slim')
+            message = str(failure.exception)
+            self.assertIn('no group metadata', message)
+            self.assertIn('not proof of incompatibility', message)
+            self.assertIn('SliderSets/body.osp', message)
+            self.assertIn('group', message)
+
     def test_output_path_cannot_escape_the_generated_mod(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
