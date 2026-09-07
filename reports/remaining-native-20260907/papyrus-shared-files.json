@@ -1,0 +1,80 @@
+[
+  {
+    "path": "Scripts/ActorUtil.pex",
+    "standalone_sha256": "35d3fd46037a4482c1be195c5967ea96f7d0e03581940c9cbfc845948ec41c12",
+    "bundled_sha256": "2f0d539b05a709c3ba073d62d4afe8335dbfc6b68d61d37dcf618cd11e7236f6",
+    "identical": false
+  },
+  {
+    "path": "Scripts/JsonUtil.pex",
+    "standalone_sha256": "ca8d6ff7656ae97de1931b6c5aa28639a2f06f988c67b4a62bfc9fc747203140",
+    "bundled_sha256": "cb9122ebfc6955a13f98f5b8436bb478b6e16c85d8700168f8717b1473d4864c",
+    "identical": false
+  },
+  {
+    "path": "Scripts/MiscUtil.pex",
+    "standalone_sha256": "2e698fb2074f39532639206ef0b8dd216b17b624c2d67fead2d44a9003ee76fa",
+    "bundled_sha256": "6be2b8185cda795dbf2671b1f4a2441f982a10e508723fc4db6c6be3a6a6adf9",
+    "identical": false
+  },
+  {
+    "path": "Scripts/ObjectUtil.pex",
+    "standalone_sha256": "40a8b895c0ed3840f52f43c04068a9d29f020c08c8afcc27a3f22c5fd8436522",
+    "bundled_sha256": "de0dcbb750d82014acd96e81ae547a1b6a9e89302f681d325a58a0e6526a125e",
+    "identical": false
+  },
+  {
+    "path": "Scripts/PapyrusUtil.pex",
+    "standalone_sha256": "79a9b25d0c9a5ad3f2197014a1cb99637d0ec05e08243a7dd6e8a746c42f9830",
+    "bundled_sha256": "3457f0c9ea7a9be06e3dc2f72ad57ab04cbdc87818de6be9c15a0b6a3c0a28ed",
+    "identical": false
+  },
+  {
+    "path": "Scripts/Source/ActorUtil.psc",
+    "standalone_sha256": "6eb2fe534f7fe87df1a51e54cc6fa717e061a49ee0b6fa9e5dca4200de38a109",
+    "bundled_sha256": "6eb2fe534f7fe87df1a51e54cc6fa717e061a49ee0b6fa9e5dca4200de38a109",
+    "identical": true
+  },
+  {
+    "path": "Scripts/Source/JsonUtil.psc",
+    "standalone_sha256": "3de471cd4d653d0bf8e7c8c4acea523e5b68ca785c029bfc275f8d617e1574b9",
+    "bundled_sha256": "3de471cd4d653d0bf8e7c8c4acea523e5b68ca785c029bfc275f8d617e1574b9",
+    "identical": true
+  },
+  {
+    "path": "Scripts/Source/MiscUtil.psc",
+    "standalone_sha256": "7483f389b1c02899a2d32b31628d4dd09fa5177362506e92c086b65c8171295a",
+    "bundled_sha256": "7483f389b1c02899a2d32b31628d4dd09fa5177362506e92c086b65c8171295a",
+    "identical": true
+  },
+  {
+    "path": "Scripts/Source/ObjectUtil.psc",
+    "standalone_sha256": "c6cc3de5240882a848331f1b5086fe29237d93f8f55d8808eaa8f7ca95220d22",
+    "bundled_sha256": "c6cc3de5240882a848331f1b5086fe29237d93f8f55d8808eaa8f7ca95220d22",
+    "identical": true
+  },
+  {
+    "path": "Scripts/Source/PapyrusUtil.psc",
+    "standalone_sha256": "4c5e0b91916d68d7d64961c43eaf2766da5545d37f01de989297b99030890963",
+    "bundled_sha256": "4c5e0b91916d68d7d64961c43eaf2766da5545d37f01de989297b99030890963",
+    "identical": true
+  },
+  {
+    "path": "Scripts/Source/StorageUtil.psc",
+    "standalone_sha256": "62aa666560d2ecd760c9b2cc55b2d8fb033f959c7d70044961d58b6c522201c6",
+    "bundled_sha256": "62aa666560d2ecd760c9b2cc55b2d8fb033f959c7d70044961d58b6c522201c6",
+    "identical": true
+  },
+  {
+    "path": "Scripts/StorageUtil.pex",
+    "standalone_sha256": "9888472de44f420ef635294d70eb8f20e21e1da94f69029e69e3c1a22f1497ef",
+    "bundled_sha256": "071b6c7407210970ee64e01ebbd7b58df0684619819c8f48a6350999f2b71a20",
+    "identical": false
+  },
+  {
+    "path": "SKSE/Plugins/PapyrusUtil.dll",
+    "standalone_sha256": "69260a675186cf781a2105002505ab224fee12e84d004a3787670c9d6ce936be",
+    "bundled_sha256": "69260a675186cf781a2105002505ab224fee12e84d004a3787670c9d6ce936be",
+    "identical": true
+  }
+]

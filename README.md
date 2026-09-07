@@ -2,7 +2,17 @@
 
 ModLab is a Windows companion for building a hand-picked Bethesda mod setup without risking the setup you already play. You choose every component. ModLab is being built to make changes in a separate Lab, show objective checks and Unknowns, and promote only a setup you explicitly approve. It is not a one-click list and it does not use Vortex.
 
-## Current build
+## Current hub build
+
+The Skyrim prototype now has a **ModLab window inside MO2 2.5.2**. It installs archive queues with native FOMOD choices, assesses the active profile, coordinates supported LOOT/xEdit, BodySlide, Pandora, per-character NPC appearance, Synthesis and PGPatcher work, retains operation history and launches through MO2/SKSE. It remains an alpha: the full mixed-mod workflow and several planned helpers are incomplete.
+
+See [Hub setup, use and verification limits](docs/HUB_QUICKSTART.md) for the actual workflow, packaging command and remaining limitations. The selected PGPatcher mesh-fix workflow, NPC appearance selection/restoration and startup-log observation have been exercised in the live test profile. See [the latest delivery report](docs/HUB_DELIVERY_2026-09-07.md) for the exact checks and remaining gaps. The package contains the plugin, not games, mods or third-party helpers.
+
+The current target is Steam Skyrim **1.6.1170**, with a small external-patcher setup route that retains newer official content. See the [1.6.1170 compatibility checkpoint](docs/HUB_1170_COMPATIBILITY_2026-09-07.md) for current dependency guidance, changed-game-file launch checks and testing limits. Earlier gameplay observations do not certify the migrated profile.
+
+## Earlier command-line components
+
+The following describes the earlier CLI workflow, separately from the MO2-hosted hub above.
 
 The current build validates transparent Foundation Recipe files, retains user-selected ZIP/7z/RAR files in a local archive vault, and can register one explicitly selected Skyrim Steam library. It can preview, create, adopt, verify, and recover a contained portable MO2 2.5.2 setup. Create transactionally builds a new contained instance; Adopt verifies a compatible existing instance without writing beneath it. ModLab also captures immutable **Observed** Skyrim baselines and reports bounded drift across the game, manager, Lab/Play profiles, shared manager state, recipe intent, target environment, and inspection coverage. Its tested internal Lab-to-Play transaction engine retains prior and desired bytes, refuses drift, structurally excludes saves/co-saves, and can roll back after failure or process interruption. The public Skyrim workflow does not launch MO2 or a game, download mods, expose Lab-to-Play promotion, or change the real game.
 

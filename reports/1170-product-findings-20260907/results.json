@@ -1,0 +1,995 @@
+{
+  "scope": "Actual retained DLL bytes through ModLab foundation findings, evaluated one member at a time. Not an archive-installation verdict, FOMOD test, load test, or gameplay pass. No DLLs were executed. Address database contents are not validated by this check.",
+  "game_baseline": "The local Steam executable, launcher and shaders matched TARGET_FILES in game_setup.py.",
+  "samples": [
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/GOG 1.6.1179/cbp.dll",
+      "sha256": "96b3549eadb4f61fbe2c52b180383438d9e676d082845aefd586a7b344888069",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.6.1179.1\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.1179.1\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/GOG 1.6.1179/cbp.dll",
+      "sha256": "96b3549eadb4f61fbe2c52b180383438d9e676d082845aefd586a7b344888069",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThe DLL declares support for other game versions: 1.6.1179.1\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.1179.1\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/GOG 1.6.659/cbp.dll",
+      "sha256": "012bc391df75ce6b470f180bbe0759fcb91ac20c753b918d6df46244dc8864bf",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.6.659.1\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.659.1\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/GOG 1.6.659/cbp.dll",
+      "sha256": "012bc391df75ce6b470f180bbe0759fcb91ac20c753b918d6df46244dc8864bf",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThe DLL declares support for other game versions: 1.6.659.1\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.659.1\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.5.50/cbp.dll",
+      "sha256": "bc13f11b1c5ce4e42cbcc18fe92931648aed8f5c9a879fe09ae6cf1561378796",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.5.50/cbp.dll",
+      "sha256": "bc13f11b1c5ce4e42cbcc18fe92931648aed8f5c9a879fe09ae6cf1561378796",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.5.53/cbp.dll",
+      "sha256": "7be694b2988fdeda09b690c553a24ebf981821409811cdd551678ac07ae31ee7",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.5.53/cbp.dll",
+      "sha256": "7be694b2988fdeda09b690c553a24ebf981821409811cdd551678ac07ae31ee7",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.5.62/cbp.dll",
+      "sha256": "6f8227ad54d82900604c530d05377877195dce16056539daf92ed63557c2de32",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.5.62/cbp.dll",
+      "sha256": "6f8227ad54d82900604c530d05377877195dce16056539daf92ed63557c2de32",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.5.73/cbp.dll",
+      "sha256": "4bde8f4a2ded1b02227e0438d34b9bb5ab51d3fc82969d9ca14db270757ee768",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.5.73/cbp.dll",
+      "sha256": "4bde8f4a2ded1b02227e0438d34b9bb5ab51d3fc82969d9ca14db270757ee768",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.5.80/cbp.dll",
+      "sha256": "fdfa92a3072ee4ee9dd482cbf71c714812dc3c2495a1831b9496c003d45d87ea",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.5.80/cbp.dll",
+      "sha256": "fdfa92a3072ee4ee9dd482cbf71c714812dc3c2495a1831b9496c003d45d87ea",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.5.97/cbp.dll",
+      "sha256": "ac548201ea25700c7da99c5be4ca3bbea524738d141494bee82d1b187f1bfaec",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.5.97/cbp.dll",
+      "sha256": "ac548201ea25700c7da99c5be4ca3bbea524738d141494bee82d1b187f1bfaec",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.1130/cbp.dll",
+      "sha256": "66c5be3d1d2e3933b0a457fba3f08096424919ec3ab6388a90cbcbc61641b190",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.6.1130.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.1130.0\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.1130/cbp.dll",
+      "sha256": "66c5be3d1d2e3933b0a457fba3f08096424919ec3ab6388a90cbcbc61641b190",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThe DLL declares support for other game versions: 1.6.1130.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.1130.0\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.1170/cbp.dll",
+      "sha256": "598648894426a0865dba42644854da28bcc3d7afd7e789702836336de81aeb3e",
+      "runtime": "1.6.1170.0",
+      "findings": [],
+      "blocked": false
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.1170/cbp.dll",
+      "sha256": "598648894426a0865dba42644854da28bcc3d7afd7e789702836336de81aeb3e",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThe DLL declares support for other game versions: 1.6.1170.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.1170.0\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.318/cbp.dll",
+      "sha256": "635f50d3744bfac03d72a6a454ece9011049a8e9fdd2faaab56cec1eca0f3f1c",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.6.318.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.318.0\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.318/cbp.dll",
+      "sha256": "635f50d3744bfac03d72a6a454ece9011049a8e9fdd2faaab56cec1eca0f3f1c",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThe DLL declares support for other game versions: 1.6.318.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.318.0\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.323/cbp.dll",
+      "sha256": "6366f1093b4b6b6da714769b08458fd25e1804a1b083da6378201b61d2e8ac8c",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.6.323.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.323.0\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.323/cbp.dll",
+      "sha256": "6366f1093b4b6b6da714769b08458fd25e1804a1b083da6378201b61d2e8ac8c",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThe DLL declares support for other game versions: 1.6.323.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.323.0\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.342/cbp.dll",
+      "sha256": "336f2e97a382f7cf1a67ebbecb15deb1741c77cc03f0ada23b186a9d9ae97228",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.6.342.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.342.0\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.342/cbp.dll",
+      "sha256": "336f2e97a382f7cf1a67ebbecb15deb1741c77cc03f0ada23b186a9d9ae97228",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThe DLL declares support for other game versions: 1.6.342.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.342.0\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.353/cbp.dll",
+      "sha256": "28002d83a4eff646eb344c5588e6d52e7e35758de4aa5f224384facf1adef32c",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.6.353.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.353.0\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.353/cbp.dll",
+      "sha256": "28002d83a4eff646eb344c5588e6d52e7e35758de4aa5f224384facf1adef32c",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThe DLL declares support for other game versions: 1.6.353.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.353.0\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.629/cbp.dll",
+      "sha256": "37ec9d5a2215560187a12160ee40f0fbe72a2b23668c0d052ebcf0be7fd6650f",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.6.629.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.629.0\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.629/cbp.dll",
+      "sha256": "37ec9d5a2215560187a12160ee40f0fbe72a2b23668c0d052ebcf0be7fd6650f",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThe DLL declares support for other game versions: 1.6.629.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.629.0\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.640/cbp.dll",
+      "sha256": "7793e9cca742523d195992c86e56fc3edfe3ee18d6d5cf346b31be12e5d2f65d",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.6.640.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.640.0\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.6.640/cbp.dll",
+      "sha256": "7793e9cca742523d195992c86e56fc3edfe3ee18d6d5cf346b31be12e5d2f65d",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThe DLL declares support for other game versions: 1.6.640.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.640.0\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.7.104/cbp.dll",
+      "sha256": "bea732986401ac049cd94e6055ac3c614e1abba13b65efc65303199d11eb9eb5",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.7.104.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.7.104.0\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.7.104/cbp.dll",
+      "sha256": "bea732986401ac049cd94e6055ac3c614e1abba13b65efc65303199d11eb9eb5",
+      "runtime": "1.7.104.0",
+      "findings": [],
+      "blocked": false
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.7.99/cbp.dll",
+      "sha256": "f49082d0e3b8bb76f277ccf8b60598e45953938c48edf9068527d614db092990",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.7.99.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.7.99.0\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/SSE 1.7.99/cbp.dll",
+      "sha256": "f49082d0e3b8bb76f277ccf8b60598e45953938c48edf9068527d614db092990",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThe DLL declares support for other game versions: 1.7.99.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.7.99.0\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/VR 1.4.15/cbp.dll",
+      "sha256": "9585f78b2e4f1e09a3a33e1c7789e353caecd368738939b70ecd832b7792d729",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.6.1170.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+      "member": "00 Data/VR 1.4.15/cbp.dll",
+      "sha256": "9585f78b2e4f1e09a3a33e1c7789e353caecd368738939b70ecd832b7792d729",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z",
+          "detail": "SKSE/Plugins/cbp.dll\nWinning mod: CBPC - Fomod installer - MAIN FILE 21224 1.7.2 2026-08-30T23-48Z kATsMWw0A.7z\nSkyrim: 1.7.104.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "ConsoleUtilSSE NG 76649 1.6.1 2026-08-22T12-59Z Yj6wQRl9M.zip",
+      "member": "SKSE/Plugins/ConsoleUtilSSE.dll",
+      "sha256": "b7051f9f2a7be3f580d6c3cef8dacc1530095168c11048c3503a52593d81d174",
+      "runtime": "1.6.1170.0",
+      "findings": [],
+      "blocked": false
+    },
+    {
+      "archive": "ConsoleUtilSSE NG 76649 1.6.1 2026-08-22T12-59Z Yj6wQRl9M.zip",
+      "member": "SKSE/Plugins/ConsoleUtilSSE.dll",
+      "sha256": "b7051f9f2a7be3f580d6c3cef8dacc1530095168c11048c3503a52593d81d174",
+      "runtime": "1.7.104.0",
+      "findings": [],
+      "blocked": false
+    },
+    {
+      "archive": "Fuz Ro D'oh-15109-2-5-1706039953.7z",
+      "member": "SKSE/Plugins/Fuz Ro D'oh.dll",
+      "sha256": "7ba03cde23f7c3ce6ac5c2727fc240cf5d9f014dabb2a4de27e8decf651d33b9",
+      "runtime": "1.6.1170.0",
+      "findings": [],
+      "blocked": false
+    },
+    {
+      "archive": "Fuz Ro D'oh-15109-2-5-1706039953.7z",
+      "member": "SKSE/Plugins/Fuz Ro D'oh.dll",
+      "sha256": "7ba03cde23f7c3ce6ac5c2727fc240cf5d9f014dabb2a4de27e8decf651d33b9",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: Fuz Ro D'oh-15109-2-5-1706039953.7z",
+          "detail": "SKSE/Plugins/Fuz Ro D'oh.dll\nWinning mod: Fuz Ro D'oh-15109-2-5-1706039953.7z\nSkyrim: 1.7.104.0\nThe DLL declares support for other game versions: 1.6.1170.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.6.1170.0\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "HDT-SMP for SSE 1.5.97 v2.11-30872-2-11-1578745910.7z",
+      "member": "data/SKSE/Plugins/hdtSMP64.dll",
+      "sha256": "62497d49800d2e4b3bc29e62cd2a3cb2312dbe717aa8c1a3fa9ef3f6aa729031",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: HDT-SMP for SSE 1.5.97 v2.11-30872-2-11-1578745910.7z",
+          "detail": "SKSE/Plugins/hdtSMP64.dll\nWinning mod: HDT-SMP for SSE 1.5.97 v2.11-30872-2-11-1578745910.7z\nSkyrim: 1.6.1170.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "HDT-SMP for SSE 1.5.97 v2.11-30872-2-11-1578745910.7z",
+      "member": "data/SKSE/Plugins/hdtSMP64.dll",
+      "sha256": "62497d49800d2e4b3bc29e62cd2a3cb2312dbe717aa8c1a3fa9ef3f6aa729031",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: HDT-SMP for SSE 1.5.97 v2.11-30872-2-11-1578745910.7z",
+          "detail": "SKSE/Plugins/hdtSMP64.dll\nWinning mod: HDT-SMP for SSE 1.5.97 v2.11-30872-2-11-1578745910.7z\nSkyrim: 1.7.104.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "JContainers SE 16495 4.3.2 2026-09-04T17-29Z Ae46W7G5e.7z",
+      "member": "Data/SKSE/Plugins/JContainers64.dll",
+      "sha256": "dab6d55b0c28fcc10bbb1ebca2b65d5c59973e6db044413e594afdff56658ab3",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: JContainers SE 16495 4.3.2 2026-09-04T17-29Z Ae46W7G5e.7z",
+          "detail": "SKSE/Plugins/JContainers64.dll\nWinning mod: JContainers SE 16495 4.3.2 2026-09-04T17-29Z Ae46W7G5e.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.7.104.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.7.104.0\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "JContainers SE 16495 4.3.2 2026-09-04T17-29Z Ae46W7G5e.7z",
+      "member": "Data/SKSE/Plugins/JContainers64.dll",
+      "sha256": "dab6d55b0c28fcc10bbb1ebca2b65d5c59973e6db044413e594afdff56658ab3",
+      "runtime": "1.7.104.0",
+      "findings": [],
+      "blocked": false
+    },
+    {
+      "archive": "LSARNG_for_AE_for_build2.2.5_ver1.6.1130-15326-2-2-5-1702813288.7z",
+      "member": "Data/SKSE/plugins/LSARNG.dll",
+      "sha256": "0f677652bbe24eefeedcae005749a2d1394e9974ee7acd1ec72e1e2c7ff97c87",
+      "runtime": "1.6.1170.0",
+      "findings": [],
+      "blocked": false
+    },
+    {
+      "archive": "LSARNG_for_AE_for_build2.2.5_ver1.6.1130-15326-2-2-5-1702813288.7z",
+      "member": "Data/SKSE/plugins/LSARNG.dll",
+      "sha256": "0f677652bbe24eefeedcae005749a2d1394e9974ee7acd1ec72e1e2c7ff97c87",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: LSARNG_for_AE_for_build2.2.5_ver1.6.1130-15326-2-2-5-1702813288.7z",
+          "detail": "SKSE/Plugins/LSARNG.dll\nWinning mod: LSARNG_for_AE_for_build2.2.5_ver1.6.1130-15326-2-2-5-1702813288.7z\nSkyrim: 1.7.104.0\nThis build uses the older Address Library encoding and has no explicit declaration for Skyrim 1.7.104.0.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This build uses the older Address Library encoding and has no explicit declaration for Skyrim 1.7.104.0.\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "OStim Standalone 98163 7.5.1 2026-09-02T11-29Z HZCMOyQBQ.zip",
+      "member": "SKSE/Plugins/OStim.dll",
+      "sha256": "62d531c5dd138fcf9bb909487e7a4b61bdfecd0b584b5a8d570bc0d8cce1f078",
+      "runtime": "1.6.1170.0",
+      "findings": [],
+      "blocked": false
+    },
+    {
+      "archive": "OStim Standalone 98163 7.5.1 2026-09-02T11-29Z HZCMOyQBQ.zip",
+      "member": "SKSE/Plugins/OStim.dll",
+      "sha256": "62d531c5dd138fcf9bb909487e7a4b61bdfecd0b584b5a8d570bc0d8cce1f078",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-functional-incompatible",
+          "title": "OStim Standalone 7.5.1 does not support Skyrim 1.7.x",
+          "detail": "SKSE/Plugins/OStim.dll\nWinning mod: OStim Standalone 98163 7.5.1 2026-09-02T11-29Z HZCMOyQBQ.zip\nExact DLL SHA-256: 62d531c5dd138fcf9bb909487e7a4b61bdfecd0b584b5a8d570bc0d8cce1f078",
+          "action": "Use a supported runtime with matched dependencies, or a release whose author confirms 1.7 support. Author files and changelog: https://www.nexusmods.com/skyrimspecialedition/mods/98163?tab=files . If keeping 1.7, disable this release and its dependent functionality until a supported replacement exists.",
+          "explanation": "The author reports that Skyrim 1.7 changed its virtual machine and this release does not work. Its DLL declaration can pass while the framework still fails. Sorting, cleaning or installing Address Library cannot fix that documented functional limitation. This finding applies only to the identified 7.5.1 DLL on 1.7.x, not every release of this framework."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "OStim-40725-5-7-1663696032.zip",
+      "member": "01 SE/SKSE/Plugins/OSA.dll",
+      "sha256": "d3c030ad07794a7c564e4dc2a8a54a36be282cb5fd43877db420485b606542cf",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: OStim-40725-5-7-1663696032.zip",
+          "detail": "SKSE/Plugins/OSA.dll\nWinning mod: OStim-40725-5-7-1663696032.zip\nSkyrim: 1.6.1170.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "OStim-40725-5-7-1663696032.zip",
+      "member": "01 SE/SKSE/Plugins/OSA.dll",
+      "sha256": "d3c030ad07794a7c564e4dc2a8a54a36be282cb5fd43877db420485b606542cf",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: OStim-40725-5-7-1663696032.zip",
+          "detail": "SKSE/Plugins/OSA.dll\nWinning mod: OStim-40725-5-7-1663696032.zip\nSkyrim: 1.7.104.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "OStim-40725-5-7-1663696032.zip",
+      "member": "02 AE/SKSE/Plugins/OSA.dll",
+      "sha256": "944fbc903aab895b6f7ccddae6a65764fee039e652f333fc89642426239e5dd9",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: OStim-40725-5-7-1663696032.zip",
+          "detail": "SKSE/Plugins/OSA.dll\nWinning mod: OStim-40725-5-7-1663696032.zip\nSkyrim: 1.6.1170.0\nThe DLL declares the older game structure layout, before Skyrim 1.6.629.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares the older game structure layout, before Skyrim 1.6.629.\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "OStim-40725-5-7-1663696032.zip",
+      "member": "02 AE/SKSE/Plugins/OSA.dll",
+      "sha256": "944fbc903aab895b6f7ccddae6a65764fee039e652f333fc89642426239e5dd9",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: OStim-40725-5-7-1663696032.zip",
+          "detail": "SKSE/Plugins/OSA.dll\nWinning mod: OStim-40725-5-7-1663696032.zip\nSkyrim: 1.7.104.0\nThis build uses the older Address Library encoding and has no explicit declaration for Skyrim 1.7.104.0.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This build uses the older Address Library encoding and has no explicit declaration for Skyrim 1.7.104.0.\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "PapyrusUtil AE SE - Scripting Utility Functions 13048 4.8 2026-08-30T01-51Z OyYrPu3oN.zip",
+      "member": "SKSE/Plugins/PapyrusUtil.dll",
+      "sha256": "69260a675186cf781a2105002505ab224fee12e84d004a3787670c9d6ce936be",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: PapyrusUtil AE SE - Scripting Utility Functions 13048 4.8 2026-08-30T01-51Z OyYrPu3oN.zip",
+          "detail": "SKSE/Plugins/PapyrusUtil.dll\nWinning mod: PapyrusUtil AE SE - Scripting Utility Functions 13048 4.8 2026-08-30T01-51Z OyYrPu3oN.zip\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.7.104.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name. For 1.6.1170, the author lists PapyrusUtil 4.6 (Steam): https://www.nexusmods.com/skyrimspecialedition/mods/13048?tab=files . If this DLL is bundled in a framework, obtain that framework\u2019s matching package; do not swap only its DLL and leave incompatible scripts. Verify the dependent mods\u2019 minimum PapyrusUtil requirements before choosing an older release.",
+          "explanation": "The DLL declares support for other game versions: 1.7.104.0\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "PapyrusUtil AE SE - Scripting Utility Functions 13048 4.8 2026-08-30T01-51Z OyYrPu3oN.zip",
+      "member": "SKSE/Plugins/PapyrusUtil.dll",
+      "sha256": "69260a675186cf781a2105002505ab224fee12e84d004a3787670c9d6ce936be",
+      "runtime": "1.7.104.0",
+      "findings": [],
+      "blocked": false
+    },
+    {
+      "archive": "SexLabFrameworkAE_v166d.7z",
+      "member": "SKSE/Plugins/PapyrusUtil.dll",
+      "sha256": "69260a675186cf781a2105002505ab224fee12e84d004a3787670c9d6ce936be",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: SexLabFrameworkAE_v166d.7z",
+          "detail": "SKSE/Plugins/PapyrusUtil.dll\nWinning mod: SexLabFrameworkAE_v166d.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.7.104.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name. For 1.6.1170, the author lists PapyrusUtil 4.6 (Steam): https://www.nexusmods.com/skyrimspecialedition/mods/13048?tab=files . If this DLL is bundled in a framework, obtain that framework\u2019s matching package; do not swap only its DLL and leave incompatible scripts. Verify the dependent mods\u2019 minimum PapyrusUtil requirements before choosing an older release.",
+          "explanation": "The DLL declares support for other game versions: 1.7.104.0\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "SexLabFrameworkAE_v166d.7z",
+      "member": "SKSE/Plugins/PapyrusUtil.dll",
+      "sha256": "69260a675186cf781a2105002505ab224fee12e84d004a3787670c9d6ce936be",
+      "runtime": "1.7.104.0",
+      "findings": [],
+      "blocked": false
+    },
+    {
+      "archive": "SexLabFrameworkAE_v166d.7z",
+      "member": "SKSE/Plugins/SexLabUtil.dll",
+      "sha256": "d3f0c5077ebc53af9034214b1ef352e297f5514331aa5081a21619556443d6d6",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: SexLabFrameworkAE_v166d.7z",
+          "detail": "SKSE/Plugins/SexLabUtil.dll\nWinning mod: SexLabFrameworkAE_v166d.7z\nSkyrim: 1.6.1170.0\nThe DLL declares support for other game versions: 1.7.104.0\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "The DLL declares support for other game versions: 1.7.104.0\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "SexLabFrameworkAE_v166d.7z",
+      "member": "SKSE/Plugins/SexLabUtil.dll",
+      "sha256": "d3f0c5077ebc53af9034214b1ef352e297f5514331aa5081a21619556443d6d6",
+      "runtime": "1.7.104.0",
+      "findings": [],
+      "blocked": false
+    },
+    {
+      "archive": "Ultimate Combat SE-17196-3-5-1579966717.7z",
+      "member": "UltimateCombatSE/SKSE/Plugins/InsertAttackData.dll",
+      "sha256": "8eb34ad952de7f34fee9c0e78c2022348da774c45d2b0b1b06b332d8e3e49ce2",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: Ultimate Combat SE-17196-3-5-1579966717.7z",
+          "detail": "SKSE/Plugins/InsertAttackData.dll\nWinning mod: Ultimate Combat SE-17196-3-5-1579966717.7z\nSkyrim: 1.6.1170.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "Ultimate Combat SE-17196-3-5-1579966717.7z",
+      "member": "UltimateCombatSE/SKSE/Plugins/InsertAttackData.dll",
+      "sha256": "8eb34ad952de7f34fee9c0e78c2022348da774c45d2b0b1b06b332d8e3e49ce2",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: Ultimate Combat SE-17196-3-5-1579966717.7z",
+          "detail": "SKSE/Plugins/InsertAttackData.dll\nWinning mod: Ultimate Combat SE-17196-3-5-1579966717.7z\nSkyrim: 1.7.104.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "Ultimate Combat SE-17196-3-5-1579966717.7z",
+      "member": "UltimateCombatSE/SKSE/Plugins/UltimateCombat.dll",
+      "sha256": "5ffbf578b57db12431483d5a4dc03ad491d30f45065e6a59b3dea2c6e4649481",
+      "runtime": "1.6.1170.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: Ultimate Combat SE-17196-3-5-1579966717.7z",
+          "detail": "SKSE/Plugins/UltimateCombat.dll\nWinning mod: Ultimate Combat SE-17196-3-5-1579966717.7z\nSkyrim: 1.6.1170.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.6.1170.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    },
+    {
+      "archive": "Ultimate Combat SE-17196-3-5-1579966717.7z",
+      "member": "UltimateCombatSE/SKSE/Plugins/UltimateCombat.dll",
+      "sha256": "5ffbf578b57db12431483d5a4dc03ad491d30f45065e6a59b3dea2c6e4649481",
+      "runtime": "1.7.104.0",
+      "findings": [
+        {
+          "level": "Blocked",
+          "code": "native-runtime-incompatible",
+          "title": "Native component needs attention: Ultimate Combat SE-17196-3-5-1579966717.7z",
+          "detail": "SKSE/Plugins/UltimateCombat.dll\nWinning mod: Ultimate Combat SE-17196-3-5-1579966717.7z\nSkyrim: 1.7.104.0\nThis legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nSKSE declaration rules: https://github.com/ianpatt/skse64/blob/master/skse64/PluginManager.cpp",
+          "action": "Install the supplying mod's release for this exact Skyrim runtime and its dependencies, or disable it and dependent mods, then recheck. Sorting, cleaning and merging cannot repair a native runtime mismatch. Open Mod instructions for the supplying mod. Its download page is not recorded; ModLab will not guess a replacement from its folder name.",
+          "explanation": "This legacy SKSE plugin has no version declaration and is ignored by this runtime's SKSE loader.\nInstalled game: Skyrim 1.7.104.0.\n\nThis is the requirement declared by the installed native component. A compatible replacement must still load successfully and pass its feature check."
+        }
+      ],
+      "blocked": true
+    }
+  ]
+}

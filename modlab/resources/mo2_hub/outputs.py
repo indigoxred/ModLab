@@ -1,0 +1,129 @@
+"""Publish checked generated meshes with project provenance and a recoverable prior version."""
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+
+from .bodyslide import relative_path
+
+MANIFEST = '.modlab-output.json'
+CONTENTS = 'ModLab - Output contents.txt'
+
+
+def output_name(profile, profile_path, tool='BodySlide'):
+    label = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '-', profile).strip(' .')[:48] or 'Profile'
+    suffix = hashlib.sha256(str(profile_path).casefold().encode()).hexdigest()[:6]
+    return f'ModLab - {label} - {tool} [{suffix}]'
+
+
+def digest(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def read_manifest(target, profile_path, tool='BodySlide'):
+    path = target / MANIFEST
+    if not path.exists():
+        if any(p.name != 'meta.ini' for p in target.iterdir()):
+            raise ValueError('The output destination is not a ModLab managed output. Its files were left unchanged.')
+        return {'owner': 'ModLab ' + tool, 'profile_path': profile_path, 'projects': {}, 'hashes': {}}
+    record = json.loads(path.read_text(encoding='utf-8'))
+    if record.get('owner') != 'ModLab ' + tool or record.get('profile_path') != profile_path:
+        raise ValueError('This output belongs to another profile or tool. Its files were left unchanged.')
+    expected = record['hashes']
+    for name, checksum in expected.items():
+        path = target / relative_path(name)
+        if not path.is_file() or digest(path) != checksum:
+            raise ValueError(f'Managed output changed outside ModLab: {name}. Preserve or move your edit before rebuilding.')
+    actual = {p.relative_to(target).as_posix().casefold() for p in target.rglob('*') if p.is_file()}
+    allowed = {name.casefold() for name in expected} | {MANIFEST.casefold(), CONTENTS.casefold(), 'meta.ini'}
+    if actual - allowed:
+        raise ValueError('The output contains untracked files. Move them to a separate mod before rebuilding.')
+    return record
+
+
+def publish_output(target, job, profile_path, projects, hashes, *, tool='BodySlide', replace_all=False):
+    from .skse import require_game_closed
+    require_game_closed()
+    target, job = Path(target).absolute(), Path(job).absolute()
+    # The destination and all directory moves stay inside this instance. No game paths are accepted.
+    instance = target.parent.parent.resolve()
+    job.resolve().relative_to(instance / 'builds')
+    if target.is_symlink() or any(p.is_symlink() for p in target.rglob('*')):
+        raise ValueError('Managed output cannot contain linked paths.')
+    target.resolve().relative_to(target.parent.resolve())
+    outputs = [relative_path(name) for project in projects.values() for name in project['outputs']]
+    if not outputs or len({name.casefold() for name in outputs}) != len(outputs) or set(outputs) != set(hashes):
+        raise ValueError('Project output ownership does not match the checked build.')
+    for name, checksum in hashes.items():
+        source = job / 'output' / relative_path(name)
+        if not source.is_file() or digest(source) != checksum:
+            raise ValueError(f'Generated content changed before publication: {name}')
+    old = read_manifest(target, profile_path, tool)
+    new_paths = {name.casefold() for name in hashes}
+    removed = {name for name, project in old['projects'].items()
+               if replace_all or name in projects or new_paths.intersection(path.casefold() for path in project['outputs'])}
+    obsolete = {relative_path(path) for name in removed for path in old['projects'][name]['outputs']}
+    merged_projects = {name: value for name, value in old['projects'].items() if name not in removed}
+    merged_projects.update({name: dict(value, build_record=str(job / 'operation.json')) for name, value in projects.items()})
+    merged_hashes = {name: value for name, value in old['hashes'].items() if name not in obsolete}
+    merged_hashes.update(hashes)
+    pending, backup = job / 'pending-output', job / 'previous-output'
+    if pending.exists() or backup.exists():
+        raise ValueError('This build has already attempted publication. Reopen the build workflow before retrying.')
+    shutil.copytree(target, pending)
+    for name in obsolete:
+        (pending / name).unlink()
+    for name in hashes:
+        destination = pending / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(job / 'output' / name, destination)
+    manifest = dict(owner='ModLab ' + tool, profile_path=profile_path, projects=merged_projects,
+                    hashes=merged_hashes, previous_output=str(backup),
+                    updated_at=datetime.now(timezone.utc).isoformat())
+    (pending / MANIFEST).write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+    lines = ['ModLab - ' + tool + ' output', f'Profile: {profile_path}', '',
+             'These files were generated by ModLab. Keep manual edits in a separate mod.', '']
+    for name, project in sorted(merged_projects.items()):
+        lines.extend([name, f"  Source mod: {project.get('source_mod', 'Not identified')}",
+                      f"  Preset: {project['preset']}", f"  Build record: {project['build_record']}", ''])
+    (pending / CONTENTS).write_text('\n'.join(lines), encoding='utf-8')
+    read_manifest(pending, profile_path, tool)  # Verify the complete new collection before replacing anything.
+    if old != read_manifest(target, profile_path, tool):
+        raise ValueError('Output changed during preparation. The pending build was not published.')
+    os.replace(target, backup)
+    try:
+        os.replace(pending, target)
+    except OSError:
+        os.replace(backup, target)
+        raise
+    return manifest
+
+
+def inspect_output(target, profile_path, resolve_path, source_signature, *, transformed=()):
+    """Recognize only generated replacements whose inputs and effective content still match."""
+    manifest = read_manifest(target, profile_path)
+    valid, issues, records = set(), [], {}
+    source_signature = json.loads(json.dumps(source_signature))
+    for name, project in manifest['projects'].items():
+        record_path = Path(project['build_record']).resolve()
+        record_path.relative_to(target.parent.parent.resolve() / 'builds')
+        if record_path not in records:
+            records[record_path] = json.loads(record_path.read_text(encoding='utf-8'))
+        if records[record_path].get('sources') != source_signature:
+            issues.append(f'{name}: BodySlide inputs changed since this build.')
+            continue
+        for relative in project['outputs']:
+            if relative.casefold() in transformed:
+                valid.add(relative.casefold())
+                continue
+            path = Path(resolve_path(relative))
+            if (not path.is_file() or target.resolve() not in path.resolve().parents or
+                    digest(path) != manifest['hashes'][relative]):
+                issues.append(f'{name}: generated file is missing, changed or overridden: {relative}')
+            else:
+                valid.add(relative.casefold())
+    return valid, issues, manifest
