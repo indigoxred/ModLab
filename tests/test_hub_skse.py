@@ -9,6 +9,14 @@ from modlab.resources.mo2_hub import skse
 
 
 class SkseTests(unittest.TestCase):
+    def test_loader_resource_version_normalizes_its_leading_zero(self):
+        from modlab.resources.mo2_hub.native import packed_version
+        for text in ('0.2.2.8', '0, 2, 2, 8', '2.2.8', '2.2.8.0'):
+            self.assertEqual(packed_version('2.2.8.0'), skse.packed_loader_version(text))
+        for text in ('', 'unknown', '0.0.0.0', '2.2'):
+            with self.assertRaises(ValueError):
+                skse.packed_loader_version(text)
+
     def test_latest_skse_rejection_on_1170_links_the_matching_download(self):
         package = skse.PACKAGES['7bad616ed360823a027f8828801d91e3a4aa2eacd952023af7f3e31adb2ae250']
         with self.assertRaises(ValueError) as caught:

@@ -78,6 +78,8 @@ After updating ModLab, open this setup screen and run its baseline check once. A
 
 Choose native DLL releases for the **running executable**, even when newer official content is retained. A missing Address Library database is reported separately from an incompatible DLL. All-in-one library packages can contain the required older database despite a newer title. Download links use the supplying mod's recorded Nexus metadata where available; a link is not a verified replacement. Frameworks may bundle matching DLLs and scripts, so replacing only the DLL can leave another mismatch.
 
+Native minimum-SKSE requirements are compared with the selected game's actual loader file version during normal inspection and managed launch. A requirement newer than the installed loader blocks launch; an unreadable loader leaves that comparison Unknown. Multi-version archives must still use the correct FOMOD variant. Passing this check establishes neither native loading nor feature behavior.
+
 The author-documented OStim 7.5.1 functional failure on 1.7 is scoped to the checked DLL's exact identity. A passing DLL declaration does not override that exception; neither this rule nor declaration checks establish that unknown releases or complete framework combinations work.
 
 Use a copied profile and fresh test save. Existing native plugins may need different downloads or variants. A successful baseline check is not a promise that every previously installed mod works. Recheck the selected profile and test its intended features.

@@ -183,10 +183,18 @@ def collect_setup(organizer, *, version_reader) -> SetupSnapshot:
         generated_verified=generated_verified, generated_findings=tuple(generated_findings),
     )
     if game_name == 'Skyrim Special Edition' and hasattr(organizer, 'resolvePath'):
+        skse_version = None
+        if snapshot.skse_loader_present:
+            try:
+                from .skse import packed_loader_version
+                skse_version = packed_loader_version(version_reader(str(game_root / 'skse64_loader.exe')) or '')
+            except Exception:
+                pass  # DLLs declaring a minimum remain Unknown if the loader cannot be read.
         try:
             from .mod_documents import download_page
             source_page = (lambda name: download_page(organizer.modsPath(), name)) if hasattr(organizer, 'modsPath') else None
-            foundation_findings = inspect_foundations(snapshot, organizer.resolvePath, source_page=source_page)
+            foundation_findings = inspect_foundations(snapshot, organizer.resolvePath, source_page=source_page,
+                                                     skse_version=skse_version)
         except Exception as error:
             foundation_findings = (Finding('Unknown', 'inspection-incomplete', 'Foundation checks could not finish',
                 str(error), 'Resolve the reported file access problem and recheck.'),)

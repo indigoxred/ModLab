@@ -9,6 +9,34 @@ from modlab.resources.mo2_hub.inspection import collect_setup
 
 
 class HubInspectionTests(unittest.TestCase):
+    def test_normal_inspection_compares_dll_minimum_against_actual_skse_loader_version(self):
+        import struct
+        from tests.test_hub_native import dll_fixture, packed
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ('skse64_loader.exe', 'skse64_1_6_1170.dll', 'skse.pex'):
+                (root / name).write_bytes(b'fixture')
+            host = self.host(root)
+            host.listDirectories = lambda path: {'': ['SKSE'], 'SKSE': ['Plugins']}.get(path, [])
+            host.findFileInfos = lambda path, predicate: [Obj(filePath='example.dll', origins=['Example'], archive='')] if path == 'SKSE/Plugins' else []
+            host.resolvePath = lambda path: str(root / 'example.dll') if path.lower().endswith('.dll') else str(root / 'skse.pex') if path.lower() == 'scripts/skse.pex' else ''
+            for minimum, loader_version, expected in (
+                    (packed(2, 2, 5), '2.2.8.0', None),
+                    (packed(2, 2, 5), '0.2.2.8', None),
+                    (packed(2, 2, 5), '0, 2, 2, 8', None),
+                    (packed(2, 3, 0), '2.2.8.0', 'native-runtime-incompatible'),
+                    (packed(2, 2, 5), '', 'native-runtime-unknown')):
+                data = bytearray(dll_fixture(flags=6))
+                struct.pack_into('<I', data, 1536 + 844, minimum)
+                (root / 'example.dll').write_bytes(data)
+                result = collect_setup(host, version_reader=lambda path: loader_version if path.endswith('skse64_loader.exe') else '1.6.1170.0')
+                native = [f.code for f in result.generated_findings if f.code.startswith('native-runtime-')]
+                self.assertEqual([expected] if expected else [], native)
+                if expected == 'native-runtime-incompatible':
+                    finding = next(f for f in result.generated_findings if f.code == expected)
+                    self.assertIn('Required SKSE: 2.3.0.0', finding.detail)
+                    self.assertIn('Installed SKSE loader: 2.2.8.0', finding.detail)
+
     def test_normal_inspection_and_launch_detect_changed_recorded_game_files(self):
         import hashlib
         from unittest.mock import Mock, patch

@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 
 from .assessment import Finding
-from .native import inspect_binary, compatibility_problem, SOURCE as NATIVE_SOURCE
+from .native import inspect_binary, compatibility_problem, display_version, SOURCE as NATIVE_SOURCE
 from .vfs import readable_path
 
 SKSE_URL = 'https://skse.silverlock.org/'
@@ -39,7 +39,7 @@ def foundation_asset(path):
     return '/skse/plugins/' in '/' + path and bool(DATABASE.fullmatch(path.rsplit('/', 1)[-1]))
 
 
-def inspect_foundations(setup, resolve_path, *, source_page=None):
+def inspect_foundations(setup, resolve_path, *, source_page=None, skse_version=None):
     if setup.game_name != 'Skyrim Special Edition':
         return ()
     findings = []
@@ -89,6 +89,9 @@ def inspect_foundations(setup, resolve_path, *, source_page=None):
                 raise ValueError('MO2 did not resolve the effective DLL.')
             info = inspect_binary(physical)
             machine = info.machine
+            if info.skse_required:
+                detail += '\nRequired SKSE: ' + display_version(info.skse_required)
+                detail += '\nInstalled SKSE loader: ' + (display_version(skse_version) if skse_version is not None else 'unreadable or missing')
             checksum = ''
             if path == 'skse/plugins/ostim.dll' and setup.runtime.startswith('1.7.'):
                 from .outputs import digest
@@ -143,7 +146,7 @@ def inspect_foundations(setup, resolve_path, *, source_page=None):
         try:
             # Check the runtime independently so installing a missing database
             # cannot conceal an incompatible structure layout or declaration.
-            problem = compatibility_problem(info, setup.runtime, True)
+            problem = compatibility_problem(info, setup.runtime, True, skse_version)
         except ValueError as error:
             problem = ('Unknown', str(error))
         if info.is_plugin and info.data_version == 1 and info.flags & 1 and not address_present:

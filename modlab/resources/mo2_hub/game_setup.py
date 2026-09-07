@@ -155,7 +155,13 @@ def inspect_baseline(game, catalog, version_reader):
     results.append('CHECKED: Steam 1.6.1170 executable identity matches.')
     loader = game / 'skse64_loader.exe'
     loader_version = (version_reader(str(loader)) or '') if loader.is_file() else ''
-    if loader_version.removesuffix('.0') != '2.2.8' or not (game / 'skse64_1_6_1170.dll').is_file():
+    from .skse import packed_loader_version
+    from .native import packed_version
+    try:
+        matched_loader = packed_loader_version(loader_version) == packed_version('2.2.8')
+    except ValueError:
+        matched_loader = False
+    if not matched_loader or not (game / 'skse64_1_6_1170.dll').is_file():
         results.append('ACTION: Install the matching Steam SKSE 2.2.8 archive through ModLab. '
                        'The existing loader/runtime pair is missing or different.')
     else:

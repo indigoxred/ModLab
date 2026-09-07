@@ -16,6 +16,17 @@ from .bodyslide import relative_path
 from .outputs import digest
 
 
+def packed_loader_version(text):
+    """SKSE's Windows resource stores 2.2.8 as 0.2.2.8 (also comma-formatted)."""
+    from .native import packed_version
+    parts = [part.strip() for part in text.replace(',', '.').split('.')]
+    if len(parts) == 4 and parts[0] == '0':
+        parts = parts[1:]
+    if not parts or not parts[0].isdigit() or int(parts[0]) == 0:
+        raise ValueError('The SKSE loader version could not be identified.')
+    return packed_version('.'.join(parts))
+
+
 @dataclass(frozen=True)
 class Package:
     version: str

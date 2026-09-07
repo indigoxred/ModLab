@@ -43,6 +43,14 @@ Desktop access is still awaiting the user's availability confirmation. No new de
 
 `dist/ModLab-Hub-0.1.0-alpha-1170-20260907-0712.zip` contains 55 source modules and 57 total members. The builder parsed every module and read back every member. SHA-256: `e9633395ac4a3ba4dce53be8bb8a686a051654fc64f5c4c3cad6db0e3f706f03`; source identity: `89ed515418af6bde2ed3d460cad3714d457d036c8b8062f2a0bda3d5064e0fe5`. Third-party binaries, mods, user profiles and game files are excluded. Packaging does not deploy the update into MO2.
 
+## Follow-up: use installed SKSE in product decisions
+
+The intended download folder exposed a normal-inspection integration gap: the native comparator supports a minimum SKSE version, but its caller was not supplying the installed loader version. Normal collection and managed launch now supply that value. The real 2.2.8 loader uses Windows resource version `0.2.2.8`; both this format and conventional `2.2.8.0` are normalized before comparison. The setup screen uses the same normalization, avoiding a false request to reinstall the correct loader.
+
+The actual MCM Helper DLL and Papyrus Extender/powerofthree's Tweaks AE1170 variants meet SKSE 2.2.8. Both inspected generic AE variants require 2.3.0 and are blocked by the same product findings path. An unreadable loader retains Unknown rather than guessing. These five component checks and normal-collector tests do not prove full mod functionality. Further asset-only prerequisites and semantic patch-family checks remain incomplete; a manual folder report is not implementation of those features.
+
+Follow-up verification: **251 hub tests passed**. Package `dist/ModLab-Hub-0.1.0-alpha-1170-20260907-0730.zip` passed 55-module parsing and 57-member readback; SHA-256 `a5b9fe5712ab887bfcd37379b3603ff762183e895b285201bbebd91009eaa045`, source identity `96132141db2fcf588afdd76743327589551d538fd3063daba1aafa37aea92015`. It supersedes the 0712 package for this source fix. Deployment remains pending desktop availability.
+
 ## Sources for the release-specific guidance
 
 - [PapyrusUtil author files](https://www.nexusmods.com/skyrimspecialedition/mods/13048?tab=files): Steam 4.6 lists Skyrim 1.6.1170; 4.8 lists 1.7.104. Checked 7 September 2026.
