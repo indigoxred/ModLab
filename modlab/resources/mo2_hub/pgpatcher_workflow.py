@@ -390,6 +390,12 @@ def saved_build_current(organizer, saved, *, withdrawn=False):
         raise ValueError(saved.get('error') or 'Your selected graphics changes have not been accepted. Open Graphics choices to retry or cancel the request.')
     target = Path(organizer.modsPath()) / own_name(organizer)
     if saved['hashes']:
+        try:
+            target.stat()
+        except FileNotFoundError:
+            # A copied profile can retain choices without its generated mod.
+            # Rebuild it; existing output still requires the ownership checks below.
+            return False
         manifest = read_manifest(target, organizer.profilePath(), 'Graphics')
         if manifest['hashes'] != saved['hashes'] or (not withdrawn and effective_issues(organizer, target, saved['hashes'])):
             return False

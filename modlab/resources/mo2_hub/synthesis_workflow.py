@@ -7,6 +7,7 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import subprocess
 from uuid import uuid4
 
 from .helpers import HELPERS, load_locations, locate_helper
@@ -178,6 +179,22 @@ def working_environment(organizer, sdk):
             else: os.environ[key] = value
 
 
+def prepare_compilation(job, args):
+    """MO2 itself is not VFS-injected; prepare directly, before startApplication."""
+    log = job.directory / 'prepare.log'
+    job.record['status'] = 'Preparing selected patchers outside MO2'
+    job.save()
+    with log.open('wb') as output:
+        result = subprocess.run([*args, '--BuildOnly'], cwd=str(job.directory),
+            stdout=output, stderr=subprocess.STDOUT,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), timeout=600)
+    job.record['prepare_exit_code'] = result.returncode
+    job.save()
+    if result.returncode:
+        raise ValueError(f'Synthesis preparation failed (exit {result.returncode}). No patches were applied. '
+                         f'Read {log}. The selected CLI must support ModLab’s BuildOnly preparation option.')
+
+
 def run_job(organizer, job):
     check_context(organizer, job)
     directory = job.directory
@@ -186,11 +203,14 @@ def run_job(organizer, job):
             '--DataFolderPath', str(Path(organizer.managedGame().gameDirectory().absolutePath()) / 'Data'),
             '--LoadOrderFilePath', str(directory / 'plugins.txt'), '--ExtraDataFolder', str(directory / 'Data'),
             '--PersistencePath', str(directory / 'persistence'), '--PersistenceMode', 'Text', '--TargetRuntime', 'win-x64']
-    command = command_line(args, directory / 'tool.log')
     job.record.update(status='Building and running selected patchers', arguments=args)
     job.save()
     try:
         with working_environment(organizer, job.record['sdk']):
+            prepare_compilation(job, args)
+            check_context(organizer, job)
+            # A changed/missing build must fail instead of invoking the compiler in VFS.
+            command = command_line([*args, '--BlockBuildingWithinMo2'], directory / 'tool.log')
             handle = organizer.startApplication(str(Path(os.environ.get('SystemRoot', 'C:/Windows')) / 'System32/cmd.exe'),
                 [command], str(directory), organizer.profile().name())
         if not handle:

@@ -26,6 +26,21 @@ def plugin(master='Skyrim.esm'):
 
 
 class SynthesisTests(unittest.TestCase):
+    def test_failed_preparation_stops_before_patch_execution_and_retains_log(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from modlab.resources.mo2_hub.synthesis_workflow import prepare_compilation
+        with tempfile.TemporaryDirectory() as tmp:
+            job = SimpleNamespace(directory=Path(tmp), record={}, save=lambda:None)
+            def fail(args, **options):
+                options['stdout'].write(b'compiler failed')
+                return SimpleNamespace(returncode=7)
+            with patch('modlab.resources.mo2_hub.synthesis_workflow.subprocess.run', side_effect=fail):
+                with self.assertRaisesRegex(ValueError, 'preparation failed'):
+                    prepare_compilation(job, ['Synthesis.exe', 'run-pipeline'])
+            self.assertEqual(b'compiler failed', (Path(tmp)/'prepare.log').read_bytes())
+            self.assertEqual(7, job.record['prepare_exit_code'])
+
     def test_large_override_list_in_master_header_uses_extended_size(self):
         from modlab.resources.mo2_hub.synthesis import plugin_masters
         with tempfile.TemporaryDirectory() as tmp:

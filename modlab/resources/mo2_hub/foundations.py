@@ -93,7 +93,8 @@ def inspect_foundations(setup, resolve_path, *, source_page=None, skse_version=N
                 detail += '\nRequired SKSE: ' + display_version(info.skse_required)
                 detail += '\nInstalled SKSE loader: ' + (display_version(skse_version) if skse_version is not None else 'unreadable or missing')
             checksum = ''
-            if path == 'skse/plugins/ostim.dll' and setup.runtime.startswith('1.7.'):
+            if ((path == 'skse/plugins/ostim.dll' and setup.runtime.startswith('1.7.'))
+                    or (path == 'skse/plugins/enginefixes.dll' and required == '1-6-1170-0')):
                 from .outputs import digest
                 checksum = digest(Path(physical))
         except (OSError, ValueError) as error:
@@ -101,6 +102,35 @@ def inspect_foundations(setup, resolve_path, *, source_page=None, skse_version=N
                 'Could not inspect native component: ' + provider, detail + '\n' + str(error),
                 'Reinstall the supplying mod through ModLab if its files are missing or damaged, then recheck. '
                 'This inspection failure does not establish compatibility.'))
+            continue
+        # Verified 7.0.20 / 1.6.1170 FOMOD variant. Newer 1.7 builds use a
+        # different preload mechanism; do not infer their requirements here.
+        if (path == 'skse/plugins/enginefixes.dll' and required == '1-6-1170-0'
+                and checksum == '5d1384acfb523abd1333f5af71af0b7d131b6ebb1a0ee6b3edff86fb4c93adf3'
+                and not (Path(setup.game_root) / 'd3dx9_42.dll').is_file()):
+            findings.append(Finding('Blocked', 'engine-fixes-preloader-missing',
+                'Engine Fixes is missing its game-folder preloader', detail,
+                'Download Engine Fixes - SKSE64 Preloader from '
+                'https://www.nexusmods.com/skyrimspecialedition/mods/17230?tab=files&file_id=725261 . '
+                'Extract d3dx9_42.dll alongside SkyrimSE.exe in ' + str(setup.game_root) +
+                ', not inside Data. Then recheck and verify startup.',
+                'This installed 7.0.20 variant requires the separate preloader. Its startup error '
+                'confirms Skyrim exits without it. File presence resolves this missing-file check; '
+                'successful preloading must still be verified when the game starts.'))
+        # This exact installed binary was reported incompatible by SKSE 2.2.8
+        # on 1.6.1170. Its independence flags alone did not predict load success.
+        if (path == 'skse/plugins/enginefixes.dll' and required == '1-6-1170-0'
+                and checksum == '26af56098f739821558ac07e1b5730a223bcd8dd7af87ef1edb0288c22cae179'):
+            findings.append(Finding('Blocked', 'native-functional-incompatible',
+                'Installed Engine Fixes build failed to load on Skyrim 1.6.1170',
+                detail + '\nExact DLL SHA-256: ' + checksum,
+                'Install a complete Engine Fixes package supporting 1.6.1170 through ModLab, including its '
+                'required preloader setup. Disable this incompatible provider, then recheck. Author files: '
+                'https://www.nexusmods.com/skyrimspecialedition/mods/17230?tab=files . '
+                'Do not replace only the DLL while retaining mismatched supporting files.',
+                'SKSE reported this exact installed binary as incompatible during load on 1.6.1170. '
+                'Its compatibility declaration passed the static check, which does not prove it can run. '
+                'This finding is limited to that binary and runtime; it does not reject other Engine Fixes builds.'))
             continue
         # Exact downloaded 7.5.1 DLL; author's files/changelog checked 2026-09-07.
         # Its newer declaration does not resolve the documented 1.7 VM problem.

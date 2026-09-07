@@ -566,9 +566,10 @@ class HubWindow(QDialog):
 
     def show_setup_result(self, result):
         try:
+            blockers = [f for f in result.findings if f.level == 'Blocked' or f.code == 'workflow-incomplete']
             queue_records.record_setup(self.queue_journal, self.organizer.profilePath(), result.record,
                 needs_attention=any(f.level in {'Blocked', 'Review', 'Unknown'} for f in result.findings))
-            if any(f.level == 'Blocked' or f.code == 'workflow-incomplete' for f in result.findings):
+            if blockers:
                 self.launch_pending = False
             self.automatic_findings = result.findings
             self.automatic_steps = result.steps
@@ -580,8 +581,17 @@ class HubWindow(QDialog):
             for row, finding in enumerate(self.findings):
                 for column, value in enumerate((finding.level, finding.title, finding.action)):
                     self.table.setItem(row, column, QTableWidgetItem(value))
+            if blockers:
+                # A previous search/scroll position must not hide why launch stopped.
+                self.search.clear()
             self.filter_rows()
-            self.detail.setPlainText('Completed steps\n\n' + '\n'.join(result.steps) + f'\n\nSaved result: {result.record}')
+            self.table.scrollToTop()
+            completed = 'Completed steps\n\n' + '\n'.join(result.steps) + f'\n\nSaved result: {result.record}'
+            if blockers:
+                self.detail.setPlainText('Setup stopped — resolve these problems\n\n' +
+                    '\n\n'.join(f.title + '\nNext action: ' + f.action for f in blockers) + '\n\n' + completed)
+            else:
+                self.detail.setPlainText(completed)
             if any(f.level == 'Blocked' for f in result.findings):
                 self.summary.setText('Setup is blocked. Resolve the identified problems before launching.')
             elif any(f.code == 'workflow-incomplete' for f in result.findings):

@@ -11,6 +11,15 @@ from modlab.resources.mo2_hub.outputs import output_name, digest, MANIFEST
 
 
 class GraphicsCycleTests(unittest.TestCase):
+    def test_missing_graphics_output_requires_rebuild(self):
+        from modlab.resources.mo2_hub import pgpatcher_workflow as graphics
+        with TemporaryDirectory() as tmp:
+            host = Obj(modsPath=lambda:tmp, profilePath=lambda:tmp,
+                       profile=lambda:Obj(name=lambda:'Test'))
+            saved = {'status':'applied', 'hashes':{'mesh.nif':'previous hash'}}
+            with patch.dict(sys.modules, {'mobase':Obj()}):
+                self.assertFalse(graphics.saved_build_current(host, saved))
+
     def test_withdrawal_is_recoverable_and_refuses_modified_output(self):
         from modlab.resources.mo2_hub import pgpatcher_workflow as graphics
         with TemporaryDirectory() as tmp:

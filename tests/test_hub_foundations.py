@@ -8,6 +8,50 @@ from modlab.resources.mo2_hub.assessment import Asset, Plugin, SetupSnapshot, as
 
 
 class FoundationTests(unittest.TestCase):
+    def test_engine_fixes_7020_requires_preloader_in_game_root(self):
+        from dataclasses import replace
+        from modlab.resources.mo2_hub.foundations import inspect_foundations
+        from tests.test_hub_native import dll_fixture
+        with TemporaryDirectory() as directory:
+            root = Path(directory); dll = root / 'EngineFixes.dll'
+            dll.write_bytes(dll_fixture(flags=6, extended=2))
+            setup = replace(self.setup(root, assets=(Asset('SKSE/Plugins/EngineFixes.dll', ('Engine Fixes',)),)), runtime='1.6.1170.0')
+            with patch('modlab.resources.mo2_hub.outputs.digest', return_value=
+                       '5d1384acfb523abd1333f5af71af0b7d131b6ebb1a0ee6b3edff86fb4c93adf3'):
+                findings = inspect_foundations(setup, lambda p: str(dll) if p.endswith('.dll') else '')
+                missing = [f for f in findings if f.code == 'engine-fixes-preloader-missing']
+                self.assertEqual(1, len(missing))
+                self.assertEqual('Blocked', missing[0].level)
+                self.assertIn('725261', missing[0].action)
+                (root / 'd3dx9_42.dll').write_bytes(b'present')
+                findings = inspect_foundations(setup, lambda p: str(dll) if p.endswith('.dll') else '')
+                self.assertFalse(any(f.code == 'engine-fixes-preloader-missing' for f in findings))
+
+    def test_engine_fixes_observed_loader_failure_is_scoped_to_binary_and_runtime(self):
+        from modlab.resources.mo2_hub.foundations import inspect_foundations
+        from tests.test_hub_native import dll_fixture
+        from dataclasses import replace
+        checksum = '26af56098f739821558ac07e1b5730a223bcd8dd7af87ef1edb0288c22cae179'
+        with TemporaryDirectory() as directory:
+            root = Path(directory); dll = root / 'EngineFixes.dll'
+            dll.write_bytes(dll_fixture(flags=6, extended=2))
+            setup = self.setup(root, assets=(Asset('SKSE/Plugins/EngineFixes.dll', ('Renamed provider',)),))
+            for identity, runtime, blocked in ((checksum, '1.6.1170.0', True),
+                                               (checksum, '1.6.1170', True),
+                                               (checksum, '1.7.104.0', False),
+                                               ('other build', '1.6.1170.0', False)):
+                with self.subTest(identity=identity, runtime=runtime):
+                    with patch('modlab.resources.mo2_hub.outputs.digest', return_value=identity):
+                        findings = inspect_foundations(replace(setup, runtime=runtime),
+                            lambda p: str(dll) if p.lower().endswith('.dll') else '')
+                    failures = [f for f in findings if f.code == 'native-functional-incompatible']
+                    self.assertEqual(blocked, bool(failures))
+                    if blocked:
+                        self.assertEqual('Blocked', failures[0].level)
+                        self.assertIn('Renamed provider', failures[0].detail)
+                        self.assertIn('17230', failures[0].action)
+                        self.assertIn('complete', failures[0].action)
+
     def test_ostim_hash_read_failure_keeps_other_native_findings(self):
         from modlab.resources.mo2_hub.foundations import inspect_foundations
         from tests.test_hub_native import dll_fixture
