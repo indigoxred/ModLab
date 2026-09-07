@@ -21,17 +21,14 @@ def log_text(*, timestamp=NOW+1, runtime='01070680', status='loaded correctly', 
 
 
 class StartupTests(unittest.TestCase):
-    def test_fsmp_menu_diagnostic_requires_exact_version_and_observed_load_sequence(self):
+    def test_fsmp_load_sequence_does_not_prove_missing_settings_menu(self):
         from modlab.resources.mo2_hub.startup import integration_findings
         text = ('checking plugin hdtsmp64.dll\nchecking plugin SKSEMenuFramework.dll\n'
             'plugin hdtsmp64.dll (00000001 hdtsmp64 04010010) loaded correctly (handle 1)\n'
             'plugin SKSEMenuFramework.dll (00000001 SKSEMenuFramework 030E0000) loaded correctly (handle 2)\n'
             'init complete\n')
-        findings = integration_findings(text)
-        self.assertEqual(['fsmp-menu-registration'], [f.code for f in findings])
-        self.assertEqual('Review', findings[0].level)
-        self.assertIn('configs.json', findings[0].action)
-        self.assertIn('physics', findings[0].explanation)
+        # This exact sequence occurred with a working FSMP settings menu in-game.
+        self.assertEqual((), integration_findings(text))
         for other in (text.replace('04010010', '04020000'),
                       text.replace('checking plugin hdtsmp64.dll\nchecking plugin SKSEMenuFramework.dll',
                                    'checking plugin SKSEMenuFramework.dll\nchecking plugin hdtsmp64.dll'),

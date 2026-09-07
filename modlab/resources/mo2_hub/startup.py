@@ -33,31 +33,14 @@ def windows_path(path):
 
 
 def integration_findings(text):
-    """Version-bounded advice from a retained initialization log, not gameplay proof."""
-    # v4.1.1's bundled SDK stores GetModuleHandle at DLL initialization, then
-    # reuses it during PostPostLoad registration. A later framework load leaves
-    # those menu functions unavailable. Observed live with the official AVX DLL.
-    # https://github.com/DaymareOn/hdtSMP64/blob/v4.1.1/extern/SKSEMenuFramework/include/SKSEMenuFramework.h
-    checks = re.findall(r'^checking plugin (.+\.dll)\s*$', text, re.M | re.I)
-    checks = [name.casefold() for name in checks]
-    if (not re.search(r'^init complete\s*$', text, re.M) or
-            not all(name in checks for name in ('hdtsmp64.dll', 'sksemenuframework.dll')) or
-            checks.index('hdtsmp64.dll') > checks.index('sksemenuframework.dll')):
-        return ()
-    if not re.search(r'^plugin hdtsmp64\.dll \(00000001 hdtsmp64 04010010\) loaded correctly ', text, re.M | re.I):
-        return ()
-    if not re.search(r'^plugin SKSEMenuFramework\.dll \([^\n]+\) loaded correctly ', text, re.M | re.I):
-        return ()
-    return (Finding('Review', 'fsmp-menu-registration', 'FSMP 4.1.1 settings menu may be missing',
-        'This launch loaded FSMP 4.1.1 before SKSE Menu Framework. The release caches the menu-library handle early, '
-        'which can leave its settings pages unregistered even though both DLLs load.',
-        'Open the in-game Menu Framework panel and check for FSMP. If absent, use FSMP’s configs.json or smp console '
-        'commands for now, or install an author-provided release that fixes menu registration. '
-        'Mod instructions and the mod folder provide access to its configuration guidance. '
-        'Sorting plugins and cleaning will not repair DLL menu registration.',
-        'This is a settings-menu concern, not evidence that physics failed. The diagnosis follows the observed DLL '
-        'sequence and the v4.1.1 source; patched builds using the same version may differ. Physics still needs a '
-        'targeted content check. Source: https://github.com/DaymareOn/hdtSMP64/blob/v4.1.1/extern/SKSEMenuFramework/include/SKSEMenuFramework.h'),)
+    """Do not infer settings-menu availability from SKSE's DLL load sequence.
+
+    FSMP 4.1.1's settings pages were observed working with the exact sequence
+    previously flagged here. A successful load is neither proof of missing
+    menus nor proof that their physics/content works. Keep those separate
+    from the actual plugin-load checks below.
+    """
+    return ()
 
 
 def parse_log(text):
