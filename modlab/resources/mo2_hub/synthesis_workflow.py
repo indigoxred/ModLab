@@ -63,7 +63,13 @@ def input_state(organizer, outputs, *, output_mod=None, excluded_outputs=()):
             continue
         if name.casefold() in {n.casefold() for n in outputs}:
             if plugins.origin(name) != own:
-                raise ValueError('A selected patch name already belongs to another mod: ' + name)
+                raise ValueError(
+                    f'{name} is already supplied by "{plugins.origin(name)}". '
+                    f'This profile would generate it in "{own}". '
+                    'If the existing mod is an inherited generated output, disable it in this profile '
+                    'and recheck to rebuild from your saved choices. Keep its files for the original profile. '
+                    'If it is an independently installed patch, resolve the output-name conflict before rebuilding. '
+                    'No existing output was overwritten.')
             continue
         if plugins.origin(name) in excluded:
             continue
