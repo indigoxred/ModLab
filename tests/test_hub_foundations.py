@@ -8,6 +8,22 @@ from modlab.resources.mo2_hub.assessment import Asset, Plugin, SetupSnapshot, as
 
 
 class FoundationTests(unittest.TestCase):
+    def test_known_skse_scripts_from_other_runtime_are_rejected(self):
+        from types import SimpleNamespace
+        from modlab.resources.mo2_hub.foundations import skse_files_error
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'skse64_1_6_1170.dll').write_bytes(b'runtime')
+            script = root / 'skse.pex'
+            script.write_bytes(b'script')
+            setup = SimpleNamespace(runtime='1.6.1170.0', game_root=str(root))
+            with patch('modlab.resources.mo2_hub.outputs.digest', return_value=
+                       '96a817c867a2dbbf0d96536e29145853972c8e6472a115038563b9b165c9845b'):
+                self.assertIn('2.3.1', skse_files_error(setup, lambda p: str(script)))
+            with patch('modlab.resources.mo2_hub.outputs.digest', return_value=
+                       '681b90c953340fcbf7d0f6d4243e16bf51ae60b973b980dad141ea498c10a53c'):
+                self.assertEqual('', skse_files_error(setup, lambda p: str(script)))
+
     def test_engine_fixes_7020_requires_preloader_in_game_root(self):
         from dataclasses import replace
         from modlab.resources.mo2_hub.foundations import inspect_foundations

@@ -30,6 +30,18 @@ def skse_files_error(setup, resolve_path):
     script = resolve_path('scripts/skse.pex')
     if not script or not Path(script).is_file():
         return 'SKSE scripts are missing from the active profile. Root loader files alone are insufficient.'
+    # Official package members, not provider names: profiles can inherit scripts
+    # from a different runtime without having their own SKSE deployment manifest.
+    from .outputs import digest
+    mismatches = {
+        ('1.6.1170', '96a817c867a2dbbf0d96536e29145853972c8e6472a115038563b9b165c9845b'): '2.3.1',
+        ('1.7.104', '681b90c953340fcbf7d0f6d4243e16bf51ae60b973b980dad141ea498c10a53c'): '2.2.8',
+    }
+    wrong_version = mismatches.get(('.'.join(version.groups()), digest(Path(script))))
+    if wrong_version:
+        return (f'The active SKSE script is from SKSE {wrong_version}, which does not match Skyrim {setup.runtime}. '
+                f'Winning script: {script}. Reinstall the matching SKSE package through ModLab; '
+                'changing plugin order or cleaning cannot repair this script mismatch.')
     return ''
 
 
