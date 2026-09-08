@@ -142,7 +142,7 @@ def verify_output(root, expected):
 def write_build_config(runner, output, game_data, selected, group_name):
     config = ET.parse(runner / 'Config.xml')
     root = config.getroot()
-    for key, value in {'TargetGame': '4', 'GameDataPath': str(game_data),
+    for key, value in {'TargetGame': '4', 'GameDataPath': str(game_data).rstrip('/\\') + '/',
                        'OutputDataPath': str(output), 'ProjectPath': str(runner),
                        'AppDir': str(runner), 'WarnMissingGamePath': 'true'}.items():
         node = root.find(key)

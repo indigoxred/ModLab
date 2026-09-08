@@ -67,3 +67,10 @@ Bodies & outfits now has Customize this shape in BodySlide. It opens the install
 Preset publication uses managed Shape Presets output with provenance and recovery. If OBody configuration is active, its existing rules are preserved and the new preset is excluded from random distribution. Consecutive saves and unchanged light-plugin rules are covered. This does not complete individual character assignment or neutral-base preparation; OBody is still optional and uninstalled on this test profile.
 
 Validation: 371 hub unit/integration tests passed. The editor configuration keys and Save workflow were checked against BodySlide v5.8.2 source: https://github.com/ousnius/BodySlide-and-Outfit-Studio/blob/v5.8.2/src/program/BodySlideApp.cpp . Desktop smoke verification follows deployment.
+
+
+### September 8 desktop customization check
+
+After the startup encoding fix (58b8d95), the actual MO2 profile opened Customize with CBBE NeverNude and a copied Athletic preset. Changing the high-weight ankle slider to 10%, clicking Save, and closing BodySlide returned `ModLab - Shared female - CBBE NeverNude [efe413484e0a]` as the selected preset. The operation journal recorded the preset installed and effective; no Prepare and apply action was taken and no meshes were published. OBody was not installed for this workflow.
+
+The first preview displayed missing textures. BodySlide's own `Log_BS.txt` identified malformed `Datatextures/...` and `Data...textures.bsa` lookups: its loader concatenates the configured base directory and resource name. ModLab now supplies the trailing directory separator. A failing-then-passing resource lookup regression covers loose textures and archives; all 373 hub tests pass. A fresh live preview check follows this fix. Preset save/import has been observed; the complete per-character shape editor remains unfinished.
