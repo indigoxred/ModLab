@@ -168,7 +168,8 @@ class HubWindow(QDialog):
                 result, record_path = skse_workflow.install_package(self.organizer, Path(filename), checksum, package,
                                                                    mobase.getFileVersion, self.install_finished)
             else:
-                result, record_path = install_archive(self.organizer, Path(filename), self.install_finished)
+                result, record_path = install_archive(self.organizer, Path(filename), self.install_finished,
+                                                      on_progress=self.summary.setText)
             self.show()
             if result.status == 'Installed; activation pending':
                 self.summary.setText(result.detail)
