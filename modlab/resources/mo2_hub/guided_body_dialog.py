@@ -54,7 +54,7 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
         self.shape_support.setToolTip('Shape data is used by RaceMenu and body distribution helpers. Preparing it does not assign a preset to individual characters.')
         form.addRow('In-game shape support', self.shape_support)
         layout.addLayout(form)
-        self.customize_button = QPushButton('Customize this shape in BodySlide…')
+        self.customize_button = QPushButton('Customize this shape in BodySlide...')
         self.customize_button.clicked.connect(self.customize_shared)
         layout.addWidget(self.customize_button)
         self.body_note = note(''); layout.addWidget(self.body_note)
