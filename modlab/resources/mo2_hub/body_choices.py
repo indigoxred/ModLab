@@ -145,3 +145,14 @@ def verified_default(request, record, directory, applied):
             and set(request.get('selected', ())) == set(record.get('projects', ()))
             and request.get('body') in record.get('projects', ())
             and bool(record.get('hashes')))
+
+
+def selected_morph_mode(selected, saved, choice):
+    """Preserve the selected items' mode; Advanced's current checkbox is irrelevant."""
+    if choice is not None:
+        return bool(choice)
+    modes = {bool(saved[name].get('morphs', False)) for name in selected if name in saved}
+    if len(modes) > 1:
+        raise ValueError('These selected bodies/outfits have different in-game shape settings. '
+            'Choose Include body shape data or Static body only for this build. Current files are unchanged.')
+    return next(iter(modes), False)

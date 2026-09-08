@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QLa
 
 from .body_dialog import BodyDialog
 from .body_choices import (shared_bodies, compatible_presets, choice_groups,
-    select_projects, load_defaults, save_default, verified_default)
+    select_projects, load_defaults, save_default, verified_default, selected_morph_mode)
 from .guidance import display_name
 
 
@@ -46,6 +46,12 @@ class GuidedBodyDialog(BodyDialog):
         form.addRow('Who uses this body?', self.sex_choice)
         self.body_choice = QComboBox(); form.addRow('Body', self.body_choice)
         self.shape_choice = QComboBox(); form.addRow('Shape preset', self.shape_choice)
+        self.shape_support = QComboBox()
+        self.shape_support.addItem('Keep existing setting', None)
+        self.shape_support.addItem('Include body shape data', True)
+        self.shape_support.addItem('Static body only', False)
+        self.shape_support.setToolTip('Shape data is used by RaceMenu and body distribution helpers. Preparing it does not assign a preset to individual characters.')
+        form.addRow('In-game shape support', self.shape_support)
         layout.addLayout(form)
         self.body_note = note(''); layout.addWidget(self.body_note)
         self.outfit_choice = QCheckBox('Prepare compatible installed outfits with this shape')
@@ -153,11 +159,13 @@ class GuidedBodyDialog(BodyDialog):
             decisions = {key: combo.currentData() for key, combo in self.decisions.items()}
             selected = select_projects(self.job.catalog, body, preset, decisions,
                 outfits=self.outfit_choice.isChecked(), saved=self.saved, outfit_paths=self.outfit_paths)
+            morphs = selected_morph_mode(selected, self.saved, self.shape_support.currentData())
             self.pending_default = dict(sex=self.sex_choice.currentData(), body=body, preset=preset,
                 decisions=decisions, outfits=self.outfit_choice.isChecked(), selected=selected)
             self.preset.setCurrentIndex(self.preset.findData(preset))
             for item in self.items():
                 item.setCheckState(Qt.CheckState.Checked if item.text() in selected else Qt.CheckState.Unchecked)
+            self.morphs.setChecked(morphs)
             BodyDialog.generate(self)
             if not self.operation_running and not self.applied:
                 self.pending_default = None

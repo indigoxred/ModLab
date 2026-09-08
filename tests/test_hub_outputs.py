@@ -105,3 +105,14 @@ class OutputTests(unittest.TestCase):
                 self.publish({'Body': self.project(['meshes/body.nif'])}, {'meshes/body.nif': b'new'})
         self.assertEqual(b'old', (self.target / 'meshes/body.nif').read_bytes())
         self.assertTrue((self.target / MANIFEST).is_file())
+
+
+    def test_static_rebuild_removes_only_selected_projects_old_morph_file(self):
+        self.publish({'Body': self.project(['meshes/body.nif', 'meshes/body.tri']),
+                      'Dress': self.project(['meshes/dress.nif', 'meshes/dress.tri'])},
+                     {'meshes/body.nif': b'body', 'meshes/body.tri': b'body morph',
+                      'meshes/dress.nif': b'dress', 'meshes/dress.tri': b'dress morph'})
+        result = self.publish({'Body': self.project(['meshes/body.nif'])}, {'meshes/body.nif': b'new static'})
+        self.assertFalse((self.target / 'meshes/body.tri').exists())
+        self.assertEqual(b'dress morph', (self.target / 'meshes/dress.tri').read_bytes())
+        self.assertEqual(b'body morph', (Path(result['previous_output']) / 'meshes/body.tri').read_bytes())

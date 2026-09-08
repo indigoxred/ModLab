@@ -10,7 +10,7 @@ import subprocess
 from uuid import uuid4
 import zipfile
 
-from .bodyslide import read_catalog_files, read_catalog, plan_build, relative_path, verify_output, write_build_config
+from .bodyslide import read_catalog_files, read_catalog, plan_build, project_outputs, relative_path, verify_output, write_build_config
 from .loot_workflow import context_signature
 from .vfs import find_files, readable_path
 from .outputs import output_name, publish_output
@@ -122,16 +122,18 @@ def check_body_context(organizer, job):
         raise ValueError('The profile or BodySlide inputs changed. Prepare a new build before installing output.')
 
 
-def run_body_job(organizer, job, selected, preset):
+def run_body_job(organizer, job, selected, preset, *, morphs=False):
     check_body_context(organizer, job)
-    expected = plan_build(job.catalog, selected, preset)
+    expected = plan_build(job.catalog, selected, preset, morphs=morphs)
     output = job.directory / 'output'
     output.mkdir()  # A job is single-use; old meshes cannot satisfy a new build.
     group_name = 'ModLab-' + job.directory.name
     write_build_config(job.executable.parent, output,
                        Path(organizer.managedGame().gameDirectory().absolutePath()) / 'Data', selected, group_name)
     args = ['--groupbuild', group_name, '--preset', preset, '--targetdir', str(output)]
-    job.record.update(status='Building', projects=list(selected), preset=preset, expected=list(expected), arguments=args)
+    if morphs:
+        args.append('--trimorphs')
+    job.record.update(status='Building', projects=list(selected), preset=preset, morphs=morphs, expected=list(expected), arguments=args)
     job.save()
     try:
         handle = organizer.startApplication(str(job.executable), [subprocess.list2cmdline(args)],
@@ -151,7 +153,7 @@ def run_body_job(organizer, job, selected, preset):
                 package.write(output / name, name)
         job.archive = archive
         job.record.update(status='Generated files checked; installation pending', hashes=hashes, archive=str(archive),
-                          verification='Expected NIF files exist with valid headers. Appearance, physics and gameplay remain unverified.')
+                          verification='Expected meshes have NIF headers; requested body TRI records are structurally complete. Runtime assignment, appearance and physics are separate checks.')
         return hashes
     except Exception as error:
         job.record.update(status='Needs attention', error=str(error))
@@ -175,7 +177,8 @@ def publish_body_job(organizer, job, on_ready):
             raise ValueError('MO2 could not create the generated output mod.')
         if Path(mod.absolutePath()).resolve() != target.resolve():
             raise ValueError('MO2 returned a different output directory. Nothing was published there.')
-    projects = {name: {'outputs': list(job.catalog.projects[name].outputs),
+    projects = {name: {'outputs': list(project_outputs(job.catalog.projects[name], job.record.get('morphs', False))),
+                       'morphs': job.record.get('morphs', False),
                        'preset': job.record['preset'], 'source_mod': job.record['project_sources'][name]}
                 for name in job.record['projects']}
     manifest = publish_output(target, job.directory, job.record['profile_path'], projects, job.record['hashes'])

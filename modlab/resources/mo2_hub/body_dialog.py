@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
                              QListWidget, QListWidgetItem, QMessageBox, QPushButton,
                              QTextEdit, QVBoxLayout)
 
@@ -74,6 +74,9 @@ class BodyDialog(OperationDialog):
             button.clicked.connect(action)
             selection_row.addWidget(button)
         layout.addLayout(selection_row)
+        self.morphs = QCheckBox('Include in-game body shape data (Build Morphs)')
+        self.morphs.setToolTip('Produces the TRI files used by RaceMenu and body distribution helpers. This does not assign a shape to a character; those helpers require their own setup.')
+        layout.addWidget(self.morphs)
         self.status = QTextEdit()
         self.status.setReadOnly(True)
         self.status.setPlainText('Output will be generated in a separate working folder. '
@@ -118,6 +121,8 @@ class BodyDialog(OperationDialog):
         for item in self.items():
             checked = self.saved.get(item.text(), {}).get('preset') == preset
             item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        chosen = [self.saved.get(name, {}) for name in self.selected()]
+        self.morphs.setChecked(bool(chosen) and all(p.get('morphs', False) for p in chosen))
         self.update_selection()
 
     def items(self):
@@ -147,7 +152,7 @@ class BodyDialog(OperationDialog):
     def generate(self):
         self.applied = False
         try:
-            plan_build(self.job.catalog, self.selected(), self.preset.currentData())
+            plan_build(self.job.catalog, self.selected(), self.preset.currentData(), morphs=self.morphs.isChecked())
             check_body_context(self.organizer, self.job)
             begin_apply(self, self.generate_confirmed)
         except Exception as error:
@@ -160,7 +165,7 @@ class BodyDialog(OperationDialog):
         self.job = prepare_body_job(self.organizer, mobase.getFileVersion)
         selected, preset = self.selected(), self.preset.currentData()
         try:
-            plan_build(self.job.catalog, selected, preset)
+            plan_build(self.job.catalog, selected, preset, morphs=self.morphs.isChecked())
             check_body_context(self.organizer, self.job)
         except Exception as error:
             QMessageBox.warning(self, 'Review the build selection', str(error))
@@ -168,8 +173,8 @@ class BodyDialog(OperationDialog):
         self.build.setEnabled(False)
         self.setEnabled(False)
         try:
-            hashes = run_body_job(self.organizer, self.job, selected, preset)
-            self.status.setPlainText(f'{len(selected)} projects built; all {len(hashes)} expected mesh files checked. Applying output…')
+            hashes = run_body_job(self.organizer, self.job, selected, preset, morphs=self.morphs.isChecked())
+            self.status.setPlainText(f'{len(selected)} projects built; all {len(hashes)} expected output files checked. Applying output…')
             self.install.setEnabled(True)
             self.install_output()
         except Exception as error:
@@ -221,10 +226,11 @@ class BodyDialog(OperationDialog):
         self.job.record['status'] = 'Effective output needs attention' if failures else 'Generated output installed and effective; gameplay unverified'
         self.job.save()
         if not failures:
+            self.saved = read_manifest(self.installed, self.job.record['profile_path'])['projects']
             self.applied = True
             remember_catalog(self.organizer, self.job)
         self.status.setPlainText('\n'.join(failures) if failures else
-                                 f"Applied to {self.job.record['installed_mod']}. Every generated mesh is now effective in this profile. "
+                                 f"Applied to {self.job.record['installed_mod']}. Every generated file is now effective in this profile. "
                                  'Other generated outfits were retained. The selected appearance still needs an in-game check.\n\n' +
                                  '\n'.join(f"{name} — {self.job.record['project_sources'][name]} — {self.job.record['preset']}"
                                            for name in self.job.record['projects']))

@@ -15,14 +15,16 @@ def plan_rebuilds(catalog, manifest, source_signature):
     signature = json.loads(json.dumps(source_signature))
     for name, project in manifest['projects'].items():
         try:
-            outputs = plan_build(catalog, [name], project['preset'])
+            morphs = project.get('morphs', False)
+            outputs = plan_build(catalog, [name], project['preset'], morphs=morphs)
             if {p.casefold() for p in outputs} != {p.casefold() for p in project['outputs']}:
                 raise ValueError('Its output paths changed; choose how to replace the old output.')
             record_path = Path(project['build_record'])
             if record_path not in records:
                 records[record_path] = json.loads(record_path.read_text(encoding='utf-8'))
             if records[record_path].get('sources') != signature:
-                groups.setdefault(project['preset'], []).append(name)
+                key = (project['preset'], True) if morphs else project['preset']
+                groups.setdefault(key, []).append(name)
         except (ValueError, OSError, KeyError) as error:
             issues.append(name + ': ' + str(error))
     return groups, issues
@@ -92,11 +94,12 @@ def rebuild_saved(organizer, version_reader, groups, on_done, on_progress):
         if not pending:
             on_done(completed, None)
             return
-        preset, selected = pending.pop(0)
+        key, selected = pending.pop(0)
+        preset, morphs = key if isinstance(key, tuple) else (key, False)
         try:
             on_progress('Rebuilding ' + ', '.join(selected) + ' using ' + preset + '…')
             job = prepare_body_job(organizer, version_reader)
-            run_body_job(organizer, job, selected, preset)
+            run_body_job(organizer, job, selected, preset, morphs=morphs)
 
             def ready(target, error):
                 try:

@@ -20,6 +20,7 @@ class Project:
     outputs: tuple
     groups: set = field(default_factory=set)
     source_file: str = ''
+    morph_output: str = ''
 
 
 @dataclass
@@ -55,7 +56,7 @@ def read_catalog_files(files):
                 raise ValueError(f'{name} has an unsupported weight setting.')
             suffixes = ('_0.nif', '_1.nif') if weights == 'true' else ('.nif',)
             projects[name] = Project(name, tuple(stem + suffix for suffix in suffixes),
-                                     source_file=relative)
+                                     source_file=relative, morph_output=stem + '.tri')
     for relative, path in sorted(files.items()):
         if not relative.casefold().startswith('slidergroups/') or path.suffix.casefold() != '.xml':
             continue
@@ -78,7 +79,15 @@ def read_catalog_files(files):
     return Catalog(projects, presets, groups)
 
 
-def plan_build(catalog, selected, preset):
+def project_outputs(project, morphs=False):
+    if not morphs:
+        return project.outputs
+    if not project.morph_output:
+        raise ValueError('The project has no declared morph output: ' + project.name)
+    return (*project.outputs, project.morph_output)
+
+
+def plan_build(catalog, selected, preset, *, morphs=False):
     if not selected:
         raise ValueError('Select the projects you want to build.')
     if preset not in catalog.presets:
@@ -100,7 +109,7 @@ def plan_build(catalog, selected, preset):
                     'Then reopen Body and outfit choices. Existing generated files are unchanged.')
             raise ValueError(f'The preset "{preset}" has no declared match for "{name}". '
                              'Choose a preset for that project/family, or inspect it in BodySlide.')
-        for output in project.outputs:
+        for output in project_outputs(project, morphs):
             key = output.casefold()
             if key in outputs:
                 raise ValueError(f'"{name}" and "{outputs[key][0]}" write the same output: {output}. '
@@ -116,9 +125,12 @@ def verify_output(root, expected):
     for relative in expected:
         path = root / relative_path(relative)
         if not path.is_file():
-            raise ValueError(f'Missing generated mesh: {relative}')
+            raise ValueError(f'Missing generated file: {relative}')
         data = path.read_bytes()
-        if len(data) < 128 or not data.startswith(b'Gamebryo File Format, Version '):
+        if path.suffix.casefold() == '.tri':
+            from .body_morphs import inspect_tri
+            inspect_tri(data)
+        elif path.suffix.casefold() != '.nif' or len(data) < 128 or not data.startswith(b'Gamebryo File Format, Version '):
             raise ValueError(f'Invalid or incomplete generated mesh: {relative}')
         hashes[relative] = hashlib.sha256(data).hexdigest()
     actual = {p.relative_to(root).as_posix().casefold() for p in root.rglob('*') if p.is_file()}
