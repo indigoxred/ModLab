@@ -50,3 +50,12 @@ Validation: 354 hub tests passed, including new cases for inheritance, winning p
 
 Field definitions were checked against [TES5Edit's Skyrim record definitions](https://raw.githubusercontent.com/TES5Edit/TES5Edit/dev-4.1.6/Core/wbDefinitionsTES5.pas). The next implementation step is to use resolved ownership and checked morph capability to offer applicable character shape choices and preserve shared defaults without assuming OBody exists.
 
+
+
+### Linked morph output gate
+
+Morph-enabled BodySlide jobs now inspect generated NIFs in an isolated native reader before making an install archive. A usable TRI next to a mesh is insufficient: the loaded scene must refer to it, matching shape names must exist, and referenced vertex indices must fit. Missing/conflicting links or changed output stop publication; source and prior installed output remain intact. This establishes file linkage, not neutral base shape, topology equivalence, physics or appearance.
+
+The reader visits the reachable scene from its root, including sibling nodes without geometry. `scripts/verify_body_mesh_native.py` generates three original triangle fixtures for a sibling-only link, competing links, and an unreachable node. It requires an existing .NET SDK and the existing niflysharp 1.1.0 library; it downloads nothing. Native production inspection is read-only.
+
+Desktop check after deploying 7a482a9: Lydia is searchable and shows the shared generated body and CBBE skin providers. Closing the character panel returned promptly without a LOOT window in this observation. OBody remains optional and uninstalled. The full character editor is still in progress.

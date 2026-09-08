@@ -147,13 +147,22 @@ def run_body_job(organizer, job, selected, preset, *, morphs=False):
             raise RuntimeError(f'BodySlide exited with code {code}. Inspect its retained log.')
         check_body_context(organizer, job)
         hashes = verify_output(output, expected)
+        if morphs:
+            from .runtime import ensure_sdk10
+            from .body_meshes import verify_generated_morphs
+            tools = Path(organizer.modsPath()).parent / 'tools'
+            sdk = ensure_sdk10(tools)
+            job.record['morph_links'] = verify_generated_morphs(sdk, tools, output, expected, job.directory)
+            check_body_context(organizer, job)
+            if hashes != verify_output(output, expected):
+                raise ValueError('Generated body files changed during morph-link inspection.')
         archive = job.directory / 'ModLab BodySlide Output.zip'
         with zipfile.ZipFile(archive, 'x', compression=zipfile.ZIP_DEFLATED) as package:
             for name in expected:
                 package.write(output / name, name)
         job.archive = archive
         job.record.update(status='Generated files checked; installation pending', hashes=hashes, archive=str(archive),
-                          verification='Expected meshes have NIF headers; requested body TRI records are structurally complete. Runtime assignment, appearance and physics are separate checks.')
+                          verification=('Expected meshes and linked TRI shapes/vertex bounds checked. Runtime assignment, topology, appearance and physics are separate checks.' if morphs else 'Expected meshes have NIF headers. Appearance and physics are separate checks.'))
         return hashes
     except Exception as error:
         job.record.update(status='Needs attention', error=str(error))

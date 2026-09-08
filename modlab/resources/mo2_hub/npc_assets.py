@@ -37,9 +37,9 @@ def texture_path(value):
     return value
 
 
-def inspect_textures(sdk, tools_root, meshes, directory):
+def inspect_nifs(sdk, tools_root, meshes, directory, *, program=PROGRAM, tool='modlab-facegen-inspector-v1'):
     tools_root, sdk = Path(tools_root), Path(sdk)
-    root = tools_root / 'modlab-facegen-inspector-v1'
+    root = tools_root / tool
     binary = root / 'bin/Release/net10.0/Facegen.dll'
     receipt = root / 'modlab-build.json'
     if receipt.is_file():
@@ -49,7 +49,7 @@ def inspect_textures(sdk, tools_root, meshes, directory):
     else:
         root.mkdir(parents=True, exist_ok=True)
         (root / 'Facegen.csproj').write_text(PROJECT, encoding='utf-8')
-        (root / 'Program.cs').write_text(PROGRAM, encoding='utf-8')
+        (root / 'Program.cs').write_text(program, encoding='utf-8')
         with sdk_environment(sdk, tools_root / 'sdk-state'):
             result = subprocess.run([str(sdk / 'dotnet.exe'), 'build', str(root / 'Facegen.csproj'), '-c', 'Release',
                 '--nologo', '--verbosity', 'quiet'], cwd=root, capture_output=True, timeout=180,
@@ -66,6 +66,11 @@ def inspect_textures(sdk, tools_root, meshes, directory):
     if result.returncode or not response.is_file(): raise ValueError('The selected face mesh could not be inspected: ' + str(directory))
     found = json.loads(response.read_text(encoding='utf-8'))
     if set(found) != {str(p) for p in meshes}: raise ValueError('The FaceGen inspection is incomplete.')
+    return found
+
+
+def inspect_textures(sdk, tools_root, meshes, directory):
+    found = inspect_nifs(sdk, tools_root, meshes, directory)
     return {p: tuple(sorted({texture_path(t) for t in values if t})) for p, values in found.items()}
 
 
