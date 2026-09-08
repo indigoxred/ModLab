@@ -41,7 +41,7 @@ class CharacterBodyTests(unittest.TestCase):
 
     def base(self, extra=()):
         return self.plugin('Base.esm', [
-            record(b'RACE', ref(b'WNAM', 0x901), 0x900),
+            record(b'RACE', sub(b'EDID', b'NordRace\0') + ref(b'WNAM', 0x901), 0x900),
             record(b'ARMO', ref(b'MODL', 0x902), 0x901),
             addon(0x902, 'actors/character/female/body_1.nif', 0x903),
             record(b'TXST', sub(b'TX00', b'actors/character/female/body.dds\0'), 0x903),
@@ -63,6 +63,8 @@ class CharacterBodyTests(unittest.TestCase):
         patch = self.plugin('Patch.esp', [addon(0x01000911, 'private/new_1.nif', 0x903)], ['Base.esm', 'Face.esp'])
         body = self.index(base, face, patch).character('000800:base.esm')
         self.assertEqual('private', body['scope'])
+        self.assertEqual('NordRace', body['race_editor'])
+        self.assertEqual(['meshes/actors/character/female/body_0.nif', 'meshes/actors/character/female/body_1.nif'], body['race_body_models'])
         self.assertEqual(['meshes/private/new_0.nif', 'meshes/private/new_1.nif'], body['body_models'])
         self.assertEqual('Patch.esp', body['parts'][0]['plugin'])
 

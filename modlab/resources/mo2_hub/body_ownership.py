@@ -242,12 +242,15 @@ class BodyIndex:
         parts = self._parts(skin, sex, races)
         body_models = {path for part in parts if 32 in part['slots'] for path in part['world_models']}
         if not body_models: raise ValueError('No applicable torso body was found for this character.')
+        shared = body_models if skin == default_skin else ({path for part in self._parts(default_skin, sex, races)
+            if 32 in part['slots'] for path in part['world_models']} if default_skin else set())
         if skin == default_skin: scope = 'shared'
         elif default_skin:
-            shared = {path for part in self._parts(default_skin, sex, races) if 32 in part['slots'] for path in part['world_models']}
             scope = 'shared' if body_models == shared else 'mixed' if body_models & shared else 'private'
         else: scope = 'private'
         return dict(traits_actor=actor, sex=sex, race=race, skin=skin,
+            race_editor=self._one(race_fields, b'EDID', b'').rstrip(b'\0').decode('utf-8'),
+            race_body_models=sorted(shared),
             skin_plugin=self._record(skin, b'ARMO', 'character skin')[1], scope=scope,
             parts=parts, body_models=sorted(body_models),
             first_person_models=sorted({path for part in parts for path in part['first_person_models']}),

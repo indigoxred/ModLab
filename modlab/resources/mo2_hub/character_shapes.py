@@ -64,6 +64,9 @@ def save_choice(profile, actor, choice, *, expected):
 
 
 def neutral_preset(runner, name, projects=None):
+    if projects:
+        from .author_neutral import inspect
+        if inspect(runner,name,projects):return True
     matches = []
     for path in (Path(runner)/'SliderPresets').rglob('*.xml'):
         matches.extend(p for p in ET.parse(path).getroot().findall('Preset') if p.get('name') == name)
