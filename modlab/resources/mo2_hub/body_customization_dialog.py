@@ -81,6 +81,9 @@ class CustomizationActions:
             self.customizer_error(error); return
         try:
             import mobase
+            # Save the user's decisions before rebuilding controls against the
+            # newly published preset. A renamed shape is not a new outfit choice.
+            pending=self.draft_choice()
             self.job=prepare_body_job(self.organizer,mobase.getFileVersion,preview=True)
             reset_build_result(self)
             self.choice_signature=context_signature(self.organizer)
@@ -88,7 +91,11 @@ class CustomizationActions:
             name=self.custom_job.record['custom_preset']
             self.preset.addItem(name,name)
             self.body_changed()
-            self.shape_choice.setCurrentIndex(self.shape_choice.findData(name))
+            self.shape_choice.blockSignals(True)
+            try: self.shape_choice.setCurrentIndex(self.shape_choice.findData(name))
+            finally: self.shape_choice.blockSignals(False)
+            self.refresh_choices(carried_decisions=pending['decisions']
+                if pending['body']==self.body_choice.currentData() else {})
             self.save_pending_choice()
             end_apply(self); self.guided.setEnabled(True); self.tabs.setTabEnabled(1,True)
             self.guided_status.setText('Your custom preset is saved and selected. Choose Prepare and apply to use this shape for the shared body and selected outfits.')

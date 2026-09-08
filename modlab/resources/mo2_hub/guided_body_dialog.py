@@ -165,11 +165,15 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
                 'Install a matching body with BodySlide files to build a shape; other projects remain available in Advanced.')
         self.refresh_choices()
 
-    def refresh_choices(self):
+    def refresh_choices(self, *, carried_decisions=None):
         previous = {key: combo.currentData() for key, combo in getattr(self, 'decisions', {}).items()}
         context = (self.body_choice.currentData(), self.shape_choice.currentData())
         if getattr(self, 'decision_context', None) != context:
             previous = {}
+        if carried_decisions is not None:
+            # Keys describe output-path groups, not preset names. Existing
+            # availability checks retain incompatible selections for review.
+            previous = dict(carried_decisions)
         self.decision_context = context
         self.parts.clear(); self.decisions = {}
         body, preset = context
