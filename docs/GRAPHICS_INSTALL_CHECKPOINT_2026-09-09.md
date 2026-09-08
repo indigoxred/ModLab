@@ -30,4 +30,14 @@ After deploying the queue reconnect change and reopening MO2, an unchanged setup
 
 514 hub tests pass. New cases cover verified new-source regeneration after restart, changed files, other profiles, old or completed queues, external receipts, wrong targets, disabled sources, edited generated output, unrelated overrides, reconnecting completed batches and malformed history. The original refusal and malformed-history crash were reproduced before their fixes.
 
-The applied source changes were deployed with the test instance closed and previous modules backed up. The broader category-based graphics interface, TexGen/DynDOLOD preparation and the remaining folder installations are unfinished. Majestic Mountains has not yet been installed. Existing Apocalypse and Ars Metallica record findings remain unresolved; this checkpoint does not claim full setup readiness.
+The applied source changes were deployed with the test instance closed and previous modules backed up. The broader category-based graphics interface, TexGen/DynDOLOD preparation and the remaining folder installations are unfinished. Majestic Mountains was not installed at that checkpoint; the subsequent installation is recorded below. Existing Apocalypse and Ars Metallica record findings remain unresolved; this checkpoint does not claim full setup readiness.
+
+## Subsequent scene-selection preparation
+
+Majestic Mountains 4.02 was subsequently installed through ModLab in batch `da6fb9c817ce`, selecting the AE landscape variant and Moss Rocks ESL. Its 303 installed files and archive identity were checked against receipt `b5a6230dfeb247f38dc896dc19557c67`; the landscape master matches the archive's `06 Landscape esm AE` variant. This verifies the selected installation, not LOD or in-game appearance.
+
+The new scene-selection core selects installed assets by component without reordering whole source mods. A read-only probe against the actual installed Blended Roads and Majestic Mountains selected 108 road/bridge assets and 168 mountain/rock assets. The existing NIF inspector read texture references from all 256 selected models. Routing includes Dwemer roads, Dragon Bridge and Solstheim road variants; unrelated building/object components remain outside those choices.
+
+Preparation retains the selected provider's installed patch bytes, checks referenced textures and uses the existing owned-output publication/recovery mechanism. A review reproduced a shared-texture defect: one choice's existing texture could be silently replaced by another choice's copied texture. Regression tests reproduced it in both processing orders before correction. Differing texture requirements now withhold preparation and name the affected choices; identical textures and genuinely newly supplied dependencies can co-exist. Failed planning leaves the original plan intact.
+
+526 hub tests pass, including 12 scene-selection/build tests. These new modules are a preparation checkpoint only: native scene selectors, active-provider reconciliation, packed-source integration, reset and downstream graphics integration are still unfinished and have not been deployed as a user-facing feature.
