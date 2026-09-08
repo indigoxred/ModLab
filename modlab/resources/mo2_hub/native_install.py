@@ -10,13 +10,7 @@ import mobase
 from PyQt6.QtCore import QCoreApplication, QEvent, QObject, QTimer
 from PyQt6.QtWidgets import QApplication, QCheckBox, QDialog
 
-from .installation import inspect_install_result, capture_files, file_stamp
-
-
-def write_record(path, record):
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(record, indent=2), encoding='utf-8')
-    temporary.replace(path)
+from .installation import inspect_install_result, capture_files, file_stamp, write_record
 
 
 class NativeBackupOption(QObject):

@@ -8,6 +8,12 @@ import os
 import stat
 
 
+def write_record(path, record):
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(record, indent=2), encoding='utf-8')
+    temporary.replace(path)
+
+
 @dataclass(frozen=True)
 class InstallResult:
     status: str

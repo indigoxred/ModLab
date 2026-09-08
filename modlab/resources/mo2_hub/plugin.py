@@ -164,9 +164,12 @@ class HubWindow(QDialog):
         try:
             queue_records.begin_item(self.queue_journal, filename, self.organizer.profilePath())
             checksum, package = skse.identify(Path(filename))
+            from . import preloader
             if package:
                 result, record_path = skse_workflow.install_package(self.organizer, Path(filename), checksum, package,
                                                                    mobase.getFileVersion, self.install_finished)
+            elif checksum == preloader.ARCHIVE_SHA:
+                result, record_path = preloader.install_package(self.organizer, Path(filename), mobase.getFileVersion)
             else:
                 result, record_path = install_archive(self.organizer, Path(filename), self.install_finished,
                                                       on_progress=self.summary.setText, parent=self)

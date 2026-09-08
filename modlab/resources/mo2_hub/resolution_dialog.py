@@ -53,9 +53,11 @@ class ResolutionDialog(QDialog):
             content.addWidget(button(title, lambda a=action: self.choose(a), True))
             content.addWidget(button('Keep existing settings for now', self.reject))
         elif finding.code == 'engine-fixes-preloader-missing':
-            content.addWidget(label('This component belongs beside SkyrimSE.exe, outside the normal mod folders. '
-                'Automatic preloader installation is not implemented. Follow the linked release instructions, '
-                'then recheck here; installing it as a normal Data mod would put it in the wrong place.'))
+            content.addWidget(label('Download the linked Engine Fixes v7 preloader, then select its archive below. '
+                'ModLab checks the package and installs it beside SkyrimSE.exe automatically. '
+                'This component is shared by profiles using the selected game folder. '
+                'A different existing preloader is retained for review; it is not silently replaced.'))
+            content.addWidget(button('Install downloaded preloader…', lambda: self.choose('install'), True))
             content.addWidget(button('Open the selected Skyrim folder',
                 lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(snapshot.game_root))))
         elif finding.code != 'record-errors' and not self.context.can_enable:

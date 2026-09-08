@@ -126,8 +126,9 @@ def inspect_foundations(setup, resolve_path, *, source_page=None, skse_version=N
                 'Engine Fixes is missing its game-folder preloader', detail,
                 'Download Engine Fixes - SKSE64 Preloader from '
                 'https://www.nexusmods.com/skyrimspecialedition/mods/17230?tab=files&file_id=725261 . '
-                'Extract d3dx9_42.dll alongside SkyrimSE.exe in ' + str(setup.game_root) +
-                ', not inside Data. Then recheck and verify startup.',
+                'Choose Install downloaded preloader in ModLab. It verifies this archive and places d3dx9_42.dll '
+                'alongside SkyrimSE.exe in ' + str(setup.game_root) +
+                '. Then recheck and verify startup.',
                 'This installed 7.0.20 variant requires the separate preloader. Its startup error '
                 'confirms Skyrim exits without it. File presence resolves this missing-file check; '
                 'successful preloading must still be verified when the game starts.'))

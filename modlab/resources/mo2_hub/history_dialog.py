@@ -42,6 +42,9 @@ class HistoryDialog(QDialog):
         buttons = QHBoxLayout()
         for title, handler in (('Open operation folder', self.open_folder), ('Open full record', self.open_record)):
             button = QPushButton(title); button.clicked.connect(handler); buttons.addWidget(button)
+        self.undo_preloader=QPushButton('Undo this preloader installation')
+        self.undo_preloader.setVisible(False);self.undo_preloader.clicked.connect(self.restore_preloader)
+        buttons.addWidget(self.undo_preloader)
         history_layout.addLayout(buttons)
         self.rows.itemSelectionChanged.connect(self.show_record)
         tabs.addTab(history, 'Operations')
@@ -93,6 +96,8 @@ class HistoryDialog(QDialog):
 
     def show_record(self):
         entry = self.selected_record()
+        self.undo_preloader.setVisible(bool(entry and entry.operation=='preloader' and
+            not entry.record.get('reused_existing') and entry.record.get('root',{}).get('applied')))
         if not entry:
             return
         data = entry.record
@@ -122,6 +127,23 @@ class HistoryDialog(QDialog):
             if backups:
                 lines.append('Retained backup directories:\n' + '\n'.join(str(Path(data['mods_root']) / name) for name in backups))
         self.detail.setPlainText('\n\n'.join(str(line) for line in lines if line))
+
+    def restore_preloader(self):
+        entry=self.selected_record()
+        if self.busy or not entry or entry.operation!='preloader':return
+        answer=QMessageBox.question(self,'Restore game-folder component',
+            'Undo this preloader installation for the selected Skyrim folder? All profiles using this game '
+            'are affected. Engine Fixes may require it again. The removed file is retained for recovery.')
+        if answer!=QMessageBox.StandardButton.Yes:return
+        self.busy=True
+        try:
+            from .preloader import restore
+            restore(self.organizer,entry.path)
+            self.changed=True;self.reload()
+            self.status.setText('Preloader installation undone. Recheck the selected setup before launching.')
+        except Exception as error:
+            self.status.setText('Preloader recovery needs attention: '+str(error))
+        finally:self.busy=False
 
     def open_folder(self):
         entry = self.selected_record()

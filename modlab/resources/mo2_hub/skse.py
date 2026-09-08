@@ -109,18 +109,26 @@ def require_game_closed():
 
 
 def _root_name(name):
-    if name != 'skse64_loader.exe' and not re.fullmatch(r'skse64_\d+_\d+_\d+\.dll', name):
+    if name not in {'skse64_loader.exe', 'd3dx9_42.dll'} and not re.fullmatch(r'skse64_\d+_\d+_\d+\.dll', name):
         raise ValueError('Not a supported SKSE root file: ' + name)
     return relative_path(name)
 
 
 def deploy_root(game, source, job, game_hash):
-    game, source, job = Path(game).resolve(), Path(source), Path(job)
-    if not (game / 'SkyrimSE.exe').is_file() or digest(game / 'SkyrimSE.exe') != game_hash:
-        raise ValueError('The selected game executable changed before SKSE installation.')
+    source=Path(source)
     names = ['skse64_loader.exe'] + sorted(p.name for p in source.glob('skse64_*.dll'))
     if len(names) != 2:
         raise ValueError('The SKSE package must contain one loader and one runtime DLL.')
+    return deploy_root_files(game,source,job,game_hash,names)
+
+
+def deploy_root_files(game, source, job, game_hash, names, *, expected=None):
+    """Shared checked publication for the named SKSE loader/preloader files only."""
+    game, source, job = Path(game).resolve(), Path(source), Path(job)
+    if not (game / 'SkyrimSE.exe').is_file() or digest(game / 'SkyrimSE.exe') != game_hash:
+        raise ValueError('The selected game executable changed before root-component installation.')
+    if not names or len(set(names))!=len(names):
+        raise ValueError('Choose distinct supported root-component files.')
     previous = job / 'previous-root'
     previous.mkdir()
     record = {'game_root': str(game), 'game_hash': game_hash, 'files': {}, 'applied': []}
@@ -131,12 +139,15 @@ def deploy_root(game, source, job, game_hash):
             raise ValueError('SKSE destination is not a regular file: ' + name)
         old = digest(target) if target.exists() else None
         record['files'][name] = {'before': old, 'after': digest(source / name)}
+        if expected is not None and record['files'][name]!=expected.get(name):
+            raise ValueError('The root-component source or destination changed before publication: '+name)
         if old is not None:
             shutil.copy2(target, previous / name)
             if digest(previous / name) != old:
                 raise ValueError('SKSE backup could not be verified: ' + name)
     journal = job / 'root-deployment.json'
     journal.write_text(json.dumps(record, indent=2), encoding='utf-8')
+    pending=None
     try:
         for name in names:
             target = game / name
@@ -145,17 +156,29 @@ def deploy_root(game, source, job, game_hash):
             if actual != state['before']:
                 raise ValueError('An SKSE root file changed during installation: ' + name)
             # Prepare in the game filesystem before replacing the destination.
-            pending = game / (name + '.modlab-pending')
-            if pending.exists():
-                raise ValueError('A previous SKSE installation needs recovery: ' + str(pending))
+            candidate = game / (name + '.modlab-pending')
+            if candidate.exists() or candidate.is_symlink():
+                raise ValueError('A previous root-component installation needs recovery: ' + str(candidate))
+            pending=candidate
             shutil.copy2(source / name, pending)
             if digest(pending) != state['after']:
                 raise ValueError('SKSE copy verification failed: ' + name)
-            os.replace(pending, target)
+            if ((digest(target) if target.exists() else None)!=state['before'] or target.is_symlink() or
+                    digest(game/'SkyrimSE.exe')!=game_hash):
+                raise ValueError('The game or root-component destination changed during publication: '+name)
+            # Skyrim/MO2 are Windows-only here. Windows rename fails if a new
+            # destination appeared; replace would silently overwrite that file.
+            if state['before'] is None and os.name=='nt':os.rename(pending,target)
+            else:os.replace(pending, target)
+            pending=None
             record['applied'].append(name)
             journal.write_text(json.dumps(record, indent=2), encoding='utf-8')
         return record
     except Exception:
+        if pending is not None and pending.is_file() and not pending.is_symlink():
+            retained=job/'failed-root';retained.mkdir(exist_ok=True)
+            destination=retained/pending.name
+            if not destination.exists():shutil.move(pending,destination)
         restore_root(record, job)
         raise
 
