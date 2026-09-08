@@ -37,3 +37,16 @@ Verification: 342 focused hub tests passed, including publication, source preser
 
 Desktop deployment is pending after the Escape interruption. Individual shape selection, neutral body/outfit preparation, scoped custom presets and OBody assignment publication remain incomplete. The optional setup entry does not represent those features as ready.
 
+
+## Character body ownership checkpoint
+
+The character directory now resolves static base-actor body ownership through winning NPC traits, skin armor, applicable race armatures and texture-set records. It reuses the directory's parsed records instead of scanning plugins twice. The panel names current loose body and base-skin providers; plugin IDs and paths are secondary evidence. Record ownership alone is not file ownership.
+
+Resolution respects the actor's Use Traits flag, master identities, deletion overrides, sex, armor-race links, weight variants and the distinction between third-person torso meshes and first-person arms. A private/replacer body means different from the race default, not exclusive to one actor. Editing its shared file is not authorized by that classification. Leveled/missing/cyclic templates, missing armatures and overlapping world-model slots remain unresolved for customization, without rejecting installation of the mod. Slot-priority selection, texture-swap evaluation, embedded mesh textures and existing-save/script overrides are not claimed verified.
+
+Read-only profile evidence: Lydia uses shared body meshes supplied by the existing ModLab BodySlide output and CBBE base-skin textures. Hulda and Adrianne use Bijin NPCs body meshes and base-skin textures; their body paths are shared with other Bijin actors. Carlotta has a separate skin record from The Ordinary Women but resolves to the shared body meshes and CBBE base-skin paths. Indexing the active profile's records took approximately 0.4 seconds. This check did not publish files or test gameplay.
+
+Validation: 354 hub tests passed, including new cases for inheritance, winning private-body overrides, shared-mesh private-skin records, incorrect races, fixed-weight meshes, deleted armatures, first-person separation, overlapping slots and file-provider labels, including MO2 Overwrite and external paths. Desktop deployment/rendering remains pending; these current-assignment displays are not the finished per-character body/skin/shape selectors.
+
+Field definitions were checked against [TES5Edit's Skyrim record definitions](https://raw.githubusercontent.com/TES5Edit/TES5Edit/dev-4.1.6/Core/wbDefinitionsTES5.pas). The next implementation step is to use resolved ownership and checked morph capability to offer applicable character shape choices and preserve shared defaults without assuming OBody exists.
+

@@ -10,7 +10,7 @@ import zlib
 from .bodyslide import relative_path
 from .synthesis import plugin_masters
 
-KINDS = {b'NPC_', b'RACE', b'ARMO', b'ARMA'}
+KINDS = {b'NPC_', b'RACE', b'ARMO', b'ARMA', b'TXST'}
 
 
 def records(path):
@@ -119,3 +119,135 @@ def active_outfit_models(organizer, sex=None):
     order = plugin_load_orders(organizer.pluginList())
     plugins = [Path(organizer.resolvePath(name)) for name in sorted(order, key=order.get) if order[name] >= 0]
     return outfit_models(plugins, sex)
+
+
+class BodyIndex:
+    """Winning record ownership for character choices; no assumptions from mod names.
+
+    This resolves static base-actor records. Leveled templates, scripted skin swaps,
+    and existing-save changes are not converted into a guessed static assignment.
+    """
+    def __init__(self):
+        self.winning = {}
+        self.masters = {}
+
+    def add_plugin(self, path, parsed=None):
+        path = Path(path)
+        self.masters[path.name] = (*plugin_masters(path), path.name)
+        for key, value in records(path) if parsed is None else parsed:
+            if value is None: self.winning.pop(key.casefold(), None)
+            else: self.winning[key.casefold()] = (*value, path.name)
+
+    def _record(self, key, kind, description):
+        value = self.winning.get((key or '').casefold())
+        if not value or value[0] != kind:
+            raise ValueError('The '+description+' is missing or cannot be resolved as a static record: '+str(key))
+        return value[1], value[2]
+
+    def _one(self, fields, tag, default=None):
+        values = fields.get(tag, ())
+        if len(values) > 1: raise ValueError('Ambiguous character body field: '+tag.decode())
+        return values[0] if values else default
+
+    def _reference(self, value, plugin):
+        if value is None: return None
+        if isinstance(value, str): return value.casefold()
+        if len(value) != 4: raise ValueError('Invalid character body reference in '+plugin)
+        form = struct.unpack('<I', value)[0]
+        if not form: return None
+        masters = self.masters[plugin]
+        if form >> 24 >= len(masters): raise ValueError('Invalid character body master in '+plugin)
+        return f'{form & 0xffffff:06x}:'+masters[form >> 24].casefold()
+
+    def _ref(self, fields, tag, plugin):
+        return self._reference(self._one(fields, tag), plugin)
+
+    def _traits(self, key, seen=()):
+        key = key.casefold()
+        if key in seen or len(seen) >= 32: raise ValueError('Cyclic or excessive character traits template chain.')
+        fields, plugin = self._record(key, b'NPC_', 'character traits template')
+        config = self._one(fields, b'ACBS', b'')
+        if len(config) != 24: raise ValueError('Character trait flags are missing or malformed: '+key)
+        if struct.unpack_from('<H', config, 18)[0] & 1:
+            template = self._ref(fields, b'TPLT', plugin)
+            if not template: raise ValueError('Character requests traits from a missing template: '+key)
+            return self._traits(template, (*seen, key))
+        return key, fields, plugin, 'female' if struct.unpack_from('<I', config)[0] & 1 else 'male'
+
+    def _races(self, key, seen=()):
+        if key in seen or len(seen) >= 32: raise ValueError('Cyclic or excessive armor race chain.')
+        fields, plugin = self._record(key, b'RACE', 'character race')
+        parent = self._ref(fields, b'RNAM', plugin)
+        return {key} | (self._races(parent, (*seen, key)) if parent and parent != key else set())
+
+    def _parts(self, skin, sex, races):
+        fields, plugin = self._record(skin, b'ARMO', 'character skin')
+        addons = [self._reference(value, plugin) for value in fields.get(b'MODL', ()) if value]
+        if not any(addons):
+            raise ValueError('The character skin has no explicit armatures; its template needs separate inspection.')
+        result = []
+        for key in dict.fromkeys(addons):
+            if not key: continue
+            fields, provider = self._record(key, b'ARMA', 'skin armature')
+            applicable = {self._ref(fields, b'RNAM', provider)}
+            applicable.update(self._reference(value, provider) for value in fields.get(b'MODL', ()))
+            if not races.intersection(applicable): continue
+            config = self._one(fields, b'DNAM', b'')
+            if len(config) != 12: raise ValueError('The skin armature weight settings are missing or malformed: '+key)
+            body = self._one(fields, b'BOD2', self._one(fields, b'BODT', b''))
+            if len(body) < 4: raise ValueError('The skin armature body parts are missing: '+key)
+            mask = struct.unpack_from('<I', body)[0]
+            models = set(); world_models = set(); first_person_models = set()
+            for tag in ((b'MOD3', b'MOD5') if sex == 'female' else (b'MOD2', b'MOD4')):
+                raw = self._one(fields, tag, b'').rstrip(b'\0')
+                if not raw: continue
+                path = relative_path(raw.decode('utf-8').replace('\\', '/')).casefold()
+                if not path.startswith('meshes/'): path = 'meshes/'+path
+                variants = {path}
+                if config[3 if sex == 'female' else 2] & 2 and re.search(r'_[01]\.nif$', path):
+                    variants.update((path[:-5]+'0.nif', path[:-5]+'1.nif'))
+                models.update(variants)
+                (world_models if tag in {b'MOD2', b'MOD3'} else first_person_models).update(variants)
+            if not models: continue
+            texture_set = self._ref(fields, b'NAM1' if sex == 'female' else b'NAM0', provider)
+            textures = []
+            if texture_set:
+                texture_fields, _ = self._record(texture_set, b'TXST', 'skin texture set')
+                for tag in (f'TX0{i}'.encode() for i in range(8)):
+                    raw = self._one(texture_fields, tag, b'').rstrip(b'\0')
+                    if not raw: continue
+                    path = relative_path(raw.decode('utf-8').replace('\\', '/')).casefold()
+                    textures.append(path if path.startswith('textures/') else 'textures/'+path)
+            result.append(dict(armature=key, plugin=provider, slots=[i+30 for i in range(32) if mask & (1 << i)],
+                priority=config[1 if sex == 'female' else 0],
+                models=sorted(models), world_models=sorted(world_models), first_person_models=sorted(first_person_models),
+                texture_set=texture_set, textures=sorted(set(textures)),
+                texture_swap=self._ref(fields, b'NAM3' if sex == 'female' else b'NAM2', provider)))
+        occupied = set()
+        for part in result:
+            if not part['world_models']: continue
+            if occupied.intersection(part['slots']):
+                raise ValueError('This skin has overlapping body armatures. Their slot and priority rules need resolution before customization.')
+            occupied.update(part['slots'])
+        return result
+
+    def character(self, key):
+        actor, fields, plugin, sex = self._traits(key)
+        race = self._ref(fields, b'RNAM', plugin)
+        race_fields, race_plugin = self._record(race, b'RACE', 'character race')
+        default_skin = self._ref(race_fields, b'WNAM', race_plugin)
+        skin = self._ref(fields, b'WNAM', plugin) or default_skin
+        races = self._races(race)
+        parts = self._parts(skin, sex, races)
+        body_models = {path for part in parts if 32 in part['slots'] for path in part['world_models']}
+        if not body_models: raise ValueError('No applicable torso body was found for this character.')
+        if skin == default_skin: scope = 'shared'
+        elif default_skin:
+            shared = {path for part in self._parts(default_skin, sex, races) if 32 in part['slots'] for path in part['world_models']}
+            scope = 'shared' if body_models == shared else 'mixed' if body_models & shared else 'private'
+        else: scope = 'private'
+        return dict(traits_actor=actor, sex=sex, race=race, skin=skin,
+            skin_plugin=self._record(skin, b'ARMO', 'character skin')[1], scope=scope,
+            parts=parts, body_models=sorted(body_models),
+            first_person_models=sorted({path for part in parts for path in part['first_person_models']}),
+            textures=sorted({path for part in parts for path in part['textures']}))

@@ -3,7 +3,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QPushButton, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 from .npc_dialog import NpcDialog
-from .characters import active_characters
+from .characters import active_characters, body_description
 from .guidance import display_name
 
 
@@ -49,7 +49,10 @@ class CharacterDialog(NpcDialog):
         self.character_note=paragraph(); detail.addWidget(self.character_note)
         form=QFormLayout(); self.appearance_choice=QComboBox(); form.addRow('Appearance',self.appearance_choice); detail.addLayout(form)
         self.appearance_note=paragraph(); detail.addWidget(self.appearance_note)
-        self.body_assignment=paragraph(); detail.addWidget(self.body_assignment)
+        body_form=QFormLayout()
+        self.body_assignment=paragraph(); body_form.addRow('Current body', self.body_assignment)
+        self.skin_assignment=paragraph(); body_form.addRow('Current skin', self.skin_assignment)
+        detail.addLayout(body_form)
         detail.addStretch(1)
         detail.addWidget(paragraph('An appearance package keeps its face, hair and related assets together. '
             'This selection also forwards any body/skin assignment made by that appearance mod. '
@@ -89,7 +92,7 @@ class CharacterDialog(NpcDialog):
         if not item:
             self.character_name.setText('No matching characters')
             self.character_note.setText('Try another name or choose All characters.')
-            self.appearance_choice.setEnabled(False); self.appearance_note.setText(''); self.body_assignment.setText('')
+            self.appearance_choice.setEnabled(False); self.appearance_note.setText(''); self.body_assignment.setText(''); self.skin_assignment.setText('')
         else:
             key=self.current_character; row=self.characters[key]
             self.character_name.setText(row['name']); self.character_name.setToolTip(row['editor']+'\n'+key)
@@ -106,9 +109,13 @@ class CharacterDialog(NpcDialog):
             if chosen and chosen not in row['options']: self.appearance_choice.addItem(chosen+' — unavailable',chosen)
             self.appearance_choice.setCurrentIndex(max(0,self.appearance_choice.findData(chosen)))
             self.appearance_choice.setEnabled(bool(row['options']) or bool(chosen))
-            self.body_assignment.setText('Current body/skin assignment could not be inspected.' if self.directory_problem else
-                'Current body/skin assignment: this character has an individual skin assignment in its records.'
-                if row['skin'] else 'Current body/skin assignment: no individual skin assignment is set on this character; race or template rules supply it.')
+            description=body_description(row, self.organizer.resolvePath, self.organizer.modsPath(),
+                overwrite_path=self.organizer.overwritePath(),
+                game_data=self.organizer.managedGame().gameDirectory().absolutePath()+'/Data')
+            self.body_assignment.setText(description['body'])
+            self.skin_assignment.setText(description['skin'])
+            self.body_assignment.setToolTip(description['evidence'])
+            self.skin_assignment.setToolTip(description['evidence'])
         self.appearance_choice.blockSignals(False); self.explain_appearance()
 
     def select_appearance(self):

@@ -4,7 +4,7 @@ from pathlib import Path
 import struct
 from tempfile import TemporaryDirectory
 
-from .body_ownership import records
+from .body_ownership import records, BodyIndex
 from .synthesis import plugin_masters
 
 
@@ -35,7 +35,7 @@ def winning_strings(candidates):
     return parse_strings(winners[0])
 
 
-def character_records(path, strings=None):
+def character_records(path, strings=None, *, parsed=None):
     path = Path(path); strings = strings or {}
     with path.open('rb') as stream:
         header = stream.read(24)
@@ -50,7 +50,7 @@ def character_records(path, strings=None):
         if form >> 24 >= len(masters): raise ValueError('Character master reference is invalid.')
         return f'{form & 0xffffff:06X}:' + masters[form >> 24].casefold()
     result = {}
-    for key, record in records(path):
+    for key, record in records(path) if parsed is None else parsed:
         key = key.split(':')[0].upper() + ':' + key.split(':')[1]
         if record is None:
             result[key] = None; continue
@@ -99,7 +99,7 @@ def active_characters(organizer, appearances):
     feature=organizer.gameFeatures().gameFeature(mobase.DataArchives)
     registered=list(feature.archives(organizer.profile())) if feature else []
     ordered_plugins=[Plugin(name,position,(),organizer.pluginList().origin(name)) for name,position in order.items()]
-    sources = []
+    sources = []; bodies = BodyIndex()
     with TemporaryDirectory(prefix='modlab-character-names-') as temp:
         for name in sorted(order, key=order.get):
             if order[name] < 0: continue
@@ -121,5 +121,51 @@ def active_characters(organizer, appearances):
                         reader.extract_asset(archive, resource, target)
                         contents.append((archive_rank(archive_name,ordered_plugins,registered),target.read_bytes()))
                     strings = winning_strings(contents)
-            sources.append((name, character_records(path, strings)))
-    return character_rows(sources, appearances)
+            parsed = list(records(path))
+            bodies.add_plugin(path, parsed)
+            sources.append((name, character_records(path, strings, parsed=parsed)))
+    rows = character_rows(sources, appearances)
+    for key, row in rows.items():
+        try: row['body'] = bodies.character(key)
+        except ValueError as error: row['body_problem'] = str(error)
+    return rows
+
+
+def body_description(row, resolve, mods_path, *, overwrite_path=None, game_data=None):
+    """Name effective loose providers without mistaking a record owner for a file owner."""
+    from .guidance import display_name
+    body = row.get('body')
+    if not body:
+        return dict(body='This character needs a closer body check before customization. Their current setup is retained.',
+                    skin='Current skin retained.', evidence=row.get('body_problem', 'Body assignment could not be read.'))
+    root = Path(mods_path).resolve()
+    locations = [(Path(path).resolve(), label) for path, label in
+                 ((overwrite_path, 'MO2 Overwrite'), (game_data, 'Game Data')) if path]
+    def providers(paths):
+        names = set(); unresolved = False
+        for relative in paths:
+            value = resolve(relative)
+            if not value or not Path(value).is_file():
+                unresolved = True; continue
+            path = Path(value).resolve()
+            try: name = path.relative_to(root).parts[0]
+            except ValueError:
+                name = next((label for folder, label in locations if path.is_relative_to(folder)), 'External files')
+            names.add(display_name(name))
+        return sorted(names, key=str.casefold), unresolved
+    names, unresolved = providers(body['body_models'])
+    scope = {'shared':'Uses the shared '+body['sex']+' body.',
+             'private':'Uses replacer body files instead of the shared body. Other characters may use those files too.',
+             'mixed':'Uses a mixture of shared and separate body parts.'}[body['scope']]
+    if names: scope += '\nSupplied by '+', '.join(names)+'.'
+    if unresolved: scope += '\nSome body files need archive inspection before customization.'
+    textures, texture_unknown = providers(body['textures'])
+    skin = 'Base skin supplied by '+', '.join(textures)+'.' if textures else 'Uses the skin linked to this body.'
+    if texture_unknown: skin += '\nSome skin files still need archive inspection.'
+    if any(not part['texture_set'] for part in body['parts']):
+        skin += '\nSome skin textures are linked inside the body meshes.'
+    evidence = '\n'.join(['Static base-record assignment; existing saves and scripts may alter it.',
+        'Skin record: '+body['skin'], 'Skin record provider: '+body['skin_plugin'], *body['body_models'], *body['textures']])
+    variations = sorted({part['texture_swap'] for part in body['parts'] if part['texture_swap']})
+    if variations: evidence += '\nTexture variation rules also apply (not resolved here): '+', '.join(variations)
+    return dict(body=scope, skin=skin, evidence=evidence)
