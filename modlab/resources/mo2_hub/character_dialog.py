@@ -89,7 +89,9 @@ class CharacterDialog(NpcDialog):
     def show_character(self, item, previous=None):
         self.current_character=item.data(Qt.ItemDataRole.UserRole) if item else None
         self.appearance_choice.blockSignals(True); self.appearance_choice.clear()
-        self.appearance_choice.addItem('Follow current mod setup (remove my override)','')
+        reset_label='Follow current mod setup'
+        if self.current_character in self.applied_selection: reset_label+=' (remove my override)'
+        self.appearance_choice.addItem(reset_label,'')
         if self.current_character in self.applied_selection:
             self.appearance_choice.addItem('Keep my saved appearance',KEEP_SAVED)
         if not item:
@@ -135,7 +137,9 @@ class CharacterDialog(NpcDialog):
         if hasattr(self,'character_status'): self.update_pending()
 
     def update_pending(self):
-        self.character_status.setText(f'{len(self.selected)} character appearance choice(s) selected. Applying prepares their paired files and checks the installed result.')
+        removed=len(set(self.applied_selection)-set(self.selected))
+        self.character_status.setText(f'{len(self.selected)} appearances selected. '+(f'{removed} saved override(s) will be removed; source mods will supply those appearances.' if removed else 'Applying prepares their paired files and checks the installed result.'))
+        self.character_apply.setText('Clear saved appearance overrides' if not self.selected and removed else 'Apply appearance choices')
         self.character_apply.setEnabled(bool(self.selected) or bool(self.applied_selection))
 
     def explain_appearance(self):
@@ -143,7 +147,7 @@ class CharacterDialog(NpcDialog):
         if chosen==KEEP_SAVED: chosen=self.applied_selection.get(key,'')
         option=self.characters.get(key,{}).get('options',{}).get(chosen)
         if not chosen:
-            self.appearance_note.setText("Applying removes ModLab's explicit appearance override for this character. The current source mods then supply their appearance. Other saved character choices remain.")
+            self.appearance_note.setText("Applying removes ModLab's explicit appearance override for this character. The current source mods then supply their appearance. Other saved character choices remain." if key in self.applied_selection else "The installed source mods supply this character. No explicit ModLab appearance override will be added.")
         elif not option: self.appearance_note.setText('This saved appearance is no longer available. Enable its source mod, choose an installed alternative, or explicitly follow the current mod setup.')
         elif not option['ready']: self.appearance_note.setText(option['problem'])
         else: self.appearance_note.setText('The matching face mesh and face tint are present in '+display_name(option['mod'])+'. They will be prepared together.')

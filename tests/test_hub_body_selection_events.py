@@ -44,3 +44,16 @@ class BodySelectionEventTests(unittest.TestCase):
         fn=method('body_dialog.py','BodyDialog','restore_selection',scope)
         dialog=self.dialog(None); fn(dialog)
         self.assertFalse(dialog.selected())
+
+
+class CharacterPendingLabelTests(unittest.TestCase):
+    def test_last_override_reset_has_an_enabled_clear_action(self):
+        fn=method('character_dialog.py','CharacterDialog','update_pending',{})
+        result={}
+        dialog=SimpleNamespace(selected={},applied_selection={'Lydia':'A.esp'},
+            character_status=SimpleNamespace(setText=lambda text:result.update(status=text)),
+            character_apply=SimpleNamespace(setText=lambda text:result.update(label=text),setEnabled=lambda value:result.update(enabled=value)))
+        fn(dialog)
+        self.assertTrue(result['enabled'])
+        self.assertEqual('Clear saved appearance overrides',result['label'])
+        self.assertIn('1 saved override(s) will be removed',result['status'])
