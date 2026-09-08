@@ -48,13 +48,15 @@ def skse_files_error(setup, resolve_path):
 def foundation_asset(path):
     """Include non-overlapping address databases in the existing VFS pass."""
     path = path.replace('\\', '/').casefold()
-    return '/skse/plugins/' in '/' + path and bool(DATABASE.fullmatch(path.rsplit('/', 1)[-1]))
+    from .shape_support import EVIDENCE_FILES
+    return path in EVIDENCE_FILES or ('/skse/plugins/' in '/' + path and bool(DATABASE.fullmatch(path.rsplit('/', 1)[-1])))
 
 
 def inspect_foundations(setup, resolve_path, *, source_page=None, skse_version=None):
     if setup.game_name != 'Skyrim Special Edition':
         return ()
-    findings = []
+    from .shape_support import inspect_support
+    findings = list(inspect_support(setup, resolve_path))
     if setup.skse_loader_present:
         problem = skse_files_error(setup, resolve_path)
         if problem:

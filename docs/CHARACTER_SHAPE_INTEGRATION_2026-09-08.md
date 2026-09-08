@@ -26,3 +26,14 @@ This is a configuration preparation component. It is not yet connected to the ch
 5. Explain any required actor reset for existing saves; do not report configuration publication as proof of in-game application. Supply the user a focused check at handover.
 
 The guide documents specific exclusion precedence and notes that already assigned actors retain their saved presets until reset: [OBody configuration guide](https://www.nexusmods.com/skyrimspecialedition/articles/4756). Neutral base and morph preparation requirements come from the [installation guide](https://www.nexusmods.com/skyrimspecialedition/articles/4580); an author-supplied neutral preset need not have every slider numerically zero.
+
+## Optional setup integration checkpoint
+
+The ordinary workflow does not require OBody. An explicit individual body-shape support action checks required effective files, active plugins and RaceMenu controller settings, then uses the existing acquisition/install/recheck flow. With OBody present, these checks also run during preparation. Archive-contained scripts are distinguished from proven missing files; native DLLs must be loose files. File presence alone does not establish runtime compatibility or a prepared character.
+
+The two supported RaceMenu changes are explicit actions: enable body morphs, or choose OBody instead of BodyGen. They create a managed Character Shapes output, preserving an exact source-settings snapshot and the previous output. Changed source files, providers, profiles and manually edited managed output prevent silent replay. Successful activation is reported only after the effective path and bytes are checked. Terminal failures release the UI operation guard, and retained refresh callbacks cannot later activate a failed operation.
+
+Verification: 342 focused hub tests passed, including publication, source preservation, profile changes, activation failure, final-journal failure and late refresh callbacks. Independent review found no remaining important issues in this increment. A read-only check of this machine's enabled loose files produced no optional-helper findings during ordinary preparation; explicitly requesting support identified OBody setup and the BodyGen controller choice. Uninspected archive scripts remained Unknown. The RaceMenu source was unchanged; no settings output was published.
+
+Desktop deployment is pending after the Escape interruption. Individual shape selection, neutral body/outfit preparation, scoped custom presets and OBody assignment publication remain incomplete. The optional setup entry does not represent those features as ready.
+

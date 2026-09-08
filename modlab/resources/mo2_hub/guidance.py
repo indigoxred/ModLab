@@ -33,6 +33,8 @@ def finding_action(finding):
         return 'finish_setup', 'Prepare and recheck'
     if code in CHOICES:
         return CHOICES[code]
+    if code.startswith('shape-support-'):
+        return 'resolve_finding', 'Set up character body customization'
     if code.startswith('body-'):
         return 'bodyslide', 'Review body and outfit setup'
     if code.startswith('animation-'):

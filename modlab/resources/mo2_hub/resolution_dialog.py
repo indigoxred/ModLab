@@ -18,6 +18,7 @@ class ResolutionDialog(QDialog):
         self.provider = None
         self.context = resolution_context(finding, snapshot)
         self.profile_path = organizer.profilePath()
+        self.settings_source = None
         layout = QVBoxLayout(self)
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
         body = QWidget(); content = QVBoxLayout(body); content.setSpacing(14)
@@ -37,7 +38,21 @@ class ResolutionDialog(QDialog):
         for index, url in enumerate(self.context.links):
             title = 'Open source linked in advice' + (f' {index + 1}' if len(self.context.links) > 1 else '')
             content.addWidget(button(title, lambda u=url: QDesktopServices.openUrl(QUrl(u))))
-        if finding.code == 'engine-fixes-preloader-missing':
+        if finding.code in {'shape-support-morph-disabled', 'shape-support-controller-choice'}:
+            from pathlib import Path
+            from .outputs import digest
+            from .shape_settings import RELATIVE
+            source = Path(organizer.resolvePath(RELATIVE))
+            self.settings_source = (str(source), digest(source))
+            if finding.code == 'shape-support-morph-disabled':
+                title, action = 'Enable body shape support', 'enable-morphs'
+                content.addWidget(label('ModLab will enable body morphs in a separate settings output and check that it takes effect. Your other settings are retained.'))
+            else:
+                title, action = 'Use OBody for body shapes', 'use-obody'
+                content.addWidget(label('This disables RaceMenu BodyGen randomization. Choose it only if you want OBody to control shapes. Existing source settings are backed up and other values stay unchanged.'))
+            content.addWidget(button(title, lambda a=action: self.choose(a), True))
+            content.addWidget(button('Keep existing settings for now', self.reject))
+        elif finding.code == 'engine-fixes-preloader-missing':
             content.addWidget(label('This component belongs beside SkyrimSE.exe, outside the normal mod folders. '
                 'Automatic preloader installation is not implemented. Follow the linked release instructions, '
                 'then recheck here; installing it as a normal Data mod would put it in the wrong place.'))

@@ -32,8 +32,12 @@ def resolution_context(finding, snapshot):
     prefix = prefixes.get(finding.code)
     if prefix and finding.title.startswith(prefix):
         dependency = finding.title[len(prefix):]
+    if finding.code == 'shape-support-dependency-disabled':
+        dependency = finding.detail.split('\n', 1)[0]
     dependents = tuple(p for p in plugins if p.load_order >= 0 and dependency and
                        dependency.casefold() in {m.casefold() for m in p.masters})
+    if finding.code.startswith('shape-support-'):
+        dependents = tuple(p for p in plugins if p.name.casefold() == 'obody.esp' and p.load_order >= 0)
     installed = next((p for p in plugins if p.name.casefold() == dependency.casefold()), None)
     providers = [p.origin for p in dependents if p.origin]
     if finding.code == 'record-errors':
@@ -46,8 +50,8 @@ def resolution_context(finding, snapshot):
             providers.append(asset.origins[0])
     return ResolutionContext(dependency, installed.origin if installed else '',
         tuple(dict.fromkeys(providers)), tuple(p.name for p in dependents),
-        web_links(finding.action), bool(finding.code == 'inactive-master' and dependents and
-                                       installed and installed.load_order < 0))
+        web_links(finding.action), bool(((finding.code == 'inactive-master' and dependents) or
+              finding.code == 'shape-support-dependency-disabled') and installed and installed.load_order < 0))
 
 
 def enable_dependency(organizer, dependency, provider, profile_path, active_state):

@@ -140,6 +140,7 @@ class HubView:
         self.action_page('Make it yours', 'Your existing choices remain available. Changes are checked through the preparation workflow.', (
             ('Bodies & outfits', 'Choose available projects and presets for generated outfits.', h.bodyslide),
             ('Character appearances', 'Choose appearance providers for the characters covered by your installed mods.', h.npc_appearances),
+            ('Individual body shape support', 'Set up the optional helper and its dependencies for character-specific shapes.', h.character_shape_support),
             ('Animations', 'Review the selected animation patches and generated behavior setup.', h.pandora),
             ('Gameplay patches', 'Configure the supported patchers for your selected setup.', h.synthesis),
             ('Graphics', 'Choose supported graphics preparation and review its output.', h.graphics)))

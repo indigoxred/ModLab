@@ -560,6 +560,24 @@ class HubWindow(QDialog):
         except Exception as error:
             QMessageBox.warning(self, 'Patch choices need attention', str(error))
 
+    def character_shape_support(self):
+        if self.processing or self.installing: return
+        try:
+            from .shape_support import inspect_support
+            self.refresh()
+            if self.snapshot is None:
+                raise ValueError('The selected setup could not be inspected.')
+            requirements = inspect_support(self.snapshot, self.organizer.resolvePath, requested=True)
+            if requirements:
+                self.resolve_finding(requirements[0])
+            else:
+                QMessageBox.information(self, 'Individual body shape support',
+                    'The known helper support files are present and the checked controller settings agree. '
+                    'This does not yet verify neutral body/outfit meshes or a character assignment. '
+                    'Character-specific shape selection is still being integrated; your current shape choices are unchanged.')
+        except Exception as error:
+            QMessageBox.warning(self, 'Character body setup needs attention', str(error))
+
     def npc_appearances(self):
         if self.processing or self.installing: return
         try:
@@ -667,6 +685,24 @@ class HubWindow(QDialog):
                     self.processing = False
                 self.automatic_signature = None
                 self.finish_setup()
+            elif dialog.next_action in {'enable-morphs', 'use-obody'}:
+                from .shape_settings import apply_settings
+                self.processing = True
+                self.change_timer.stop()
+                self.setEnabled(False)
+                def settings_ready(record, error):
+                    self.processing = False
+                    self.setEnabled(True)
+                    self.automatic_signature = None
+                    self.refresh()
+                    self.summary.setText(('Body settings need attention: '+error) if error else
+                        'Body-controller setting applied and its effective file checked. Body and outfit preparation remains separate.')
+                try:
+                    apply_settings(self.organizer, dialog.next_action, *dialog.settings_source, settings_ready)
+                except Exception:
+                    self.processing = False
+                    self.setEnabled(True)
+                    raise
             elif dialog.next_action == 'install':
                 self.install()
             elif dialog.next_action == 'documents':
