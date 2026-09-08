@@ -7,7 +7,8 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QLa
 from .body_dialog import BodyDialog
 from .body_customization_dialog import CustomizationActions
 from .body_choices import (shared_bodies, compatible_presets, choice_groups,
-    select_projects, load_defaults, save_default, verified_default, selected_morph_mode)
+    select_projects, load_defaults, save_default, verified_default, selected_morph_mode,
+    outfit_batch, outfit_batches)
 from .guidance import display_name
 from .body_drafts import load_drafts, save_draft, choice_fields, missing_decisions
 
@@ -68,6 +69,12 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
         if self.outfit_error:
             layout.addWidget(note('Outfit matching needs attention: ' + self.outfit_error +
                 ' Shared body choices and Advanced projects remain available. No outfits will be selected automatically.'))
+        self.batch_row=QWidget(); batch=QHBoxLayout(self.batch_row);batch.setContentsMargins(0,0,0,0)
+        self.batch_choice=QComboBox();batch.addWidget(self.batch_choice,1)
+        self.batch_apply=QPushButton('Use this outfit group');self.batch_apply.clicked.connect(self.apply_outfit_batch)
+        batch.addWidget(self.batch_apply);layout.addWidget(self.batch_row)
+        self.batch_choice.setToolTip('Use an author-provided group to choose several matching outfit variants together. '
+            'Only outfits with exactly one matching variant change. You can still change each outfit below.')
         self.parts = QTreeWidget(); self.parts.setColumnCount(3)
         self.parts.setHeaderLabels(['Body part or outfit', 'Use', 'From mod'])
         self.parts.setColumnWidth(0, 265); self.parts.setColumnWidth(1, 385)
@@ -183,6 +190,7 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
         self.customize_button.setEnabled(available)
         self.pending_note.setText('Pending choices restored; not applied. Review them, then choose Prepare and apply.' if self.sex_choice.currentData() in self.drafts else 'Selections are kept when you close. Prepare and apply changes the installed body and outfits.')
         if not available:
+            self.batch_row.setVisible(False)
             self.choice_note.setText('A saved body or shape is unavailable. Enable its source mod or choose an installed alternative. Current files are retained.' if body and preset else 'Choose a body and shape to see the matching parts and outfits.')
             return
         saved = self.drafts.get(self.sex_choice.currentData(), self.defaults.get(self.sex_choice.currentData(), {}))
@@ -221,6 +229,24 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
         self.choice_note.setText(f'{total} matching outfit choices. {ambiguous} parts/outfits have alternatives. '
             'Only one variant in each overlapping group is prepared here; Advanced retains individual project combinations. '
             'Projects without a declared match remain available in Advanced.')
+        previous_group=self.batch_choice.currentData();self.batch_choice.clear()
+        self.batch_choice.addItem('Choose several outfit variants together…',None)
+        for name,count in outfit_batches(self.job.catalog,groups):
+            self.batch_choice.addItem(f'{name} — {count} outfit choices',name)
+        if previous_group and self.batch_choice.findData(previous_group)>=0:
+            self.batch_choice.setCurrentIndex(self.batch_choice.findData(previous_group))
+        self.batch_row.setVisible(self.outfit_choice.isChecked() and self.batch_choice.count()>1)
+
+    def apply_outfit_batch(self):
+        group=self.batch_choice.currentData()
+        if not group or not self.outfit_choice.isChecked():return
+        groups=choice_groups(self.job.catalog,self.body_choice.currentData(),self.shape_choice.currentData(),
+            self.saved,outfit_paths=self.outfit_paths)
+        changed=outfit_batch(self.job.catalog,groups,group)
+        for key,value in changed.items():
+            combo=self.decisions[key];combo.setCurrentIndex(combo.findData(value))
+        self.guided_status.setText(f'Chose {group} for {len(changed)} matching outfits. '
+            'Other choices are retained. You can adjust any outfit below, then choose Prepare and apply.')
 
     def prepare_guided(self):
         try:

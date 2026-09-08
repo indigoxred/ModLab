@@ -111,6 +111,21 @@ def select_projects(catalog, body, preset, decisions, *, outfits, saved=None, ou
     return selected
 
 
+def outfit_batch(catalog, choices, group):
+    """An explicit author-group choice, never a guess from project names."""
+    members=catalog.groups.get(group,set()); result={}
+    for choice in choices:
+        if choice.kind!='outfit' or len(choice.options)<2: continue
+        matches=set(choice.options)&members
+        if len(matches)==1: result[choice.key]=next(iter(matches))
+    return result
+
+
+def outfit_batches(catalog, choices):
+    return [(name,count) for name in sorted(catalog.groups,key=str.casefold)
+            if (count:=len(outfit_batch(catalog,choices,name)))>1]
+
+
 def defaults_path(profile):
     return Path(profile) / 'modlab-body-defaults.json'
 
