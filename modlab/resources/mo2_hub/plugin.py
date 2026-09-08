@@ -20,7 +20,7 @@ from .loot_workflow import run_loot, context_signature
 from .loot_dialog import LootDialog
 from .helper_dialog import HelperDialog
 from .body_workflow import prepare_body_job
-from .body_dialog import BodyDialog
+from .guided_body_dialog import GuidedBodyDialog as BodyDialog
 from .xedit_dialog import XEditDialog
 from .workflow import finish_setup, complete_cleaning
 from .cleaning import withdraw_output

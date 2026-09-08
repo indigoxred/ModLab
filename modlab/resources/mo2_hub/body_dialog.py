@@ -145,6 +145,7 @@ class BodyDialog(OperationDialog):
         self.update_selection()
 
     def generate(self):
+        self.applied = False
         try:
             plan_build(self.job.catalog, self.selected(), self.preset.currentData())
             check_body_context(self.organizer, self.job)
@@ -200,6 +201,7 @@ class BodyDialog(OperationDialog):
             self.check_effective()
 
     def check_effective(self):
+        self.applied = False
         failures = []
         if self.organizer.profilePath() != self.job.record['profile_path']:
             failures.append('The selected profile changed.')
