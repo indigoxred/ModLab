@@ -59,3 +59,11 @@ Morph-enabled BodySlide jobs now inspect generated NIFs in an isolated native re
 The reader visits the reachable scene from its root, including sibling nodes without geometry. `scripts/verify_body_mesh_native.py` generates three original triangle fixtures for a sibling-only link, competing links, and an unreachable node. It requires an existing .NET SDK and the existing niflysharp 1.1.0 library; it downloads nothing. Native production inspection is read-only.
 
 Desktop check after deploying 7a482a9: Lydia is searchable and shows the shared generated body and CBBE skin providers. Closing the character panel returned promptly without a LOOT window in this observation. OBody remains optional and uninstalled. The full character editor is still in progress.
+
+### Guided shape customization
+
+Bodies & outfits now has Customize this shape in BodySlide. It opens the installed 5.8.2 editor through MO2 with the chosen body and a uniquely named copy of the starting preset. The private runner directs preview builds away from game output. Save, then close returns the edited preset to the guided selector; Prepare and apply remains the explicit body/outfit build action. No-save exits, renamed/different-body presets, invalid values, failed activation and profile changes do not report completion. Completed-build controls are reset when the preview job is refreshed.
+
+Preset publication uses managed Shape Presets output with provenance and recovery. If OBody configuration is active, its existing rules are preserved and the new preset is excluded from random distribution. Consecutive saves and unchanged light-plugin rules are covered. This does not complete individual character assignment or neutral-base preparation; OBody is still optional and uninstalled on this test profile.
+
+Validation: 371 hub unit/integration tests passed. The editor configuration keys and Save workflow were checked against BodySlide v5.8.2 source: https://github.com/ousnius/BodySlide-and-Outfit-Studio/blob/v5.8.2/src/program/BodySlideApp.cpp . Desktop smoke verification follows deployment.

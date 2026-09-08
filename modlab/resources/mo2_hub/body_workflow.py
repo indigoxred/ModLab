@@ -60,11 +60,11 @@ class BodyJob:
         (self.directory / 'operation.json').write_text(json.dumps(self.record, indent=2), encoding='utf-8')
 
 
-def prepare_body_job(organizer, version_reader, *, preview=False):
+def prepare_body_job(organizer, version_reader, *, preview=False, editing=False):
     if organizer.managedGame().gameName() != 'Skyrim Special Edition':
         raise ValueError('Select Skyrim Special Edition before building.')
     from .pgpatcher_workflow import require_upstream_view
-    if not preview:
+    if not preview and not editing:
         require_upstream_view(organizer)
     signature = context_signature(organizer)
     files = effective_files(organizer)

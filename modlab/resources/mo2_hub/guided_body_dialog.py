@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QLa
     QVBoxLayout, QWidget)
 
 from .body_dialog import BodyDialog
+from .body_customization_dialog import CustomizationActions
 from .body_choices import (shared_bodies, compatible_presets, choice_groups,
     select_projects, load_defaults, save_default, verified_default, selected_morph_mode)
 from .guidance import display_name
@@ -15,7 +16,7 @@ def note(text):
     return widget
 
 
-class GuidedBodyDialog(BodyDialog):
+class GuidedBodyDialog(CustomizationActions, BodyDialog):
     def __init__(self, organizer, job, parent=None, review_names=None):
         super().__init__(organizer, job, parent, review_names)
         self.setWindowTitle('ModLab â€” Bodies & outfits')
@@ -53,6 +54,9 @@ class GuidedBodyDialog(BodyDialog):
         self.shape_support.setToolTip('Shape data is used by RaceMenu and body distribution helpers. Preparing it does not assign a preset to individual characters.')
         form.addRow('In-game shape support', self.shape_support)
         layout.addLayout(form)
+        self.customize_button = QPushButton('Customize this shape in BodySlide…')
+        self.customize_button.clicked.connect(self.customize_shared)
+        layout.addWidget(self.customize_button)
         self.body_note = note(''); layout.addWidget(self.body_note)
         self.outfit_choice = QCheckBox('Prepare compatible installed outfits with this shape')
         self.outfit_choice.setChecked(not self.outfit_error); self.outfit_choice.setEnabled(not self.outfit_error)
@@ -123,6 +127,7 @@ class GuidedBodyDialog(BodyDialog):
         self.parts.clear(); self.decisions = {}
         body, preset = context
         self.guided_build.setEnabled(bool(body and preset))
+        self.customize_button.setEnabled(bool(body and preset))
         if not body or not preset:
             self.choice_note.setText('Choose a body and shape to see the matching parts and outfits.')
             return

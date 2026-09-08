@@ -79,7 +79,14 @@ def _plugins(mapping):
         seen.add(key)
 
 
-def _validate(data, lights):
+def _validate(data, lights, preserve_actor_ids=False):
+    def identity_form(form, plugin):
+        if preserve_actor_ids:
+            if not isinstance(form,str) or not re.fullmatch(r'[0-9a-fA-F]{3,8}',form):
+                raise ValueError('Invalid actor base identity in character shape configuration.')
+            return form.casefold()
+        return _form(form, plugin.casefold() in lights or plugin.casefold().endswith('.esl'))
+
     if not isinstance(data, dict) or REQUIRED - data.keys():
         raise ValueError('OBody configuration is incomplete. Restore its matching configuration before preparing shapes.')
     for key in PRESET_MAPS:
@@ -97,7 +104,7 @@ def _validate(data, lights):
         if not isinstance(rules, dict):
             raise ValueError('Invalid character rules for ' + plugin)
         for form, presets in rules.items():
-            identity = (_plugin(plugin), _form(form, plugin.casefold() in lights or plugin.casefold().endswith('.esl')))
+            identity = (_plugin(plugin), identity_form(form, plugin))
             if identity in index:
                 raise ValueError('Actor rule aliases are ambiguous: ' + plugin + ' / ' + form)
             if not _strings(presets):
@@ -110,7 +117,7 @@ def _validate(data, lights):
             if not isinstance(forms, list):
                 raise ValueError('Invalid FormID list in ' + key)
             for form in forms:
-                identity = (_plugin(plugin), _form(form, plugin.casefold() in lights or plugin.casefold().endswith('.esl')))
+                identity = (_plugin(plugin), identity_form(form, plugin))
                 if key == 'blacklistedNpcsFormID':
                     exclusions.add(identity)
     return index, exclusions
@@ -128,7 +135,7 @@ def _unique_actor_keys(mapping):
     return result
 
 
-def plan_config(source, choices, characters, available_presets, *, light_plugins=(), expected_source=None):
+def plan_config(source, choices, characters, available_presets, *, light_plugins=(), expected_source=None, preserve_actor_ids=False):
     """Build one deterministic rule per selected NPC; leave upstream data intact.
 
 `choices` is the full current selection, keyed by local BaseID:owningPlugin.
@@ -151,8 +158,10 @@ Existing-save actors may still require OBody's actor reset after publication.
         data = json.loads(source.lstrip('\ufeff'), object_pairs_hook=_pairs, parse_constant=invalid_constant)
     except json.JSONDecodeError as error:
         raise ValueError('OBody configuration is not valid JSON: ' + str(error)) from error
+    if preserve_actor_ids and choices:
+        raise ValueError('Actor assignment requires resolved identities; preserve-only validation cannot assign characters.')
     lights = {_plugin(name) for name in light_plugins}
-    index, exclusions = _validate(data, lights)
+    index, exclusions = _validate(data, lights, preserve_actor_ids)
     replaced, seen = {}, set()
     directory = _unique_actor_keys(characters)
     available = _unique_actor_keys(available_presets)
