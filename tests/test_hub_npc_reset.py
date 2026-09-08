@@ -60,6 +60,18 @@ class NpcResetTests(unittest.TestCase):
             self.assertEqual({},saved['selected']); self.assertEqual('reset',saved['status'])
             self.assertEqual(host.saved,json.loads(Path(saved['previous_choices']).read_text(encoding='utf-8')))
 
+    def test_body_only_selection_can_be_reset_without_deleting_output(self):
+        with TemporaryDirectory() as folder:
+            host=Host(Path(folder));host.saved['selected']={}
+            host.saved['body_choices']={'Lydia':'shared'}
+            workflow.path_for(host).write_text(json.dumps(host.saved),encoding='utf-8')
+            self.assertEqual([(host.target,None)],self.run_reset(host))
+            self.assertFalse(host.active)
+            self.assertEqual(b'original plugin',host.file.read_bytes())
+            reset=workflow.load(host)
+            self.assertEqual('reset',reset['status'])
+            self.assertEqual(host.saved,json.loads(Path(reset['previous_choices']).read_text()))
+
     def test_failed_disable_does_not_clear_saved_selection(self):
         with TemporaryDirectory() as folder:
             host=Host(Path(folder)); host.fail=True

@@ -22,3 +22,11 @@ Commit `6298852` was deployed with a plugin backup. The real character panel ret
 The following automatic preparation exposed a dependency cycle: Pandora's input signature included generated FaceGen meshes, while NPC preparation included Pandora's outputs. Replacing FaceGen consequently invalidated behaviors and vice versa. The run was held with the current choices retained as pending. FaceGen paths are now excluded from behavior inputs; an additional regression test checks that FaceGen changes are ignored and actual animation changes remain detected. The suite is now 408 tests. The fix still requires a native recheck after deployment.
 
 Character preparation progress now updates the normal character panel as well as Advanced. Independent skin, shape, hair and physics controls remain unfinished; this checkpoint is not full product completion.
+
+## Cycle correction verified in MO2
+
+`d5de537` was deployed and the retained four face choices plus Adrianne's body choice were applied again. Runs `95d6abfd903c` and `d07cb8bc6a3d` completed; one upstream behavior refresh was expected when migrating the old input receipt. Preparation then advanced through gameplay patching and graphics (`pgpatcher/c5ae32fa7230`), completed its final order/record checks, and returned to an enabled idle window with 36 active plugins. No LOOT, xEdit or PGPatcher process remained. No further NPC regeneration occurred in this completed sequence.
+
+Independent installed-file inspection verified 28 output files, Adrianne's shared model/private skin references and unchanged Hulda body/skin references. The generated character patch had zero xEdit record errors. Remaining UI findings concern other plugins' record and cleaning advice; they are not treated as resolved by this character test.
+
+409 hub tests now pass, including a body-only reset that preserves the previous output and recovery choices. In-game visual appearance remains for the user to check.
