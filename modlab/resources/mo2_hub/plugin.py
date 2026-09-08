@@ -33,7 +33,7 @@ from .history_dialog import HistoryDialog
 from . import synthesis_workflow as patching
 from .synthesis_dialog import SynthesisDialog
 from . import npc_workflow as appearances
-from .npc_dialog import NpcDialog
+from .character_dialog import CharacterDialog as NpcDialog
 from . import install_queue as queue_records
 from .queue_dialog import QueueDialog
 from . import pgpatcher_workflow as graphics
