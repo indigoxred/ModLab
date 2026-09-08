@@ -85,7 +85,7 @@ def character_rows(sources, appearances):
     return rows
 
 
-def active_characters(organizer, appearances):
+def active_characters(organizer, appearances, *, include_races=False):
     from .archives import active_archive_paths, archive_reader, archive_rank
     from .assessment import Plugin
     import mobase
@@ -128,6 +128,7 @@ def active_characters(organizer, appearances):
     for key, row in rows.items():
         try: row['body'] = bodies.character(key)
         except ValueError as error: row['body_problem'] = str(error)
+    if include_races: rows.update(bodies.race_templates())
     return rows
 
 

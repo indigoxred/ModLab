@@ -1,5 +1,6 @@
 """Beginner body/shape/outfit choices over the existing verified build workflow."""
-from PyQt6.QtCore import Qt
+from pathlib import Path
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QLabel,
     QMessageBox, QPushButton, QScrollArea, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget)
@@ -24,6 +25,9 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
         self.setWindowTitle('ModLab — Bodies & outfits')
         self.resize(1080, 820)
         self.pending_default = None
+        self.shape_recipe = None
+        self.shape_record = None
+        self.shape_defaults_published=False
         self.defaults = load_defaults(organizer.profilePath())
         self.drafts = load_drafts(self.profile_path)
         self.editing_sex = None
@@ -66,6 +70,10 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
         self.outfit_choice = QCheckBox('Prepare compatible installed outfits with this shape')
         self.outfit_choice.setChecked(not self.outfit_error); self.outfit_choice.setEnabled(not self.outfit_error)
         layout.addWidget(self.outfit_choice)
+        self.individual_shapes=QCheckBox('Keep this shared shape and allow individual character shapes (OBody)')
+        self.individual_shapes.setToolTip('Optional. ModLab prepares the author’s neutral body and matching outfits, then applies this shared shape and your saved character exceptions together. Separate static NPC bodies and skins are retained.')
+        layout.addWidget(self.individual_shapes)
+        self.individual_shapes.toggled.connect(self.individual_changed)
         if self.outfit_error:
             layout.addWidget(note('Outfit matching needs attention: ' + self.outfit_error +
                 ' Shared body choices and Advanced projects remain available. No outfits will be selected automatically.'))
@@ -104,9 +112,15 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
         prior=self.drafts.get(self.editing_sex,self.defaults.get(self.editing_sex,{}))
         decisions=dict(prior.get('decisions',{})) if prior.get('body')==body and prior.get('preset')==preset else {}
         decisions.update({key:combo.currentData() for key,combo in self.decisions.items()})
-        return dict(body=body,preset=preset,
+        result=dict(body=body,preset=preset,
             decisions=decisions,
             outfits=self.outfit_choice.isChecked(),shape_support=self.shape_support.currentData())
+        if self.individual_shapes.isChecked():result['individual_shapes']=True
+        return result
+
+    def individual_changed(self, enabled):
+        if enabled:self.shape_support.setCurrentIndex(self.shape_support.findData(True))
+        self.shape_support.setEnabled(not enabled)
 
     def save_pending_choice(self):
         if not self.editing_sex: return
@@ -150,6 +164,8 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
         self.outfit_choice.blockSignals(True)
         self.outfit_choice.setChecked(bool(saved.get('outfits', True)) and not self.outfit_error); self.outfit_choice.blockSignals(False)
         self.shape_support.setCurrentIndex(max(0,self.shape_support.findData(saved.get('shape_support'))))
+        self.individual_shapes.setChecked(bool(saved.get('individual_shapes')))
+        self.individual_changed(self.individual_shapes.isChecked())
         self.decision_context=None
         self.body_changed()
 
@@ -251,6 +267,7 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
             'Other choices are retained. You can adjust any outfit below, then choose Prepare and apply.')
 
     def prepare_guided(self):
+        self.shape_recipe=None;self.shape_record=None;self.shape_defaults_published=False
         try:
             body, preset = self.body_choice.currentData(), self.shape_choice.currentData()
             decisions = {key: combo.currentData() for key, combo in self.decisions.items()}
@@ -263,7 +280,17 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
             self.pending_default = dict(sex=self.sex_choice.currentData(), body=body, preset=preset,
                 decisions=decisions, outfits=self.outfit_choice.isChecked(), selected=selected,
                 shape_support=self.shape_support.currentData())
-            self.preset.setCurrentIndex(self.preset.findData(preset))
+            if self.individual_shapes.isChecked():
+                from .characters import active_characters
+                from .shape_preparation import prepare_request
+                self.guided_status.setText('Checking the shared shape, character exceptions and optional helper before changing any bodies…')
+                self.shape_recipe=prepare_request(self.organizer,self.job.catalog,self.pending_default,
+                    active_characters(self.organizer,{},include_races=True))
+                self.pending_default=self.shape_recipe['request'];morphs=True
+            elif Path(self.organizer.resolvePath('SKSE/Plugins/OBody.dll') or '').is_file():
+                raise ValueError('OBody is enabled. Choose “Keep this shared shape and allow individual character shapes” so the body is not shaped twice, or disable OBody before preparing a static body.')
+            build_preset=self.pending_default.get('build_preset',preset)
+            self.preset.setCurrentIndex(self.preset.findData(build_preset))
             for item in self.items():
                 item.setCheckState(Qt.CheckState.Checked if item.text() in selected else Qt.CheckState.Unchecked)
             self.morphs.setChecked(morphs)
@@ -277,13 +304,40 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
     def generate(self):
         # Advanced selections must never silently rewrite the shared-body preference.
         self.pending_default = None
+        self.shape_recipe=None
         BodyDialog.generate(self)
+
+    def generate_confirmed(self):
+        if self.shape_recipe:
+            from .shape_preparation import mark_pending
+            mark_pending(self.profile_path,dict(status='Building bodies and outfits',preflight=self.shape_recipe['directory']))
+        BodyDialog.generate_confirmed(self)
+        if self.shape_recipe and not self.awaiting_publication and not self.applied:
+            self.shapes_failed(self.status.toPlainText())
 
     def install_output(self):
         if self.pending_default and (set(self.pending_default['selected']) == set(self.job.record.get('projects', ()))
-                and self.pending_default['preset'] == self.job.record.get('preset')):
+                and self.pending_default.get('build_preset',self.pending_default['preset']) == self.job.record.get('preset')):
             self.pending_default['build_record'] = str(self.job.directory / 'operation.json')
+        if self.shape_recipe:
+            from .shape_preparation import mark_pending,upstream,check_archive_inputs
+            from .character_shapes import load_choices
+            state=load_choices(self.profile_path)
+            if state!=self.shape_recipe['choices']:
+                raise ValueError('Character choices changed during the body build. The new output was not applied.')
+            if load_defaults(self.profile_path)!=self.shape_recipe['defaults_before']:
+                raise ValueError('Shared body choices changed during the body build. The new output was not applied.')
+            current,checksum,_=upstream(self.organizer,state)
+            if str(current)!=self.shape_recipe['source'] or checksum!=self.shape_recipe['source_sha256']:
+                raise ValueError('The shape configuration changed during the body build. The new output was not applied.')
+            check_archive_inputs(self.organizer,self.shape_recipe['plan']['archive_inputs'])
+            mark_pending(self.profile_path,dict(status='Applying bodies, then shape assignments',body_job=str(self.job.directory),preflight=self.shape_recipe['directory']))
         BodyDialog.install_output(self)
+
+    def output_ready(self,target,error):
+        if self.shape_recipe and error:
+            self.installed=target;self.shapes_failed(error);return
+        BodyDialog.output_ready(self,target,error)
 
     def check_effective(self):
         BodyDialog.check_effective(self)
@@ -291,12 +345,87 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
             try:
                 choice = dict(self.pending_default); sex = choice.pop('sex')
                 choice['build_record'] = str(self.job.directory / 'operation.json')
+                if self.shape_recipe:
+                    from .characters import active_characters
+                    from .character_shapes import apply_choices
+                    self.applied=False;self.operation_running=True;self.awaiting_publication=True;self.setEnabled(False)
+                    self.shape_choice_to_save=(sex,choice)
+                    defaults=load_defaults(self.profile_path);defaults[sex]=choice
+                    self.guided_status.setText('Bodies and outfits are checked. Applying the shared shape and saved character exceptions…')
+                    apply_choices(self.organizer,active_characters(self.organizer,{},include_races=True),self.job.catalog,
+                        self.shapes_ready,prepared_defaults=defaults,on_prepared=lambda path:setattr(self,'shape_record',path))
+                    return
                 save_default(self.profile_path, sex, choice)
                 self.defaults = load_defaults(self.profile_path)
                 self.pending_default = None
                 self.save_pending_choice()
+                self.pending_note.setText('Applied choices. Changes you make here are saved as pending until you prepare again.')
                 self.guided_status.setText('Prepared and applied. Your shared body and shape are saved for this profile. '
                     'Generated files were checked and are effective. NPC body assignments were not changed. '
                     'You can change these choices here at any time.')
             except Exception as error:
+                if self.shape_recipe:self.shapes_failed(str(error));return
                 self.guided_status.setText('Output was applied, but the body default could not be saved: ' + str(error))
+        elif self.shape_recipe:
+            self.shapes_failed(self.status.toPlainText())
+
+    def shapes_ready(self,target,error):
+        if error:self.shapes_failed(error);return
+        from .dialog_workflow import end_apply
+        from .shape_preparation import pending_path
+        try:
+            sex,choice=self.shape_choice_to_save
+            if load_defaults(self.profile_path)!=self.shape_recipe['defaults_before']:
+                raise ValueError('Shared body choices changed during assignment. Review them before preparing again.')
+            save_default(self.profile_path,sex,choice)
+            self.shape_defaults_published=True
+            self.defaults=load_defaults(self.profile_path)
+            self.job.record.update(shape_config_record=str(self.shape_record),status='Body, outfits and shape assignments installed and effective')
+            self.job.save();pending_path(self.profile_path).unlink(missing_ok=True)
+            self.pending_default=None;self.applied=True
+            self.guided_status.setText('Prepared and applied: the shared shape and saved character exceptions are effective. '
+                'Separate static NPC bodies and skins were retained. Existing saves may need OBody’s assignment reset; visual checks remain in game.')
+        except Exception as problem:
+            self.shapes_failed(str(problem));return
+        self.shape_recipe=None
+        try:self.save_pending_choice()
+        except Exception as problem:self.guided_status.setText('The body and shapes are applied, but clearing the saved draft needs attention: '+str(problem))
+        self.pending_note.setText('Applied choices. Your shared shape and character exceptions are saved for this profile.')
+        end_apply(self)
+
+    def shapes_failed(self,error):
+        from .shape_preparation import restore_attempt,mark_pending
+        from .dialog_workflow import end_apply
+        from .character_shapes import load_choices,_write,TOOL
+        from .outputs import output_name
+        from pathlib import Path
+        recovery=[]
+        for target,directory,tool in ((self.installed,self.job.directory,'BodySlide'),
+                (Path(self.organizer.modsPath())/output_name(self.organizer.profile().name(),self.profile_path,TOOL),
+                 Path(self.shape_record).parent if self.shape_record else None,TOOL)):
+            if target is None or directory is None:continue
+            try:
+                if restore_attempt(target,directory,self.profile_path,tool):recovery.append(tool+': previous files restored')
+            except Exception as problem:recovery.append(tool+': recovery needs attention — '+str(problem))
+        try:
+            state=load_choices(self.profile_path)
+            if self.shape_recipe and (state.get('applied') or {}).get('record_path')==str(self.shape_record):
+                _write(self.profile_path,self.shape_recipe['choices'],state)
+        except Exception as problem:recovery.append('Saved choices: '+str(problem))
+        if self.shape_defaults_published and self.shape_recipe:
+            try:
+                import json,os
+                from .body_choices import defaults_path
+                expected=dict(self.shape_recipe['defaults_before']);sex,choice=self.shape_choice_to_save;expected[sex]=choice
+                if load_defaults(self.profile_path)!=expected:raise ValueError('Shared defaults were edited outside this operation.')
+                path=defaults_path(self.profile_path);temporary=path.with_suffix('.tmp')
+                temporary.write_text(json.dumps(dict(profile_path=self.profile_path,defaults=self.shape_recipe['defaults_before']),indent=2),encoding='utf-8')
+                os.replace(temporary,path);self.defaults=load_defaults(self.profile_path)
+            except Exception as problem:recovery.append('Shared defaults: '+str(problem))
+        mark_pending(self.profile_path,dict(status='Preparation needs attention',error=str(error),
+            body_job=str(self.job.directory),shape_job=str(self.shape_record),
+            preflight=(self.shape_recipe or {}).get('directory'),recovery=recovery))
+        self.applied=False;end_apply(self)
+        self.guided_status.setText('Preparation did not finish: '+str(error)+'\n'+'\n'.join(recovery)+
+            '\nYour choices are retained. Review the named requirement, then Prepare and apply again. Launch remains stopped until preparation is resolved.')
+        self.organizer.refresh()

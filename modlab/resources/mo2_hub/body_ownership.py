@@ -232,6 +232,28 @@ class BodyIndex:
             occupied.update(part['slots'])
         return result
 
+    def race_templates(self):
+        """Include possible player races even when no current NPC uses them."""
+        result = {}
+        for key, (kind, fields, plugin) in self.winning.items():
+            if kind != b'RACE': continue
+            skin = self._ref(fields, b'WNAM', plugin)
+            if not skin: continue
+            for sex in ('female', 'male'):
+                try:
+                    parts = self._parts(skin, sex, self._races(key))
+                    models = sorted({p for part in parts if 32 in part['slots'] for p in part['world_models']})
+                    if not models: continue
+                    editor = self._one(fields, b'EDID', b'').rstrip(b'\0').decode('utf-8')
+                    result['race:'+sex+':'+key] = dict(name=editor, race_template=True,
+                        body=dict(sex=sex, race=key, race_editor=editor, race_body_models=models,
+                                  body_models=models, parts=parts, scope='shared'))
+                except ValueError:
+                    # Races without a readable humanoid torso cannot be assigned
+                    # this shared body. Existing actor-level problems stay visible.
+                    continue
+        return result
+
     def character(self, key):
         actor, fields, plugin, sex = self._traits(key)
         race = self._ref(fields, b'RNAM', plugin)

@@ -224,6 +224,7 @@ class HubWindow(QDialog):
     def finish_setup(self, checked=False, *, installation_record=None):
         if self.processing or self.installing:
             return
+        self.view.navigate(0)
         self.processing = True
         self.change_timer.stop()
         self.recheck_pending = False
@@ -644,10 +645,12 @@ class HubWindow(QDialog):
         self.xedit_window.raise_()
         self.xedit_window.activateWindow()
 
-    def bodyslide(self, checked=False, *, review_names=None):
+    def bodyslide(self, checked=False, *, review_names=None, individual_shapes=False, sex=None):
         try:
             job = prepare_body_job(self.organizer, mobase.getFileVersion, preview=True)
             self.body_window = BodyDialog(self.organizer, job, self, review_names=review_names)
+            if sex is not None:self.body_window.sex_choice.setCurrentIndex(self.body_window.sex_choice.findData(sex))
+            if individual_shapes:self.body_window.individual_shapes.setChecked(True)
             self.body_window.finished.connect(lambda _, d=self.body_window: self.dialog_closed(d))
             self.body_window.setModal(True)
             self.body_window.show()

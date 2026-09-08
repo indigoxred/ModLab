@@ -38,10 +38,14 @@ def launch_game(organizer, version_reader):
     findings = assess(setup).findings
     blockers = [f for f in findings if f.level == 'Blocked' or f.code in {
         'inspection-incomplete', 'native-inspection-incomplete', 'native-runtime-unknown', 'skse-files-incomplete',
-        'graphics-pending', 'graphics-withdrawn', 'graphics-stale', 'graphics-inspection-incomplete', 'npc-stale'}]
+        'graphics-pending', 'graphics-withdrawn', 'graphics-stale', 'graphics-inspection-incomplete', 'npc-stale',
+        'character-shapes-stale'}]
     if blockers:
         raise ValueError('\n\n'.join(f.title + '\n' + (f.explanation or f.detail) +
                                     '\nNext action: ' + f.action for f in blockers))
+    from .shape_preparation import pending_finding
+    pending=pending_finding(organizer.profilePath())
+    if pending:raise ValueError(pending.title+'. '+pending.action)
     launcher = choose_launcher(setup, organizer.resolvePath)
     if signature != context_signature(organizer):
         raise ValueError('The selected setup changed before launch. Recheck and launch again.')

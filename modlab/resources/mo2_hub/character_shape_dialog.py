@@ -101,18 +101,23 @@ class CharacterShapeDialog(OperationDialog):
         if hasattr(self,'timer'):self.timer.stop()
         self.busy(False);self.status.setText(str(error)+' Your installed character shape has not been reported as changed.')
         self.requirement=getattr(error,'finding',None)
-        self.requirement_button.setVisible(self.requirement is not None)
+        self.body_setup=getattr(error,'body_setup',False)
+        self.requirement_button.setText('Prepare shared body and character shapes' if self.body_setup else 'Resolve this requirement')
+        self.requirement_button.setVisible(self.requirement is not None or self.body_setup)
 
     def repair_requirement(self):
-        if not getattr(self,'requirement',None):return
+        if not getattr(self,'requirement',None) and not getattr(self,'body_setup',False):return
         parent=self.parent();hub=parent
         while hub is not None and not hasattr(hub,'resolve_finding'):hub=hub.parent()
         if hub is None:
-            self.status.setText('Return to Continue setup to complete this requirement. '+self.requirement.action);return
+            self.status.setText('Return to Continue setup to complete this requirement. '+getattr(self.requirement,'action','Open Bodies & outfits to prepare the shared body.'));return
         finding=self.requirement
         self.accept()
         if parent is not hub:parent.accept()
-        QTimer.singleShot(0,lambda:hub.resolve_finding(finding))
+        if getattr(self,'body_setup',False):
+            sex=self.characters[self.actor].get('body',{}).get('sex')
+            QTimer.singleShot(0,lambda:hub.bodyslide(individual_shapes=True,sex=sex))
+        else:QTimer.singleShot(0,lambda:hub.resolve_finding(finding))
 
     def editor_finished(self):
         try:
@@ -146,7 +151,7 @@ class CharacterShapeDialog(OperationDialog):
             check_body_context(self.organizer,self.job)
             self.busy(True);self.status.setText('Checking the helper, prepared bodies and outfits, then applying saved character shapes…')
             from .characters import active_characters
-            characters=active_characters(self.organizer,{})
+            characters=active_characters(self.organizer,{},include_races=True)
             shapes.apply_choices(self.organizer,characters,self.job.catalog,self.applied_ready)
         except Exception as error:self.failed(error)
 

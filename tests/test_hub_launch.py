@@ -8,12 +8,28 @@ from modlab.resources.mo2_hub.launch import choose_launcher
 
 
 class LaunchTests(unittest.TestCase):
+    def test_pending_shape_transaction_stops_launch_even_if_other_checks_pass(self):
+        from modlab.resources.mo2_hub.launch import launch_game
+        from modlab.resources.mo2_hub.shape_preparation import mark_pending
+        from types import SimpleNamespace
+        with TemporaryDirectory() as folder:
+            mark_pending(folder,{'status':'Assignment failed'})
+            host=Mock();host.profilePath.return_value=folder
+            with patch('modlab.resources.mo2_hub.launch.context_signature',return_value='same'), \
+                 patch('modlab.resources.mo2_hub.launch.collect_setup'), \
+                 patch('modlab.resources.mo2_hub.launch.assess',return_value=SimpleNamespace(findings=[])), \
+                 patch('modlab.resources.mo2_hub.skse.require_game_closed'):
+                with self.assertRaisesRegex(ValueError,'Finish individual body preparation'):
+                    launch_game(host,lambda _: '1.6.1170')
+            host.startApplication.assert_not_called()
+
     def test_unresolved_native_or_graphics_work_prevents_starting_the_game(self):
         from modlab.resources.mo2_hub.assessment import Finding
         from modlab.resources.mo2_hub.launch import launch_game
         for level, code in (('Blocked', 'native-runtime-incompatible'), ('Unknown', 'native-runtime-unknown'),
                             ('Review', 'graphics-pending'), ('Review', 'graphics-stale'),
-                            ('Review', 'graphics-withdrawn'), ('Unknown', 'graphics-inspection-incomplete')):
+                            ('Review', 'graphics-withdrawn'), ('Unknown', 'graphics-inspection-incomplete'),
+                            ('Review', 'character-shapes-stale')):
             setup = SetupSnapshot('Skyrim Special Edition', '1.7.104.0', 'Test', '.',
                 generated_findings=(Finding(level, code, 'Native DLL needs attention', 'Bad declaration', 'Install the matching release'),))
             organizer = Mock()

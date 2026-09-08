@@ -5,9 +5,11 @@ from pathlib import Path
 
 
 def choice_fields(choice):
-    return dict(body=choice.get('body'),preset=choice.get('preset'),
+    result=dict(body=choice.get('body'),preset=choice.get('preset'),
         decisions=dict(choice.get('decisions',{})),outfits=bool(choice.get('outfits',True)),
         shape_support=choice.get('shape_support'))
+    if choice.get('individual_shapes'):result['individual_shapes']=True
+    return result
 
 
 def load_drafts(profile):

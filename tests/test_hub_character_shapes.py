@@ -89,7 +89,7 @@ class ShapeHost(SettingsHost):
 
 
 class ShapePublicationTests(unittest.TestCase):
-    def apply(self,host):
+    def apply(self,host,*,managed=False):
         results=[]
         modules={'mobase':SimpleNamespace(GuessedString=str,getFileVersion=lambda _: '1.6.1170'),
                  'PyQt6':ModuleType('PyQt6'),
@@ -101,8 +101,32 @@ class ShapePublicationTests(unittest.TestCase):
                 patch.object(shapes,'prepared_body',return_value={}), \
                 patch.object(shapes,'preset_inputs',return_value={}), \
                 patch('modlab.resources.mo2_hub.body_choices.compatible_presets',return_value=['Athletic','Slim']):
-            record=shapes.apply_choices(host,{LYDIA:{'name':'Lydia'},HULDA:{'name':'Hulda'}},None,lambda r,e:results.append((r,e)))
+            characters={LYDIA:{'name':'Lydia'},HULDA:{'name':'Hulda'}}
+            catalog=None
+            if managed:
+                for value in characters.values():value['body']=dict(sex='female',scope='shared',race_editor='NordRace',race_body_models=['body.nif'],parts=[dict(models=['body.nif'])])
+                catalog=SimpleNamespace(projects={'Body':SimpleNamespace(outputs=['body.nif'])},presets={'Athletic':{},'Slim':{}})
+            record=shapes.apply_choices(host,characters,catalog,lambda r,e:results.append((r,e)))
         return record,results
+
+    def test_character_changes_retain_shared_defaults_and_original_upstream(self):
+        from tests.test_hub_obody_config import source
+        from modlab.resources.mo2_hub.body_choices import save_default
+        with TemporaryDirectory() as folder:
+            host=ShapeHost(Path(folder));host.source.write_text(json.dumps(source()))
+            save_default(host.profilePath(),'female',dict(body='Body',preset='Slim',selected=['Body'],individual_shapes=True))
+            record,result=self.apply(host,managed=True)
+            self.assertIsNone(result[0][1])
+            config=json.loads(Path(host.resolvePath(shapes.OBODY_CONFIG)).read_text())
+            self.assertEqual({'NordRace':['Slim']},config['raceFemale'])
+            self.assertEqual(['Athletic'],config['npcFormID']['skyrim.esm']['0A2C8E'])
+            state=shapes.load_choices(host.profilePath())
+            self.assertEqual(source(),json.loads(state['applied']['upstream']))
+            shapes.save_choice(host.profilePath(),LYDIA,None,expected=state)
+            self.apply(host,managed=True)
+            config=json.loads(Path(host.resolvePath(shapes.OBODY_CONFIG)).read_text())
+            self.assertEqual({'NordRace':['Slim']},config['raceFemale'])
+            self.assertEqual({},config['npcFormID'])
 
     def test_publish_verify_change_and_remove_assignment_retain_upstream_rules(self):
         with TemporaryDirectory() as folder:

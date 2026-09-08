@@ -156,7 +156,7 @@ def verified_default(request, record, directory, applied):
     if not request or not applied or record.get('effective_output_issues') != []:
         return False
     return (request.get('build_record') == str(Path(directory) / 'operation.json')
-            and request.get('preset') == record.get('preset')
+            and request.get('build_preset', request.get('preset')) == record.get('preset')
             and set(request.get('selected', ())) == set(record.get('projects', ()))
             and request.get('body') in record.get('projects', ())
             and bool(record.get('hashes')))

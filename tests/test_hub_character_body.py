@@ -55,6 +55,13 @@ class CharacterBodyTests(unittest.TestCase):
         self.assertEqual(['textures/actors/character/female/body.dds'], body['textures'])
         self.assertEqual('Base.esm', body['skin_plugin'])
 
+    def test_race_templates_cover_races_without_an_existing_actor(self):
+        path=self.base([record(b'RACE',sub(b'EDID',b'NordRaceVampire\0')+ref(b'WNAM',0x901)+ref(b'RNAM',0x900),0x910)])
+        index=self.index(path)
+        result=index.race_templates()
+        self.assertTrue(any(row['body']['race_editor']=='NordRaceVampire' and row['body']['sex']=='female' for row in result.values()))
+
+
     def test_private_body_uses_winning_addon_override_and_its_master_references(self):
         base = self.base()
         face = self.plugin('Face.esp', [npc(0x800, 0x01000910),

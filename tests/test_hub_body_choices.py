@@ -8,6 +8,16 @@ from modlab.resources.mo2_hub.body_choices import (body_role, shared_bodies, com
 
 
 class BodyChoiceTests(unittest.TestCase):
+    def test_individual_shapes_verify_the_neutral_build_without_losing_desired_shape(self):
+        from modlab.resources.mo2_hub.body_choices import verified_default
+        folder=Path('new')
+        request=dict(body='Body',preset='Athletic',build_preset='Author neutral',individual_shapes=True,
+            selected=['Body'],build_record=str(folder/'operation.json'))
+        record=dict(projects=['Body'],preset='Author neutral',hashes={'body.nif':'hash'},effective_output_issues=[])
+        self.assertTrue(verified_default(request,record,folder,True))
+        record['preset']='Some other shape'
+        self.assertFalse(verified_default(request,record,folder,True))
+
     def outfit_paths(self):
         return {p for name in ('Iron', 'Iron physics', 'Boots', 'Other family') for p in self.catalog().projects[name].outputs}
 

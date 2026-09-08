@@ -22,6 +22,10 @@ class ShapeRequirementError(ValueError):
         super().__init__(finding.title+'\n'+finding.action)
 
 
+class ShapeBodyPreparationError(ValueError):
+    body_setup=True
+
+
 def choices_path(profile):
     return Path(profile)/'modlab-character-shapes.json'
 
@@ -101,18 +105,18 @@ def neutral_preset(runner, name, projects=None):
     return True
 
 
-def prepared_body(profile, character, choice, resolve):
+def prepared_body(profile, character, choice, resolve, *, defaults=None):
     body = character.get('body', {})
-    default = load_defaults(profile).get(body.get('sex'), {})
+    default = (load_defaults(profile) if defaults is None else defaults).get(body.get('sex'), {})
     if default.get('body') != choice['body'] or not default.get('build_record'):
-        raise ValueError('Prepare '+choice['body']+' in Bodies & outfits before applying this character shape.')
+        raise ShapeBodyPreparationError('Prepare '+choice['body']+' in Bodies & outfits before applying this character shape.')
     path = Path(default['build_record'])
     record = json.loads(path.read_text(encoding='utf-8'))
     if (record.get('profile_path') != str(profile) or not record.get('morphs') or
             not record.get('morph_links') or record.get('effective_output_issues') != []):
-        raise ValueError('Prepare the body and matching outfits with body shape data before applying individual shapes.')
+        raise ShapeBodyPreparationError('Prepare the body and matching outfits with body shape data before applying individual shapes.')
     if not record.get('neutral_shape_base') or not neutral_preset(path.parent/'runner', record.get('preset'),record.get('projects')):
-        raise ValueError('The current body has its shape baked into it. Individual shapes need a neutral body and matching outfits; your saved default must be retained as a shape assignment during that preparation.')
+        raise ShapeBodyPreparationError('Your shared body needs preparation for individual shapes. ModLab can build the matching body and outfits while keeping your chosen shared shape and character exceptions.')
     hashes = {p.casefold(): h for p,h in record.get('hashes',{}).items()}
     if not hashes: raise ValueError('The body preparation record has no checked files.')
     models = {p.casefold() for part in body.get('parts', []) for p in part['models']}
@@ -149,7 +153,7 @@ def preset_inputs(organizer, choices):
     return inputs
 
 
-def apply_choices(organizer, characters, catalog, on_ready):
+def apply_choices(organizer, characters, catalog, on_ready, *, prepared_defaults=None, on_prepared=None):
     """Publish checked actor assignments; never rewrite source configs or defaults."""
     import mobase
     from PyQt6.QtCore import QTimer
@@ -167,22 +171,21 @@ def apply_choices(organizer, characters, catalog, on_ready):
     from .foundations import inspect_foundations
     blockers = [f for f in inspect_foundations(setup, organizer.resolvePath) if f.level == 'Blocked']
     if blockers: raise ShapeRequirementError(blockers[0])
+    saved_defaults=load_defaults(profile)
+    defaults=saved_defaults if prepared_defaults is None else prepared_defaults
+    managed={sex:{k:v for k,v in value.items() if k!='sex'} for sex,value in defaults.items() if value.get('individual_shapes')}
     available = {}; inputs = {}
     for actor, choice in selected['choices'].items():
         if actor not in characters: raise ValueError('The selected character is no longer available: '+choice['name'])
         available[actor] = compatible_presets(catalog, choice['body'])
-        inputs.update(prepared_body(profile, characters[actor], choice, organizer.resolvePath))
-    inputs.update(preset_inputs(organizer,selected['choices']))
-    current = organizer.resolvePath(OBODY_CONFIG)
-    if not current: raise ValueError('Install OBody NG before applying individual shapes.')
-    current = readable_path(current); current_hash = digest(current)
-    source = current.read_text(encoding='utf-8-sig')
-    previous = selected.get('applied')
+        inputs.update(prepared_body(profile, characters[actor], choice, organizer.resolvePath,defaults=defaults))
+    for sex,value in managed.items():
+        representative=dict(body=dict(sex=sex,parts=[dict(models=catalog.projects[value['body']].outputs)]))
+        inputs.update(prepared_body(profile,representative,value,organizer.resolvePath,defaults=defaults))
+    inputs.update(preset_inputs(organizer,dict(selected['choices'],**{'default-'+sex:value for sex,value in managed.items()})))
+    from .shape_preparation import upstream,plan_defaults,check_archive_inputs
+    current,current_hash,source=upstream(organizer,selected)
     target = Path(organizer.modsPath())/output_name(organizer.profile().name(),profile,TOOL)
-    if current.resolve() == readable_path(target/OBODY_CONFIG).resolve():
-        if not previous or current_hash != previous['hashes'].get(OBODY_CONFIG):
-            raise ValueError('Character shape configuration was edited outside ModLab. Reconcile that file before applying saved choices.')
-        source = previous['upstream']
     # Actor identities are local IDs. The config planner needs the ESL owner
     # flags only when existing upstream rules use a full light-plugin ID.
     light_plugins = []
@@ -192,19 +195,27 @@ def apply_choices(organizer, characters, catalog, on_ready):
             with readable_path(path).open('rb') as stream: header=stream.read(24)
             if len(header)!=24 or header[:4]!=b'TES4': raise ValueError('A character source plugin header could not be read: '+plugin.name)
             if int.from_bytes(header[8:12],'little') & 0x200: light_plugins.append(plugin.name)
-    planned = plan_assignments(source,selected['choices'],characters,available,light_plugins=light_plugins)
     directory = Path(organizer.modsPath()).parent/'builds/character-shapes'/uuid4().hex[:12]
+    directory.mkdir(parents=True)
+    baseline=plan_defaults(organizer,catalog,characters,managed,source,directory)
+    if baseline:inputs.update(baseline['inputs'])
+    planned = plan_assignments(baseline['text'] if baseline else source,selected['choices'],characters,available,light_plugins=light_plugins)
     file = directory/'output'/OBODY_CONFIG; file.parent.mkdir(parents=True)
     file.write_text(planned.text,encoding='utf-8')
     hashes = {OBODY_CONFIG:digest(file)}
     record = dict(profile_path=profile,choices=selected['choices'],upstream=source,source=str(current),
-        source_sha256=current_hash,hashes=hashes,inputs=inputs,status='Prepared',installed_path=str(target))
+        source_sha256=current_hash,hashes=hashes,inputs=inputs,status='Prepared',installed_path=str(target),
+        baseline_defaults=managed,archive_inputs=baseline['archive_inputs'] if baseline else {},
+        preset_inventory=baseline['preset_inventory'] if baseline else None)
     record_path = directory/'operation.json'
     def save(): record_path.write_text(json.dumps(record,indent=2),encoding='utf-8')
     def context(published=False):
         require_game_closed()
         if organizer.profilePath()!=profile or load_choices(profile)!=selected:
             raise ValueError('The profile or character choices changed during preparation.')
+        if load_defaults(profile)!=saved_defaults:
+            raise ValueError('The shared body choices changed during preparation.')
+        check_archive_inputs(organizer,record['archive_inputs'])
         for relative, evidence in inputs.items():
             active=organizer.resolvePath(relative)
             if (not active or readable_path(active).resolve()!=Path(evidence['path']).resolve() or
@@ -216,6 +227,7 @@ def apply_choices(organizer, characters, catalog, on_ready):
         elif active.resolve()!=current.resolve() or digest(active)!=current_hash:
             raise ValueError('The active character shape configuration changed during preparation.')
     save(); context()
+    if on_prepared:on_prepared(record_path)
     if not target.exists():
         mod=organizer.createMod(mobase.GuessedString(target.name))
         if mod is None or Path(mod.absolutePath()).resolve()!=target.resolve():
@@ -261,14 +273,28 @@ def apply_choices(organizer, characters, catalog, on_ready):
 def inspect_choices(organizer):
     from .assessment import Finding
     try:
+        from .shape_preparation import pending_finding,check_archive_inputs
+        pending=pending_finding(organizer.profilePath())
+        if pending:return (pending,)
         state=load_choices(organizer.profilePath());applied=state.get('applied')
-        if not state['choices'] and not applied:return ()
+        managed={sex:{k:v for k,v in value.items() if k!='sex'} for sex,value in load_defaults(organizer.profilePath()).items() if value.get('individual_shapes')}
+        if not state['choices'] and not applied and not managed:return ()
         if not applied or state['choices']!=applied.get('choices'):
             names=', '.join(c['name'] for c in state['choices'].values()) or 'Remove saved shape overrides'
             return (Finding('Review','character-shapes-pending','Apply saved character shapes',names,
                 'Open the character’s shape panel to finish preparation and apply these choices.',
                 'The choices are saved; the in-game assignments have not yet been updated.'),)
         issues=[]
+        if managed!=applied.get('baseline_defaults',{}):issues.append('The shared body or default shape changed.')
+        if applied.get('preset_inventory') is not None:
+            from .body_workflow import effective_files
+            inventory=set()
+            for relative,path in effective_files(organizer).items():
+                if relative.casefold().startswith('sliderpresets/') and path.suffix.casefold()=='.xml':
+                    inventory.update(node.get('name') for node in ET.parse(path).getroot().findall('Preset'))
+            if sorted(inventory)!=applied['preset_inventory']:issues.append('Available shape presets changed. Reconcile the default and character assignments.')
+        try:check_archive_inputs(organizer,applied.get('archive_inputs',{}))
+        except (OSError,ValueError) as error:issues.append(str(error))
         for relative,expected in applied['hashes'].items():
             active=organizer.resolvePath(relative)
             target=readable_path(Path(applied['installed_path'])/relative)
@@ -287,6 +313,6 @@ def inspect_choices(organizer):
             ', '.join(c['name']+': '+c['preset'] for c in state['choices'].values()) or 'Upstream shape choices restored.',
             'Check appearance in game. Existing saves can retain an earlier OBody assignment.',
             'The generated configuration and its recorded body/outfit inputs are effective. This is not a gameplay check.'),)
-    except (OSError,ValueError,KeyError,TypeError) as error:
+    except (OSError,ValueError,KeyError,TypeError,ET.ParseError) as error:
         return (Finding('Unknown','character-shapes-unreadable','Character shape choices need attention',str(error),
             'Open character choices to inspect the saved request before preparing again.'),)
