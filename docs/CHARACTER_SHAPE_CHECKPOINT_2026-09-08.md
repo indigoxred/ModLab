@@ -24,3 +24,11 @@ The publication tests use a fixture MO2 host. They prove those software paths, n
 OBody is not active in this profile, and its shared body is currently baked as CBBE Athletic rather than prepared for individual morph assignment. The next step is the guided optional-helper setup and neutral-body/outfit preparation while preserving the desired shared appearance and private-character exceptions. Do not simply build zeroed bodies globally and call the current appearance preserved. Then apply Lydia's saved choice through the real interface and verify the exact configuration and input providers.
 
 Independent skin/hair/physics choices, the remaining broader mod preparation workflows and the final user gameplay checklist remain part of the active project. The existing four face selections and Adrianne's verified shared-body/private-skin choice remain intact.
+
+## Preset-only invalidation fix
+
+After adding Lydia's preset, the previous checks incorrectly requested BodySlide, NPC and graphics preparation. Commit `c679acd` compares BodySlide against the preset actually used by each retained build, including detection of duplicate or missing named presets. The NPC and PGPatcher adapters exclude only BodySlide preset XML from their asset inventories; generic Synthesis input checking remains unchanged. Publishing another unique preset also retains an existing preset output's priority when no distribution config needs precedence.
+
+423 hub tests pass. The deployed native interface was checked again: all three unnecessary rebuild warnings disappeared without running the helpers, leaving Lydia's pending assignment and the three existing record findings. Skyrim remains unlaunched during this check.
+
+A separate filesystem reconstruction saw additional long-path BodySlide source entries absent from older embedded-MO2 inventories. Its NPC/graphics comparison is therefore not a substitute for the native result. The broader long-path inventory discrepancy remains a follow-up; no recorded inputs were fabricated or rewritten to make this test pass.
