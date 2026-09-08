@@ -184,7 +184,7 @@ class HubWindow(QDialog):
             self.show()
             self.refresh()
             QMessageBox.warning(self, "Installation needs attention", str(error) +
-                '\nUse Advanced tools → Resume installation queue to continue unattempted archives.')
+                '\nChoose Review unfinished installs on Continue setup to resume the remaining archives.')
 
     def install_finished(self, result, record_path):
         try:
@@ -216,7 +216,7 @@ class HubWindow(QDialog):
         self.refresh()
         message = QMessageBox(QMessageBox.Icon.Information, result.status,
                              f"{result.name}\n{result.detail}\n\nQueue stopped; {remaining} remaining archives were not installed. "
-                             'Earlier completed installations are retained. Use Advanced tools → Resume installation queue '
+                             'Earlier completed installations are retained. Choose Review unfinished installs on Continue setup '
                              'to continue the remaining archives, then recheck the resulting setup.', parent=self)
         message.setDetailedText(f"Saved installation details: {record_path}")
         message.exec()

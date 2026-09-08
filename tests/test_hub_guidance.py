@@ -8,6 +8,18 @@ def finding(level, code):
 
 
 class GuidanceTests(unittest.TestCase):
+    def test_unfinished_install_opens_recovery_without_certifying_the_batch(self):
+        item = finding('Review', 'installation-queue-pending')
+        plan = setup_guidance([item], checked=True)
+        self.assertFalse(plan.complete)
+        self.assertEqual(plan.action, 'resume_queue')
+        self.assertEqual(finding_action(item), ('resume_queue', 'Review unfinished installs'))
+
+    def test_unreadable_queue_opens_history_instead_of_retrying_installers(self):
+        plan = setup_guidance([finding('Unknown', 'installation-queue-unreadable')], checked=True)
+        self.assertFalse(plan.complete)
+        self.assertEqual(plan.action, 'history')
+
     def test_stale_outputs_are_executable_work_not_completed_preparation(self):
         plan = setup_guidance([finding('Review', 'npc-stale'), finding('Review', 'graphics-stale')], checked=True)
         self.assertFalse(plan.complete)

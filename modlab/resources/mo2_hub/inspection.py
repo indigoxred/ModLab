@@ -99,7 +99,7 @@ def collect_setup(organizer, *, version_reader) -> SetupSnapshot:
                     f'Installation queue has {len(remaining)} unfinished archives',
                     '\n'.join(Path(item['archive']).name + ' — ' + item['state'] + '\n' + item.get('detail', '')
                               for item in remaining) + '\n\nSaved queue: ' + str(queue.path),
-                    'Open Advanced tools → Resume installation queue. Continue unattempted archives, '
+                    'Choose Review unfinished installs. Continue unattempted archives, '
                     'resolve failed installers before retrying, or dismiss requests you no longer want.',
                     'Earlier installed mods are retained, but the full requested batch has not been installed. '
                     'Checks on the active setup do not certify the unfinished archives.'))

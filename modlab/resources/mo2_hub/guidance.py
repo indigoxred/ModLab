@@ -29,6 +29,10 @@ def display_name(name):
 
 def finding_action(finding):
     code = finding.code
+    if code == 'installation-queue-pending':
+        return 'resume_queue', 'Review unfinished installs'
+    if code == 'installation-queue-unreadable':
+        return 'history', 'Review saved installation history'
     if code=='character-shape-preparation-pending':return 'bodyslide','Finish body and character shapes'
     if code.startswith('character-shapes-'):
         return 'npc_appearances', 'Review saved character shapes'
