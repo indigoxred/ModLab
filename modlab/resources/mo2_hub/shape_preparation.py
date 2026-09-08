@@ -53,6 +53,49 @@ def restore_attempt(target, directory, profile, tool):
     return True
 
 
+def preset_upstream(target, manifest, checksum, profile, applied, assignment_target, seen=()):
+    """Unwrap only our checked preset receipt, including the previous receipt format."""
+    from .body_customization import exclude_random_preset
+    import hashlib
+    owners=[project for project in manifest['projects'].values() if OBODY_CONFIG in project['outputs']]
+    if len(owners)!=1 or manifest.get('hashes',{}).get(OBODY_CONFIG)!=checksum:
+        raise ValueError('The custom shape distribution receipt is missing or changed.')
+    record_path=readable_path(owners[0]['build_record']).resolve()
+    record_path.relative_to(readable_path(target.parent.parent/'builds').resolve())
+    if record_path in seen or len(seen)>=64:
+        raise ValueError('The custom shape receipt history could not be resolved. Existing presets and rules are retained.')
+    record=json.loads(record_path.read_text(encoding='utf-8'))
+    if (record.get('profile_path')!=profile or
+            record.get('status')!='Custom preset installed and effective' or
+            readable_path(record.get('installed_path','')).resolve()!=readable_path(target).resolve() or
+            record.get('hashes',{}).get(OBODY_CONFIG)!=checksum):
+        raise ValueError('The custom shape distribution receipt is incomplete or changed.')
+    if 'distribution_upstream' in record:
+        if not isinstance(record['distribution_upstream'],str):
+            raise ValueError('The custom shape source rules could not be read.')
+        return record['distribution_upstream']
+    original=record_path.parent/'original-obody.json'
+    origin=record.get('distribution_source',{})
+    if not original.is_file() or digest(original)!=origin.get('sha256'):
+        raise ValueError('The original custom-shape configuration is missing or changed. Presets are retained; review the distribution source before preparing again.')
+    text=original.read_text(encoding='utf-8-sig')
+    produced=exclude_random_preset(text,record['custom_preset'])
+    if hashlib.sha256(produced.encode('utf-8')).hexdigest()!=checksum:
+        raise ValueError('The custom-shape configuration does not match its source receipt.')
+    source_path=readable_path(origin['path']).resolve()
+    if source_path==readable_path(assignment_target/OBODY_CONFIG).resolve():
+        if not applied or applied.get('hashes',{}).get(OBODY_CONFIG)!=origin['sha256']:
+            raise ValueError('The earlier character assignment receipt changed. Existing presets and rules are retained.')
+        text=applied['upstream']
+    elif source_path==readable_path(target/OBODY_CONFIG).resolve():
+        backup=record_path.parent/'previous-output'
+        if readable_path(record.get('previous_output','')).resolve()!=backup.resolve():
+            raise ValueError('The preceding custom-shape output receipt changed.')
+        previous=read_manifest(backup,profile,'Shape Presets')
+        text=preset_upstream(target,previous,origin['sha256'],profile,applied,assignment_target,(*seen,record_path))
+    return exclude_random_preset(text,record['custom_preset'])
+
+
 def upstream(organizer, state):
     current=organizer.resolvePath(OBODY_CONFIG)
     if not current:raise ValueError('Install OBody NG before preparing individual shapes.')
@@ -64,6 +107,10 @@ def upstream(organizer, state):
         if not previous or checksum!=previous['hashes'].get(OBODY_CONFIG):
             raise ValueError('Character shape configuration was edited outside ModLab. Reconcile that file before applying saved choices.')
         source=previous['upstream']
+    preset_target=Path(organizer.modsPath())/output_name(organizer.profile().name(),organizer.profilePath(),'Shape Presets')
+    if current.resolve()==readable_path(preset_target/OBODY_CONFIG).resolve():
+        manifest=read_manifest(preset_target,organizer.profilePath(),'Shape Presets')
+        source=preset_upstream(preset_target,manifest,checksum,organizer.profilePath(),previous,target)
     return current,checksum,source
 
 

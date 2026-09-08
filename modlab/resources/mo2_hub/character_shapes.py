@@ -105,7 +105,7 @@ def neutral_preset(runner, name, projects=None):
     return True
 
 
-def prepared_body(profile, character, choice, resolve, *, defaults=None):
+def prepared_body_record(profile, character, choice, *, defaults=None):
     body = character.get('body', {})
     default = (load_defaults(profile) if defaults is None else defaults).get(body.get('sex'), {})
     if default.get('body') != choice['body'] or not default.get('build_record'):
@@ -122,6 +122,11 @@ def prepared_body(profile, character, choice, resolve, *, defaults=None):
     models = {p.casefold() for part in body.get('parts', []) for p in part['models']}
     if not models or not models.issubset(hashes):
         raise ValueError('This character uses a separate body. Apply its compatible shared body choice before assigning this shape.')
+    return hashes
+
+
+def prepared_body(profile, character, choice, resolve, *, defaults=None):
+    hashes=prepared_body_record(profile,character,choice,defaults=defaults)
     inputs = {}
     for relative, checksum in hashes.items():
         current = resolve(relative)
@@ -129,6 +134,32 @@ def prepared_body(profile, character, choice, resolve, *, defaults=None):
             raise ValueError('A prepared body or outfit changed. Recheck Bodies & outfits before applying character shapes.')
         inputs[relative] = dict(path=str(readable_path(current)),sha256=checksum)
     return inputs
+
+
+def inspect_body_choices(organizer, choices, applied):
+    """Re-resolve actor relationships, not just the continued presence of old files."""
+    if not choices:return []
+    from .body_ownership import BodyIndex
+    from .inspection import plugin_load_orders
+    index=BodyIndex();order=plugin_load_orders(organizer.pluginList())
+    for name in sorted(order,key=order.get):
+        if order[name]<0:continue
+        resolved=organizer.resolvePath(name)
+        if not resolved:raise ValueError('A character source plugin is unavailable: '+name)
+        index.add_plugin(readable_path(resolved))
+    defaults=load_defaults(organizer.profilePath());issues=[]
+    for actor,choice in choices.items():
+        try:
+            body=index.character(actor)
+            hashes=prepared_body_record(organizer.profilePath(),{'body':body},choice,defaults=defaults)
+            # These hashes must belong to the selected body's own checked build.
+            # Retained inputs also include private models inspected for other NPCs.
+            if any(applied.get('inputs',{}).get(relative,{}).get('sha256')!=checksum
+                   for relative,checksum in hashes.items()):
+                raise ValueError('The body preparation changed. Reapply this character shape after preparing its body.')
+        except (OSError,ValueError,KeyError,TypeError,ET.ParseError) as error:
+            issues.append(choice['name']+': '+str(error))
+    return issues
 
 
 def plan_assignments(upstream, choices, characters, available, *, light_plugins=()):
@@ -285,6 +316,9 @@ def inspect_choices(organizer):
                 'Open the character’s shape panel to finish preparation and apply these choices.',
                 'The choices are saved; the in-game assignments have not yet been updated.'),)
         issues=[]
+        try:issues.extend(inspect_body_choices(organizer,state['choices'],applied))
+        except (OSError,ValueError,KeyError,TypeError) as error:
+            issues.append('Current character bodies could not be checked: '+str(error))
         if managed!=applied.get('baseline_defaults',{}):issues.append('The shared body or default shape changed.')
         if applied.get('preset_inventory') is not None:
             from .body_workflow import effective_files

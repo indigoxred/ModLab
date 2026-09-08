@@ -107,11 +107,20 @@ def publish_preset(organizer, job, data, on_ready):
         if not config_path.is_file() or config_path.stat().st_size>8*1024*1024:
             raise ValueError('The active body-distribution settings could not be preserved.')
         original_config=config_path.read_bytes(); config_hash=hashlib.sha256(original_config).hexdigest()
+        from .character_shapes import load_choices
+        from .shape_preparation import upstream
+        from .vfs import readable_path
+        baseline_path,baseline_hash,baseline=upstream(organizer,load_choices(profile))
+        if baseline_path.resolve()!=readable_path(config_path).resolve() or baseline_hash!=config_hash:
+            raise ValueError('Body-distribution settings changed during customization.')
         changed=exclude_random_preset(original_config.decode('utf-8-sig'),job.record['custom_preset'])
         (job.directory/'original-obody.json').write_bytes(original_config)
         configured=job.directory/'output'/OBODY_CONFIG; configured.parent.mkdir(parents=True,exist_ok=True)
         configured.write_bytes(changed.encode('utf-8')); hashes[OBODY_CONFIG]=digest(configured)
         job.record['distribution_source']={'path':config_source,'sha256':config_hash}
+        # Retain the source rules without our generated race/actor assignments.
+        # A later character edit rebuilds those assignments from saved intent.
+        job.record['distribution_upstream']=exclude_random_preset(baseline,job.record['custom_preset'])
     published=False
     def configuration_current():
         current=organizer.resolvePath(OBODY_CONFIG)

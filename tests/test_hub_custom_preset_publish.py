@@ -16,6 +16,7 @@ class PresetHost:
         self.priority_changes=[]
     def modsPath(self): return str(self.root/'mods')
     def profilePath(self): return 'Other' if self.other else 'Test'
+    def profile(self): return SimpleNamespace(name=lambda:self.profilePath())
     def resolvePath(self, relative): return str(self.target/relative) if self.enabled and (self.target/relative).is_file() else ''
     def createMod(self,name):
         self.target=self.root/'mods'/str(name); self.target.mkdir(parents=True)
@@ -39,6 +40,7 @@ class PresetHost:
 class CustomPresetPublicationTests(unittest.TestCase):
     def prepare(self,root,session='custom'):
         directory=root/'builds'/session; job=fixtures.BodyCustomizationTests().job(directory)
+        job.save=lambda:(directory/'operation.json').write_text(json.dumps(job.record))
         job.record['profile']='Test'; prepare_customizer(job,'Body','Base','Female default','game/Data')
         file=job.executable.parent/job.record['custom_file']; tree=ET.parse(file)
         tree.getroot().find('Preset/SetSlider').set('value','45'); tree.write(file)

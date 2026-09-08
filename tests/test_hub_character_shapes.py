@@ -161,9 +161,12 @@ class ShapePublicationTests(unittest.TestCase):
             self.assertIsNone(result[0][1])
             current=json.loads(Path(host.resolvePath(shapes.OBODY_CONFIG)).read_text())
             self.assertEqual({'013BA3':['Slim'],'0A2C8E':['Athletic']},current['npcFormID']['skyrim.esm'])
-            self.assertEqual('character-shapes-current',shapes.inspect_choices(host)[0].code)
-            host.active=False
-            self.assertEqual('character-shapes-stale',shapes.inspect_choices(host)[0].code)
+            # This fixture isolates publication/VFS; binary body relationship
+            # changes are exercised in test_hub_shape_body_changes.
+            with patch.object(shapes,'inspect_body_choices',return_value=[]):
+                self.assertEqual('character-shapes-current',shapes.inspect_choices(host)[0].code)
+                host.active=False
+                self.assertEqual('character-shapes-stale',shapes.inspect_choices(host)[0].code)
 
     def test_manual_config_edit_is_not_discarded(self):
         with TemporaryDirectory() as folder:
