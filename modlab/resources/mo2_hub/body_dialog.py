@@ -15,10 +15,14 @@ from .body_setup import remember_catalog
 from .outputs import output_name, read_manifest
 
 
-class BodyDialog(QDialog):
+from .dialog_workflow import capture_dialog, begin_apply, end_apply
+from .operation_dialog import OperationDialog
+
+class BodyDialog(OperationDialog):
     def __init__(self, organizer, job, parent=None, review_names=None):
         super().__init__(parent)
         self.organizer, self.job = organizer, job
+        capture_dialog(self)
         self.installed = None
         self.review_names = set(review_names) if review_names is not None else None
         target = Path(organizer.modsPath()) / output_name(job.record['profile'], job.record['profile_path'])
@@ -90,7 +94,7 @@ class BodyDialog(QDialog):
         self.check.clicked.connect(self.check_effective)
         actions.addWidget(self.check)
         folder = QPushButton('Open build files and log')
-        folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(job.directory))))
+        folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.job.directory or self.job.executable.parent))))
         actions.addWidget(folder)
         close = QPushButton('Close')
         close.clicked.connect(self.accept)
@@ -104,6 +108,7 @@ class BodyDialog(QDialog):
     def keep_choices(self):
         try:
             remember_catalog(self.organizer, self.job)
+            self.preferences_changed = True
             self.accept()
         except Exception as error:
             QMessageBox.warning(self, 'Choices could not be saved', str(error))
@@ -140,6 +145,18 @@ class BodyDialog(QDialog):
         self.update_selection()
 
     def generate(self):
+        try:
+            plan_build(self.job.catalog, self.selected(), self.preset.currentData())
+            check_body_context(self.organizer, self.job)
+            begin_apply(self, self.generate_confirmed)
+        except Exception as error:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, 'Preparation needs attention', str(error))
+
+    def generate_confirmed(self):
+        import mobase
+        from .body_workflow import prepare_body_job
+        self.job = prepare_body_job(self.organizer, mobase.getFileVersion)
         selected, preset = self.selected(), self.preset.currentData()
         try:
             plan_build(self.job.catalog, selected, preset)
@@ -163,13 +180,16 @@ class BodyDialog(QDialog):
     def install_output(self):
         try:
             check_body_context(self.organizer, self.job)
+            self.awaiting_publication = True
             publish_body_job(self.organizer, self.job, self.output_ready)
             self.install.setEnabled(False)
             self.status.setPlainText('Generated output published. Waiting for MO2 to refresh before checking its effective files…')
         except Exception as error:
+            end_apply(self)
             self.status.setPlainText(str(error))
 
     def output_ready(self, target, error):
+        end_apply(self)
         self.installed = target
         self.check.setEnabled(True)
         if error:
@@ -199,6 +219,7 @@ class BodyDialog(QDialog):
         self.job.record['status'] = 'Effective output needs attention' if failures else 'Generated output installed and effective; gameplay unverified'
         self.job.save()
         if not failures:
+            self.applied = True
             remember_catalog(self.organizer, self.job)
         self.status.setPlainText('\n'.join(failures) if failures else
                                  f"Applied to {self.job.record['installed_mod']}. Every generated mesh is now effective in this profile. "

@@ -6,10 +6,14 @@ from PyQt6.QtWidgets import QAbstractItemView, QDialog, QHBoxLayout, QLabel, QLi
 from .pandora_workflow import load_choices, run_job, publish_job
 
 
-class PandoraDialog(QDialog):
+from .dialog_workflow import capture_dialog, begin_apply, end_apply
+from .operation_dialog import OperationDialog
+
+class PandoraDialog(OperationDialog):
     def __init__(self, organizer, job, parent=None):
         super().__init__(parent)
         self.organizer, self.job = organizer, job
+        capture_dialog(self)
         self.setWindowTitle('ModLab — Animation behavior choices')
         self.resize(880, 650)
         layout = QVBoxLayout(self)
@@ -45,7 +49,7 @@ class PandoraDialog(QDialog):
         self.build.clicked.connect(self.generate)
         row.addWidget(self.build)
         logs = QPushButton('Open build and log')
-        logs.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(job.directory))))
+        logs.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.job.directory or self.job.executable.parent))))
         row.addWidget(logs)
         self.close_button = QPushButton('Close')
         self.close_button.clicked.connect(self.accept)
@@ -53,6 +57,23 @@ class PandoraDialog(QDialog):
         layout.addLayout(row)
 
     def generate(self):
+        try:
+            from .pandora import selection_entries
+            selected = [self.patches.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.patches.count())
+                        if self.patches.item(i).checkState() == Qt.CheckState.Checked]
+            selection_entries(self.job.patches, selected)
+            from .pandora_workflow import locate_engine, available_patches, patch_identity
+            current = available_patches(self.organizer, locate_engine(self.organizer))
+            if patch_identity(current) != self.job.record['patch_identity']:
+                raise ValueError('Animation choices changed while this screen was open. Reopen it before applying.')
+            begin_apply(self, self.generate_confirmed)
+        except Exception as error:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, 'Preparation needs attention', str(error))
+
+    def generate_confirmed(self):
+        from .pandora_workflow import prepare_job
+        self.job = prepare_job(self.organizer)
         selected = [self.patches.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.patches.count())
                     if self.patches.item(i).checkState() == Qt.CheckState.Checked]
         self.build.setEnabled(False)
@@ -61,12 +82,16 @@ class PandoraDialog(QDialog):
         try:
             result = run_job(self.organizer, self.job, selected)
             self.status.setPlainText(f'Behavior generation checked; applying {len(result.hashes)} files…')
+            self.awaiting_publication = True
             publish_job(self.organizer, self.job, self.ready)
         except Exception as error:
+            end_apply(self)
             self.status.setPlainText(str(error) + '\n\nReopen Animation choices after correcting the problem for a fresh attempt.')
             self.close_button.setEnabled(True)
 
     def ready(self, target, error):
+        end_apply(self)
+        self.applied = not bool(error)
         self.close_button.setEnabled(True)
         self.status.setPlainText(error if error else
             f'Applied {len(self.job.record["hashes"])} files to {target.name}. All generated files are effective in this profile. '

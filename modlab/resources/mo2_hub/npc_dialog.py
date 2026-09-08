@@ -5,10 +5,14 @@ from PyQt6.QtWidgets import (QApplication, QComboBox, QDialog, QHBoxLayout, QLab
 from . import npc_workflow as workflow
 
 
-class NpcDialog(QDialog):
+from .dialog_workflow import capture_dialog, begin_apply, end_apply
+from .operation_dialog import OperationDialog
+
+class NpcDialog(OperationDialog):
     def __init__(self, organizer, parent=None):
         super().__init__(parent)
         self.organizer = organizer
+        capture_dialog(self)
         self.profile_path = organizer.profilePath()
         self.rows = workflow.catalog(organizer)
         pending = workflow.load(organizer, 'pending')
@@ -75,9 +79,19 @@ class NpcDialog(QDialog):
             self.status.setText('Selected profile changed. Reopen choices.'); return
         path = workflow.path_for(self.organizer, 'pending')
         if path.exists(): path.unlink()
+        self.preferences_changed = True
         self.accept()
 
     def generate(self):
+        try:
+            from .npc import validate_selections
+            validate_selections(self.rows, self.selected)
+            begin_apply(self, self.generate_confirmed)
+        except Exception as error:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, 'Preparation needs attention', str(error))
+
+    def generate_confirmed(self):
         if self.organizer.profilePath() != self.profile_path:
             self.status.setText('Selected profile changed. Reopen choices.'); return
         if not self.selected:
@@ -91,12 +105,16 @@ class NpcDialog(QDialog):
         try:
             self.job = workflow.prepare_job(self.organizer, self.selected)
             workflow.run_job(self.organizer, self.job)
+            self.awaiting_publication = True
             workflow.publish_job(self.organizer, self.job, self.ready)
         except Exception as error: self.ready(None, str(error))
 
     def ready(self, target, error):
+        end_apply(self)
         if error:
             workflow.path_for(self.organizer, 'pending').write_text(json.dumps(dict(selected=self.selected, error=error), indent=2), encoding='utf-8')
             self.status.setText(error + '\nPrevious output is retained. Resolve this problem and reopen choices to retry.')
             self.close_button.setEnabled(True); self.cancel.setEnabled(True); self.cancel.setVisible(True)
-        else: self.accept()
+        else:
+            self.applied = True
+            self.accept()

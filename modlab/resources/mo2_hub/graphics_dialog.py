@@ -61,6 +61,6 @@ class GraphicsDialog(QDialog):
             if self.organizer.profilePath() != self.profile_path:
                 raise ValueError('The selected profile changed; reopen these choices.')
             workflow.clear_pending(self.organizer, self.pending['id'])
-            self.accept()
+            self.reject()
         except Exception as error:
             self.status.setText(str(error))

@@ -155,12 +155,16 @@ class PandoraJob:
         (self.directory / 'operation.json').write_text(json.dumps(self.record, indent=2), encoding='utf-8')
 
 
-def prepare_job(organizer):
+def prepare_job(organizer, *, preview=False):
     if organizer.managedGame().gameName() != 'Skyrim Special Edition':
         raise ValueError('Select Skyrim Special Edition before generating behaviors.')
     executable = locate_engine(organizer)
-    runtime = ensure_net10(Path(organizer.modsPath()).parent / 'tools')
     patches = available_patches(organizer, executable)
+    if preview:
+        return PandoraJob(None, executable, patches, context_signature(organizer), (),
+            dict(profile=organizer.profile().name(), profile_path=organizer.profilePath(),
+                 patch_identity=patch_identity(patches)))
+    runtime = ensure_net10(Path(organizer.modsPath()).parent / 'tools')
     signature = context_signature(organizer)
     sources = source_signature(input_roots(organizer) + [('Pandora helper', executable.parent)])
     fnis_codes = sorted({''.join(PureWindowsPath(path).stem.split())

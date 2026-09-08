@@ -43,12 +43,15 @@ def finding_action(finding):
         return 'graphics', 'Review graphics setup'
     if code.startswith('patching-') and finding.level != 'Info':
         return 'synthesis', 'Review patch choices'
-    if code in {'missing-master', 'skse-loader-missing', 'native-runtime-incompatible', 'native-functional-incompatible'}:
-        return 'install', 'Add matching download'
+    if code == 'inactive-master':
+        return 'resolve_finding', 'Enable installed dependency'
+    if code in {'missing-master', 'skse-loader-missing', 'native-runtime-incompatible', 'native-functional-incompatible',
+                'native-dependency-missing', 'engine-fixes-preloader-missing'}:
+        return 'resolve_finding', 'Resolve this requirement'
     if code in {'record-check-incomplete', 'workflow-incomplete'}:
         return 'helpers', 'Review tool setup'
     if code == 'record-errors':
-        return 'documents', 'Open mod instructions'
+        return 'resolve_finding', 'Review unresolved finding'
     return None, None
 
 

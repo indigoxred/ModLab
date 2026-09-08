@@ -46,6 +46,7 @@ class HubWindow(QDialog):
         super().__init__(parent)
         self.organizer = organizer
         self.snapshot = None
+        self.snapshot_profile_path = None
         self.findings = ()
         self.xedit_window = None
         self.body_window = None
@@ -552,9 +553,8 @@ class HubWindow(QDialog):
     def synthesis(self):
         if self.processing or self.installing: return
         try:
-            if graphics.withdraw_for_upstream(self.organizer, self.synthesis): return
             self.patching_window = SynthesisDialog(self.organizer, self)
-            self.patching_window.finished.connect(lambda _: QTimer.singleShot(0, self.finish_setup))
+            self.patching_window.finished.connect(lambda _, d=self.patching_window: self.dialog_closed(d))
             self.patching_window.setModal(True)
             self.patching_window.show()
         except Exception as error:
@@ -563,21 +563,17 @@ class HubWindow(QDialog):
     def npc_appearances(self):
         if self.processing or self.installing: return
         try:
-            if graphics.withdraw_for_upstream(self.organizer, self.npc_appearances): return
             self.npc_window = NpcDialog(self.organizer, self)
-            self.npc_window.finished.connect(lambda _: QTimer.singleShot(0, self.finish_setup))
+            self.npc_window.finished.connect(lambda _, d=self.npc_window: self.dialog_closed(d))
             self.npc_window.setModal(True); self.npc_window.show()
         except Exception as error:
             QMessageBox.warning(self, 'NPC appearances need attention', str(error))
 
     def pandora(self):
         try:
-            if graphics.withdraw_for_upstream(self.organizer, self.pandora): return
-            self.summary.setText('Preparing Pandora and its .NET runtime. A missing runtime will be downloaded from Microsoft…')
-            QApplication.processEvents()
-            job = animations.prepare_job(self.organizer)
+            job = animations.prepare_job(self.organizer, preview=True)
             self.animation_window = PandoraDialog(self.organizer, job, self)
-            self.animation_window.finished.connect(lambda _: QTimer.singleShot(0, self.finish_setup))
+            self.animation_window.finished.connect(lambda _, d=self.animation_window: self.dialog_closed(d))
             self.animation_window.setModal(True)
             self.animation_window.show()
             self.animation_window.raise_()
@@ -635,24 +631,57 @@ class HubWindow(QDialog):
 
     def bodyslide(self, checked=False, *, review_names=None):
         try:
-            if graphics.withdraw_for_upstream(self.organizer, lambda: self.bodyslide(review_names=review_names)): return
-            job = prepare_body_job(self.organizer, mobase.getFileVersion)
+            job = prepare_body_job(self.organizer, mobase.getFileVersion, preview=True)
             self.body_window = BodyDialog(self.organizer, job, self, review_names=review_names)
-            self.body_window.finished.connect(lambda _: QTimer.singleShot(0, self.finish_setup))
+            self.body_window.finished.connect(lambda _, d=self.body_window: self.dialog_closed(d))
             self.body_window.setModal(True)
             self.body_window.show()
             self.body_window.raise_()
             self.body_window.activateWindow()
         except Exception as error:
             QMessageBox.warning(self, 'BodySlide needs attention', str(error))
-        finally:
+
+    def dialog_closed(self, dialog):
+        from .dialog_workflow import finish_dialog
+        finish_dialog(self, dialog, lambda action: QTimer.singleShot(0, action))
+
+    def resolve_finding(self, finding):
+        if self.processing or self.installing or self.snapshot is None:
+            return
+        from .resolution_dialog import ResolutionDialog
+        from .resolution import enable_dependency
+        try:
+            if self.snapshot_profile_path != self.organizer.profilePath():
+                raise ValueError('The selected profile changed. Recheck its findings before taking action.')
+            dialog = ResolutionDialog(self.organizer, finding, self.snapshot, self)
+            if not dialog.exec():
+                return
+            if Path(self.organizer.profilePath()).resolve() != Path(dialog.profile_path).resolve():
+                raise ValueError('The selected profile changed. Recheck its requirements before continuing.')
+            if dialog.next_action == 'enable':
+                self.processing = True
+                try:
+                    enable_dependency(self.organizer, dialog.context.dependency,
+                        dialog.context.dependency_provider, dialog.profile_path, mobase.PluginState.ACTIVE)
+                finally:
+                    self.processing = False
+                self.automatic_signature = None
+                self.finish_setup()
+            elif dialog.next_action == 'install':
+                self.install()
+            elif dialog.next_action == 'documents':
+                self.documents(provider=dialog.provider)
+            elif dialog.next_action == 'recheck':
+                self.finish_setup()
+        except Exception as error:
+            QMessageBox.warning(self, 'Setup requirement needs attention', str(error))
             self.refresh()
 
-    def documents(self):
+    def documents(self, provider=None):
         if self.processing or self.installing:
             return
         try:
-            DocumentsDialog(self.organizer, self).exec()
+            DocumentsDialog(self.organizer, self, provider=provider).exec()
         except Exception as error:
             QMessageBox.warning(self, 'Mod instructions unavailable', str(error))
 
@@ -689,11 +718,16 @@ class HubWindow(QDialog):
     def refresh(self):
         # Never leave a previous profile's successful report visible after a failure.
         self.snapshot = None
+        self.snapshot_profile_path = None
         self.findings = ()
         self.table.setRowCount(0)
         self.detail.clear()
         try:
+            inspected_profile = self.organizer.profilePath()
             snapshot = collect_setup(self.organizer, version_reader=mobase.getFileVersion)
+            if self.organizer.profilePath() != inspected_profile:
+                raise ValueError('The profile changed during inspection. Recheck the selected profile.')
+            self.snapshot_profile_path = inspected_profile
             result = assess(snapshot)
             self.snapshot = snapshot
             self.findings = result.findings

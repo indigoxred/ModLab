@@ -10,7 +10,7 @@ import subprocess
 from uuid import uuid4
 import zipfile
 
-from .bodyslide import read_catalog, plan_build, relative_path, verify_output, write_build_config
+from .bodyslide import read_catalog_files, read_catalog, plan_build, relative_path, verify_output, write_build_config
 from .loot_workflow import context_signature
 from .vfs import find_files, readable_path
 from .outputs import output_name, publish_output
@@ -60,11 +60,12 @@ class BodyJob:
         (self.directory / 'operation.json').write_text(json.dumps(self.record, indent=2), encoding='utf-8')
 
 
-def prepare_body_job(organizer, version_reader):
+def prepare_body_job(organizer, version_reader, *, preview=False):
     if organizer.managedGame().gameName() != 'Skyrim Special Edition':
         raise ValueError('Select Skyrim Special Edition before building.')
     from .pgpatcher_workflow import require_upstream_view
-    require_upstream_view(organizer)
+    if not preview:
+        require_upstream_view(organizer)
     signature = context_signature(organizer)
     files = effective_files(organizer)
     executables = [p for name, p in files.items() if name.casefold() in {'bodyslide.exe', 'bodyslide x64.exe'}]
@@ -75,6 +76,17 @@ def prepare_body_job(organizer, version_reader):
         raise ValueError(f'This build adapter has been checked for BodySlide 5.8.2; found {version or "unknown"}.')
     source_signature = file_signature(files)
     directory = Path(organizer.modsPath()).parent / 'builds' / 'bodyslide' / uuid4().hex[:12]
+    if preview:
+        catalog = read_catalog_files(files)
+        mods_root = readable_path(organizer.modsPath()).resolve()
+        origins = {}
+        for name, project in catalog.projects.items():
+            try:
+                origins[name] = files[project.source_file].resolve().relative_to(mods_root).parts[0]
+            except (KeyError, ValueError):
+                origins[name] = 'Source mod not identified'
+        return BodyJob(None, catalog, executables[0], signature, source_signature,
+            dict(profile=organizer.profile().name(), profile_path=organizer.profilePath(), project_sources=origins))
     runner = directory / 'runner'
     runner.mkdir(parents=True)
     # An independent working copy keeps helper settings and existing generated assets intact.

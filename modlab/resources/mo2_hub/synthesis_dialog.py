@@ -24,10 +24,14 @@ def speed_reach_recipe():
             'MutagenVersionType': 'Match', 'SynthesisVersionType': 'Match', 'AutoUpdateToBranchTip': False}]}]}]}
 
 
-class SynthesisDialog(QDialog):
+from .dialog_workflow import capture_dialog, begin_apply, end_apply
+from .operation_dialog import OperationDialog
+
+class SynthesisDialog(OperationDialog):
     def __init__(self, organizer, parent=None):
         super().__init__(parent)
         self.organizer = organizer
+        capture_dialog(self)
         self.profile_path = organizer.profilePath()
         self.pending = load_pending(self.profile_path)
         self.pending_id = None
@@ -68,6 +72,7 @@ class SynthesisDialog(QDialog):
     def cancel_attempt(self):
         try:
             clear_pending(self.profile_path, self.pending['id'])
+            self.preferences_changed = True
             self.accept()
         except Exception as error:
             self.status.setText(str(error))
@@ -107,6 +112,14 @@ class SynthesisDialog(QDialog):
             self.status.setText(str(error))
 
     def generate(self):
+        try:
+            inspect_pipeline(self.settings)
+            begin_apply(self, self.generate_confirmed)
+        except Exception as error:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, 'Preparation needs attention', str(error))
+
+    def generate_confirmed(self):
         for widget in (self.build, self.recipe, self.import_button, self.close_button, self.cancel_pending): widget.setEnabled(False)
         self.status.setText('Preparing the SDK, building selected patchers, then checking their output. Initial package downloads may take a few minutes…')
         QApplication.processEvents()
@@ -118,8 +131,10 @@ class SynthesisDialog(QDialog):
             update_pending(self.profile_path, self.pending_id, build_record=self.job.directory / 'operation.json')
             workflow.run_job(self.organizer, self.job)
             self.status.setText('Export and record checks passed. Applying the generated patches…')
+            self.awaiting_publication = True
             workflow.publish_job(self.organizer, self.job, self.ready)
         except Exception as error:
+            end_apply(self)
             message = self.retain_failure(error)
             self.status.setText(message + '\nReopen Patch choices after resolving this problem for a fresh attempt.')
             self.close_button.setEnabled(True)
@@ -134,6 +149,8 @@ class SynthesisDialog(QDialog):
         return str(error)
 
     def ready(self, target, error):
+        end_apply(self)
+        self.applied = not bool(error)
         self.close_button.setEnabled(True)
         if error:
             error = self.retain_failure(error)

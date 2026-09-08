@@ -270,7 +270,10 @@ class HubView:
     def run_finding(self, finding):
         self.select(finding)
         action, _ = finding_action(finding)
-        if action:
+        if action == 'resolve_finding':
+            if not self.hub.processing and not self.hub.installing:
+                self.hub.resolve_finding(finding)
+        elif action:
             self.invoke(action)
 
     def show_completed(self):
@@ -293,5 +296,7 @@ class HubView:
             return
         if self.plan.action == 'details':
             self.select(self.plan.groups['attention'][0])
+        elif self.plan.action == 'resolve_finding':
+            self.run_finding(self.plan.groups['attention'][0])
         else:
             self.invoke(self.plan.action)
