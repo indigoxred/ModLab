@@ -64,6 +64,10 @@ class NpcDialog(OperationDialog):
         self.close_button = QPushButton('Close'); self.close_button.clicked.connect(self.accept); row.addWidget(self.close_button)
         layout.addLayout(row)
 
+    def report_status(self,text):
+        self.status.setText(text)
+        if hasattr(self,'character_status'): self.character_status.setText(text)
+
     def choose(self, key, provider):
         if provider: self.selected[key] = provider
         else: self.selected.pop(key, None)
@@ -82,10 +86,10 @@ class NpcDialog(OperationDialog):
 
     def cancel_pending(self):
         if self.organizer.profilePath() != self.profile_path:
-            self.status.setText('Selected profile changed. Reopen choices.'); return
+            self.report_status('Selected profile changed. Reopen choices.'); return
         path = workflow.path_for(self.organizer, 'pending')
         try: workflow.check_pending(self.organizer,self.pending_snapshot)
-        except ValueError as error: self.status.setText(str(error));return
+        except ValueError as error: self.report_status(str(error));return
         if path.exists(): path.unlink()
         self.pending_snapshot=None
         self.persisted_request=dict(selected=dict(self.selected),body_choices=dict(self.body_choices))
@@ -105,7 +109,7 @@ class NpcDialog(OperationDialog):
 
     def generate_confirmed(self):
         if self.organizer.profilePath() != self.profile_path:
-            self.status.setText('Selected profile changed. Reopen choices.'); return
+            self.report_status('Selected profile changed. Reopen choices.'); return
         if not self.selected and not self.body_choices:
             from .npc_reset import reset_choices
             self.awaiting_publication = True
@@ -116,7 +120,7 @@ class NpcDialog(OperationDialog):
             return
         self.build.setEnabled(False); self.close_button.setEnabled(False); self.table.setEnabled(False)
         self.apply_visible.setEnabled(False); self.cancel.setEnabled(False)
-        self.status.setText('Checking selected body/skin variants and appearance sources, then preparing character records and paired assets…')
+        self.report_status('Checking selected body/skin variants and appearance sources, then preparing character records and paired assets…')
         QApplication.processEvents()
         try:
             self.write_pending()
@@ -131,7 +135,7 @@ class NpcDialog(OperationDialog):
         if error:
             try: self.write_pending(error)
             except (OSError,ValueError) as changed: error=str(error)+'\n'+str(changed)
-            self.status.setText(error + '\nPrevious output is retained. Resolve this problem and reopen choices to retry.')
+            self.report_status(error + '\nPrevious output is retained. Resolve this problem and reopen choices to retry.')
             self.close_button.setEnabled(True); self.cancel.setEnabled(True); self.cancel.setVisible(True)
         else:
             self.applied = True

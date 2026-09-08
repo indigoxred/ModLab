@@ -31,6 +31,11 @@ def source_signature(roots):
         for folder in ('meshes', 'Pandora_Engine/mod', 'Nemesis_Engine/mod'):
             for path in (root / folder).rglob('*'):
                 if path.is_file():
+                    # FaceGen contains NPC face meshes, not behavior inputs. Including
+                    # regenerated faces creates a cycle: faces rebuild behaviors,
+                    # whose changed output timestamps then rebuild faces again.
+                    if path.relative_to(root).as_posix().casefold().startswith('meshes/actors/character/facegendata/'):
+                        continue
                     stat = path.stat()
                     entries.append((path.relative_to(root).as_posix(), stat.st_size, stat.st_mtime_ns))
         for path in root.glob('*.bsa'):
