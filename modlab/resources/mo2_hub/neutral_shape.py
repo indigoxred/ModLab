@@ -22,6 +22,7 @@ class Recipe:
     assignment_name: str
     base_file: str
     assignment_file: str
+    fixed_sliders: tuple
     base_xml: bytes
     assignment_xml: bytes
 
@@ -46,7 +47,7 @@ def plan(runner, projects, preset):
         if not key[0] or key[1] not in {'small','big'}: raise ValueError('Invalid shape slider identity.')
         if key in values: raise ValueError('Duplicate shape slider: '+key[0])
         values[key]=number(node.get('value'))
-    shape_values={}; zaps=set(); nodes=[]
+    shape_values={}; fixed=set(); nodes=[]
     for name in projects:
         path=runner/catalog.projects[name].source_file
         found=[node for node in ET.parse(path).getroot().findall('SliderSet') if node.get('name')==name]
@@ -56,8 +57,11 @@ def plan(runner, projects, preset):
             key=slider.get('name')
             if not key or key in seen: raise ValueError('Duplicate or unnamed project slider: '+name)
             seen.add(key)
-            if slider.get('zap','false').casefold()=='true':
-                zaps.add(key); continue
+            # Hidden fit corrections (e.g. CBBE NeckSeam) and geometry controls
+            # are not user shape choices. Keep each project's authored defaults
+            # and any explicit preset values in the baked base, not OBody rules.
+            if any(slider.get(flag,'false').casefold()=='true' for flag in ('zap','hidden','clamp')):
+                fixed.add(key); continue
             if slider.get('invert','false').casefold()=='true':
                 raise ValueError('This project uses an inverted shape slider requiring a separate preparation adapter: '+name+' / '+key)
             for size in ('small','big'):
@@ -67,11 +71,11 @@ def plan(runner, projects, preset):
                     raise ValueError(key+' has different body/outfit defaults. Choose matching projects or explicitly customize that slider before preparing individual shapes.')
                 shape_values[identity]=value
     if not shape_values: raise ValueError('These projects have no body shape sliders.')
-    if zaps.intersection(key for key,size in shape_values):
-        raise ValueError('A slider changes shape in one project and removes geometry in another. Choose separate compatible project variants.')
+    if fixed.intersection(key for key,size in shape_values):
+        raise ValueError('A slider changes visible shape in one project and controls fixed geometry in another. Choose separate compatible project variants.')
     # Include source declarations in the identity; reusing a name after a source
     # update could otherwise mistake an old assignment for the prepared one.
-    identity=hashlib.sha256(ET.tostring(original)+b''.join(ET.tostring(n) for n in nodes)).hexdigest()[:12]
+    identity=hashlib.sha256(b'modlab-neutral-v2\0'+ET.tostring(original)+b''.join(ET.tostring(n) for n in nodes)).hexdigest()[:12]
     base_name='ModLab neutral body ['+identity+']'
     assignment_name='ModLab default - '+preset+' ['+identity+']'
     def document(name, neutral):
@@ -82,14 +86,14 @@ def plan(runner, projects, preset):
             # Retain the chosen geometry zaps. Unspecified zaps stay unspecified,
             # so each project's own geometry defaults are preserved as well.
             for (key,size),value in sorted(values.items()):
-                if key in zaps: ET.SubElement(node,'SetSlider',name=key,size=size,value=format(value,'.17g'))
+                if key in fixed: ET.SubElement(node,'SetSlider',name=key,size=size,value=format(value,'.17g'))
         for (key,size),value in sorted(shape_values.items()):
             ET.SubElement(node,'SetSlider',name=key,size=size,value='0' if neutral else format(value,'.17g'))
         root=ET.Element('SliderPresets');root.append(node)
         return ET.tostring(root,encoding='utf-8',xml_declaration=True)
     return Recipe(preset,projects,base_name,assignment_name,
         'ModLab-neutral-'+identity+'.xml','ModLab-default-'+identity+'.xml',
-        document(base_name,True),document(assignment_name,False))
+        tuple(sorted(fixed)),document(base_name,True),document(assignment_name,False))
 
 
 def stage(runner, recipe):

@@ -93,3 +93,16 @@ class NeutralShapeTests(unittest.TestCase):
             path.write_text(path.read_text().replace('value="45"','value="NaN"'))
             with self.assertRaisesRegex(ValueError,'finite'):
                 neutral_shape.plan(root,['Body'],'Athletic')
+
+    def test_hidden_fit_corrections_and_clamps_stay_in_each_project(self):
+        with TemporaryDirectory() as folder:
+            root=Path(folder);self.fixture(root)
+            path=root/'SliderSets/body.osp'
+            path.write_text(path.read_text().replace('</SliderSet>',
+                '<Slider name="NeckSeam" hidden="true" small="100" big="0"/>'
+                '<Slider name="Fix" clamp="true" small="100" big="100"/></SliderSet>'))
+            recipe=neutral_shape.plan(root,['Body'],'Athletic')
+            for data in (recipe.base_xml,recipe.assignment_xml):
+                names={n.get('name') for n in ET.fromstring(data).find('Preset').findall('SetSlider')}
+                self.assertNotIn('NeckSeam',names)
+                self.assertNotIn('Fix',names)
