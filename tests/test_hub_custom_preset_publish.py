@@ -13,6 +13,7 @@ class PresetHost:
     def __init__(self, root, enable=True, change_profile=False):
         self.root=root; self.enabled=False; self.allow_enable=enable; self.other=False
         self.change_profile=change_profile; self.callbacks=[]; self.target=None; self.refresh_count=0
+        self.priority_changes=[]
     def modsPath(self): return str(self.root/'mods')
     def profilePath(self): return 'Other' if self.other else 'Test'
     def resolvePath(self, relative): return str(self.target/relative) if self.enabled and (self.target/relative).is_file() else ''
@@ -22,7 +23,8 @@ class PresetHost:
     def modList(self): return self
     def allMods(self): return [self.target.name]
     def priority(self,name): return 0
-    def setPriority(self,*args): pass
+    def state(self,name):return 1 if self.enabled else 0
+    def setPriority(self,*args):self.priority_changes.append(args)
     def setActive(self,name,value):
         if self.allow_enable: self.enabled=value
         return self.allow_enable
@@ -44,7 +46,7 @@ class CustomPresetPublicationTests(unittest.TestCase):
 
     def publish(self,host,job,data):
         results=[]
-        modules={'mobase':SimpleNamespace(GuessedString=str),'PyQt6':ModuleType('PyQt6'),
+        modules={'mobase':SimpleNamespace(GuessedString=str,ModState=SimpleNamespace(ACTIVE=1)),'PyQt6':ModuleType('PyQt6'),
             'PyQt6.QtCore':SimpleNamespace(QTimer=SimpleNamespace(singleShot=lambda delay,fn:fn()))}
         with patch.dict('sys.modules',modules),patch('modlab.resources.mo2_hub.skse.require_game_closed'),patch('modlab.resources.mo2_hub.body_workflow.check_body_context'):
             publish_preset(host,job,data,lambda path,error:results.append((path,error)))
@@ -67,6 +69,16 @@ class CustomPresetPublicationTests(unittest.TestCase):
                 results=self.publish(host,job,data)
                 self.assertTrue(results[0][1]); self.assertFalse(host.enabled)
                 self.assertEqual('Custom preset needs attention',job.record['status'])
+
+    def test_adding_another_private_preset_does_not_move_existing_output(self):
+        with TemporaryDirectory() as folder:
+            root=Path(folder);host=PresetHost(root)
+            job,data=self.prepare(root);self.publish(host,job,data)
+            previous=list(host.priority_changes)
+            second,data=self.prepare(root,'second');result=self.publish(host,second,data)
+            self.assertEqual([(host.target,None)],result)
+            self.assertEqual(previous,host.priority_changes)
+            self.assertEqual(2,len(list(host.target.rglob('*.xml'))))
 
     def test_preset_changed_after_collection_is_not_published(self):
         with TemporaryDirectory() as folder:

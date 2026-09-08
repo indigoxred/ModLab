@@ -15,6 +15,7 @@ from .synthesis import command_line, plugin_masters
 from .synthesis_workflow import input_state, SynthesisJob, settings_hashes, working_environment
 from .pandora_workflow import effective_issues, activate_generated_plugins
 from .vfs import readable_path
+from .body_inputs import mesh_helper_state
 
 OUTPUT = 'ModLab NPC Appearance.esp'
 
@@ -39,7 +40,7 @@ def check_pending(organizer, expected):
 
 def state(organizer):
     excluded = [output_name(organizer.profile().name(), organizer.profilePath(), tool) for tool in ('Synthesis', 'Graphics')]
-    return input_state(organizer, [OUTPUT], output_mod=own_name(organizer), excluded_outputs=excluded)
+    return mesh_helper_state(input_state(organizer, [OUTPUT], output_mod=own_name(organizer), excluded_outputs=excluded))
 
 
 def catalog(organizer):
@@ -291,7 +292,7 @@ def saved_build_current(organizer, saved):
     plugins = organizer.pluginList()
     if any(plugins.priority(p) > plugins.priority(OUTPUT) for p in saved['input_state']['order']):
         return False
-    return json.loads(json.dumps(state(organizer))) == saved['input_state']
+    return json.loads(json.dumps(state(organizer))) == mesh_helper_state(saved['input_state'])
 
 
 def inspect_choices(organizer):

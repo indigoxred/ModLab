@@ -113,7 +113,8 @@ def inspect_output(target, profile_path, resolve_path, source_signature, *, tran
         record_path.relative_to(target.parent.parent.resolve() / 'builds')
         if record_path not in records:
             records[record_path] = json.loads(record_path.read_text(encoding='utf-8'))
-        if records[record_path].get('sources') != source_signature:
+        from .body_inputs import build_sources_match
+        if not build_sources_match(records[record_path],source_signature,record_path):
             issues.append(f'{name}: BodySlide inputs changed since this build.')
             continue
         for relative in project['outputs']:

@@ -16,6 +16,7 @@ from .pandora_workflow import effective_issues, activate_generated_plugins
 from .skse import require_game_closed
 from .skse_workflow import store_for
 from .vfs import find_files
+from .body_inputs import mesh_helper_state
 
 
 def own_name(organizer):
@@ -126,7 +127,7 @@ def require_upstream_view(organizer):
 
 
 def state(organizer):
-    return input_state(organizer, (), output_mod=own_name(organizer))
+    return mesh_helper_state(input_state(organizer, (), output_mod=own_name(organizer)))
 
 
 def locate_engine(organizer):
@@ -414,7 +415,7 @@ def saved_build_current(organizer, saved, *, withdrawn=False):
             raise ValueError('A generated graphics plugin is disabled. Enable it or review Graphics choices.')
     elif target.exists() and organizer.modList().state(target.name) & mobase.ModState.ACTIVE:
         raise ValueError('Older graphics output is active even though the last build generated no changes. Disable that older output.')
-    return json.loads(json.dumps(state(organizer))) == saved['input_state']
+    return json.loads(json.dumps(state(organizer))) == mesh_helper_state(saved['input_state'])
 
 
 def reapply_saved(organizer, saved, on_done):

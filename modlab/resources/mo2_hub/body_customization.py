@@ -169,7 +169,12 @@ def publish_preset(organizer, job, data, on_ready):
             effective=organizer.resolvePath(relative)
             if effective and Path(effective).resolve()!=(target/relative).resolve():
                 raise ValueError('Another custom-preset provider became active during preparation.')
-            mods=organizer.modList(); mods.setPriority(name,max(mods.priority(item) for item in mods.allMods()))
+            mods=organizer.modList()
+            # A new, uniquely named preset does not compete with another file.
+            # Keep an existing preset output's position unless the operation also
+            # publishes distribution settings that must win over their source.
+            if config_source or not mods.state(name) & mobase.ModState.ACTIVE:
+                mods.setPriority(name,max(mods.priority(item) for item in mods.allMods()))
             if not mods.setActive(name,True): raise ValueError('MO2 could not enable the saved preset.')
             organizer.onNextRefresh(lambda:QTimer.singleShot(0,verify),False); organizer.refresh()
         except Exception as error: finish(error)
