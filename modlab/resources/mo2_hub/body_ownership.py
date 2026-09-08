@@ -220,6 +220,7 @@ class BodyIndex:
                     textures.append(path if path.startswith('textures/') else 'textures/'+path)
             result.append(dict(armature=key, plugin=provider, slots=[i+30 for i in range(32) if mask & (1 << i)],
                 priority=config[1 if sex == 'female' else 0],
+                weight_slider=bool(config[3 if sex == 'female' else 2] & 2),
                 models=sorted(models), world_models=sorted(world_models), first_person_models=sorted(first_person_models),
                 texture_set=texture_set, textures=sorted(set(textures)),
                 texture_swap=self._ref(fields, b'NAM3' if sex == 'female' else b'NAM2', provider)))

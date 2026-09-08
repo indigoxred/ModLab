@@ -361,7 +361,7 @@ class HubWindow(QDialog):
         if not error and not plan.choices and not any(f.level == 'Blocked' for f in result.findings):
             try:
                 saved = appearances.load(self.organizer)
-                if saved and not appearances.saved_build_current(self.organizer, saved):
+                if saved and not appearances.load(self.organizer,'pending') and not appearances.saved_build_current(self.organizer, saved):
                     self.summary.setText('Rebuilding your selected NPC appearances and checking paired records and assets…')
                     job = appearances.prepare_job(self.organizer, saved['selected'])
                     appearances.run_job(self.organizer, job)

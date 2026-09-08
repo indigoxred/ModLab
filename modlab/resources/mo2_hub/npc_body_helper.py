@@ -7,7 +7,7 @@ from . import npc_helper
 from .outputs import digest
 from .runtime import sdk_environment
 
-ADAPTER='body-reference-v3'
+ADAPTER='body-reference-v6'
 
 def adapt_source(program,settings):
     call='if (mergeJSONlist.Any())'
@@ -18,8 +18,11 @@ def adapt_source(program,settings):
         raise ValueError('NPC helper source does not match the checked adaptation points.')
     program=program.replace(call,'ApplyModLabBodies(settings, state);\n                '+call)
     extension='public static void ApplyModLabBodies(PatcherSettings settings, IPatcherState<ISkyrimMod, ISkyrimModGetter> state)\n        {\n            ApplyModLabBodiesCore(settings, state.LinkCache, state.PatchMod);\n        }\n\n        public static void ApplyModLabBodiesCore(PatcherSettings settings, ILinkCache<ISkyrimMod, ISkyrimModGetter> cache, ISkyrimMod patch)\n        {\n            foreach (var request in settings.ModLabBodyAssignments)\n            {\n                var key = FormKey.Factory(request.Key);\n                var skin = FormKey.Factory(request.Value);\n                if (!cache.TryResolve<INpcGetter>(key, out var source))\n                    throw new Exception("Requested ModLab character is unavailable: " + request.Key);\n                if (!cache.TryResolve<IArmorGetter>(skin, out var armor))\n                    throw new Exception("Requested ModLab body armor is unavailable: " + request.Value);\n                var npc = patch.Npcs.GetOrAddAsOverride(source);\n                npc.WornArmor.SetTo(armor.FormKey);\n            }\n        }\n\n        '
+    extension=extension.replace('npc.WornArmor.SetTo(armor.FormKey);', 'ApplyModLabModels(npc, armor, request.Key, settings, cache, patch);')
+    extension += (Path(__file__).with_name('npc_body_models.cs')).read_text(encoding='utf-8')
     program=program.replace(method,extension+method)
     settings=settings.replace(field,field+'\n        public Dictionary<string, string> ModLabBodyAssignments = new Dictionary<string, string>();')
+    settings=settings.replace(field,field+'\n        public Dictionary<string, Dictionary<string, string>> ModLabBodyModelSources = new Dictionary<string, Dictionary<string, string>>();\n        public Dictionary<string, string> ModLabBodySex = new Dictionary<string, string>();')
     return program,settings
 
 def ensure_helper(tools_root):
