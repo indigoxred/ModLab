@@ -8,6 +8,23 @@ from modlab.resources.mo2_hub.xedit import dependency_order, stage_plugins, stag
 
 
 class XEditTests(unittest.TestCase):
+    def test_winner_check_is_read_only_and_requires_complete_structured_report(self):
+        from modlab.resources.mo2_hub.xedit_workflow import arguments
+        from modlab.resources.mo2_hub.winning_records import targets
+        with tempfile.TemporaryDirectory() as temp:
+            job,source=self.job(Path(temp))
+            names=('A.esm','B.esp')
+            (job/'tool.log').write_text('ModLab winning-record check complete: '+job.name)
+            (job/'winning-records.tsv').write_text('MODLAB-WINNERS-1\t'+job.name+'\nL\tA.esm\nL\tB.esp\n'
+                'P\tA.esm\t1\t0\t0\nP\tB.esp\t1\t0\t0\nEND\t'+job.name+'\n')
+            self.assertEqual(set(names),set(verify_job(job,'winners',0)['winning_records']))
+            args=arguments(job,names[-1],'winners',job/'tool.log',context=names)
+            self.assertIn('-script:'+str(job/'winning-records.pas'),args)
+            self.assertNotIn('-quickautoclean',args)
+            self.assertEqual(list(names),args[-2:])
+            (job/'Data/A.esm').write_bytes(b'TES4'+bytes(20)+b'changed')
+            with self.assertRaises(ValueError):verify_job(job,'winners',0)
+
     def test_record_check_keeps_earlier_non_master_injection_providers(self):
         from modlab.resources.mo2_hub.xedit import inspection_order
         plugins = [Plugin('Skyrim.esm', 0), Plugin('Injector.esp', 1, ('Skyrim.esm',)),

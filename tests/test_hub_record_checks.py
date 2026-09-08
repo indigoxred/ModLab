@@ -11,6 +11,23 @@ from modlab.resources.mo2_hub.record_checks import check_targets, inspect_target
 
 
 class RecordChecks(unittest.TestCase):
+    def test_loose_text_table_changes_and_removal_change_host_context(self):
+        from modlab.resources.mo2_hub import record_checks as rc
+        with TemporaryDirectory() as temp:
+            root=Path(temp); helper=root/'helper.exe';helper.write_bytes(b'exe')
+            ini=root/'Skyrim.ini';ini.write_bytes(b'ini'); strings=root/'Example_english.strings';strings.write_bytes(b'first')
+            organizer=Obj(getPluginDataPath=lambda:str(root),findFiles=lambda folder,pats:[],
+                          profile=lambda:Obj(absoluteIniFilePath=lambda name:str(ini)),profilePath=lambda:str(root))
+            with patch('modlab.resources.mo2_hub.helpers.locate_helper',return_value=[helper]), \
+                 patch('modlab.resources.mo2_hub.helpers.load_locations',return_value={}), \
+                 patch('modlab.resources.mo2_hub.vfs.find_files',side_effect=lambda *a:[strings] if strings.exists() else []):
+                before=rc.host_context(organizer)
+                strings.write_bytes(b'changed')
+                after=rc.host_context(organizer)
+                self.assertNotEqual(before,after)
+                strings.unlink()
+                self.assertNotEqual(after,rc.host_context(organizer))
+
     def test_hash_read_does_not_mistake_access_timestamp_for_content_change(self):
         with TemporaryDirectory() as temp:
             path = Path(temp)/'helper.exe'; path.write_bytes(b'helper')

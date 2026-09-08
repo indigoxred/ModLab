@@ -146,6 +146,7 @@ def check_targets(plugins, resolve, context, cache_path, run, status=lambda mess
 
 def host_context(organizer):
     from .helpers import HELPERS, load_locations, locate_helper
+    from .vfs import find_files
     paths = locate_helper(HELPERS['xedit'], load_locations(Path(organizer.getPluginDataPath())/'modlab/helpers.json'), ())
     if len(paths) != 1:
         raise ValueError('Download the complete xEdit package from https://github.com/TES5Edit/TES5Edit/releases '
@@ -155,15 +156,19 @@ def host_context(organizer):
         path = readable_path(value); stat = path.stat()
         archives.append((str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
     ini = organizer.profile().absoluteIniFilePath('Skyrim.ini')
-    return dict(profile=organizer.profilePath(), helper=file_hash(paths[0]), ini=file_hash(ini), archives=sorted(archives))
+    strings = [(str(readable_path(p)),file_hash(p)) for p in
+               find_files(organizer,'Strings',['*.strings','*.dlstrings','*.ilstrings'])]
+    return dict(profile=organizer.profilePath(), helper=file_hash(paths[0]), ini=file_hash(ini),
+                archives=sorted(archives), strings=sorted(strings))
 
 
 def inspect_record_checks(organizer, setup):
     if not targets(setup.plugins):
         return ()
     try:
-        return inspect_targets(setup.plugins, organizer.resolvePath, host_context(organizer),
-                               Path(organizer.profilePath())/'modlab-record-checks.json')
+        from .winning_records import inspect_setup
+        return inspect_setup(setup.plugins, organizer.resolvePath, host_context(organizer),
+                             Path(organizer.profilePath())/'modlab-winning-record-checks.json')
     except Exception as error:
         return (Finding('Unknown', 'record-check-incomplete', 'Automatic record checks need setup', str(error),
             'Resolve the reported requirement in Setup / tool locations, then use Recheck and finish setup.'),)
@@ -174,9 +179,10 @@ def run_record_checks(organizer, setup, version_reader, status=lambda message: N
     if not targets(setup.plugins):
         return (), ()
     try:
-        return check_targets(setup.plugins, organizer.resolvePath, host_context(organizer),
-            Path(organizer.profilePath())/'modlab-record-checks.json',
-            lambda name: run_xedit(organizer, name, 'check', '', version_reader), status)
+        from .winning_records import check_setup
+        return check_setup(setup.plugins, organizer.resolvePath, host_context(organizer),
+            Path(organizer.profilePath())/'modlab-winning-record-checks.json',
+            lambda: run_xedit(organizer, '', 'winners', '', version_reader), status)
     except Exception as error:
         return (Finding('Unknown', 'record-check-incomplete', 'Automatic record checks could not start', str(error),
             'Resolve the helper or file requirement, then use Recheck and finish setup.'),), ()

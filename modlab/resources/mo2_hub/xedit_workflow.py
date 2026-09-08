@@ -16,16 +16,17 @@ from .vfs import find_files
 
 
 def arguments(job, target, mode, log, *, context=()):
-    return ['-SSE', '-quickautoclean' if mode == 'clean' else '-checkforerrors',
+    operation = '-script:' + str(job/'winning-records.pas') if mode == 'winners' else ('-quickautoclean' if mode == 'clean' else '-checkforerrors')
+    return ['-SSE', operation,
             '-autoload', '-autoexit', '-forcebsa', '-DontCache',
             '-D:' + str(job / 'Data'), '-O:' + str(job / 'Data'),
             '-P:' + str(job / 'plugins.txt'), '-I:' + str(job / 'Skyrim.ini'),
             '-M:' + str(job / 'settings'), '-B:' + str(job / 'backups'),
-            '-T:' + str(job / 'temp'), '-R:' + str(log)] + (list(context) if mode == 'check' and context else [target])
+            '-T:' + str(job / 'temp'), '-R:' + str(log)] + (list(context) if mode in {'check','winners'} and context else [target])
 
 
 def run_xedit(organizer, target, mode, reason, version_reader, *, generated_inputs=None):
-    if mode not in {'clean', 'check'} or (mode == 'clean' and not reason.strip()):
+    if mode not in {'clean', 'check', 'winners'} or (mode == 'clean' and not reason.strip()):
         raise ValueError('Cleaning requires a specific reason from the author or applicable LOOT advice.')
     if mode == 'clean' and target.casefold() == 'skyrim.esm':
         raise ValueError('Skyrim.esm is not offered for automatic cleaning. Check the official xEdit guidance.')
@@ -44,7 +45,12 @@ def run_xedit(organizer, target, mode, reason, version_reader, *, generated_inpu
             Plugin(name, len(plugins) + index, plugin_masters(Path(path)), 'Pending generated patch')
             for index, (name, path) in enumerate(generated_inputs.items()))
         resolve = lambda name: str(overrides[name.casefold()]) if name.casefold() in overrides else organizer.resolvePath(name)
-    names = inspection_order(plugins, target) if mode == 'check' else dependency_order(plugins, target)
+    if mode == 'winners':
+        from .winning_records import active_order, script
+        names=active_order(plugins)
+        if not names:raise ValueError('No active plugins to check.')
+    else:
+        names = inspection_order(plugins, target) if mode == 'check' else dependency_order(plugins, target)
     config = Path(organizer.getPluginDataPath()) / 'modlab' / 'helpers.json'
     paths = locate_helper(HELPERS['xedit'], load_locations(config), ())
     if len(paths) != 1:
@@ -55,6 +61,8 @@ def run_xedit(organizer, target, mode, reason, version_reader, *, generated_inpu
     signature = context_signature(organizer)
     job = stage_plugins(Path(organizer.modsPath()).parent / 'builds' / 'xedit' / uuid4().hex[:12],
                         names, resolve)
+    if mode == 'winners':
+        (job/'winning-records.pas').write_text(script(job,names),encoding='utf-8-sig')
     resources = {}
     for path in organizer.findFiles('', ['*.bsa']):
         resolved = Path(path)
@@ -79,7 +87,8 @@ def run_xedit(organizer, target, mode, reason, version_reader, *, generated_inpu
     record = json.loads((job / 'operation.json').read_text(encoding='utf-8'))
     record.update(profile_path=organizer.profilePath(), mode=mode, reason=reason,
                   helper=str(executable), status='Running', signature=signature, checked_text_resources=True,
-                  record_context='Active plugins through target' if mode == 'check' else 'Declared masters only')
+                  record_context='Winning records in complete active load order' if mode == 'winners' else
+                                 ('Active plugins through target' if mode == 'check' else 'Declared masters only'))
     write_record(job, record)
     try:
         # Settings next to an existing helper take precedence over -P in xEdit.
@@ -95,7 +104,24 @@ def run_xedit(organizer, target, mode, reason, version_reader, *, generated_inpu
                                                 str(job / 'runner'), setup.profile)
             if not handle:
                 raise RuntimeError('xEdit could not start. Inspect the MO2 log.')
-            complete, code = organizer.waitForApplication(handle, False)
+            timer = None
+            if run_mode == 'winners':
+                from PyQt6.QtCore import QTimer
+                from .xedit_script_ui import advance
+                timer=QTimer();timer.setInterval(500)
+                handshake={}
+                def acknowledge():
+                    try:
+                        closed=advance(handle,job,names,handshake)
+                        if closed:timer.stop()
+                    except Exception as problem:
+                        record.setdefault('dialog_errors',[]).append(str(problem));write_record(job,record)
+                        timer.stop()
+                timer.timeout.connect(acknowledge);timer.start()
+            try:
+                complete, code = organizer.waitForApplication(handle, False)
+            finally:
+                if timer:timer.stop()
             if not complete:
                 raise RuntimeError('xEdit completion was not observed. Wait for it to close before retrying. No output was installed.')
             if context_signature(organizer) != signature:

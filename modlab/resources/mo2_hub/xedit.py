@@ -155,7 +155,7 @@ def verify_job(job, mode, code):
     log = (job / 'tool.log').read_text(encoding='utf-8-sig', errors='replace')
     checked = mode == 'check' and record.get('checked_text_resources')
     errors = check_result(log, code, target=record['target']) if checked else None
-    marker = 'Quick Clean mode finished.' if mode == 'clean' else '--= All Done =--'
+    marker = ('ModLab winning-record check complete: ' + job.name) if mode == 'winners' else ('Quick Clean mode finished.' if mode == 'clean' else '--= All Done =--')
     if marker not in log or 'fatal:' in log.casefold() or 'exception' in log.casefold():
         raise ValueError('xEdit did not report reliable completion. Read the retained log.')
     check_resources(log)
@@ -166,7 +166,7 @@ def verify_job(job, mode, code):
             raise ValueError(f'Text/archive resource changed: {name}')
         if resource.get('sha256') and any(digest(path) != resource['sha256'] for path in (source, staged)):
             raise ValueError(f'Text resource changed: {name}')
-    if (mode == 'clean' and code != 0) or (mode == 'check' and not 0 <= code <= 127):
+    if (mode in {'clean','winners'} and code != 0) or (mode == 'check' and not 0 <= code <= 127):
         raise ValueError(f'xEdit exited unexpectedly ({code}). Read the retained log.')
     target = record['target']
     for name, source in record['sources'].items():
@@ -175,7 +175,7 @@ def verify_job(job, mode, code):
         changed = digest(job / 'Data' / name) != source['sha256']
         if changed and name != target:
             raise ValueError(f'xEdit changed a copied master: {name}. Output is not offered for installation.')
-        if changed and mode == 'check':
+        if changed and mode in {'check','winners'}:
             raise ValueError('An inspection changed its copied input. Review the tool log.')
     output = job / 'Data' / target
     with output.open('rb') as stream:
@@ -184,5 +184,11 @@ def verify_job(job, mode, code):
         raise ValueError('The resulting plugin header is missing or invalid.')
     if any((job / 'Data').glob('*.save')):
         raise ValueError('xEdit left an unfinished save. Output is not ready for installation.')
-    return {'changed': digest(output) != record['sources'][target]['sha256'],
-            'sha256': digest(output), 'record_errors': (errors if checked else code) if mode == 'check' else None}
+    result = {'changed': digest(output) != record['sources'][target]['sha256'],
+              'sha256': digest(output), 'record_errors': (errors if checked else code) if mode == 'check' else None}
+    if mode == 'winners':
+        from .winning_records import parse_report, targets
+        names=tuple(record['sources'])
+        result['winning_records']=parse_report((job/'winning-records.tsv').read_text(encoding='utf-8-sig'),
+                                               job.name,names,targets(names))
+    return result
