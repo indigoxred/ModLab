@@ -16,6 +16,7 @@ class NpcDialog(OperationDialog):
         self.profile_path = organizer.profilePath()
         self.rows = workflow.catalog(organizer)
         pending = workflow.load(organizer, 'pending')
+        self.applied_selection = dict((workflow.load(organizer) or {}).get('selected',{}))
         saved = pending or workflow.load(organizer) or {}
         self.selected = dict(saved.get('selected', {}))
         self.setWindowTitle('ModLab — NPC appearance choices'); self.resize(1050, 680)
@@ -85,7 +86,8 @@ class NpcDialog(OperationDialog):
     def generate(self):
         try:
             from .npc import validate_selections
-            validate_selections(self.rows, self.selected)
+            if self.selected: validate_selections(self.rows, self.selected)
+            elif not self.applied_selection: raise ValueError('No saved appearance overrides remain to reset.')
             begin_apply(self, self.generate_confirmed)
         except Exception as error:
             from PyQt6.QtWidgets import QMessageBox
@@ -95,7 +97,13 @@ class NpcDialog(OperationDialog):
         if self.organizer.profilePath() != self.profile_path:
             self.status.setText('Selected profile changed. Reopen choices.'); return
         if not self.selected:
-            self.status.setText('Select at least one character. Existing applied output is retained; removing all output from an existing save needs separate review.'); return
+            from .npc_reset import reset_choices
+            self.awaiting_publication = True
+            try:
+                workflow.path_for(self.organizer,'pending').write_text(json.dumps(dict(selected={})),encoding='utf-8')
+                reset_choices(self.organizer,self.ready)
+            except Exception as error: self.ready(None,str(error))
+            return
         self.build.setEnabled(False); self.close_button.setEnabled(False); self.table.setEnabled(False)
         self.apply_visible.setEnabled(False); self.cancel.setEnabled(False)
         pending = dict(selected=self.selected)

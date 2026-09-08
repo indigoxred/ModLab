@@ -63,7 +63,7 @@ class BodyDialog(OperationDialog):
                             '\n'.join(job.catalog.projects[name].outputs))
             self.projects.addItem(item)
         self.projects.itemChanged.connect(self.update_selection)
-        self.preset.currentIndexChanged.connect(self.restore_selection)
+        self.preset.currentIndexChanged.connect(self.preset_changed)
         layout.addWidget(self.projects, 3)
         self.count = QLabel('No projects selected')
         layout.addWidget(self.count)
@@ -73,6 +73,8 @@ class BodyDialog(OperationDialog):
             button = QPushButton(label)
             button.clicked.connect(action)
             selection_row.addWidget(button)
+        restore = QPushButton('Load previous build selection for this preset')
+        restore.clicked.connect(self.restore_selection); selection_row.addWidget(restore)
         layout.addLayout(selection_row)
         self.morphs = QCheckBox('Include in-game body shape data (Build Morphs)')
         self.morphs.setToolTip('Produces the TRI files used by RaceMenu and body distribution helpers. This does not assign a shape to a character; those helpers require their own setup.')
@@ -116,10 +118,20 @@ class BodyDialog(OperationDialog):
         except Exception as error:
             QMessageBox.warning(self, 'Choices could not be saved', str(error))
 
+    def preset_changed(self):
+        # Changing shape does not change the projects the user selected.
+        self.update_selection()
+        selected=self.selected()
+        if not selected: return
+        try:
+            plan_build(self.job.catalog,selected,self.preset.currentData(),morphs=self.morphs.isChecked())
+        except ValueError as error:
+            self.count.setText(f'{len(selected)} projects kept selected. '+str(error))
+
     def restore_selection(self):
         preset = self.preset.currentData()
         for item in self.items():
-            checked = self.saved.get(item.text(), {}).get('preset') == preset
+            checked = bool(preset) and self.saved.get(item.text(), {}).get('preset') == preset
             item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
         chosen = [self.saved.get(name, {}) for name in self.selected()]
         self.morphs.setChecked(bool(chosen) and all(p.get('morphs', False) for p in chosen))

@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineE
 from .npc_dialog import NpcDialog
 from .characters import active_characters, body_description
 from .guidance import display_name
+from .npc_reset import KEEP_SAVED, appearance_selection
 
 
 def paragraph(text=''):
@@ -88,7 +89,9 @@ class CharacterDialog(NpcDialog):
     def show_character(self, item, previous=None):
         self.current_character=item.data(Qt.ItemDataRole.UserRole) if item else None
         self.appearance_choice.blockSignals(True); self.appearance_choice.clear()
-        self.appearance_choice.addItem('Keep current appearance','')
+        self.appearance_choice.addItem('Follow current mod setup (remove my override)','')
+        if self.current_character in self.applied_selection:
+            self.appearance_choice.addItem('Keep my saved appearance',KEEP_SAVED)
         if not item:
             self.character_name.setText('No matching characters')
             self.character_note.setText('Try another name or choose All characters.')
@@ -121,6 +124,8 @@ class CharacterDialog(NpcDialog):
     def select_appearance(self):
         if not self.current_character: return
         key=self.current_character; chosen=self.appearance_choice.currentData()
+        updated=appearance_selection(self.selected,self.applied_selection,key,chosen)
+        chosen=updated.get(key,'')
         if key in self.controls:
             combo=self.controls[key]; combo.blockSignals(True); combo.setCurrentIndex(max(0,combo.findData(chosen))); combo.blockSignals(False)
         self.choose(key,chosen); self.explain_appearance()
@@ -131,14 +136,15 @@ class CharacterDialog(NpcDialog):
 
     def update_pending(self):
         self.character_status.setText(f'{len(self.selected)} character appearance choice(s) selected. Applying prepares their paired files and checks the installed result.')
-        self.character_apply.setEnabled(bool(self.selected))
+        self.character_apply.setEnabled(bool(self.selected) or bool(self.applied_selection))
 
     def explain_appearance(self):
         key=self.current_character; chosen=self.appearance_choice.currentData()
+        if chosen==KEEP_SAVED: chosen=self.applied_selection.get(key,'')
         option=self.characters.get(key,{}).get('options',{}).get(chosen)
         if not chosen:
-            self.appearance_note.setText('ModLab will not add a new appearance choice for this character. Existing mod order controls their appearance.')
-        elif not option: self.appearance_note.setText('This saved appearance is no longer available. Choose an installed source or keep the current appearance.')
+            self.appearance_note.setText("Applying removes ModLab's explicit appearance override for this character. The current source mods then supply their appearance. Other saved character choices remain.")
+        elif not option: self.appearance_note.setText('This saved appearance is no longer available. Enable its source mod, choose an installed alternative, or explicitly follow the current mod setup.')
         elif not option['ready']: self.appearance_note.setText(option['problem'])
         else: self.appearance_note.setText('The matching face mesh and face tint are present in '+display_name(option['mod'])+'. They will be prepared together.')
 

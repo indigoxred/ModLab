@@ -225,6 +225,11 @@ def publish_job(organizer, job, on_done):
 
 
 def saved_build_current(organizer, saved):
+    if saved.get('status')=='reset':
+        import mobase
+        if organizer.modList().state(own_name(organizer)) & mobase.ModState.ACTIVE or organizer.pluginList().loadOrder(OUTPUT)>=0:
+            raise ValueError('The cleared ModLab appearance output was enabled outside these choices. Review Character appearances before preparing again.')
+        return True
     target = Path(organizer.modsPath()) / own_name(organizer)
     if not target.is_dir(): return False
     manifest = read_manifest(target, organizer.profilePath(), 'NPC Appearance')
@@ -265,6 +270,10 @@ def inspect_choices(organizer):
             if not saved_build_current(organizer, saved):
                 return (Finding('Review', 'npc-stale', 'NPC appearances need an update',
                     'Installed mods or asset winners changed after your saved NPC selection.', 'Use Recheck and finish setup. ModLab will rebuild your selected appearances before downstream patchers.'),)
+            if saved.get('status')=='reset':
+                return (Finding('Info','npc-reset','Character appearance overrides cleared',
+                    'The previous generated appearance output is disabled and retained for recovery. Source mods now supply appearances.',
+                    'Choose character appearances again whenever you want to add an override.'),)
             return (Finding('Info', 'npc-current', f"Selected NPC appearances applied: {len(saved['selected'])}",
                 'Paired FaceGen assets and checked NPC records are enabled. Build: ' + saved['build_record'],
                 'Check the selected NPCs in game. Source mods remain installed; other NPCs follow normal load order.'),)

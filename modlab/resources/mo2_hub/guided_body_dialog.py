@@ -9,6 +9,7 @@ from .body_customization_dialog import CustomizationActions
 from .body_choices import (shared_bodies, compatible_presets, choice_groups,
     select_projects, load_defaults, save_default, verified_default, selected_morph_mode)
 from .guidance import display_name
+from .body_drafts import load_drafts, save_draft, choice_fields, missing_decisions
 
 
 def note(text):
@@ -23,6 +24,8 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
         self.resize(1080, 820)
         self.pending_default = None
         self.defaults = load_defaults(organizer.profilePath())
+        self.drafts = load_drafts(self.profile_path)
+        self.editing_sex = None
         from .body_ownership import active_outfit_models
         self.outfit_error = None
         try:
@@ -58,6 +61,7 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
         self.customize_button.clicked.connect(self.customize_shared)
         layout.addWidget(self.customize_button)
         self.body_note = note(''); layout.addWidget(self.body_note)
+        self.pending_note = note(''); layout.addWidget(self.pending_note)
         self.outfit_choice = QCheckBox('Prepare compatible installed outfits with this shape')
         self.outfit_choice.setChecked(not self.outfit_error); self.outfit_choice.setEnabled(not self.outfit_error)
         layout.addWidget(self.outfit_choice)
@@ -86,30 +90,73 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
         self.status.textChanged.connect(lambda: self.guided_status.setText(self.status.toPlainText()))
         self.sex_changed()
 
+    def draft_choice(self):
+        body,preset=self.body_choice.currentData(),self.shape_choice.currentData()
+        prior=self.drafts.get(self.editing_sex,self.defaults.get(self.editing_sex,{}))
+        decisions=dict(prior.get('decisions',{})) if prior.get('body')==body and prior.get('preset')==preset else {}
+        decisions.update({key:combo.currentData() for key,combo in self.decisions.items()})
+        return dict(body=body,preset=preset,
+            decisions=decisions,
+            outfits=self.outfit_choice.isChecked(),shape_support=self.shape_support.currentData())
+
+    def save_pending_choice(self):
+        if not self.editing_sex: return
+        if self.organizer.profilePath()!=self.profile_path:
+            raise ValueError('The selected profile changed. Reopen body choices before saving.')
+        sex=self.editing_sex; choice=self.draft_choice()
+        prepared=choice_fields(self.defaults.get(sex,{}))
+        # Untouched browsing does not rewrite files or mark outputs as changed.
+        desired=None if choice==prepared or not choice['body'] else choice
+        if desired==self.drafts.get(sex): return
+        save_draft(self.profile_path,sex,desired,expected=self.drafts.get(sex))
+        if desired is None: self.drafts.pop(sex,None)
+        else: self.drafts[sex]=desired
+
+    def done(self,result):
+        if self.operation_running: return
+        try: self.save_pending_choice()
+        except (ValueError,OSError) as error:
+            QMessageBox.warning(self,'Pending choices could not be saved',str(error)+' These edits were not saved. Previously saved choices are retained; reopen this screen to continue.')
+        super().done(result)
+
     def sex_changed(self):
+        try: self.save_pending_choice()
+        except (ValueError,OSError) as error:
+            self.sex_choice.blockSignals(True)
+            self.sex_choice.setCurrentIndex(self.sex_choice.findData(self.editing_sex))
+            self.sex_choice.blockSignals(False)
+            QMessageBox.warning(self,'Pending choices could not be saved',str(error)); return
         sex = self.sex_choice.currentData()
+        self.editing_sex=sex
         self.outfit_paths = self.outfit_paths_by_sex[sex]
         self.body_choice.blockSignals(True); self.body_choice.clear()
         self.body_choice.addItem('Choose an installed body…', None)
         for name in shared_bodies(self.job.catalog, sex):
             self.body_choice.addItem(name, name)
-        saved = self.defaults.get(sex, {})
+        saved = self.drafts.get(sex, self.defaults.get(sex, {}))
+        if saved.get('body') and self.body_choice.findData(saved['body'])<0:
+            self.body_choice.addItem(saved['body']+' (unavailable)',saved['body'])
         index = self.body_choice.findData(saved.get('body'))
         self.body_choice.setCurrentIndex(max(index, 0)); self.body_choice.blockSignals(False)
         self.outfit_choice.blockSignals(True)
         self.outfit_choice.setChecked(bool(saved.get('outfits', True)) and not self.outfit_error); self.outfit_choice.blockSignals(False)
+        self.shape_support.setCurrentIndex(max(0,self.shape_support.findData(saved.get('shape_support'))))
+        self.decision_context=None
         self.body_changed()
 
     def body_changed(self):
         body = self.body_choice.currentData()
-        saved = self.defaults.get(self.sex_choice.currentData(), {})
+        saved = self.drafts.get(self.sex_choice.currentData(), self.defaults.get(self.sex_choice.currentData(), {}))
         self.shape_choice.blockSignals(True); self.shape_choice.clear()
         self.shape_choice.addItem('Choose a shape…', None)
-        for preset in compatible_presets(self.job.catalog, body) if body else ():
+        available = body in shared_bodies(self.job.catalog,self.sex_choice.currentData())
+        for preset in compatible_presets(self.job.catalog, body) if available else ():
             self.shape_choice.addItem(preset, preset)
+        if saved.get('body')==body and saved.get('preset') and self.shape_choice.findData(saved['preset'])<0:
+            self.shape_choice.addItem(saved['preset']+' (unavailable)',saved['preset'])
         self.shape_choice.setCurrentIndex(max(0, self.shape_choice.findData(saved.get('preset'))))
         self.shape_choice.blockSignals(False)
-        if body:
+        if available:
             self.body_note.setText('Body supplied by ' + display_name(self.job.record['project_sources'][body]) +
                 '. Hands, feet and outfit alternatives are shown below. Keep current files is available for each part.')
         else:
@@ -126,12 +173,15 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
         self.decision_context = context
         self.parts.clear(); self.decisions = {}
         body, preset = context
-        self.guided_build.setEnabled(bool(body and preset))
-        self.customize_button.setEnabled(bool(body and preset))
-        if not body or not preset:
-            self.choice_note.setText('Choose a body and shape to see the matching parts and outfits.')
+        available = body in shared_bodies(self.job.catalog,self.sex_choice.currentData())
+        available = available and preset in compatible_presets(self.job.catalog,body)
+        self.guided_build.setEnabled(available)
+        self.customize_button.setEnabled(available)
+        self.pending_note.setText('Pending choices restored; not applied. Review them, then choose Prepare and apply.' if self.sex_choice.currentData() in self.drafts else 'Selections are kept when you close. Prepare and apply changes the installed body and outfits.')
+        if not available:
+            self.choice_note.setText('A saved body or shape is unavailable. Enable its source mod or choose an installed alternative. Current files are retained.' if body and preset else 'Choose a body and shape to see the matching parts and outfits.')
             return
-        saved = self.defaults.get(self.sex_choice.currentData(), {})
+        saved = self.drafts.get(self.sex_choice.currentData(), self.defaults.get(self.sex_choice.currentData(), {}))
         saved_decisions = saved.get('decisions', {}) if saved.get('body') == body and saved.get('preset') == preset else {}
         groups = choice_groups(self.job.catalog, body, preset, self.saved, outfit_paths=self.outfit_paths)
         parents = {}; total = 0; ambiguous = 0
@@ -147,6 +197,7 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
             for name in group.options:
                 combo.addItem(name, name)
             choice = previous.get(group.key, saved_decisions.get(group.key, group.suggested))
+            if choice and combo.findData(choice)<0: combo.addItem(choice+' (unavailable)',choice)
             combo.setCurrentIndex(max(0, combo.findData(choice)))
             self.parts.setItemWidget(row, 1, combo); self.decisions[group.key] = combo
             sources = sorted({display_name(self.job.record['project_sources'][name]) for name in group.options})
@@ -154,6 +205,15 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
             row.setToolTip(0, '\n'.join(group.options))
             row.setToolTip(2, '\n'.join(self.job.record['project_sources'][name] for name in group.options))
             total += group.kind == 'outfit'; ambiguous += len(group.options) > 1
+        # A removed group must not silently disappear from the pending request.
+        remembered=dict(saved_decisions); remembered.update(previous)
+        self.unavailable_decisions=missing_decisions(remembered,{group.key for group in groups})
+        for key,value in self.unavailable_decisions.items():
+            row=QTreeWidgetItem(self.parts,['Unavailable saved choice'])
+            combo=QComboBox(); combo.addItem(value+' (unavailable)',value)
+            combo.addItem('Keep current files; clear this pending choice','')
+            self.parts.setItemWidget(row,1,combo); self.decisions[key]=combo
+            row.setText(2,'Enable the source mod, or clear this pending choice.')
         self.choice_note.setText(f'{total} matching outfit choices. {ambiguous} parts/outfits have alternatives. '
             'Only one variant in each overlapping group is prepared here; Advanced retains individual project combinations. '
             'Projects without a declared match remain available in Advanced.')
@@ -162,11 +222,15 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
         try:
             body, preset = self.body_choice.currentData(), self.shape_choice.currentData()
             decisions = {key: combo.currentData() for key, combo in self.decisions.items()}
+            if any(decisions.get(key) for key in getattr(self,'unavailable_decisions',{})):
+                raise ValueError('A saved body or outfit choice is unavailable. Enable its source mod or clear that pending choice before preparing.')
+            self.save_pending_choice()
             selected = select_projects(self.job.catalog, body, preset, decisions,
                 outfits=self.outfit_choice.isChecked(), saved=self.saved, outfit_paths=self.outfit_paths)
             morphs = selected_morph_mode(selected, self.saved, self.shape_support.currentData())
             self.pending_default = dict(sex=self.sex_choice.currentData(), body=body, preset=preset,
-                decisions=decisions, outfits=self.outfit_choice.isChecked(), selected=selected)
+                decisions=decisions, outfits=self.outfit_choice.isChecked(), selected=selected,
+                shape_support=self.shape_support.currentData())
             self.preset.setCurrentIndex(self.preset.findData(preset))
             for item in self.items():
                 item.setCheckState(Qt.CheckState.Checked if item.text() in selected else Qt.CheckState.Unchecked)
@@ -198,6 +262,7 @@ class GuidedBodyDialog(CustomizationActions, BodyDialog):
                 save_default(self.profile_path, sex, choice)
                 self.defaults = load_defaults(self.profile_path)
                 self.pending_default = None
+                self.save_pending_choice()
                 self.guided_status.setText('Prepared and applied. Your shared body and shape are saved for this profile. '
                     'Generated files were checked and are effective. NPC body assignments were not changed. '
                     'You can change these choices here at any time.')

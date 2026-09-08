@@ -89,6 +89,7 @@ class CustomizationActions:
             self.preset.addItem(name,name)
             self.body_changed()
             self.shape_choice.setCurrentIndex(self.shape_choice.findData(name))
+            self.save_pending_choice()
             end_apply(self); self.guided.setEnabled(True); self.tabs.setTabEnabled(1,True)
             self.guided_status.setText('Your custom preset is saved and selected. Choose Prepare and apply to use this shape for the shared body and selected outfits.')
         except Exception as problem: self.customizer_error(problem)
