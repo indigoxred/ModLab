@@ -78,6 +78,27 @@ def resumable_items(queue):
     return [i['archive'] for i in queue.data['items'] if i['state'] == 'Queued']
 
 
+def latest_unprepared(instance, profile_path):
+    """Reconnect a completed batch to preparation after reopening the window.
+
+    This never resumes an installer, or treats a failed/unfinished archive as
+    installed. Already recorded setup results remain in History.
+    """
+    paths=sorted((Path(instance)/'reports/install-queue').glob('*/operation.json'),
+                 key=lambda p:p.stat().st_mtime,reverse=True)
+    for path in paths:
+        try:
+            queue=load_queue(path,profile_path);data=queue.data
+            if (data.get('status')=='Installations completed; setup check pending' and
+                    not data.get('setup_record') and data.get('current') is None and
+                    all(i['state'] in {'Completed','Dismissed'} for i in data['items']) and
+                    any(i['state']=='Completed' and i.get('record') for i in data['items'])):
+                return queue
+        except (OSError,ValueError,TypeError,KeyError,AttributeError):
+            continue
+    return None
+
+
 def begin_item(queue, archive, profile_path):
     if queue.data['profile_path'] != str(profile_path):
         raise ValueError('The selected profile changed. Resume this queue from its original profile.')

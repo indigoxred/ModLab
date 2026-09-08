@@ -77,27 +77,38 @@ def withdraw_for_upstream(organizer, on_ready):
         if marker.exists():
             raise ValueError('Temporarily withdrawn graphics output is missing. Review its retained build before retrying.')
         return False
-    read_manifest(target, organizer.profilePath(), 'Graphics')
+    manifest=read_manifest(target, organizer.profilePath(), 'Graphics')
     active = bool(organizer.modList().state(target.name) & mobase.ModState.ACTIVE)
     if marker.exists():
         record = json.loads(marker.read_text(encoding='utf-8'))
         if record['profile_path'] != organizer.profilePath() or record['manifest'] != digest(target / MANIFEST):
             raise ValueError('Temporarily withdrawn graphics output changed. Review it before continuing.')
     elif active:
+        installed_inputs={}
         # A saved rebuild must not undo an outside choice of file provider.
         # A pending request is an explicit new selection from Graphics choices.
         saved = load_choices(organizer)
         if saved and not load_pending(organizer):
             issues = effective_issues(organizer, target, saved['hashes'])
-            issues += ['Generated plugin is disabled: ' + name for name in saved['hashes']
+            if issues:
+                from .graphics_install_inputs import pending_mesh_inputs
+                installed_inputs=pending_mesh_inputs(organizer,saved['hashes'],manifest.get('updated_at'))
+                issues=effective_issues(organizer,target,{name:checksum for name,checksum in saved['hashes'].items()
+                                                       if name not in installed_inputs})
+            disabled = [name for name in saved['hashes']
                        if Path(name).suffix.casefold() in {'.esp', '.esm', '.esl'}
                        and organizer.pluginList().loadOrder(name) < 0]
+            if disabled:
+                raise ValueError('Generated graphics plugin is disabled: ' + ', '.join(disabled) +
+                                 '. Your choice was retained. Open Graphics choices to confirm whether to prepare this setup again.')
             if issues:
-                raise ValueError('\n'.join(issues[:12]) + '\nThe current graphics providers differ from the saved output. '
-                                 'Open Graphics choices to select and apply the intended result; existing overrides are retained.')
+                raise ValueError(f'{len(issues)} prepared graphics files or plugins have changed outside the pending verified installs. '
+                                 'Open Graphics choices to confirm the setup you want before regenerating. '
+                                 'Your existing files and provider choices have been retained.')
         require_game_closed()
         marker.write_text(json.dumps(dict(profile_path=organizer.profilePath(), mod=target.name,
-            manifest=digest(target / MANIFEST), withdrawn_at=datetime.now(timezone.utc).isoformat()),indent=2),encoding='utf-8')
+            manifest=digest(target / MANIFEST), installation_inputs=installed_inputs,
+            withdrawn_at=datetime.now(timezone.utc).isoformat()),indent=2),encoding='utf-8')
     elif (load_choices(organizer) or {}).get('hashes') and not load_pending(organizer):
         raise ValueError('The selected graphics output is disabled. Re-enable its retained mod in MO2, then recheck.')
     if not active:

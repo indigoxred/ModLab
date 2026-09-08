@@ -4,6 +4,42 @@ import unittest
 
 
 class InstallQueueTests(unittest.TestCase):
+    def test_malformed_history_does_not_block_pending_batch_preparation(self):
+        import json
+        import os
+        from modlab.resources.mo2_hub.install_queue import (
+            create_queue, begin_item, finish_item, latest_unprepared)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); archive = root/'mod.zip'; archive.write_bytes(b'archive')
+            queue = create_queue(root, 'A', [archive])
+            begin_item(queue, str(archive), 'A')
+            finish_item(queue, 'Installed, enabled', 'receipt.json')
+            malformed = queue.path.parent.parent/'malformed'/'operation.json'
+            malformed.parent.mkdir()
+            for data in ([], {'version': 1, 'profile_path': 'A', 'items': [None]}):
+                with self.subTest(data=data):
+                    malformed.write_text(json.dumps(data), encoding='utf-8')
+                    stamp = queue.path.stat().st_mtime + 10
+                    os.utime(malformed, (stamp, stamp))
+                    self.assertEqual(queue.path, latest_unprepared(root, 'A').path)
+                    self.assertEqual(data, json.loads(malformed.read_text(encoding='utf-8')))
+
+    def test_restart_reconnects_completed_batch_to_preparation_without_reinstalling(self):
+        from modlab.resources.mo2_hub.install_queue import (create_queue,begin_item,finish_item,
+            latest_unprepared,resumable_items,record_setup)
+        with TemporaryDirectory() as tmp:
+            root=Path(tmp);archive=root/'mod.zip';archive.write_bytes(b'archive')
+            queue=create_queue(root,'A',[archive])
+            self.assertIsNone(latest_unprepared(root,'A'))
+            begin_item(queue,str(archive),'A');finish_item(queue,'Installed, enabled','receipt.json')
+            create_queue(root,'B',[archive])
+            restored=latest_unprepared(root,'A')
+            self.assertEqual(queue.path,restored.path)
+            self.assertEqual([],resumable_items(restored))
+            self.assertEqual('receipt.json',restored.data['items'][0]['record'])
+            record_setup(restored,'A',root/'setup.json',needs_attention=True)
+            self.assertIsNone(latest_unprepared(root,'A'))
+
     def test_final_setup_result_replaces_pending_status_and_tracks_later_recheck(self):
         from modlab.resources.mo2_hub.install_queue import create_queue, begin_item, finish_item, record_setup, load_queue
         with TemporaryDirectory() as tmp:

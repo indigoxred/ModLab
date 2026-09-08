@@ -236,6 +236,14 @@ class HubWindow(QDialog):
         self.summary.setText('Checking the selected setup and running applicable tool work…')
         try:
             skse.require_game_closed()
+            if installation_record is None:
+                unprepared=queue_records.latest_unprepared(Path(self.organizer.modsPath()).parent,
+                                                          self.organizer.profilePath())
+                if unprepared:
+                    self.queue_journal=unprepared
+                    self.queue_completed=[item['record'] for item in unprepared.data['items']
+                                          if item['state']=='Completed' and item.get('record')]
+                    installation_record=self.queue_completed[-1]
             if graphics.withdraw_for_upstream(self.organizer, lambda: self.begin_source_setup(installation_record)):
                 return
             self.begin_source_setup(installation_record)
