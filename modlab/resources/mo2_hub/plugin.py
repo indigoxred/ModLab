@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
 
 from .assessment import Finding, assess
 from .inspection import collect_setup
-from .native_install import install_archive
+from .repeat_install_workflow import install_archive, PENDING as INSTALL_CHECK_PENDING
 from .loot_workflow import run_loot, context_signature
 from .loot_dialog import LootDialog
 from .helper_dialog import HelperDialog
@@ -169,9 +169,9 @@ class HubWindow(QDialog):
                                                                    mobase.getFileVersion, self.install_finished)
             else:
                 result, record_path = install_archive(self.organizer, Path(filename), self.install_finished,
-                                                      on_progress=self.summary.setText)
+                                                      on_progress=self.summary.setText, parent=self)
             self.show()
-            if result.status == 'Installed; activation pending':
+            if result.status in {'Installed; activation pending', INSTALL_CHECK_PENDING}:
                 self.summary.setText(result.detail)
             else:
                 self.install_finished(result, record_path)

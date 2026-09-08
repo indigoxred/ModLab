@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import json
 import os
 import stat
 
@@ -90,6 +91,42 @@ def capture_files(archive, target, mods_root, original_archive_stamp=None):
         raise ValueError('Installed files or source archive changed during verification. Recheck before continuing.')
     return dict(version=1, archive_sha256=archive_hash, files=files,
                 scope='Exact archive identity and native installer output; dependencies and effective winners are checked separately.')
+
+
+def find_existing(history, archive, mods_root, profile_path):
+    """Find a receipt whose entire installed output still matches this archive.
+
+    No restoration or inferred FOMOD selections: absent/old/ambiguous evidence
+    simply leaves the normal native installation path available.
+    """
+    archive, mods_root = Path(archive).resolve(), Path(mods_root).resolve()
+    seen = set()
+    paths = sorted(Path(history).glob('*.json'), key=lambda p:p.stat().st_mtime_ns, reverse=True)
+    for path in paths:
+        yield 'Checking saved installation choices'
+        try:
+            record = json.loads(path.read_text(encoding='utf-8'))
+            if record.get('status') not in {'Installed, enabled', 'Installed, disabled'}:
+                continue
+            if record.get('profile_path') != str(profile_path) or Path(record.get('mods_root','')).resolve() != mods_root:
+                continue
+            if Path(record.get('archive','')).resolve() != archive:
+                continue
+            expected = record.get('file_verification', {})
+            if expected.get('version') != 1 or not expected.get('files'):
+                continue
+            target = Path(record['result']['path'])
+            if target.parent.resolve() != mods_root or target.name != record['result']['name']:
+                continue
+            if str(target).casefold() in seen:
+                continue
+            seen.add(str(target).casefold())
+            current = yield from capture_files(archive, target, mods_root)
+            if current['archive_sha256'] == expected['archive_sha256'] and current['files'] == expected['files']:
+                return dict(record=str(path), target=str(target), name=target.name, verification=current)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return None
 
 
 def inspect_install_result(mod, mods_root: Path, active: bool) -> InstallResult:
