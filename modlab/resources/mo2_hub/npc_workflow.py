@@ -229,11 +229,28 @@ def saved_build_current(organizer, saved):
     if not target.is_dir(): return False
     manifest = read_manifest(target, organizer.profilePath(), 'NPC Appearance')
     if manifest['hashes'] != saved['hashes']: raise ValueError('Installed NPC output does not match the retained selection.')
+    issues = effective_issues(organizer, target, saved['hashes'])
+    if issues:
+        # Generated graphics may legitimately transform these exact appearance
+        # meshes. Recognize the retained byte-to-byte receipt, not any later winner.
+        from . import pgpatcher_workflow as graphics
+        from .pgpatcher import transformed_body_files
+        downstream = graphics.load_choices(organizer)
+        if downstream and downstream.get('status') == 'applied':
+            graphics_target = Path(organizer.modsPath()) / graphics.own_name(organizer)
+            graphics_manifest = read_manifest(graphics_target, organizer.profilePath(), 'Graphics')
+            if graphics_manifest['hashes'] == downstream['hashes']:
+                transformed = transformed_body_files(target, manifest, graphics_target, graphics_manifest, organizer.resolvePath)
+                issues = effective_issues(organizer, target,
+                    {name: value for name, value in saved['hashes'].items() if name.casefold() not in transformed})
+    if issues:
+        raise ValueError('\n'.join(issues[:12]) + '\nChoose the intended appearance provider before rebuilding. '
+                         'ModLab will preserve the current overrides until you select and apply appearances again.')
     if organizer.pluginList().loadOrder(OUTPUT) < 0: raise ValueError('The selected NPC appearance patch is disabled.')
     plugins = organizer.pluginList()
     if any(plugins.priority(p) > plugins.priority(OUTPUT) for p in saved['input_state']['order']):
         return False
-    return json.loads(json.dumps(state(organizer))) == saved['input_state'] and not effective_issues(organizer, target, saved['hashes'])
+    return json.loads(json.dumps(state(organizer))) == saved['input_state']
 
 
 def inspect_choices(organizer):

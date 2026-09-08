@@ -83,6 +83,17 @@ def withdraw_for_upstream(organizer, on_ready):
         if record['profile_path'] != organizer.profilePath() or record['manifest'] != digest(target / MANIFEST):
             raise ValueError('Temporarily withdrawn graphics output changed. Review it before continuing.')
     elif active:
+        # A saved rebuild must not undo an outside choice of file provider.
+        # A pending request is an explicit new selection from Graphics choices.
+        saved = load_choices(organizer)
+        if saved and not load_pending(organizer):
+            issues = effective_issues(organizer, target, saved['hashes'])
+            issues += ['Generated plugin is disabled: ' + name for name in saved['hashes']
+                       if Path(name).suffix.casefold() in {'.esp', '.esm', '.esl'}
+                       and organizer.pluginList().loadOrder(name) < 0]
+            if issues:
+                raise ValueError('\n'.join(issues[:12]) + '\nThe current graphics providers differ from the saved output. '
+                                 'Open Graphics choices to select and apply the intended result; existing overrides are retained.')
         require_game_closed()
         marker.write_text(json.dumps(dict(profile_path=organizer.profilePath(), mod=target.name,
             manifest=digest(target / MANIFEST), withdrawn_at=datetime.now(timezone.utc).isoformat()),indent=2),encoding='utf-8')

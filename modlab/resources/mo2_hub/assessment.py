@@ -121,7 +121,9 @@ def asset_category(path: str) -> tuple[str, str]:
     if path.startswith("scripts/"):
         return "Scripts", "Check the script providers' versions and compatibility instructions. Replacing a script can change behavior even when plugins load correctly."
     if path.startswith("textures/"):
-        return "Textures", "Check that the winning textures match the intended mesh or body family."
+        if path.startswith('textures/actors/character/'):
+            return "Character textures", "Choose the intended character skin and check its compatibility with the selected body and face assets."
+        return "Textures", "Review which texture provider you want for these files. This overlap identifies the effective replacement; it does not establish a visual defect or a required repair."
     if path.startswith("meshes/"):
         return "Meshes", "Check that the winning meshes are the intended replacements and match their textures, body and physics requirements where applicable."
     return "Other files", "Check the intended replacement and its requirements."

@@ -67,79 +67,8 @@ class HubWindow(QDialog):
         self.startup_timer.setInterval(2000)
         self.startup_timer.timeout.connect(self.poll_startup)
         self.setWindowTitle("ModLab — Skyrim")
-        self.resize(1080, 720)
-        layout = QVBoxLayout(self)
-        title = QLabel("ModLab")
-        title.setStyleSheet("font-size: 28px; font-weight: 600;")
-        layout.addWidget(title)
-        self.context = QLabel("Reading selected setup…")
-        self.context.setWordWrap(True)
-        layout.addWidget(self.context)
-        row = QHBoxLayout()
-        for label, action in (("Install archives…", self.install),
-                              ("Recheck and finish setup", self.finish_setup),
-                              ("Launch Skyrim", self.launch),
-                              ("Mod instructions…", self.documents)):
-            button = QPushButton(label)
-            button.clicked.connect(action)
-            row.addWidget(button)
-        row.addStretch()
-        layout.addLayout(row)
-        row = QHBoxLayout()
-        for label, action in (
-                              ("Body and outfit choices…", self.bodyslide),
-                              ("Patch choices…", self.synthesis),
-                              ("NPC appearances…", self.npc_appearances),
-                              ("Setup / tool locations…", self.helpers),
-                              ("History / recovery…", self.history)):
-            button = QPushButton(label)
-            button.clicked.connect(action)
-            row.addWidget(button)
-        advanced = QWidget(self)
-        advanced_row = QGridLayout(advanced)
-        advanced_row.setContentsMargins(0, 0, 0, 0)
-        for index, (label, action) in enumerate((("LOOT details…", self.loot), ("BodySlide choices…", self.bodyslide),
-                              ("Resume installation queue…", self.resume_queue),
-                              ("Animation choices…", self.pandora),
-                              ("Graphics choices…", self.graphics),
-                              ("xEdit checks / cleaning…", self.xedit), ("Open mods folder", self.open_mods),
-                              ("Save report…", self.save_report))):
-            button = QPushButton(label); button.clicked.connect(action)
-            advanced_row.addWidget(button, index // 3, index % 3)
-        advanced.hide()
-        toggle = QPushButton('Advanced tools'); toggle.setCheckable(True)
-        toggle.toggled.connect(advanced.setVisible); row.addWidget(toggle)
-        row.addStretch()
-        layout.addLayout(row)
-        layout.addWidget(advanced)
-        self.summary = QLabel()
-        self.summary.setWordWrap(True)
-        layout.addWidget(self.summary)
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Filter findings by mod, file or problem")
-        self.search.textChanged.connect(self.filter_rows)
-        layout.addWidget(self.search)
-        split = QSplitter(Qt.Orientation.Vertical)
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Status", "Finding", "Next action"])
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setColumnWidth(0, 90)
-        self.table.setColumnWidth(1, 370)
-        self.table.itemSelectionChanged.connect(self.show_selection)
-        split.addWidget(self.table)
-        self.detail = QTextBrowser()
-        self.detail.setOpenExternalLinks(True)
-        self.detail.setReadOnly(True)
-        self.detail.setPlaceholderText("Select a finding to see its reason and next action.")
-        split.addWidget(self.detail)
-        split.setSizes([390, 150])
-        layout.addWidget(split)
-        self.technical = QPushButton('Technical details')
-        self.technical.setCheckable(True)
-        self.technical.toggled.connect(lambda checked: self.show_selection())
-        layout.addWidget(self.technical)
+        from .hub_view import HubView
+        self.view = HubView(self)
         self.refresh()
         self.change_timer = QTimer(self)
         self.change_timer.setSingleShot(True)
@@ -167,7 +96,11 @@ class HubWindow(QDialog):
         if self.processing or self.installing or QApplication.activeModalWidget() is not None:
             self.change_timer.start()
             return
-        self.finish_setup()
+        # A notification establishes changed state, not permission to restore saved
+        # winners. Inspect first; installation and explicit choices prepare separately.
+        self.recheck_pending = False
+        self.automatic_signature = None
+        self.refresh()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -592,12 +525,8 @@ class HubWindow(QDialog):
                     '\n\n'.join(f.title + '\nNext action: ' + f.action for f in blockers) + '\n\n' + completed)
             else:
                 self.detail.setPlainText(completed)
-            if any(f.level == 'Blocked' for f in result.findings):
-                self.summary.setText('Setup is blocked. Resolve the identified problems before launching.')
-            elif any(f.code == 'workflow-incomplete' for f in result.findings):
-                self.summary.setText('Automatic checks need attention. See the reported problem and recheck after resolving it.')
-            else:
-                self.summary.setText('Automatic checks finished — review the remaining findings. Gameplay is not yet checked.')
+            self.view.render(self.findings, self.snapshot,
+                checked=self.automatic_signature is not None)
         except Exception as error:
             self.automatic_signature = None
             self.summary.setText(f'Automatic checks need attention: {error}')
@@ -675,7 +604,8 @@ class HubWindow(QDialog):
             self.summary.setText(launcher.label + ' started. Gameplay and feature checks remain separate from file checks.')
             self.detail.setPlainText('Launcher: ' + str(launcher.executable) + '\nSaved launch record: ' + str(record))
         except Exception as error:
-            self.summary.setText('Launch needs attention.')
+            self.view.navigate(0)
+            self.summary.setText('Launch needs attention: ' + str(error))
             self.detail.setPlainText(str(error))
 
     def poll_startup(self):
@@ -768,12 +698,13 @@ class HubWindow(QDialog):
             self.snapshot = snapshot
             self.findings = result.findings
             if self.automatic_signature is not None and context_signature(self.organizer) == self.automatic_signature:
-                self.findings += tuple(f for f in self.automatic_findings if f.code.startswith('loot-'))
+                from .guidance import retain_run_findings
+                self.findings = retain_run_findings(self.findings, self.automatic_findings)
             self.findings = tuple(sorted(self.findings, key=lambda f: {'Blocked': 0, 'Unknown': 1, 'Review': 2, 'Info': 3}.get(f.level, 1)))
             enabled = sum(p.load_order >= 0 for p in snapshot.plugins)
             self.context.setText(
                 f"Profile: {snapshot.profile}  |  Skyrim: {snapshot.runtime or 'unidentified'}  |  "
-                f"Active plugins: {enabled}\n{snapshot.game_root}"
+                f"Active plugins: {enabled}"
             )
             self.summary.setText(result.summary)
             self.table.setRowCount(len(self.findings))
@@ -781,7 +712,12 @@ class HubWindow(QDialog):
                 for column, value in enumerate((finding.level, finding.title, finding.action)):
                     self.table.setItem(row, column, QTableWidgetItem(value))
             self.filter_rows()
+            self.view.render(self.findings, snapshot,
+                checked=self.automatic_signature is not None and context_signature(self.organizer) == self.automatic_signature)
         except Exception as error:
+            self.findings = (Finding('Unknown', 'inspection-incomplete', 'Current setup could not be read',
+                str(error), 'Resolve this inspection problem before continuing.'),)
+            self.view.render(self.findings, None)
             self.context.setText("Current setup could not be read.")
             self.summary.setText(f"Inspection incomplete: {error}")
 
@@ -794,25 +730,7 @@ class HubWindow(QDialog):
     def show_selection(self):
         row = self.table.currentRow()
         if 0 <= row < len(self.findings):
-            finding = self.findings[row]
-            meaning = finding.explanation or finding.detail
-            text = f"{finding.title}\n\n{meaning}\n\nNext action\n{finding.action}"
-            if self.technical.isChecked() and finding.explanation:
-                text += f"\n\nTechnical details\n{finding.detail}"
-            self.detail.setPlainText(text)
-            # Preserve all finding text literally; only explicit web URLs become links.
-            for match in re.finditer(r'https?://[^\s<>"\']+', text):
-                url = match.group().rstrip('.,;')
-                cursor = QTextCursor(self.detail.document())
-                # Qt positions are UTF-16 code units, including non-BMP mod names.
-                start = len(text[:match.start()].encode('utf-16-le')) // 2
-                cursor.setPosition(start)
-                cursor.setPosition(start + len(url.encode('utf-16-le')) // 2,
-                                   QTextCursor.MoveMode.KeepAnchor)
-                link = QTextCharFormat()
-                link.setAnchor(True); link.setAnchorHref(url)
-                link.setFontUnderline(True); link.setForeground(Qt.GlobalColor.blue)
-                cursor.mergeCharFormat(link)
+            self.view.select(self.findings[row])
 
     def open_mods(self):
         path = Path(self.organizer.modsPath())

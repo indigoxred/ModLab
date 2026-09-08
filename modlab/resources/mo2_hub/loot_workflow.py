@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .inspection import collect_setup, plugin_load_orders
-from .loot import report_findings, validate_order
+from .loot import report_findings, validate_order, reconcile_requirements
 
 
 def context_signature(organizer):
@@ -119,6 +119,7 @@ def run_loot(organizer, app_root, version_reader):
             raise RuntimeError('LOOT did not produce its report, even though it returned success. No order was applied.')
         proposal = validate_order(output_path.read_text(encoding='utf-8-sig'), setup.plugins)
         findings = report_findings(json.loads(report_path.read_text(encoding='utf-8-sig')), setup.plugins)
+        findings = reconcile_requirements(findings, setup.game_root, organizer.resolvePath, setup.runtime)
         # A per-NPC selection is an explicit choice of record winner. Keep its
         # generated override after sources and before our downstream patchers.
         from . import npc_workflow as appearances

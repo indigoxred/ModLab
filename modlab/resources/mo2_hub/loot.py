@@ -7,6 +7,40 @@ Original reports are retained by the caller alongside the proposed order.
 from .assessment import Finding
 
 
+def reconcile_requirements(findings, game_root, resolve_path, runtime):
+    """Explain one obsolete metadata rule from exact installed package evidence.
+
+    LOOT's current upstream masterlist distinguishes v7 preloader-only from older
+    TBB requirements: https://github.com/loot/skyrimse/blob/master/masterlist.yaml
+    Author package: https://www.nexusmods.com/skyrimspecialedition/mods/17230?tab=files
+    Checksummed pair also retained from this project's successful 7.0.20 startup.
+    This resolves the file requirement only, never overall native compatibility.
+    """
+    from pathlib import Path
+    from .outputs import digest
+    legacy = ('It appears you have installed **SSE Engine Fixes - Part 1**, but some of its requirements seem to be missing. '
+              'Please ensure you have correctly installed **[SSE Engine Fixes - Part 2](https://www.nexusmods.com/skyrimspecialedition/mods/17230/)**.')
+    if runtime not in {'1.6.1170', '1.6.1170.0'} or not any(
+            f.code == 'loot-message' and f.level == 'Review' and f.detail == legacy for f in findings):
+        return tuple(findings)
+    try:
+        native = Path(resolve_path('SKSE/Plugins/EngineFixes.dll') or '')
+        preloader = Path(game_root) / 'd3dx9_42.dll'
+        if (not native.is_file() or not preloader.is_file()
+                or digest(native) != '5d1384acfb523abd1333f5af71af0b7d131b6ebb1a0ee6b3edff86fb4c93adf3'
+                or digest(preloader) != 'cf366987da6237559eb6e113ea717ec21762c9eec3a87d9dc4fa9ddfe7789c26'):
+            return tuple(findings)
+    except OSError:
+        return tuple(findings)
+    return tuple(Finding('Info', 'loot-requirement-explained', 'Engine Fixes preloader requirement is satisfied',
+        f.detail + '\n\nMatched Engine Fixes 7.0.20 / 1.6.1170 DLL and preloader by SHA-256.\n'
+        + str(native) + '\n' + str(preloader),
+        'No extra TBB download is required for this matched build. Keep startup checks enabled; file identity does not prove every fix works.',
+        'The older LOOT rule asks for separate TBB libraries used by earlier releases. The installed 7.0.20 variant '
+        'requires its preloader instead, and the matching file is installed beside SkyrimSE.exe. The original advice remains in technical evidence.')
+        if f.code == 'loot-message' and f.level == 'Review' and f.detail == legacy else f for f in findings)
+
+
 def validate_order(text, plugins):
     names = {p.name.casefold(): p.name for p in plugins}
     lines = [line.strip() for line in text.lstrip('\ufeff').splitlines()
