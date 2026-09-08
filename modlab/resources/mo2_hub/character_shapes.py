@@ -16,6 +16,12 @@ from .vfs import readable_path
 TOOL = 'Character Shape Assignments'
 
 
+class ShapeRequirementError(ValueError):
+    def __init__(self, finding):
+        self.finding=finding
+        super().__init__(finding.title+'\n'+finding.action)
+
+
 def choices_path(profile):
     return Path(profile)/'modlab-character-shapes.json'
 
@@ -152,12 +158,12 @@ def apply_choices(organizer, characters, catalog, on_ready):
     profile = organizer.profilePath(); selected = load_choices(profile)
     setup = collect_setup(organizer, version_reader=mobase.getFileVersion)
     needs = inspect_support(setup, organizer.resolvePath, requested=True)
-    if needs: raise ValueError(needs[0].title+'\n'+needs[0].action)
+    if needs: raise ShapeRequirementError(needs[0])
     # The same native/runtime inspection used by launch must not be bypassed by
     # installing only the expected filenames for this optional helper.
     from .foundations import inspect_foundations
     blockers = [f for f in inspect_foundations(setup, organizer.resolvePath) if f.level == 'Blocked']
-    if blockers: raise ValueError(blockers[0].title+'\n'+blockers[0].action)
+    if blockers: raise ShapeRequirementError(blockers[0])
     available = {}; inputs = {}
     for actor, choice in selected['choices'].items():
         if actor not in characters: raise ValueError('The selected character is no longer available: '+choice['name'])

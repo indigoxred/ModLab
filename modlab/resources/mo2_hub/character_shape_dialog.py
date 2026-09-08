@@ -21,7 +21,7 @@ class CharacterShapeDialog(OperationDialog):
         import mobase
         self.organizer=organizer;self.actor=actor;self.characters=characters
         self.profile_path=organizer.profilePath();self.saved=shapes.load_choices(self.profile_path)
-        self.operation_running=False;self.changed=False;self.applied=False
+        self.operation_running=False;self.changed=False;self.applied=False;self.files_changed=False
         self.job=prepare_body_job(organizer,mobase.getFileVersion,preview=True)
         row=characters[actor];self.name=row['name']
         default=load_defaults(self.profile_path).get(row.get('body',{}).get('sex'),{})
@@ -45,6 +45,8 @@ class CharacterShapeDialog(OperationDialog):
         self.default_preset=default.get('preset')
         self.status=paragraph('Saving remembers this character’s choice. Applying uses optional OBody support and checks '
             'that the character’s body and prepared outfits can take individual shapes.');root.addWidget(self.status)
+        self.requirement_button=QPushButton('Complete this requirement…');self.requirement_button.setVisible(False)
+        self.requirement_button.clicked.connect(self.repair_requirement);root.addWidget(self.requirement_button)
         root.addWidget(paragraph('Outfits need matching body-shape data to follow this choice. Existing saves may need this '
             'character’s preset reset in OBody before showing a changed assignment.'))
         root.addStretch(1)
@@ -73,7 +75,7 @@ class CharacterShapeDialog(OperationDialog):
 
     def busy(self,value):
         self.operation_running=value
-        for control in (self.preset,self.customize,self.save_button,self.apply_button,self.close_button):control.setEnabled(not value)
+        for control in (self.preset,self.customize,self.save_button,self.apply_button,self.close_button,self.requirement_button):control.setEnabled(not value)
 
     def edit(self):
         try:
@@ -98,6 +100,19 @@ class CharacterShapeDialog(OperationDialog):
     def failed(self,error):
         if hasattr(self,'timer'):self.timer.stop()
         self.busy(False);self.status.setText(str(error)+' Your installed character shape has not been reported as changed.')
+        self.requirement=getattr(error,'finding',None)
+        self.requirement_button.setVisible(self.requirement is not None)
+
+    def repair_requirement(self):
+        if not getattr(self,'requirement',None):return
+        parent=self.parent();hub=parent
+        while hub is not None and not hasattr(hub,'resolve_finding'):hub=hub.parent()
+        if hub is None:
+            self.status.setText('Return to Continue setup to complete this requirement. '+self.requirement.action);return
+        finding=self.requirement
+        self.accept()
+        if parent is not hub:parent.accept()
+        QTimer.singleShot(0,lambda:hub.resolve_finding(finding))
 
     def editor_finished(self):
         try:
@@ -116,6 +131,7 @@ class CharacterShapeDialog(OperationDialog):
     def preset_ready(self,target,error):
         if error:self.failed(error);return
         try:
+            self.files_changed=True
             import mobase
             self.context();self.job=prepare_body_job(self.organizer,mobase.getFileVersion,preview=True)
             name=self.custom_job.record['custom_preset'];self.preset.addItem(name,name)
@@ -126,6 +142,7 @@ class CharacterShapeDialog(OperationDialog):
     def apply(self):
         if not self.save_choice():return
         try:
+            self.requirement_button.setVisible(False)
             check_body_context(self.organizer,self.job)
             self.busy(True);self.status.setText('Checking the helper, prepared bodies and outfits, then applying saved character shapes…')
             from .characters import active_characters
@@ -135,6 +152,6 @@ class CharacterShapeDialog(OperationDialog):
 
     def applied_ready(self,target,error):
         if error:self.failed(error);return
-        self.saved=shapes.load_choices(self.profile_path);self.applied=True;self.changed=True;self.busy(False)
+        self.saved=shapes.load_choices(self.profile_path);self.applied=True;self.changed=True;self.files_changed=True;self.busy(False)
         self.status.setText('Saved character shapes are installed and effective in this profile. '+
             'Check their appearance in game; existing saves may still contain an older OBody assignment.')

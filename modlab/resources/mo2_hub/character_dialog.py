@@ -170,9 +170,9 @@ class CharacterDialog(NpcDialog):
     def shape_closed(self):
         if self.shape_window.changed:
             self.preferences_changed=True
+        if self.shape_window.files_changed:
             from .loot_workflow import context_signature
             self.choice_signature=context_signature(self.organizer)
-        if self.shape_window.applied:self.applied=True
         self.show_character(self.character_list.currentItem())
 
     def select_body(self):

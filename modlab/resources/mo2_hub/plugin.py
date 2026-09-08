@@ -571,10 +571,7 @@ class HubWindow(QDialog):
             if requirements:
                 self.resolve_finding(requirements[0])
             else:
-                QMessageBox.information(self, 'Individual body shape support',
-                    'The known helper support files are present and the checked controller settings agree. '
-                    'This does not yet verify neutral body/outfit meshes or a character assignment. '
-                    'Character-specific shape selection is still being integrated; your current shape choices are unchanged.')
+                self.npc_appearances()
         except Exception as error:
             QMessageBox.warning(self, 'Character body setup needs attention', str(error))
 
