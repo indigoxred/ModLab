@@ -21,9 +21,11 @@ class NpcDialog(OperationDialog):
         saved = pending or workflow.load(organizer) or {}
         self.selected = dict(saved.get('selected', {}))
         self.body_choices=dict(saved.get('body_choices',{}))
+        self.skin_choices=dict(saved.get('skin_choices',{}))
+        self.applied_skin_choices=dict((workflow.load(organizer) or {}).get('skin_choices',{}))
         self.applied_body_choices=dict((workflow.load(organizer) or {}).get('body_choices',{}))
         self.body_labels=dict(saved.get('labels',{}))
-        self.persisted_request=dict(selected=dict(self.selected),body_choices=dict(self.body_choices))
+        self.persisted_request=dict(selected=dict(self.selected),body_choices=dict(self.body_choices),skin_choices=dict(self.skin_choices))
         self.setWindowTitle('ModLab — NPC appearance choices'); self.resize(1050, 680)
         layout = QVBoxLayout(self)
         note = QLabel('Choose which installed appearance supplies each character. ModLab keeps its face records, face mesh '
@@ -92,7 +94,7 @@ class NpcDialog(OperationDialog):
         except ValueError as error: self.report_status(str(error));return
         if path.exists(): path.unlink()
         self.pending_snapshot=None
-        self.persisted_request=dict(selected=dict(self.selected),body_choices=dict(self.body_choices))
+        self.persisted_request=dict(selected=dict(self.selected),body_choices=dict(self.body_choices),skin_choices=dict(getattr(self,'skin_choices',{})))
         self.preferences_changed = True
         self.accept()
 
@@ -100,7 +102,7 @@ class NpcDialog(OperationDialog):
         try:
             from .npc import validate_selections
             if self.selected: validate_selections(self.rows, self.selected)
-            elif not self.body_choices and not self.applied_selection and not self.applied_body_choices:
+            elif not self.body_choices and not self.applied_selection and not self.applied_body_choices and not self.skin_choices and not self.applied_skin_choices:
                 raise ValueError('Choose a character appearance or body before preparing.')
             begin_apply(self, self.generate_confirmed)
         except Exception as error:
@@ -110,7 +112,7 @@ class NpcDialog(OperationDialog):
     def generate_confirmed(self):
         if self.organizer.profilePath() != self.profile_path:
             self.report_status('Selected profile changed. Reopen choices.'); return
-        if not self.selected and not self.body_choices:
+        if not self.selected and not self.body_choices and not getattr(self,'skin_choices',{}):
             from .npc_reset import reset_choices
             self.awaiting_publication = True
             try:
@@ -124,7 +126,7 @@ class NpcDialog(OperationDialog):
         QApplication.processEvents()
         try:
             self.write_pending()
-            self.job = workflow.prepare_job(self.organizer, self.selected,self.body_choices,self.body_labels)
+            self.job = workflow.prepare_job(self.organizer, self.selected,self.body_choices,self.body_labels,self.skin_choices)
             workflow.run_job(self.organizer, self.job)
             self.awaiting_publication = True
             workflow.publish_job(self.organizer, self.job, self.ready)
@@ -144,7 +146,7 @@ class NpcDialog(OperationDialog):
     def write_pending(self,error=None):
         if self.organizer.profilePath()!=self.profile_path: raise ValueError('The selected profile changed. Reopen character choices.')
         workflow.check_pending(self.organizer,self.pending_snapshot)
-        request=dict(selected=dict(self.selected),body_choices=dict(self.body_choices))
+        request=dict(selected=dict(self.selected),body_choices=dict(self.body_choices),skin_choices=dict(getattr(self,'skin_choices',{})))
         payload=dict(request,labels=self.body_labels)
         if error: payload['error']=error
         path=workflow.path_for(self.organizer,'pending');temporary=path.with_suffix('.tmp')
@@ -154,7 +156,7 @@ class NpcDialog(OperationDialog):
 
     def done(self,result):
         if self.operation_running: return
-        request=dict(selected=dict(self.selected),body_choices=dict(self.body_choices))
+        request=dict(selected=dict(self.selected),body_choices=dict(self.body_choices),skin_choices=dict(getattr(self,'skin_choices',{})))
         if not self.applied and request!=self.persisted_request:
             try: self.write_pending();self.preferences_changed=True
             except (OSError,ValueError) as error:

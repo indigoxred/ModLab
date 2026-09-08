@@ -25,7 +25,7 @@ def reset_choices(organizer,on_done):
     profile=organizer.profilePath(); target=Path(organizer.modsPath())/workflow.own_name(organizer)
     choices_path=workflow.path_for(organizer); original=choices_path.read_bytes()
     saved=json.loads(original)
-    if not saved.get('selected') and not saved.get('body_choices'): raise ValueError('No saved character overrides remain to reset.')
+    if not saved.get('selected') and not saved.get('body_choices') and not saved.get('skin_choices'): raise ValueError('No saved character overrides remain to reset.')
     manifest=workflow.read_manifest(target,profile,'NPC Appearance')
     if manifest['hashes']!=saved['hashes']:
         raise ValueError('The managed appearance output changed. Review its retained build before resetting.')
@@ -89,7 +89,7 @@ def reset_choices(organizer,on_done):
             temporary.write_text(json.dumps(reset,indent=2),encoding='utf-8')
             pending=workflow.path_for(organizer,'pending')
             pending_bytes=pending.read_bytes() if pending.exists() else None
-            if pending_bytes and (json.loads(pending_bytes).get('selected') or json.loads(pending_bytes).get('body_choices')):
+            if pending_bytes and (json.loads(pending_bytes).get('selected') or json.loads(pending_bytes).get('body_choices') or json.loads(pending_bytes).get('skin_choices')):
                 raise ValueError('The pending appearance selection changed during reset.')
             if pending_bytes is not None: pending.unlink()
             try: os.replace(temporary,choices_path)

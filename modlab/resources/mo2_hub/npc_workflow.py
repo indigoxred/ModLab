@@ -78,7 +78,7 @@ def catalog(organizer):
     return rows
 
 
-def prepare_job(organizer, selected, body_choices=None, body_labels=None):
+def prepare_job(organizer, selected, body_choices=None, body_labels=None, skin_choices=None):
     from .skse import require_game_closed
     require_game_closed()
     from .pgpatcher_workflow import require_upstream_view
@@ -86,17 +86,21 @@ def prepare_job(organizer, selected, body_choices=None, body_labels=None):
     choices = catalog(organizer)
     saved = load(organizer)
     body_choices=dict(body_choices if body_choices is not None else (saved or {}).get('body_choices',{}))
+    skin_choices=dict(skin_choices if skin_choices is not None else (saved or {}).get('skin_choices',{}))
     if selected: validate_selections(choices, selected)
-    elif not body_choices: raise ValueError('Choose a character appearance or body before preparing.')
+    elif not body_choices and not skin_choices: raise ValueError('Choose a character appearance, body or skin before preparing.')
     instance = Path(organizer.modsPath()).parent
     current = state(organizer)
     body_plans={}
-    if body_choices:
+    if body_choices or skin_choices:
         from .body_assignment import prepare
         from .npc_body_helper import ensure_helper as ensure_body_helper
         body_plans=prepare(organizer,current,selected,body_choices)
+        from .character_skin import prepare as prepare_skin
+        skin_plans=prepare_skin(organizer,current,selected,body_choices,skin_choices,body_plans) if skin_choices else {}
         sdk,binary,data=ensure_body_helper(instance/'tools')
-    else: sdk, binary, data = ensure_helper(instance / 'tools')
+    else:
+        skin_plans={};sdk, binary, data = ensure_helper(instance / 'tools')
     target = Path(organizer.modsPath()) / own_name(organizer)
     if (target / '.modlab-output.json').is_file() and not saved:
         raise ValueError('Existing NPC output needs its retained choices. Restore those before rebuilding.')
@@ -121,12 +125,16 @@ def prepare_job(organizer, selected, body_choices=None, body_labels=None):
         settings.update(ModLabBodyAssignments={k:p['skin'] for k,p in body_plans.items()},
             ModLabBodyModelSources={k:p['model_sources'] for k,p in body_plans.items()},
             ModLabBodySex={k:p['sex'] for k,p in body_plans.items()})
+    if skin_plans:
+        settings.update(ModLabSkinTextures={k:p['body_textures'] for k,p in skin_plans.items()},
+            ModLabHeadSkinTextures={k:p['head_textures'] for k,p in skin_plans.items()})
     labels=dict((saved or {}).get('labels',{}));labels.update(body_labels or {})
     labels.update({k:choices[k]['label'] for k in selected})
-    for key in body_choices: labels.setdefault(key,key)
+    for key in set(body_choices)|set(skin_choices): labels.setdefault(key,key)
     job = SynthesisJob(directory, binary, settings, dict(profile=organizer.profile().name(),
         profile_path=organizer.profilePath(), selected=selected, labels=labels,
         body_choices=body_choices,body_plans=body_plans,pending_request=load(organizer,'pending'),
+        skin_choices=skin_choices,skin_plans=skin_plans,
         input_state=current, sdk=str(sdk), defaults=str(data), helper_sha256=digest(binary), revision=REVISION,
         status='Prepared', created_at=datetime.now(timezone.utc).isoformat()))
     job.save()
@@ -137,6 +145,10 @@ def check_context(organizer, job):
     if 'pending_request' in job.record: check_pending(organizer,job.record['pending_request'])
     from .body_assignment import check_inputs
     check_inputs(job.record.get('body_plans',{}))
+    if job.record.get('skin_archive_inputs'):
+        from .character_skin import SourceView
+        from .shape_preparation import check_archive_inputs
+        check_archive_inputs(SourceView(organizer,job.record['input_state']),job.record['skin_archive_inputs'])
     if json.loads(json.dumps(state(organizer))) != job.record['input_state']:
         raise ValueError('The NPC patch inputs changed during generation. No new output was applied; recheck.')
     if digest(job.executable) != job.record['helper_sha256']: raise ValueError('NPC helper changed during generation.')
@@ -161,7 +173,7 @@ def run_job(organizer, job):
             configured = dict(settings, AssetOutputDirectory=str(assets), PluginsToForward=providers)
             face_keys={key for provider in providers for key in provider['NPCs']}
             body_plans={key:plan for key,plan in job.record.get('body_plans',{}).items() if label=='combined' or key in face_keys}
-            for setting in ('ModLabBodyAssignments','ModLabBodyModelSources','ModLabBodySex'):
+            for setting in ('ModLabBodyAssignments','ModLabBodyModelSources','ModLabBodySex','ModLabSkinTextures','ModLabHeadSkinTextures'):
                 if setting in configured: configured[setting]={k:v for k,v in configured[setting].items() if k in body_plans}
             (folder / 'Data/settings.json').write_text(json.dumps(configured, indent=2), encoding='utf-8')
             patch = folder / OUTPUT
@@ -192,6 +204,9 @@ def run_job(organizer, job):
             if body_plans:
                 from .body_assignment import source_index,verify_preserved
                 verify_preserved(patch,source_index(job.record['input_state'],job.record['selected']),body_plans)
+                from .character_skin import verify_head_records
+                verify_head_records(patch,source_index(job.record['input_state'],job.record['selected']),
+                    {k:v for k,v in job.record.get('skin_plans',{}).items() if k in body_plans})
             for key in face_keys:
                 for relative in facegen_paths(key):
                     if not (assets / relative).is_file(): raise ValueError('Generated FaceGen pair is incomplete: ' + relative)
@@ -207,6 +222,9 @@ def run_job(organizer, job):
                 raise ValueError('Generated appearance patch has an unavailable master.')
             merge_assets(assets, job.directory / 'output')
             if label == 'combined': shutil.copy2(patch, job.directory / 'output' / OUTPUT)
+        if job.record.get('skin_plans'):
+            from .character_skin import apply_assets
+            apply_assets(organizer,job)
         check_context(organizer, job)
         import mobase
         from .xedit_workflow import run_xedit
@@ -229,13 +247,15 @@ def publish_job(organizer, job, on_done):
         mod = organizer.createMod(mobase.GuessedString(target.name))
         if mod is None or Path(mod.absolutePath()).resolve() != target.resolve(): raise ValueError('MO2 could not create the NPC output mod.')
     saved = dict(selected=job.record['selected'],body_choices=job.record.get('body_choices',{}),labels=job.record['labels'],
+        skin_choices=job.record.get('skin_choices',{}),
         input_state=job.record['input_state'], hashes=job.record['hashes'],
         build_record=str(job.directory / 'operation.json'))
     context = job.directory / 'recovery-context.json'
     context.write_text(json.dumps(saved, indent=2), encoding='utf-8')
     descriptions=[job.record['labels'][k]+' → '+p for k,p in job.record['selected'].items()]
     descriptions.extend(job.record['labels'][k]+' → '+p['shared_body']+' / '+p['shared_preset']+
-        '; retained appearance skin' for k,p in job.record.get('body_plans',{}).items())
+        ('; selected separate skin' if k in job.record.get('skin_plans',{}) else '; retained appearance skin') for k,p in job.record.get('body_plans',{}).items())
+    descriptions.extend(job.record['labels'][k]+' → skin from '+p['source']['mod'] for k,p in job.record.get('skin_plans',{}).items())
     projects = {'Selected character faces and bodies': dict(outputs=list(job.record['hashes']),
         source_mod=', '.join(sorted(set(job.record['selected'].values()))),
         preset='; '.join(descriptions),
@@ -311,9 +331,9 @@ def inspect_choices(organizer):
                 return (Finding('Info','npc-reset','Character appearance overrides cleared',
                     'The previous generated appearance output is disabled and retained for recovery. Source mods now supply appearances.',
                     'Choose character appearances again whenever you want to add an override.'),)
-            count=len(set(saved['selected'])|set(saved.get('body_choices',{})))
+            count=len(set(saved['selected'])|set(saved.get('body_choices',{}))|set(saved.get('skin_choices',{})))
             return (Finding('Info', 'npc-current', f"Character choices applied: {count}",
-                f"{len(saved['selected'])} face selections and {len(saved.get('body_choices',{}))} body selections; checked output is enabled. Build: " + saved['build_record'],
+                f"{len(saved['selected'])} face, {len(saved.get('body_choices',{}))} body and {len(saved.get('skin_choices',{}))} skin selections; checked output is enabled. Build: " + saved['build_record'],
                 'Check the selected NPCs in game. Source mods remain installed; other NPCs follow normal load order.'),)
         return ()
     except Exception as error:

@@ -10,7 +10,7 @@ import zlib
 from .bodyslide import relative_path
 from .synthesis import plugin_masters
 
-KINDS = {b'NPC_', b'RACE', b'ARMO', b'ARMA', b'TXST'}
+KINDS = {b'NPC_', b'RACE', b'ARMO', b'ARMA', b'TXST', b'FLST'}
 
 
 def records(path):

@@ -79,6 +79,26 @@ class NpcResetTests(unittest.TestCase):
             self.assertTrue(result[0][1]); self.assertTrue(host.active)
             self.assertEqual(host.saved,workflow.load(host))
 
+    def test_skin_only_selection_can_be_reset_with_recoverable_source_choices(self):
+        with TemporaryDirectory() as folder:
+            host=Host(Path(folder));host.saved['selected']={}
+            host.saved['skin_choices']={'Lydia':{'source':'Chosen skin|textures/female|female'}}
+            workflow.path_for(host).write_text(json.dumps(host.saved),encoding='utf-8')
+            self.assertEqual([(host.target,None)],self.run_reset(host))
+            self.assertFalse(host.active);self.assertEqual(b'original plugin',host.file.read_bytes())
+            reset=workflow.load(host)
+            self.assertEqual(host.saved,json.loads(Path(reset['previous_choices']).read_text()))
+
+    def test_new_pending_skin_choice_cannot_be_lost_during_reset(self):
+        with TemporaryDirectory() as folder:
+            host=Host(Path(folder));pending=workflow.path_for(host,'pending')
+            request={'selected':{},'skin_choices':{'Lydia':{'source':'New skin'}}}
+            pending.write_text(json.dumps(request),encoding='utf-8')
+            result=self.run_reset(host)
+            self.assertIn('changed',result[0][1])
+            self.assertEqual(request,json.loads(pending.read_text()))
+            self.assertEqual(host.saved,workflow.load(host))
+
     def test_ineffective_reset_restores_activation_and_retains_selection(self):
         with TemporaryDirectory() as folder:
             host=Host(Path(folder)); host.stale=True

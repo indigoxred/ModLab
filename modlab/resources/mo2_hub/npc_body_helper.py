@@ -7,7 +7,7 @@ from . import npc_helper
 from .outputs import digest
 from .runtime import sdk_environment
 
-ADAPTER='body-reference-v6'
+ADAPTER='body-reference-v8'
 
 def adapt_source(program,settings):
     call='if (mergeJSONlist.Any())'
@@ -23,6 +23,7 @@ def adapt_source(program,settings):
     program=program.replace(method,extension+method)
     settings=settings.replace(field,field+'\n        public Dictionary<string, string> ModLabBodyAssignments = new Dictionary<string, string>();')
     settings=settings.replace(field,field+'\n        public Dictionary<string, Dictionary<string, string>> ModLabBodyModelSources = new Dictionary<string, Dictionary<string, string>>();\n        public Dictionary<string, string> ModLabBodySex = new Dictionary<string, string>();')
+    settings=settings.replace(field,field+'\n        public Dictionary<string, Dictionary<string, Dictionary<string, string>>> ModLabSkinTextures = new Dictionary<string, Dictionary<string, Dictionary<string, string>>>();\n        public Dictionary<string, Dictionary<string, string>> ModLabHeadSkinTextures = new Dictionary<string, Dictionary<string, string>>();')
     return program,settings
 
 def ensure_helper(tools_root):

@@ -38,6 +38,30 @@ class Archive:
             self.cache[member]=self._read(['-xOf',str(self.path),'--',member],128*1024*1024)
         return self.cache[member]
 
+    def read_many(self,members):
+        """Read selected regular members in one archive pass, into memory only."""
+        wanted=set(members)-self.cache.keys()
+        if not wanted:return
+        if any(n not in self.members or '\n' in n or '\r' in n for n in wanted):
+            raise ValueError('Unknown or unsupported archive member requested.')
+        if len(wanted)>256 or sum(len(n)+3 for n in wanted)>24000:
+            raise ValueError('The requested archive batch exceeds the supported size.')
+        entries=[]
+        for line in self._read(['-tvf',str(self.path)],8*1024*1024).decode('utf-8-sig').splitlines():
+            fields=line.split(None,8)
+            if len(fields)!=9 or fields[8] not in wanted:continue
+            if not fields[0].startswith('-') or not fields[4].isdigit():
+                raise ValueError('Skin evidence must be an ordinary archive file.')
+            entries.append((fields[8],int(fields[4])))
+        if len(entries)!=len(wanted) or {n for n,_ in entries}!=wanted:
+            raise ValueError('The archive member sizes could not be established unambiguously.')
+        total=sum(size for _,size in entries)
+        if total>512*1024*1024:raise ValueError('Skin evidence exceeds the supported batch size.')
+        raw=self._read(['-xOf',str(self.path),'--',*[name for name,_ in entries]],total)
+        if len(raw)!=total:raise ValueError('The archive returned incomplete skin evidence.')
+        offset=0
+        for name,size in entries:self.cache[name]=raw[offset:offset+size];offset+=size
+
     def check(self,installed,family):
         configs=[name for name in self.members if name.replace(chr(92),'/').lower().endswith('/fomod/moduleconfig.xml')
             or name.lower()=='fomod/moduleconfig.xml']
@@ -49,6 +73,10 @@ def clean(path):
     if ':' in value or any(p in {'.','..',''} for p in value.split('/')):
         raise ValueError('Invalid installer evidence path: '+path)
     return value
+
+def unambiguous_family(label,family):
+    names=re.findall(r'(?<![A-Za-z0-9])(CBBE|UNP|UUNP|BHUNP|TBD|HIMBO)(?![A-Za-z0-9])',label,re.I)
+    return {name.upper() for name in names}=={family.upper()}
 
 def verify(xml, config_member, members, read_member, installed, family):
     if not installed: raise ValueError('Installed body and skin file evidence is required.')
@@ -62,7 +90,7 @@ def verify(xml, config_member, members, read_member, installed, family):
     candidates=[]
     for option in root.findall('.//plugin'):
         label=option.get('name','')
-        if not re.search(r'(?<![A-Za-z0-9])'+re.escape(family)+r'(?![A-Za-z0-9])',label,re.I): continue
+        if not unambiguous_family(label,family): continue
         mapped={}
         for rule in option.findall('./files/*'):
             if rule.tag not in {'folder','file'}: continue

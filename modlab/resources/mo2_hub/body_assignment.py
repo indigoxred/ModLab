@@ -66,7 +66,7 @@ def prepare(organizer,state,selected,choices):
     import configparser,json
     from pathlib import Path
     from .body_choices import load_defaults
-    from .body_variant import Archive
+    from .body_variant import Archive,unambiguous_family
     from .outputs import digest
     from .vfs import readable_path
     index=source_index(state,selected);plans=plan_preserving_skin(index,choices)
@@ -115,7 +115,7 @@ def prepare(organizer,state,selected,choices):
             if reader is None: reader=readers[str(archive)]=Archive(archive)
             proof=reader.check(installed,'CBBE')
             receipt.write_text(json.dumps(proof,indent=2),encoding='utf-8')
-        if proof.get('family')!='CBBE' or set(proof.get('hashes',{}))!={p.casefold() for p in installed} or any(
+        if proof.get('family')!='CBBE' or not unambiguous_family(proof.get('option',''),'CBBE') or set(proof.get('hashes',{}))!={p.casefold() for p in installed} or any(
                 proof['hashes'][name.casefold()].get('sha256')!=hashlib.sha256(data).hexdigest() for name,data in installed.items()):
             raise ValueError('Body variant evidence is incomplete. Recheck the source installer.')
         plan.update(inputs=inputs,variant=proof,shared_body=default['body'],shared_preset=default['preset'])
@@ -150,5 +150,20 @@ def verify_preserved(path,index,plans):
             if len(shared)!=1 or any(part[key]!=shared[0][key]
                     for key in ('models','world_models','first_person_models')):
                 raise ValueError('Generated character body part meshes do not match the selected shared body.')
-            if any(part[key]!=original[key] for key in ('texture_set','texture_swap','priority','weight_slider')):
+            skin_textures=plan.get('skin_textures',{}).get(original['armature'])
+            retained=('priority','weight_slider') if skin_textures else ('texture_set','texture_swap','priority','weight_slider')
+            if skin_textures:
+                from .character_skin import texture_fields
+                fields,_=changed._record(part['texture_set'],b'TXST','generated skin textures')
+                if part['texture_set']==original['texture_set'] or texture_fields(fields)!=plan['skin_expected_fields'][original['armature']]:
+                    raise ValueError('Generated skin textures do not match this character’s selected skin and retained detail maps.')
+                if original.get('texture_swap'):
+                    if part.get('texture_swap')==original['texture_swap']:
+                        raise ValueError('The character skin swap still uses the original shared list.')
+                    fields,provider=changed._record(part.get('texture_swap'),b'FLST','generated skin swap list')
+                    refs=[changed._reference(value,provider) for value in fields.get(b'LNAM',[])]
+                    if refs!=[part['texture_set']]:raise ValueError('The character skin swap does not match the selected skin.')
+                elif part.get('texture_swap'):
+                    raise ValueError('An unrequested skin swap list was introduced.')
+            if any(part[key]!=original[key] for key in retained):
                 raise ValueError('Generated body parts did not retain the character skin and weight settings.')

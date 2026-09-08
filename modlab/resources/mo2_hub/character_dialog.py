@@ -1,6 +1,6 @@
 """Character-first appearance choices; technical bulk controls remain in Advanced."""
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+from PyQt6.QtWidgets import (QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QScrollArea,
     QListWidget, QListWidgetItem, QPushButton, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 from .npc_dialog import NpcDialog
 from .characters import active_characters, body_description
@@ -17,6 +17,10 @@ class CharacterDialog(NpcDialog):
         super().__init__(organizer, parent)
         from .body_choices import load_defaults
         self.shared_defaults=load_defaults(self.profile_path)
+        from .character_skin import catalog as skin_catalog
+        self.skin_sources=skin_catalog(organizer)
+        from .npc_workflow import load
+        self.applied_character_choices=load(organizer)
         self.setWindowTitle('ModLab — Character appearances'); self.resize(1100, 790)
         self.directory_problem=None
         try: self.characters=active_characters(organizer, self.rows)
@@ -46,7 +50,7 @@ class CharacterDialog(NpcDialog):
         layout.addLayout(filters)
         split=QSplitter(); layout.addWidget(split, 1)
         self.character_list=QListWidget(); split.addWidget(self.character_list)
-        panel=QWidget(); detail=QVBoxLayout(panel); split.addWidget(panel); split.setSizes([320,700])
+        panel=QWidget(); detail=QVBoxLayout(panel); scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(panel);split.addWidget(scroll);split.setSizes([320,700])
         self.character_name=QLabel('Select a character'); self.character_name.setStyleSheet('font-size: 23px; font-weight: 600;')
         detail.addWidget(self.character_name)
         self.character_note=paragraph(); detail.addWidget(self.character_note)
@@ -56,6 +60,10 @@ class CharacterDialog(NpcDialog):
         self.character_body_choice=QComboBox();body_form.addRow('Body',self.character_body_choice)
         self.character_body_note=paragraph();body_form.addRow('',self.character_body_note)
         self.body_assignment=paragraph(); body_form.addRow('Current body', self.body_assignment)
+        self.skin_choice=QComboBox();body_form.addRow('Skin',self.skin_choice)
+        self.skin_note=paragraph();body_form.addRow('',self.skin_note)
+        self.skin_archive=QPushButton('Locate the original skin download…');body_form.addRow('',self.skin_archive)
+        self.skin_archive.clicked.connect(self.locate_skin_archive)
         self.skin_assignment=paragraph(); body_form.addRow('Current skin', self.skin_assignment)
         detail.addLayout(body_form)
         self.shape_button=QPushButton('Choose or customize this character’s shape…')
@@ -63,7 +71,7 @@ class CharacterDialog(NpcDialog):
         self.shape_note=paragraph();detail.addWidget(self.shape_note)
         detail.addStretch(1)
         detail.addWidget(paragraph('An appearance package keeps its face, hair and related assets together. '
-            'You can use its body or choose your prepared shared body while retaining its skin. '
+            'Choose a body and compatible skin separately, or keep the appearance package’s choices. '
             'Winning gameplay data and outfits are retained.'))
         self.character_status=paragraph(); layout.addWidget(self.character_status)
         buttons=QHBoxLayout(); self.character_apply=QPushButton('Apply appearance choices')
@@ -76,6 +84,7 @@ class CharacterDialog(NpcDialog):
         self.character_list.currentItemChanged.connect(self.show_character)
         self.appearance_choice.currentIndexChanged.connect(self.select_appearance)
         self.character_body_choice.currentIndexChanged.connect(self.select_body)
+        self.skin_choice.currentIndexChanged.connect(self.select_skin)
         self.current_character=None
         self.refresh_characters(); self.update_pending()
 
@@ -98,6 +107,8 @@ class CharacterDialog(NpcDialog):
         self.current_character=item.data(Qt.ItemDataRole.UserRole) if item else None
         self.appearance_choice.blockSignals(True); self.appearance_choice.clear()
         self.character_body_choice.blockSignals(True);self.character_body_choice.clear()
+        self.skin_choice.blockSignals(True);self.skin_choice.clear();self.skin_choice.addItem('Keep the appearance’s skin','')
+        self.skin_archive.setVisible(False);self.skin_note.setText('')
         self.character_body_choice.addItem('Use the body supplied by the appearance','')
         reset_label='Follow current mod setup'
         if self.current_character in self.applied_selection: reset_label+=' (remove my override)'
@@ -110,6 +121,7 @@ class CharacterDialog(NpcDialog):
             self.appearance_choice.setEnabled(False); self.appearance_note.setText(''); self.body_assignment.setText(''); self.skin_assignment.setText('')
             self.character_body_choice.setEnabled(False);self.character_body_note.setText('')
             self.shape_button.setEnabled(False);self.shape_note.setText('')
+            self.skin_choice.setEnabled(False)
         else:
             key=self.current_character; row=self.characters[key]
             self.character_name.setText(row['name']); self.character_name.setToolTip(row['editor']+'\n'+key)
@@ -131,18 +143,32 @@ class CharacterDialog(NpcDialog):
                 game_data=self.organizer.managedGame().gameDirectory().absolutePath()+'/Data')
             self.body_assignment.setText(description['body'])
             self.skin_assignment.setText(description['skin'])
+            from .character_skin import current_skin_name
+            prepared_skin=current_skin_name(self.organizer,key,row,self.applied_character_choices)
+            if prepared_skin:self.skin_assignment.setText(display_name(prepared_skin)+' — prepared by ModLab for this character. Original face details are retained.')
             self.body_assignment.setToolTip(description['evidence'])
             self.skin_assignment.setToolTip(description['evidence'])
             sex=row.get('body',{}).get('sex',row.get('sex'))
+            available={key:value for key,value in self.skin_sources.items() if value['sex']==sex}
+            for source_key,source in available.items():
+                title=display_name(source['mod'])
+                if sum(s['mod']==source['mod'] for s in available.values())>1:title+=' — '+source['folder'].split('/')[-1]
+                self.skin_choice.addItem(title,source_key)
+            skin=self.skin_choices.get(key,{})
+            if skin.get('source') and skin['source'] not in available:self.skin_choice.addItem('Saved skin — source unavailable',skin['source'])
+            self.skin_choice.setCurrentIndex(max(0,self.skin_choice.findData(skin.get('source',''))));self.skin_choice.setEnabled(True)
+            self.describe_skin()
             default=self.shared_defaults.get(sex,{})
             if default.get('body'):
-                self.character_body_choice.addItem('Shared '+str(sex)+' body — '+default['body']+' / '+default.get('preset',''),'shared')
+                self.character_body_choice.addItem('Use my shared '+str(sex)+' body — '+default['body'],'shared')
+                self.character_body_choice.setItemData(self.character_body_choice.count()-1,
+                    'Saved shape: '+default.get('preset',''),Qt.ItemDataRole.ToolTipRole)
             chosen_body=self.body_choices.get(key,'')
             if chosen_body and self.character_body_choice.findData(chosen_body)<0:
                 self.character_body_choice.addItem('Shared body — preparation needed',chosen_body)
             self.character_body_choice.setCurrentIndex(max(0,self.character_body_choice.findData(chosen_body)))
             self.character_body_choice.setEnabled(True)
-            self.character_body_note.setText('Keeps the selected appearance’s skin. Applying checks the installed body variant and prepares this character’s own body references. It does not change other characters.' if default else
+            self.character_body_note.setText('Keeps your selected skin. Applying checks the installed body variant and prepares this character’s own body references. It does not change other characters.' if default else
                 'Prepare a shared body in Bodies & outfits to add a body choice here. The appearance’s current body is retained.')
             self.body_labels[key]=row['name']
             self.shape_button.setEnabled(True)
@@ -154,6 +180,7 @@ class CharacterDialog(NpcDialog):
                     'Optional individual shapes. Your shared body remains the default until you choose an exception.')
             except (OSError,ValueError) as error:self.shape_note.setText(str(error))
         self.character_body_choice.blockSignals(False)
+        self.skin_choice.blockSignals(False)
         self.appearance_choice.blockSignals(False); self.explain_appearance()
 
     def character_shape(self):
@@ -182,6 +209,33 @@ class CharacterDialog(NpcDialog):
         else:self.body_choices.pop(self.current_character,None)
         self.update_pending()
 
+    def describe_skin(self):
+        key=self.skin_choice.currentData();source=self.skin_sources.get(key)
+        if not key:self.skin_note.setText('Keep the skin supplied by the selected appearance.');self.skin_archive.setVisible(False);return
+        if not source:self.skin_note.setText('Enable the saved skin source or choose an installed alternative.');self.skin_archive.setVisible(False);return
+        from pathlib import Path
+        chosen=self.skin_choices.get(self.current_character,{})
+        archive=chosen.get('archive') or source.get('archive','')
+        self.skin_archive.setVisible(not Path(archive).is_file())
+        self.skin_note.setText('Use this skin for '+self.characters[self.current_character]['name']+'. Face, hair and body choices stay the same. ModLab checks the matching head, body and hand textures before applying.'+
+            (' Locate its original download once so ModLab can check the installed variant.' if not Path(archive).is_file() else ''))
+
+    def select_skin(self):
+        if not self.current_character:return
+        source=self.skin_choice.currentData()
+        previous=self.skin_choices.get(self.current_character,{})
+        if source:self.skin_choices[self.current_character]=previous if previous.get('source')==source else dict(source=source)
+        else:self.skin_choices.pop(self.current_character,None)
+        self.body_labels[self.current_character]=self.characters[self.current_character]['name']
+        self.describe_skin();self.update_pending()
+
+    def locate_skin_archive(self):
+        if not self.current_character or not self.skin_choice.currentData():return
+        path,_=QFileDialog.getOpenFileName(self,'Locate this skin’s original download',self.organizer.downloadsPath(),'Mod archives (*.7z *.zip *.rar)')
+        if not path:return
+        self.skin_choices[self.current_character]=dict(source=self.skin_choice.currentData(),archive=path)
+        self.describe_skin();self.update_pending()
+
     def select_appearance(self):
         if not self.current_character: return
         key=self.current_character; chosen=self.appearance_choice.currentData()
@@ -199,11 +253,14 @@ class CharacterDialog(NpcDialog):
         removed=len(set(self.applied_selection)-set(self.selected))
         bodies=getattr(self,'body_choices',{})
         previous_bodies=getattr(self,'applied_body_choices',{})
+        skins=getattr(self,'skin_choices',{});previous_skins=getattr(self,'applied_skin_choices',{})
         removed+=len(set(previous_bodies)-set(bodies))
+        removed+=len(set(previous_skins)-set(skins))
         self.character_status.setText(f'{len(self.selected)} appearances selected. '+(f'{removed} saved override(s) will be removed; source mods will supply those appearances.' if removed else 'Applying prepares their paired files and checks the installed result.'))
         if bodies:self.character_status.setText(f'{len(self.selected)} face choices; {len(bodies)} shared body choice(s). Pending changes are saved when you close. Apply checks compatibility and prepares the selected characters.')
-        self.character_apply.setText('Clear saved appearance overrides' if not self.selected and not bodies and removed else 'Apply character choices')
-        self.character_apply.setEnabled(bool(self.selected) or bool(self.applied_selection) or bool(bodies) or bool(previous_bodies))
+        if skins:self.character_status.setText(f'{len(self.selected)} face choices; {len(bodies)} body choices; {len(skins)} skin choices. Apply prepares these choices together; other characters remain unchanged.')
+        self.character_apply.setText('Clear saved appearance overrides' if not self.selected and not bodies and not skins and removed else 'Apply character choices')
+        self.character_apply.setEnabled(bool(self.selected) or bool(self.applied_selection) or bool(bodies) or bool(previous_bodies) or bool(skins) or bool(previous_skins))
 
     def explain_appearance(self):
         key=self.current_character; chosen=self.appearance_choice.currentData()
