@@ -212,4 +212,7 @@ def collect_setup(organizer, *, version_reader) -> SetupSnapshot:
     if game_name == 'Skyrim Special Edition' and hasattr(organizer, 'modsPath'):
         from .record_checks import inspect_record_checks
         snapshot = replace(snapshot, generated_findings=snapshot.generated_findings + inspect_record_checks(organizer, snapshot))
+    if game_name == 'Skyrim Special Edition' and hasattr(organizer, 'profilePath'):
+        from .character_shapes import inspect_choices as inspect_character_shapes
+        snapshot = replace(snapshot, generated_findings=snapshot.generated_findings + inspect_character_shapes(organizer))
     return snapshot

@@ -50,7 +50,7 @@ class CharacterDialog(NpcDialog):
         self.character_name=QLabel('Select a character'); self.character_name.setStyleSheet('font-size: 23px; font-weight: 600;')
         detail.addWidget(self.character_name)
         self.character_note=paragraph(); detail.addWidget(self.character_note)
-        form=QFormLayout(); self.appearance_choice=QComboBox(); form.addRow('Face & hair',self.appearance_choice); detail.addLayout(form)
+        form=QFormLayout(); self.appearance_choice=QComboBox(); form.addRow('Face && hair',self.appearance_choice); detail.addLayout(form)
         self.appearance_note=paragraph(); detail.addWidget(self.appearance_note)
         body_form=QFormLayout()
         self.character_body_choice=QComboBox();body_form.addRow('Body',self.character_body_choice)
@@ -58,6 +58,9 @@ class CharacterDialog(NpcDialog):
         self.body_assignment=paragraph(); body_form.addRow('Current body', self.body_assignment)
         self.skin_assignment=paragraph(); body_form.addRow('Current skin', self.skin_assignment)
         detail.addLayout(body_form)
+        self.shape_button=QPushButton('Choose or customize this character’s shape…')
+        self.shape_button.clicked.connect(self.character_shape);detail.addWidget(self.shape_button)
+        self.shape_note=paragraph();detail.addWidget(self.shape_note)
         detail.addStretch(1)
         detail.addWidget(paragraph('An appearance package keeps its face, hair and related assets together. '
             'You can use its body or choose your prepared shared body while retaining its skin. '
@@ -106,6 +109,7 @@ class CharacterDialog(NpcDialog):
             self.character_note.setText('Try another name or choose All characters.')
             self.appearance_choice.setEnabled(False); self.appearance_note.setText(''); self.body_assignment.setText(''); self.skin_assignment.setText('')
             self.character_body_choice.setEnabled(False);self.character_body_note.setText('')
+            self.shape_button.setEnabled(False);self.shape_note.setText('')
         else:
             key=self.current_character; row=self.characters[key]
             self.character_name.setText(row['name']); self.character_name.setToolTip(row['editor']+'\n'+key)
@@ -141,8 +145,35 @@ class CharacterDialog(NpcDialog):
             self.character_body_note.setText('Keeps the selected appearance’s skin. Applying checks the installed body variant and prepares this character’s own body references. It does not change other characters.' if default else
                 'Prepare a shared body in Bodies & outfits to add a body choice here. The appearance’s current body is retained.')
             self.body_labels[key]=row['name']
+            self.shape_button.setEnabled(True)
+            from .character_shapes import load_choices
+            try:
+                shapes=load_choices(self.profile_path);choice=shapes['choices'].get(key)
+                applied=(shapes.get('applied') or {}).get('choices',{}).get(key)
+                self.shape_note.setText(('Saved shape: '+choice['preset']+(' — assignment prepared' if choice==applied else ' — awaiting preparation')) if choice else
+                    'Optional individual shapes. Your shared body remains the default until you choose an exception.')
+            except (OSError,ValueError) as error:self.shape_note.setText(str(error))
         self.character_body_choice.blockSignals(False)
         self.appearance_choice.blockSignals(False); self.explain_appearance()
+
+    def character_shape(self):
+        if not self.current_character:return
+        try:
+            from .character_shape_dialog import CharacterShapeDialog
+            self.shape_window=CharacterShapeDialog(self.organizer,self.current_character,self.characters,self)
+            self.shape_window.finished.connect(self.shape_closed)
+            self.shape_window.setModal(True);self.shape_window.show()
+        except Exception as error:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self,'Character shape setup',str(error))
+
+    def shape_closed(self):
+        if self.shape_window.changed:
+            self.preferences_changed=True
+            from .loot_workflow import context_signature
+            self.choice_signature=context_signature(self.organizer)
+        if self.shape_window.applied:self.applied=True
+        self.show_character(self.character_list.currentItem())
 
     def select_body(self):
         if not self.current_character:return

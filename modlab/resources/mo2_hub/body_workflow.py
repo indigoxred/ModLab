@@ -161,6 +161,8 @@ def run_body_job(organizer, job, selected, preset, *, morphs=False):
             for name in expected:
                 package.write(output / name, name)
         job.archive = archive
+        from .character_shapes import neutral_preset
+        job.record['neutral_shape_base']=neutral_preset(job.executable.parent,preset,selected)
         job.record.update(status='Generated files checked; installation pending', hashes=hashes, archive=str(archive),
                           verification=('Expected meshes and linked TRI shapes/vertex bounds checked. Runtime assignment, topology, appearance and physics are separate checks.' if morphs else 'Expected meshes have NIF headers. Appearance and physics are separate checks.'))
         return hashes

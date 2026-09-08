@@ -29,6 +29,8 @@ def display_name(name):
 
 def finding_action(finding):
     code = finding.code
+    if code.startswith('character-shapes-'):
+        return 'npc_appearances', 'Review saved character shapes'
     if code in WORK:
         return 'finish_setup', 'Prepare and recheck'
     if code in CHOICES:
