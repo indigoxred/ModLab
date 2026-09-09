@@ -8,6 +8,14 @@ def finding(level, code):
 
 
 class GuidanceTests(unittest.TestCase):
+    def test_background_check_does_not_ask_for_repairs_or_claim_completion(self):
+        item = finding('Unknown', 'graphics-scene-checking')
+        plan = setup_guidance([item], checked=True)
+        self.assertFalse(plan.complete)
+        self.assertEqual([], plan.groups['attention'])
+        self.assertIsNone(finding_action(item)[0])
+        self.assertNotIn(plan.action, ('launch', 'graphics', 'finish_setup'))
+
     def test_unfinished_install_opens_recovery_without_certifying_the_batch(self):
         item = finding('Review', 'installation-queue-pending')
         plan = setup_guidance([item], checked=True)

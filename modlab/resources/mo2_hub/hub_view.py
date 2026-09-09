@@ -126,24 +126,27 @@ class HubView:
         page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(label(heading, 'sectionTitle')); layout.addWidget(label(description, 'muted'))
         layout.addSpacing(12)
+        descriptions = {}
         for title, explanation, action in actions:
             card = QFrame(); card.setObjectName('taskCard'); inner = QVBoxLayout(card)
             inner.setContentsMargins(16, 12, 16, 12)
-            inner.addWidget(button(title, action)); inner.addWidget(label(explanation, 'muted'))
+            inner.addWidget(button(title, action))
+            descriptions[title] = label(explanation, 'muted'); inner.addWidget(descriptions[title])
             layout.addWidget(card)
         layout.addStretch()
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(page)
         self.pages.addWidget(scroll)
+        return descriptions
 
     def build_choices(self):
         h = self.hub
-        self.action_page('Make it yours', 'Your existing choices remain available. Changes are checked through the preparation workflow.', (
+        self.choice_descriptions = self.action_page('Make it yours', 'Your existing choices remain available. Changes are checked through the preparation workflow.', (
             ('Bodies & outfits', 'Choose available projects and presets for generated outfits.', h.bodyslide),
             ('Character appearances', 'Choose appearance providers for the characters covered by your installed mods.', h.npc_appearances),
             ('Individual body shape support', 'Set up the optional helper and its dependencies for character-specific shapes.', h.character_shape_support),
             ('Animations', 'Review the selected animation patches and generated behavior setup.', h.pandora),
             ('Gameplay patches', 'Configure the supported patchers for your selected setup.', h.synthesis),
-            ('Graphics', 'Choose supported graphics preparation and review its output.', h.graphics)))
+            ('Graphics', 'Choose roads, mountains, trees and other scenery from your installed mods.', h.graphics)))
 
     def build_tools(self):
         h = self.hub
@@ -185,6 +188,8 @@ class HubView:
         return text
 
     def render(self, findings, snapshot, checked=False):
+        from .scene_workflow import choice_summary
+        self.choice_descriptions['Graphics'].setText(choice_summary(findings))
         self.plan = setup_guidance(findings, checked=checked)
         origins = set()
         if snapshot:
@@ -195,6 +200,7 @@ class HubView:
         self.state_title.setText(self.plan.title)
         self.hub.summary.setText(self.plan.summary)
         self.primary.setText(self.plan.action_label)
+        self.primary.setEnabled(self.plan.action != 'checking')
         self.recheck.setVisible(self.plan.action != 'finish_setup')
         previous_scroll = self.task_scroll.verticalScrollBar().value()
         page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(0, 12, 0, 0); layout.setSpacing(12)

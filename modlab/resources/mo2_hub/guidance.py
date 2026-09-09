@@ -29,6 +29,8 @@ def display_name(name):
 
 def finding_action(finding):
     code = finding.code
+    if code == 'graphics-scene-checking':
+        return None, None
     if code == 'installation-queue-pending':
         return 'resume_queue', 'Review unfinished installs'
     if code == 'installation-queue-unreadable':
@@ -98,7 +100,7 @@ def setup_guidance(findings, *, checked=False):
             group = 'choices'
         elif finding.code in WORK:
             group = 'work'
-        elif finding.level == 'Info' or finding.code in FIRST_RUN or finding.code == 'asset-overlap':
+        elif finding.level == 'Info' or finding.code in FIRST_RUN or finding.code in {'asset-overlap', 'graphics-scene-checking'}:
             group = 'observations'
         else:
             group = 'attention'
@@ -120,6 +122,10 @@ def setup_guidance(findings, *, checked=False):
     if groups['work']:
         return Guidance('Your setup needs preparation', 'ModLab can update the affected outputs and recheck the setup using your saved choices.',
                         'finish_setup', 'Prepare and recheck', False, groups)
+    if any(f.code == 'graphics-scene-checking' for f in groups['observations']):
+        return Guidance('Checking your scenery choices',
+            'ModLab is checking files and textures in the background. You can keep browsing your choices.',
+            'checking', 'Checking…', False, groups)
     if checked:
         return Guidance('Preparation checks complete', 'The current preparation checks finished. File-overlap observations and first-run checks remain available below.',
                         'launch', 'Launch Skyrim', True, groups)

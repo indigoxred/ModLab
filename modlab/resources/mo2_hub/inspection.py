@@ -22,7 +22,7 @@ def plugin_load_orders(plugins):
     return result
 
 
-def collect_setup(organizer, *, version_reader) -> SetupSnapshot:
+def collect_setup(organizer, *, version_reader, defer_scene=False) -> SetupSnapshot:
     game = organizer.managedGame()
     game_name = game.gameName()
     game_root = Path(game.gameDirectory().absolutePath())
@@ -123,9 +123,8 @@ def collect_setup(organizer, *, version_reader) -> SetupSnapshot:
                 'Inspect modlab-patcher-pending.json in this profile before retrying. Preserve its settings and build record.'))
         target = Path(organizer.modsPath()) / output_name(profile, organizer.profilePath())
         transformed = set()
+        graphics_findings = ()
         try:
-            from .scene_workflow import inspect_request
-            generated_findings.extend(inspect_request(organizer))
             from .pgpatcher_workflow import inspect_graphics
             graphics_findings, transformed = inspect_graphics(organizer, target,
                 read_manifest(target, organizer.profilePath()) if target.exists() else None)
@@ -134,12 +133,17 @@ def collect_setup(organizer, *, version_reader) -> SetupSnapshot:
             generated_findings.append(Finding('Unknown', 'graphics-inspection-incomplete',
                 'Graphics output could not be checked', str(error),
                 'Open Graphics choices and the retained build record before launching. Preserve manually changed output.'))
+        from .scene_workflow import inspect_scene, checking_result
+        scene_verified, scene_findings = (checking_result(organizer) if defer_scene else
+            inspect_scene(organizer, graphics_findings=graphics_findings))
+        generated_verified = tuple(generated_verified) + scene_verified
+        generated_findings.extend(scene_findings)
         if target.exists():
             try:
                 from .body_workflow import effective_files, file_signature
                 verified, issues, manifest = inspect_output(target, organizer.profilePath(), organizer.resolvePath,
                                                             file_signature(effective_files(organizer)), transformed=transformed)
-                generated_verified = tuple(verified)
+                generated_verified = tuple(generated_verified) + tuple(verified)
                 description = '\n'.join(f"{name} — {p['source_mod']} — {p['preset']}" for name, p in manifest['projects'].items())
                 if issues:
                     generated_findings.append(Finding('Review', 'generated-output-stale',

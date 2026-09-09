@@ -2,7 +2,7 @@
 
 import json
 import re
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import mobase
@@ -785,36 +785,61 @@ class HubWindow(QDialog):
         self.detail.clear()
         try:
             inspected_profile = self.organizer.profilePath()
-            snapshot = collect_setup(self.organizer, version_reader=mobase.getFileVersion)
+            snapshot = collect_setup(self.organizer, version_reader=mobase.getFileVersion, defer_scene=True)
             if self.organizer.profilePath() != inspected_profile:
                 raise ValueError('The profile changed during inspection. Recheck the selected profile.')
             self.snapshot_profile_path = inspected_profile
-            result = assess(snapshot)
-            self.snapshot = snapshot
-            self.findings = result.findings
-            if self.automatic_signature is not None and context_signature(self.organizer) == self.automatic_signature:
-                from .guidance import retain_run_findings
-                self.findings = retain_run_findings(self.findings, self.automatic_findings)
-            self.findings = tuple(sorted(self.findings, key=lambda f: {'Blocked': 0, 'Unknown': 1, 'Review': 2, 'Info': 3}.get(f.level, 1)))
-            enabled = sum(p.load_order >= 0 for p in snapshot.plugins)
-            self.context.setText(
-                f"Profile: {snapshot.profile}  |  Skyrim: {snapshot.runtime or 'unidentified'}  |  "
-                f"Active plugins: {enabled}"
-            )
-            self.summary.setText(result.summary)
-            self.table.setRowCount(len(self.findings))
-            for row, finding in enumerate(self.findings):
-                for column, value in enumerate((finding.level, finding.title, finding.action)):
-                    self.table.setItem(row, column, QTableWidgetItem(value))
-            self.filter_rows()
-            self.view.render(self.findings, snapshot,
-                checked=self.automatic_signature is not None and context_signature(self.organizer) == self.automatic_signature)
+            self.show_snapshot(snapshot)
+            if any(f.code == 'graphics-scene-checking' for f in snapshot.generated_findings):
+                from . import scene_workflow as scene, background
+                captured = scene.capture_inspection(self.organizer, graphics_findings=snapshot.generated_findings)
+                background.run(self, lambda: scene.evaluate_inspection(captured),
+                    lambda result, error: self.scene_inspected(snapshot, captured, result, error))
         except Exception as error:
             self.findings = (Finding('Unknown', 'inspection-incomplete', 'Current setup could not be read',
                 str(error), 'Resolve this inspection problem before continuing.'),)
             self.view.render(self.findings, None)
             self.context.setText("Current setup could not be read.")
             self.summary.setText(f"Inspection incomplete: {error}")
+
+    def scene_inspected(self, snapshot, captured, result, error):
+        # Never paint an old profile or inspection over a newer user operation.
+        if self.snapshot is not snapshot or self.processing or self.installing or self.recheck_pending:
+            return
+        from . import scene_workflow as scene
+        try:
+            if captured != scene.capture_inspection(self.organizer, graphics_findings=snapshot.generated_findings):
+                self.setup_changed(); return
+            verified, findings = scene.stale_result(error) if error else result
+            updated = replace(snapshot, generated_verified=snapshot.generated_verified + tuple(verified),
+                generated_findings=tuple(f for f in snapshot.generated_findings if f.code != 'graphics-scene-checking') + tuple(findings))
+            self.show_snapshot(updated)
+        except Exception as issue:
+            _, findings = scene.stale_result(issue)
+            self.show_snapshot(replace(snapshot, generated_findings=tuple(f for f in snapshot.generated_findings
+                if f.code != 'graphics-scene-checking') + tuple(findings)))
+
+    def show_snapshot(self, snapshot):
+        result = assess(snapshot)
+        self.snapshot = snapshot
+        self.findings = result.findings
+        if self.automatic_signature is not None and context_signature(self.organizer) == self.automatic_signature:
+            from .guidance import retain_run_findings
+            self.findings = retain_run_findings(self.findings, self.automatic_findings)
+        self.findings = tuple(sorted(self.findings, key=lambda f: {'Blocked': 0, 'Unknown': 1, 'Review': 2, 'Info': 3}.get(f.level, 1)))
+        enabled = sum(p.load_order >= 0 for p in snapshot.plugins)
+        self.context.setText(
+            f"Profile: {snapshot.profile}  |  Skyrim: {snapshot.runtime or 'unidentified'}  |  "
+            f"Active plugins: {enabled}"
+        )
+        self.summary.setText(result.summary)
+        self.table.setRowCount(len(self.findings))
+        for row, finding in enumerate(self.findings):
+            for column, value in enumerate((finding.level, finding.title, finding.action)):
+                self.table.setItem(row, column, QTableWidgetItem(value))
+        self.filter_rows()
+        self.view.render(self.findings, snapshot,
+            checked=self.automatic_signature is not None and context_signature(self.organizer) == self.automatic_signature)
 
     def filter_rows(self):
         text = self.search.text().casefold()
