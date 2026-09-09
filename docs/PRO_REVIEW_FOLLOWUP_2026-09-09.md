@@ -23,3 +23,5 @@ Focused independent review found no actionable blocking defects in these changes
 ## Native follow-up
 
 Native scenery reset was submitted and independently verified to disable the owned scene output while retaining its 277 files and both source mods. Current desktop/process inspection confirms downstream reset preparation finished: ModLab shows the same three existing record/cleaning findings and no scenery helper remains running. Native restoration of the selected roads/mountains remains to be checked. The test MO2 instance was closed through its UI before deploying these changes. Deployment and further native results will be recorded separately.
+
+Subsequent native verification completed that restoration: `045ad7b5970c` applied 277 scene files, `bc1e0c087d4f` applied the downstream graphics output, and Mods & choices displayed both current component results. See `SCENE_CHOICES_CHECKPOINT_2026-09-09.md` for independent hash checks and remaining native shared-dialog coverage.

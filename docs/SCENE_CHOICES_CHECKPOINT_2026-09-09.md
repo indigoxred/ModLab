@@ -30,3 +30,15 @@ After preparation returned control, reopening Graphics restored both component s
 Local evidence: `outputs/ui-rework/check_scene_applied.py` and its JSON result in the Codex task workspace. Native reset and same-choice reapply are still not tested end to end; their existing unit coverage is not a substitute for those checks. The deliberately unresolved record/cleaning findings remain visible, so this is not an all-clear for the entire profile.
 
 Further work remains on final setup reporting of scene choices after downstream transformations, mixed texture/mesh preference detail, distant LOD preparation, remaining installations and the broader goal. This checkpoint does not establish complete scenery compatibility or in-game appearance.
+
+## Review corrections and native reset/restore follow-up
+
+Source commits `4e53791` and `3d74df0` address the reproduced inventory, interrupted-root-recovery and shared-texture findings; see `PRO_REVIEW_FOLLOWUP_2026-09-09.md` for their boundaries. All 559 hub tests pass, compilation succeeds, and focused independent review found no blocking defects. Twelve current modules were deployed and SHA256 checked with the test MO2 instance closed. The prior modules are retained in `builds/ui-backups/before-shared-choices-20260909`.
+
+Native reset finished without deleting the 277 old scene files or disabling source mods. On restarting the updated instance, Mods & choices reported that scenery followed the installed setup. In the actual Graphics panel, Blended Roads and Majestic Mountains were selected again independently, leaving the other components on Keep the installed setup. Scene job `045ad7b5970c` applied 277 files and retained 55 dependencies. This real combination produced no unresolved shared-resource decision.
+
+Downstream graphics job `bc1e0c087d4f` applied 654 checked meshes/656 files. Independent verification matched every published scene file to its source, retained all five installed bridge patch identities, checked source/output activation and priority, found all 277 scene paths in downstream inputs, and matched every published graphics hash. Evidence is `outputs/ui-rework/check_scene_restored.py` and its JSON result in the Codex task workspace.
+
+The finished native Mods & choices page now displays Applied scenery choices, Roads and bridges: Blended Roads, and Mountains and rocks: Majestic Mountains after downstream transformation. Existing Apocalypse, Ars Metallica and cleaning-advice findings remain; this is not a profile-wide all-clear. The reset/restore chain and current-result reporting are now observed end to end. Same-choice reapply after a manual override, and the new grouped shared-appearance dialog's accept/cancel/reconsider path, still need their own native round trips. Their source and fixture checks are not substituted for that coverage.
+
+The scene-only restore also reassessed NPC and gameplay preparation before graphics. Reducing unnecessary unrelated rebuilds remains the separate targeted improvement in the plan; do not remove actual record dependencies merely to shorten testing.
