@@ -124,6 +124,7 @@ def deploy_root(game, source, job, game_hash):
 
 def deploy_root_files(game, source, job, game_hash, names, *, expected=None):
     """Shared checked publication for the named SKSE loader/preloader files only."""
+    from .installation import write_record
     game, source, job = Path(game).resolve(), Path(source), Path(job)
     if not (game / 'SkyrimSE.exe').is_file() or digest(game / 'SkyrimSE.exe') != game_hash:
         raise ValueError('The selected game executable changed before root-component installation.')
@@ -146,7 +147,7 @@ def deploy_root_files(game, source, job, game_hash, names, *, expected=None):
             if digest(previous / name) != old:
                 raise ValueError('SKSE backup could not be verified: ' + name)
     journal = job / 'root-deployment.json'
-    journal.write_text(json.dumps(record, indent=2), encoding='utf-8')
+    write_record(journal, record)
     pending=None
     try:
         for name in names:
@@ -172,7 +173,7 @@ def deploy_root_files(game, source, job, game_hash, names, *, expected=None):
             else:os.replace(pending, target)
             pending=None
             record['applied'].append(name)
-            journal.write_text(json.dumps(record, indent=2), encoding='utf-8')
+            write_record(journal, record)
         return record
     except Exception:
         if pending is not None and pending.is_file() and not pending.is_symlink():
@@ -184,25 +185,62 @@ def deploy_root_files(game, source, job, game_hash, names, *, expected=None):
 
 
 def restore_root(record, job):
+    from .installation import _plain, write_record
     game, job = Path(record['game_root']).resolve(), Path(job)
     if digest(game / 'SkyrimSE.exe') != record['game_hash']:
         raise ValueError('The game changed since this SKSE deployment; automatic restoration was stopped.')
-    for name in record['applied']:
-        target = game / _root_name(name)
-        if not target.is_file() or target.is_symlink() or digest(target) != record['files'][name]['after']:
-            raise ValueError('An SKSE root file changed after installation; preserve that change before restoring: ' + name)
-        before = record['files'][name]['before']
-        if before is not None and digest(job / 'previous-root' / name) != before:
-            raise ValueError('The retained SKSE backup changed: ' + name)
     withdrawn = job / 'withdrawn-root'
+    _plain(withdrawn); _plain(job/'previous-root')
+    def fingerprint(path):
+        _plain(path)
+        if path.exists() and not path.is_file():
+            raise ValueError('A root restoration path changed: ' + str(path))
+        return digest(path) if path.is_file() else None
+    # The journal can lag publication by one rename. Reconcile every recorded
+    # before/after identity, not just the last durable `applied` list.
+    pending = []
+    for name, state in record['files'].items():
+        target = game / _root_name(name)
+        actual = fingerprint(target)
+        if actual == state['before']:
+            continue  # Never published, or already restored before a receipt write.
+        retained = fingerprint(withdrawn/name)
+        if not (actual == state['after'] or (actual is None and retained == state['after'])):
+            raise ValueError('An SKSE root file changed after installation; preserve that change before restoring: ' + name)
+        if retained is not None and retained != state['after']:
+            raise ValueError('A retained root file changed; restoration was stopped: ' + name)
+        if state['before'] is not None and fingerprint(job/'previous-root'/name) != state['before']:
+            raise ValueError('The retained SKSE backup changed: ' + name)
+        candidate = game/(name + '.modlab-restore')
+        if fingerprint(candidate) not in (None, state['before']):
+            raise ValueError('A pending root restoration changed: ' + name)
+        pending.append((name, actual))
     withdrawn.mkdir(exist_ok=True)
-    for name in reversed(record['applied'][:]):
-        target = game / name
-        destination = withdrawn / name
-        if destination.exists():
-            raise ValueError('This root restoration already has a retained file: ' + name)
-        shutil.move(target, destination)
-        if record['files'][name]['before'] is not None:
-            shutil.copy2(job / 'previous-root' / name, target)
-        record['applied'].remove(name)
-        (job / 'root-deployment.json').write_text(json.dumps(record, indent=2), encoding='utf-8')
+    for name, expected in reversed(pending):
+        target, destination = game/name, withdrawn/name
+        state = record['files'][name]
+        if fingerprint(target) != expected or digest(game/'SkyrimSE.exe') != record['game_hash']:
+            raise ValueError('A root file or game changed during restoration: ' + name)
+        if expected is not None:
+            if fingerprint(destination) == state['after']:
+                target.unlink()  # Exact published bytes are already retained.
+            elif destination.exists():
+                raise ValueError('A retained root file changed during restoration: ' + name)
+            else:
+                shutil.move(target, destination)
+        if state['before'] is not None:
+            candidate = game/(name + '.modlab-restore')
+            if fingerprint(candidate) is None:
+                shutil.copy2(job/'previous-root'/name, candidate)
+            if fingerprint(candidate) != state['before'] or target.exists() or target.is_symlink():
+                raise ValueError('A root restoration destination or backup changed: ' + name)
+            os.rename(candidate, target)
+        if fingerprint(target) != state['before']:
+            raise ValueError('The previous root file was not restored: ' + name)
+        record['applied'] = [item for item in record['applied'] if item != name]
+        write_record(job/'root-deployment.json', record)
+    # Validate the final destination even when the journal said nothing applied.
+    if any(fingerprint(game/name) != state['before'] for name, state in record['files'].items()):
+        raise ValueError('Root restoration did not reach its recorded previous state.')
+    record['applied'] = []
+    write_record(job/'root-deployment.json', record)

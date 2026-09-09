@@ -107,7 +107,8 @@ def catalog(context, *, cache=None):
     from .archive_text import ArchiveReader
     from .scene_assets import Catalog
     cache = Path(cache) if cache is not None else Path(context['instance'])/'builds/scene-inputs'/uuid4().hex[:12]
-    return Catalog(context['roots'], context['archives'], cache, ArchiveReader(context['library']))
+    archives = context.get('archives', [])
+    return Catalog(context['roots'], archives, cache, ArchiveReader(context['library']) if archives else None)
 
 
 def prepare(context, request):
@@ -140,7 +141,7 @@ def prepare(context, request):
 
 def verify_saved(target, saved, context, effective, *, transformed=()):
     from .outputs import read_manifest, digest
-    from .scene_choices import check_sources
+    from .scene_choices import check_sources, provider_file
     roots, previous = dict(context['roots']), dict(saved['context']['roots'])
     if saved.get('inactive_vanilla_references') and any(context.get(key) != saved['context'].get(key)
             for key in ('renderer', 'custom_renderer')):
@@ -154,17 +155,33 @@ def verify_saved(target, saved, context, effective, *, transformed=()):
         raise ValueError('Scenery output no longer matches the saved choices; review Graphics choices.')
     check_sources(saved['plan'])
     dependencies = saved['plan']['dependencies']
-    if dependencies:
-        from tempfile import TemporaryDirectory
-        # Inspection extractions are disposable. Only preparation caches belong
-        # in retained build provenance, not every passive refresh.
-        with TemporaryDirectory(prefix='modlab-scene-check-') as cache:
-            active_assets = catalog(context, cache=cache)
-            for name, previous_source in dependencies.items():
-                current_source = active_assets.resolve(name)
-                if current_source is None or current_source['sha256'] != previous_source['sha256']:
-                    raise ValueError('A required scenery texture is missing or has a different active replacement: ' + name +
-                                     '. Review Graphics choices before preparing again.')
+    from tempfile import TemporaryDirectory
+    # A saved choice covers the selected component, including files a package
+    # update adds later. Looking only at the old receipt misses those additions.
+    inspection_context = context
+    if not dependencies:
+        selected = set(saved['choices'].values())
+        inspection_context = dict(context, roots=[row for row in context['roots'] if row[0] in selected],
+            archives=[row for row in context.get('archives', []) if row['provider'] in selected])
+    with TemporaryDirectory(prefix='modlab-scene-check-') as cache:
+        active_assets = catalog(inspection_context, cache=cache)
+        for group, provider in saved['choices'].items():
+            current = active_assets.providers.get(provider, {}).get('groups', {}).get(group, ())
+            recorded = saved['plan']['groups'][group]['paths']
+            if set(current) != set(recorded):
+                raise ValueError(GROUPS[group] + ' from ' + provider +
+                    ' changed its available files. Your choice is retained; apply it again in Graphics to include the updated component.')
+        for name, previous_source in saved['plan']['files'].items():
+            provider = active_assets.providers.get(previous_source['provider'])
+            if (not provider or name not in (set(provider['files']) | set(provider.get('packed', {}))) or
+                    provider_file(provider, name)['sha256'] != previous_source['sha256']):
+                raise ValueError(previous_source['provider'] + ': the installed scenery variant changed. '
+                    'Your choice is retained; apply it again in Graphics: ' + name)
+        for name, previous_source in dependencies.items():
+            current_source = active_assets.resolve(name)
+            if current_source is None or current_source['sha256'] != previous_source['sha256']:
+                raise ValueError('A required scenery texture is missing or has a different active replacement: ' + name +
+                                 '. Review Graphics choices before preparing again.')
     for name, checksum in saved['hashes'].items():
         # The caller has matched the current downstream build's receipt to this
         # exact source mesh, published output hash and effective provider.

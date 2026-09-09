@@ -12,6 +12,18 @@ PAYLOAD=b'checked test preloader'
 
 
 class PreloaderTests(unittest.TestCase):
+    def test_recovery_reconciles_publication_missing_from_durable_applied_list(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder); host = self.host(root); _, path = self.install(host)
+            journal = path.parent/'root-deployment.json'
+            record = json.loads(journal.read_text()); record['applied'] = []
+            journal.write_text(json.dumps(record))
+            with patch.object(preloader, 'DLL_SHA', hashlib.sha256(PAYLOAD).hexdigest()), patch.object(preloader.skse, 'require_game_closed'):
+                preloader.restore(host, path)
+            self.assertFalse((root/'game'/preloader.NAME).exists())
+            self.assertEqual(PAYLOAD, (path.parent/'withdrawn-root'/preloader.NAME).read_bytes())
+            self.assertEqual('Root preloader installation restored', json.loads(path.read_text())['status'])
+
     def host(self, root):
         game=root/'game';game.mkdir();(game/'SkyrimSE.exe').write_bytes(b'game1170')
         instance=root/'instance';(instance/'mods').mkdir(parents=True)

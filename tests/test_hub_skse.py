@@ -9,6 +9,39 @@ from modlab.resources.mo2_hub import skse
 
 
 class SkseTests(unittest.TestCase):
+    def test_recovery_can_resume_after_withdrawing_a_published_file(self):
+        with TemporaryDirectory() as tmp:
+            game, source, job = self.fixture(Path(tmp))
+            loader = game/'skse64_loader.exe'; loader.write_bytes(b'previous loader')
+            record = skse.deploy_root(game, source, job, digest(game/'SkyrimSE.exe'))
+            retained = job/'withdrawn-root'; retained.mkdir()
+            loader.rename(retained/loader.name)
+            skse.restore_root(record, job)
+            self.assertEqual(b'previous loader', loader.read_bytes())
+            self.assertFalse((game/'skse64_1_7_104.dll').exists())
+            self.assertEqual(b'new loader', (retained/loader.name).read_bytes())
+
+    def test_reconcile_unjournalled_publication_restores_backup_and_preserves_unknown_change(self):
+        for manual_change in (False, True):
+            with self.subTest(manual_change=manual_change), TemporaryDirectory() as tmp:
+                game, source, job = self.fixture(Path(tmp))
+                loader = game/'skse64_loader.exe'; loader.write_bytes(b'previous loader')
+                record = skse.deploy_root(game, source, job, digest(game/'SkyrimSE.exe'))
+                record['applied'] = []
+                if manual_change:
+                    loader.write_bytes(b'later manual change')
+                    with self.assertRaisesRegex(ValueError, 'changed'):
+                        skse.restore_root(record, job)
+                    self.assertEqual(b'later manual change', loader.read_bytes())
+                    self.assertEqual(b'new runtime', (game/'skse64_1_7_104.dll').read_bytes())
+                else:
+                    skse.restore_root(record, job)
+                    self.assertEqual(b'previous loader', loader.read_bytes())
+                    self.assertFalse((game/'skse64_1_7_104.dll').exists())
+                    # Recovery may be retried after interruption before its final receipt.
+                    skse.restore_root(record, job)
+                    self.assertEqual(b'previous loader', loader.read_bytes())
+
     def test_loader_resource_version_normalizes_its_leading_zero(self):
         from modlab.resources.mo2_hub.native import packed_version
         for text in ('0.2.2.8', '0, 2, 2, 8', '2.2.8', '2.2.8.0'):
