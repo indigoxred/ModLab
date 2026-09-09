@@ -61,6 +61,9 @@ class SceneSetup:
         try:
             import mobase
             self.context_current(); require_game_closed()
+            if job['status'] == 'Shared appearance choices needed':
+                self.choose_shared(job)
+                return
             self.job = job
             if not self.target.exists():
                 mod = self.organizer.createMod(mobase.GuessedString(self.target.name))
@@ -68,6 +71,21 @@ class SceneSetup:
                     raise ValueError('MO2 could not create the scenery output mod.')
             background.run(self.parent, lambda: scene_build.publish(self.target, job, self.context['profile_path']), self.published)
         except Exception as issue: self.failed(issue)
+
+    def choose_shared(self, job):
+        from .scene_shared_dialog import SharedAppearanceDialog
+        current = dict(self.request, status=job['status'], texture_conflicts=job['texture_conflicts'], error=job['error'])
+        write_record(scene.path_for(self.organizer, 'pending'), current)
+        self.request = current
+        dialog = SharedAppearanceDialog(job['texture_conflicts'], self.request.get('texture_choices'), self.parent)
+        if not dialog.exec():
+            self.failed('Shared scenery choices were left pending. Your previous output is retained. Open Graphics and continue when ready.')
+            return
+        self.context_current()
+        resolutions = dict(self.request.get('texture_choices', {}), **dialog.resolutions)
+        self.request = scene.begin_pending(self.organizer, self.request['choices'], expected=self.request,
+                                           texture_choices=resolutions)
+        self.start()
 
     def after_refresh(self, action):
         from PyQt6.QtCore import QTimer

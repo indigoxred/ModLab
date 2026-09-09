@@ -108,58 +108,19 @@ def plan_choices(providers, choices):
     return dict(choices=dict(choices), groups=groups, files=files, dependencies={})
 
 
-def complete_textures(plan, providers, references, resolve_texture):
-    meshes = {name for name in plan['files'] if name.endswith('.nif')}
-    if set(references) != meshes:
-        raise ValueError('The selected scenery mesh inspection is incomplete.')
-    additions, dependencies, fallbacks = {}, {}, []
-    for mesh in sorted(meshes):
-        mesh_source = plan['files'][mesh]
-        provider = providers[mesh_source['provider']]
-        for name in references[mesh]:
-            from .npc_assets import texture_path
-            name = texture_path(name)
-            if name in provider['files'] or name in provider.get('packed', {}):
-                source = dict(provider_file(provider, name), group=mesh_source['group'])
-                previous = additions.get(name) or plan['files'].get(name)
-                if previous and previous['sha256'] != source['sha256']:
-                    raise ValueError(previous['provider'] + ' and ' + source['provider'] +
-                        ' need different versions of a shared texture. Choose a matching combination or compatibility patch: ' + name)
-                additions[name] = source
-            else:
-                fallbacks.append((name, provider['name']))
-    # An existing texture remains part of a choice even if a different selected
-    # mod supplies that path. Resolve it independently before allowing replacement.
-    files = {**plan['files'], **additions}
-    resolved = {}
-    for name, requested_by in fallbacks:
-        if name not in resolved:
-            resolved[name] = resolve_texture(name)
-        source = resolved[name]
-        selected = files.get(name)
-        if source is None:
-            if selected is None:
-                raise ValueError(requested_by + ' needs a missing texture: ' + name)
-        elif selected is not None:
-            if source['sha256'] != selected['sha256']:
-                raise ValueError(requested_by + ' and ' + selected['provider'] +
-                    ' need different versions of a shared texture. Choose a matching combination or compatibility patch: ' + name)
-        else:
-            dependencies[name] = source
-    checked = dict(plan, files=files, dependencies=dependencies)
-    check_sources(checked)
-    plan.update(checked)
-    return plan
+def complete_textures(plan, providers, references, resolve_texture, *, texture_choices=None):
+    from .scene_shared import complete
+    return complete(plan, providers, references, resolve_texture, texture_choices)
 
-
-def check_sources(plan):
+def check_sources(plan, *, check_containers=True):
     containers = {}
     for name, entry in {**plan['dependencies'], **plan['files']}.items():
         source = Path(entry['source'])
         _plain(source)
         if not source.is_file() or source.stat().st_size != entry['size'] or digest(source) != entry['sha256']:
             raise ValueError(entry['provider'] + ': a scenery source changed; keep your choice and prepare again: ' + name)
-        containers.update(entry.get('containers', {}))
+        if check_containers:
+            containers.update(entry.get('containers', {}))
     for path, checksum in containers.items():
         archive = Path(path); _plain(archive)
         if not archive.is_file() or digest(archive) != checksum:

@@ -45,3 +45,29 @@ class SceneDialogTests(unittest.TestCase):
             self.assertEqual([], errors)
             self.assertEqual(previous_request, scene.load(host, 'pending'))
             self.assertEqual('Mesh fixes only', module.workflow.load_pending(host)['choices']['renderer'])
+
+    def test_shared_appearance_decisions_survive_save_and_can_be_reconsidered(self):
+        widgets = Obj(**{name: object for name in ('QDialog', 'QVBoxLayout', 'QHBoxLayout', 'QLabel',
+            'QComboBox', 'QCheckBox', 'QPushButton', 'QTabWidget', 'QWidget', 'QFormLayout')})
+        spec = spec_from_file_location('modlab.resources.mo2_hub._tested_shared_save', Path(scene.__file__).with_name('graphics_dialog.py'))
+        module = module_from_spec(spec)
+        with patch.dict('sys.modules', {'PyQt6.QtWidgets': widgets}): spec.loader.exec_module(module)
+        with TemporaryDirectory() as tmp:
+            context = {'profile_path': tmp}; host = Obj(profilePath=lambda: tmp)
+            decision = {'textures/shared.dds': dict(provider='Roads', sha256='selected', evidence='current')}
+            ui = Obj(organizer=host, profile_path=tmp, context=context, scene_available=True,
+                scene_pending=None, scene_choices={'roads': 'Roads'}, texture_choices=decision,
+                components={'roads': Obj(currentData=lambda: 'Roads')},
+                assets=Obj(providers={'Roads': {'groups': {'roads': ['mesh']}}}),
+                renderer=Obj(currentData=lambda: None), pbr=Obj(isChecked=lambda: False),
+                lighting=Obj(isChecked=lambda: False), complex=Obj(isChecked=lambda: False),
+                status=Obj(setText=lambda value: None), accept=lambda: None)
+            with patch.object(scene, 'snapshot', return_value=context):
+                module.GraphicsDialog.save_choices(ui)
+                self.assertEqual(decision, scene.load(host, 'pending')['texture_choices'])
+                ui.scene_pending = scene.load(host, 'pending')
+                module.GraphicsDialog.reconsider_shared(ui)
+                self.assertEqual(decision, scene.load(host, 'pending')['texture_choices'], 'Unsaved edits must stay local to the panel')
+                module.GraphicsDialog.save_choices(ui)
+            self.assertEqual({}, scene.load(host, 'pending')['texture_choices'])
+            self.assertEqual({'roads': 'Roads'}, scene.load(host, 'pending')['choices'])

@@ -33,12 +33,13 @@ def inspect_request(organizer):
                     'The requested scenery has not been confirmed as applied. Your previous output and source mods are retained.'),)
 
 
-def begin_pending(organizer, choices, *, expected):
+def begin_pending(organizer, choices, *, expected, texture_choices=None):
     if load(organizer, 'pending') != expected:
         raise ValueError('Scenery choices changed elsewhere; reopen the panel to retain the newer request.')
     if any(key not in GROUPS or not isinstance(value, str) or not value for key, value in choices.items()):
         raise ValueError('Select an installed provider for each chosen scenery component.')
     record = dict(id=uuid4().hex, profile_path=organizer.profilePath(), choices=dict(choices),
+                  texture_choices=dict(texture_choices or {}),
                   created_at=datetime.now(timezone.utc).isoformat(), status='Requested')
     write_record(path_for(organizer, 'pending'), record)
     return record
@@ -133,7 +134,7 @@ def prepare(context, request):
                 if ignored: inactive_references[name] = ignored
         return {name: found[path] for name, path in meshes.items()}
     job = scene_build.prepare(context['instance'], context['profile_path'], assets.providers,
-                              request['choices'], inspect, assets.resolve)
+                              request['choices'], inspect, assets.resolve, texture_choices=request.get('texture_choices'))
     job.update(context=context, request=request, inactive_vanilla_references=inactive_references)
     scene_build.save(job)
     return job
@@ -153,7 +154,10 @@ def verify_saved(target, saved, context, effective, *, transformed=()):
     manifest = read_manifest(Path(target), saved['profile_path'], 'Scene appearance')
     if manifest['hashes'] != saved['hashes']:
         raise ValueError('Scenery output no longer matches the saved choices; review Graphics choices.')
-    check_sources(saved['plan'])
+    # Current archive members are verified below by their selected payloads.
+    # An unrelated object added to the same archive does not change these choices.
+    # Preparation/publication retain the stricter whole-container check.
+    check_sources(saved['plan'], check_containers=False)
     dependencies = saved['plan']['dependencies']
     from tempfile import TemporaryDirectory
     # A saved choice covers the selected component, including files a package
@@ -296,6 +300,13 @@ def evaluate_inspection(captured):
                 'Open Graphics to change this component. Other scenery choices stay yours.',
                 'Applied from ' + display_name(provider) + '. The selected files, required textures and current replacements '
                 'passed their checks. Source mods remain installed. Visual appearance is checked in game.'))
+        shared = {(tuple(row['groups']), row['provider']) for row in saved['plan'].get('shared_effects', [])}
+        for groups, provider in sorted(shared):
+            affected = ' + '.join(GROUPS.get(group, 'Other scenery') for group in groups)
+            findings.append(Finding('Info', 'graphics-scene-current', 'Shared textures (' + affected + '): ' + display_name(provider),
+                'Explicit shared-resource choice from this scenery build.',
+                'Open Graphics to change the component selections or reconsider their shared appearances.',
+                'These parts use the shared appearance you selected. Other files retain their component selections.'))
         return tuple(saved['hashes']), tuple(findings)
     except Exception as error:
         return stale_result(error)

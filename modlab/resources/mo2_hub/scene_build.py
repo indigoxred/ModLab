@@ -13,7 +13,7 @@ def save(job):
     (Path(job['directory'])/'operation.json').write_text(json.dumps(job, indent=2), encoding='utf-8')
 
 
-def prepare(instance, profile_path, providers, choices, inspect_meshes, resolve_texture):
+def prepare(instance, profile_path, providers, choices, inspect_meshes, resolve_texture, *, texture_choices=None):
     directory = Path(instance)/'builds/scene'/uuid4().hex[:12]
     directory.mkdir(parents=True)
     job = dict(directory=str(directory), profile_path=profile_path, choices=dict(choices),
@@ -25,7 +25,14 @@ def prepare(instance, profile_path, providers, choices, inspect_meshes, resolve_
             raise ValueError('Choose at least one scenery appearance before building an output.')
         meshes = {name: value['source'] for name, value in plan['files'].items() if name.endswith('.nif')}
         references = inspect_meshes(meshes, directory)
-        complete_textures(plan, providers, references, resolve_texture)
+        from .scene_shared import SharedTextureChoices
+        try:
+            complete_textures(plan, providers, references, resolve_texture, texture_choices=texture_choices)
+        except SharedTextureChoices as decision:
+            job.update(status='Shared appearance choices needed', texture_conflicts=decision.conflicts,
+                       texture_choices=texture_choices or {}, error=str(decision))
+            save(job)
+            return job
         hashes = {}
         for name, entry in plan['files'].items():
             destination = directory/'output'/name
@@ -35,7 +42,7 @@ def prepare(instance, profile_path, providers, choices, inspect_meshes, resolve_
             if hashes[name] != entry['sha256']:
                 raise ValueError('A scenery file changed while it was copied: ' + name)
         check_sources(plan)
-        job.update(plan=plan, hashes=hashes, status='Checked; application pending')
+        job.update(plan=plan, hashes=hashes, texture_choices=plan['texture_choices'], status='Checked; application pending')
         save(job)
         return job
     except Exception as error:

@@ -17,6 +17,7 @@ class GraphicsDialog(QDialog):
         self.scene_pending = scene.load(organizer, 'pending')
         self.scene_saved = scene.load(organizer) or {}
         self.scene_choices = (self.scene_pending or self.scene_saved).get('choices', {})
+        self.texture_choices = (self.scene_pending or self.scene_saved).get('texture_choices', {})
         self.scene_available = False
         self.pending = workflow.load_pending(organizer)
         saved = self.pending or workflow.load_choices(organizer) or {}
@@ -37,6 +38,9 @@ class GraphicsDialog(QDialog):
         scene_layout.addStretch()
         self.scene_note = QLabel('Reading active scenery mods. You can close this panel without applying anything.')
         self.scene_note.setWordWrap(True); scene_layout.addWidget(self.scene_note)
+        if self.texture_choices or (self.scene_pending or {}).get('texture_conflicts'):
+            reconsider = QPushButton('Change shared appearances…')
+            reconsider.clicked.connect(self.reconsider_shared); scene_layout.addWidget(reconsider)
         tabs.addTab(scenery, 'Scenery')
         renderer_page = QWidget(); renderer_layout = QVBoxLayout(renderer_page)
         tabs.addTab(renderer_page, 'Renderer and mesh fixes')
@@ -115,12 +119,17 @@ class GraphicsDialog(QDialog):
             # Save is an explicit confirmation, including reapplying the same
             # choices after an outside change; normal rechecks never infer it.
             if self.scene_available and (selected_scene or self.scene_choices or self.scene_pending):
-                scene.begin_pending(self.organizer, selected_scene, expected=self.scene_pending)
+                scene.begin_pending(self.organizer, selected_scene, expected=self.scene_pending,
+                    texture_choices=getattr(self, 'texture_choices', {}) if selected_scene == self.scene_choices else {})
             if choices['renderer'] in RENDERERS:
                 workflow.begin_pending(self.organizer, choices)
             self.accept()
         except Exception as error:
             self.status.setText(str(error))
+
+    def reconsider_shared(self):
+        self.texture_choices = {}
+        self.status.setText('Your component selections stay as shown. Save and continue to choose their shared appearances again.')
 
     def cancel_pending(self):
         try:

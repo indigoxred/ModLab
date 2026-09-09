@@ -8,6 +8,28 @@ import test_hub_scene_choices as fixtures
 
 
 class SceneBuildTests(unittest.TestCase):
+    def test_shared_choice_is_presented_before_output_and_can_resume_with_retained_ground(self):
+        from modlab.resources.mo2_hub.scene_build import prepare, publish
+        from test_hub_scene_shared import SharedSceneTests
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            providers, mesh, texture, resolve = SharedSceneTests().fixture(root/'mods')
+            inspect = lambda meshes, directory: {name: [texture] for name in meshes}
+            job = prepare(root, 'A', providers, {'trees': 'Trees A'}, inspect, resolve)
+            self.assertEqual('Shared appearance choices needed', job['status'])
+            self.assertFalse((Path(job['directory'])/'output').exists())
+            target = root/'mods/Scene output'; target.mkdir()
+            with self.assertRaisesRegex(ValueError, 'not been checked'):
+                publish(target, job, 'A')
+            conflict = job['texture_conflicts'][0]
+            option = next(row for row in conflict['options'] if row['provider'] == 'Ground C')
+            decision = {texture: dict(provider='Ground C', sha256=option['sha256'], evidence=conflict['evidence'])}
+            resumed = prepare(root, 'A', providers, {'trees': 'Trees A'}, inspect, resolve, texture_choices=decision)
+            self.assertEqual('Checked; application pending', resumed['status'])
+            self.assertEqual(decision, resumed['texture_choices'])
+            self.assertEqual('Ground C', resumed['plan']['dependencies'][texture]['provider'])
+            self.assertFalse((Path(resumed['directory'])/'output'/texture).exists())
+
     def test_prepare_publish_and_replace_preserve_source_mods_and_recover_previous_output(self):
         from modlab.resources.mo2_hub.scene_build import prepare, publish
         from modlab.resources.mo2_hub.outputs import read_manifest

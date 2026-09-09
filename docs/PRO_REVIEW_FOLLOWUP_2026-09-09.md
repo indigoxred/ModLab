@@ -10,8 +10,16 @@ The report was checked against a89719b, not merely the reviewed historical commi
 
 Validation: five new regression tests were observed failing before the corresponding changes. The complete hub suite passes 552 tests. Fixtures exercise real planning/publication/recovery and temporary files; only native archive reading and the live-game-running check are substituted at their external boundaries. This is not a power-loss test or a new native installation trial.
 
-## Still open
+## Shared-resource correction
 
-Shared-resource choice needs its own correction: tree selection must not silently change retained ground textures, and incidental fallback hash differences must not be called proven incompatibility. Preserve component choices and provide an understandable shared-resource decision where needed. No universal texture conversion is proposed.
+Scenery planning now distinguishes a bundled competing appearance, an explicitly chosen component texture, and the incidental current texture. Cross-component replacements with competing appearances produce a structured choice before any new output is copied/published. When a tree mod supplies no competing texture, an explicitly selected ground texture is not rejected because it differs from the incidental previous winner.
 
-Native scenery reset was submitted and independently verified to disable the owned scene output while retaining its 277 files and both source mods. Completion of downstream reset preparation and native restoration of the selected roads/mountains still need current-state inspection. The latest source changes in this follow-up have not yet been deployed to the running MO2 instance. Preserve that distinction when reporting progress.
+The preparation flow opens a grouped shared-appearance dialog, naming affected components and source mods. A group decision records each underlying texture identity separately. Cancelling retains the previous output and pending request; accepting resumes preparation. Current decisions survive ordinary saves, and Graphics exposes Change shared appearances for intentional reconsideration. Changed decision evidence is reassessed on preparation. Applied summaries also show shared-resource exceptions to the component selections.
+
+The selected-archive follow-up permits an unrelated packed object update after checking current selected payloads. Whole-container consistency remains mandatory during preparation/publication. Passive recheck preserves an explicit shared override if a losing alternative changes while its chosen appearance remains valid; deliberate re-preparation reassesses the current competing evidence.
+
+Focused independent review found no actionable blocking defects in these changes. Tests cover both original shared-texture reproductions, grouped per-file decisions, retained-ground resume without premature publication, save/reconsider persistence, and unrelated packed updates versus new component inventory. The complete hub suite now passes 559 tests. Native rendering and full shared-choice round trips remain separate checks.
+
+## Native follow-up
+
+Native scenery reset was submitted and independently verified to disable the owned scene output while retaining its 277 files and both source mods. Current desktop/process inspection confirms downstream reset preparation finished: ModLab shows the same three existing record/cleaning findings and no scenery helper remains running. Native restoration of the selected roads/mountains remains to be checked. The test MO2 instance was closed through its UI before deploying these changes. Deployment and further native results will be recorded separately.

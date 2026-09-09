@@ -7,6 +7,34 @@ import json
 
 
 class SceneWorkflowTests(unittest.TestCase):
+    def test_unrelated_packed_update_keeps_choice_but_new_component_member_does_not(self):
+        import zipfile
+        from modlab.resources.mo2_hub import scene_workflow as scene, scene_build
+        from modlab.resources.mo2_hub.scene_assets import Catalog
+        from test_hub_scene_assets import ArchiveFixture
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); source = root/'mods/Trees A'; source.mkdir(parents=True)
+            name = 'meshes/landscape/trees/pine.nif'; archive = source/'Trees.bsa'
+            def update(extra):
+                with zipfile.ZipFile(archive, 'w') as package:
+                    package.writestr(name, b'packed pine')
+                    for path, value in extra.items(): package.writestr(path, value)
+            update({})
+            context = dict(roots=[('Trees A', str(source))], library='fixture-boundary',
+                archives=[dict(provider='Trees A', path=str(archive), rank=[1, 1])])
+            assets = Catalog(context['roots'], context['archives'], root/'retained-cache', ArchiveFixture())
+            job = scene_build.prepare(root, 'A', assets.providers, {'trees': 'Trees A'},
+                lambda meshes, directory: {path: [] for path in meshes}, lambda path: None)
+            job['context'] = context; target = root/'mods/Scene output'; target.mkdir()
+            with patch('modlab.resources.mo2_hub.skse.require_game_closed'): scene_build.publish(target, job, 'A')
+            effective = {path: str(target/path) for path in job['hashes']}
+            with patch('modlab.resources.mo2_hub.archive_text.ArchiveReader', return_value=ArchiveFixture()):
+                update({'meshes/clutter/chair.nif': b'new chair'})
+                scene.verify_saved(target, job, context, effective)
+                update({'meshes/landscape/trees/oak.nif': b'new oak'})
+                with self.assertRaisesRegex(ValueError, 'available files'):
+                    scene.verify_saved(target, job, context, effective)
+
     def test_new_loose_variant_of_a_selected_packed_asset_requires_reassessment(self):
         import zipfile
         from modlab.resources.mo2_hub import scene_workflow as scene, scene_build
