@@ -254,6 +254,19 @@ class HubWindow(QDialog):
 
     def begin_source_setup(self, installation_record=None):
         try:
+            from . import scene_workflow as scene
+            from .scene_setup import SceneSetup
+            if scene.load(self.organizer, 'pending') or scene.load(self.organizer):
+                self.scene_run = SceneSetup(self, lambda error: self.begin_cleaning_setup(installation_record, error))
+                self.scene_run.start()
+                return
+            self.begin_cleaning_setup(installation_record)
+        except Exception as error:
+            self.begin_cleaning_setup(installation_record, str(error))
+
+    def begin_cleaning_setup(self, installation_record=None, scene_error=None):
+        try:
+            if scene_error: raise ValueError(scene_error)
             if withdraw_output(self.organizer, lambda error: self.run_setup(installation_record, error)):
                 return
             self.run_setup(installation_record)

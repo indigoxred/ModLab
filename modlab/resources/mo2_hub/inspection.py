@@ -124,6 +124,8 @@ def collect_setup(organizer, *, version_reader) -> SetupSnapshot:
         target = Path(organizer.modsPath()) / output_name(profile, organizer.profilePath())
         transformed = set()
         try:
+            from .scene_workflow import inspect_request
+            generated_findings.extend(inspect_request(organizer))
             from .pgpatcher_workflow import inspect_graphics
             graphics_findings, transformed = inspect_graphics(organizer, target,
                 read_manifest(target, organizer.profilePath()) if target.exists() else None)

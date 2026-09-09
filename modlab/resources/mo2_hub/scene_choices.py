@@ -81,6 +81,8 @@ def file_source(path, provider):
 
 
 def provider_file(provider, name):
+    if name in provider.get('packed', {}) and name not in provider['files']:
+        return provider['packed_source'](name)
     path = Path(provider['files'][name])
     root = readable_path(provider['root']).resolve()
     if not path.resolve().is_relative_to(root):
@@ -117,7 +119,7 @@ def complete_textures(plan, providers, references, resolve_texture):
         for name in references[mesh]:
             from .npc_assets import texture_path
             name = texture_path(name)
-            if name in provider['files']:
+            if name in provider['files'] or name in provider.get('packed', {}):
                 source = dict(provider_file(provider, name), group=mesh_source['group'])
                 previous = additions.get(name) or plan['files'].get(name)
                 if previous and previous['sha256'] != source['sha256']:
@@ -151,8 +153,14 @@ def complete_textures(plan, providers, references, resolve_texture):
 
 
 def check_sources(plan):
+    containers = {}
     for name, entry in {**plan['dependencies'], **plan['files']}.items():
         source = Path(entry['source'])
         _plain(source)
         if not source.is_file() or source.stat().st_size != entry['size'] or digest(source) != entry['sha256']:
             raise ValueError(entry['provider'] + ': a scenery source changed; keep your choice and prepare again: ' + name)
+        containers.update(entry.get('containers', {}))
+    for path, checksum in containers.items():
+        archive = Path(path); _plain(archive)
+        if not archive.is_file() or digest(archive) != checksum:
+            raise ValueError('A scenery source archive changed; prepare the choices again: ' + path)
